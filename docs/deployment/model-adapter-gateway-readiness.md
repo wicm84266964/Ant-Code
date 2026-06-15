@@ -18,7 +18,7 @@ Required boundary:
 - `LAB_MODEL_GATEWAY_API_KEY`, when used, is only a gateway access token for that adapter. Do not place provider API keys in the local client environment.
 - Remote tools are disabled by default and are not required for MVP.
 - A loopback adapter at `127.0.0.1` is acceptable for local models.
-- A lab-only or VPN-only adapter is preferred for shared GPU or hosted models.
+- A private-network or VPN-only adapter is preferred for shared GPU or hosted models.
 - Public exposure is optional and must add authentication, TLS, rate limits, audit IDs, and data-retention review.
 
 ## Required Endpoints
@@ -110,7 +110,7 @@ The local client owns:
 
 Before broad use, record answers for:
 
-- Is the adapter loopback, lab-only, VPN-only, or public?
+- Is the adapter loopback, private-network, VPN-only, or public?
 - Which model aliases are allowed?
 - What data classes may be sent through this adapter?
 - What retention policy applies to gateway logs?

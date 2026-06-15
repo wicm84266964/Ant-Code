@@ -51,7 +51,7 @@ test("startup banner exposes Ant Code identity and local execution boundary", ()
 });
 
 test("startup confirmation lines are shown even after workspace trust", () => {
-  const lines = startupConfirmLines("C:\\saveproject\\LBJ-workspace\\lab-agent", true);
+  const lines = startupConfirmLines("C:\\workspace\\ant-code", true);
 
   assert.equal(lines[0], "启动 Ant Code");
   assert.ok(lines.some((line) => line.includes("工作区信任：已授权")));
@@ -165,7 +165,7 @@ test("session metadata transcript blocks are not hidden behind detail mode", () 
 });
 
 test("trust dialog lines include cwd and keyboard decisions", () => {
-  const lines = trustDialogLines("C:\\saveproject\\LBJ-workspace\\lab-agent");
+  const lines = trustDialogLines("C:\\workspace\\ant-code");
 
   assert.equal(lines[0], "需要信任工作区");
   assert.ok(lines.some((line) => line.includes("cwd:")));

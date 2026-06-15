@@ -11,7 +11,7 @@ import {
   slashPaletteState
 } from "../../src/cli/tui/palettes.js";
 
-test("slash palette filters lab-owned command metadata", () => {
+test("slash palette filters project-owned command metadata", () => {
   const palette = slashPaletteState("/stat");
 
   assert.ok(palette.commands.some((command) => command.name === "status"));

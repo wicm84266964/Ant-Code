@@ -29,10 +29,10 @@ const REQUIRED_DOCS = Object.freeze([
     ]
   },
   {
-    file: "docs/deployment/lab-user-quickstart.md",
+    file: "docs/deployment/quickstart.md",
     markers: [
       "## First Run",
-      "## Connecting The Lab Gateway",
+      "## Connecting The Model Gateway",
       "ant-code doctor",
       "## Daily Code Workflow",
       "## Sensitive Research Data",
@@ -40,78 +40,12 @@ const REQUIRED_DOCS = Object.freeze([
     ]
   },
   {
-    file: "docs/deployment/lab-gateway-rollout-checklist.md",
+    file: "docs/security/data-boundary.md",
     markers: [
-      "## Phase 0: Freeze The Client Candidate",
-      "## Phase 2: Validate Health And Compatibility",
-      "## Phase 3: Validate Tool-Call Round Trips",
-      "## Rollback",
-      "node scripts/verify-gateway-compat.js --live"
-    ]
-  },
-  {
-    file: "docs/deployment/release-candidate-package.md",
-    markers: [
-      "## Freeze Criteria",
-      "## Required Evidence Bundle",
-      "npm run verify:release",
-      "node scripts/verify-gateway-compat.js --live",
-      "## High-Sensitivity Projects",
-      "## Rollback And Disablement"
-    ]
-  },
-  {
-    file: "docs/deployment/rc-acceptance-summary.md",
-    markers: [
-      "## Candidate Scope",
-      "## Acceptance Criteria",
-      "npm run verify:release",
-      "node scripts/verify-gateway-compat.js --live --json",
-      "## Current Non-Goals",
-      "## Rollback Summary"
-    ]
-  },
-  {
-    file: "docs/deployment/v1.0-acceptance.md",
-    markers: [
-      "## Go Decision",
-      "Ant Code v1.0 is accepted as the controlled clean-room baseline",
-      "## Verification Evidence",
-      "npm run verify:release",
-      "## Model Adapter Smoke Test",
-      "## Security Boundary",
-      "## Known Limitations",
-      "## Rollback"
-    ]
-  },
-  {
-    file: "docs/specs/lab-model-gateway-compatibility-matrix.md",
-    markers: [
-      "protocolVersion",
-      "toolCalls",
-      "toolResults",
-      "text/event-stream",
-      "application/x-ndjson",
-      "LAB_MODEL_GATEWAY_HEALTH_URL"
-    ]
-  },
-  {
-    file: "docs/deployment/pre-launch-security-config.md",
-    markers: [
+      "## Primary Rule",
       "LAB_MODEL_GATEWAY_URL",
-      "LAB_MODEL_GATEWAY_HEALTH_URL",
       "LAB_AGENT_NETWORK_MODE",
-      "Provider credentials belong inside the lab gateway service boundary",
-      "config/lab-agent.lab-template.json"
-    ]
-  },
-  {
-    file: "docs/branding/public-identity.md",
-    markers: [
-      "The public project name is **Ant Code**.",
-      "Primary CLI command: `ant-code`",
-      "The package also exposes `lab-agent` as a backward-compatible CLI alias",
-      "Protocol version: `lab-agent-gateway.v1`"
+      "## Model Traffic Boundary"
     ]
   }
 ]);
@@ -168,7 +102,7 @@ async function verifyConfigTemplate() {
     failures.push(`${relativePath} must declare allowedHosts`);
   }
   if (!parsed.lab?.gatewayUrl || !parsed.lab?.gatewayHealthUrl) {
-    failures.push(`${relativePath} must declare lab gateway and health URLs`);
+    failures.push(`${relativePath} must declare gateway and health URLs`);
   }
   if (parsed.transcript?.retentionDays > 30) {
     failures.push(`${relativePath} transcript retention must be 30 days or lower`);

@@ -1291,7 +1291,7 @@ async function runMcpCommand(options, config) {
         "当前没有配置 MCP 服务器。",
         "",
         "配置入口：lab-agent.config.json 的 mcp.servers。",
-        "边界：只支持显式本地/lab-approved stdio MCP；不会自动发现第三方托管或 marketplace 后台。"
+        "边界：只支持显式配置的本地/受控 stdio MCP；不会自动发现第三方托管或 marketplace 后台。"
       ].join("\n")
       : [
         "Ant Code MCP",

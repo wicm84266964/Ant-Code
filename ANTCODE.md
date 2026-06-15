@@ -5,8 +5,8 @@ for tools that look for that conventional filename.
 
 ## Repository Boundary
 
-This is the open-source Ant Code source tree. Work inside the repository should
-stay limited to source, tests, sanitized templates, and public documentation.
+This is the Ant Code source tree. Work inside the repository should stay limited
+to source, tests, example templates, and public documentation.
 
 Do not add:
 
@@ -24,11 +24,10 @@ npm run check:syntax
 npm test
 ```
 
-For release-style review, also run dependency and provenance checks:
+For release-style review, also run dependency checks:
 
 ```powershell
 npm run check:dependencies
-npm run check:provenance
 ```
 
 ## Naming

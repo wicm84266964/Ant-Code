@@ -798,7 +798,7 @@ async function buildAgentSystemPrompt(options) {
     options.profile.system,
     "",
     "Boundary:",
-    "- You run inside the local lab-agent client. Model traffic goes only through the configured lab gateway.",
+    "- You run inside the local Ant Code client. Model traffic goes only through the configured gateway.",
     "- Use only the tools provided in this subagent request.",
     "- Keep the parent session in control: ask for approvals through normal tool calls and do not assume broad write access.",
     "- Do not reveal secrets, raw credentials, or unnecessary large data excerpts.",

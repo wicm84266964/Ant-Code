@@ -71,7 +71,7 @@ function requestIncludesImages(messages = []) {
 }
 
 /**
- * Normalize the lab gateway response shape into the internal assistant result.
+ * Normalize the gateway response shape into the internal assistant result.
  *
  * @param {unknown} raw
  * @returns {NormalizedGatewayResponse}

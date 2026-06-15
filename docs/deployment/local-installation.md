@@ -63,7 +63,7 @@ Give users the `dist\ant-code-windows-x64\` directory. It contains:
 - `configure-gateway.ps1` and `configure-gateway.cmd`: interactive
   gateway/model/token setup scripts.
 - `config\`: config templates and bundled skills.
-- `docs\`: deployment, audit, provenance, security, and gateway protocol docs.
+- `docs\`: installation, gateway, quickstart, and security docs.
 - `README.md`, `README.zh-CN.md`, `package.json`, and
   `RELEASE-MANIFEST.md`.
 
@@ -101,8 +101,7 @@ This repository uses reviewed public open-source runtime dependencies for the
 terminal UI layer. `npm ci` installs the locked dependency graph from
 `package-lock.json`; packed releases carry the same graph through
 `npm-shrinkwrap.json`. Release checks verify the reviewed allowlist, lockfile
-integrity, dependency SBOM, license summary, shrinkwrap parity, and provenance
-notes.
+integrity, dependency notices, and shrinkwrap parity.
 
 ## Linked CLI
 
@@ -190,7 +189,7 @@ Create `lab-agent.config.json` in each project that needs its own gateway:
 ```
 
 For OpenAI Chat Completions compatible gateways, use
-`"gatewayProtocol": "openai-chat"`. For the native Ant Code lab gateway, use
+`"gatewayProtocol": "openai-chat"`. For the native Ant Code gateway protocol, use
 `"gatewayProtocol": "lab-agent-gateway"`.
 
 Store gateway bearer tokens outside the JSON:
@@ -213,7 +212,7 @@ keys in Ant Code config files.
 
 ### Option B: Shared Config
 
-For a machine-wide or lab-managed config, copy the template from the installed
+For a machine-wide or operator-managed config, copy the template from the installed
 package or this checkout:
 
 ```powershell
@@ -327,7 +326,7 @@ you switch gateways often.
 
 ## PowerShell Environment
 
-For a local model adapter or lab model gateway:
+For a local model adapter or model gateway:
 
 ```powershell
 $env:LAB_MODEL_GATEWAY_URL = "http://127.0.0.1:8787/v1/chat"
@@ -349,7 +348,7 @@ node src/cli/index.js -p "hello"
 node src/cli/index.js tui
 ```
 
-`LAB_MODEL_GATEWAY_API_KEY` is a local adapter access token. Do not commit it to config files; use a PowerShell session variable, a Windows user environment variable, or another lab-approved secret store.
+`LAB_MODEL_GATEWAY_API_KEY` is a local adapter access token. Do not commit it to config files; use a PowerShell session variable, a Windows user environment variable, or another approved secret store.
 
 Optional TUI appearance variables:
 
@@ -384,13 +383,13 @@ Expected result:
 - Release verification passes.
 - Doctor shows no unexpected errors.
 - Slash commands work without model gateway access.
-- The v1.0 acceptance record in `docs/deployment/v1.0-acceptance.md` matches the configured delivery environment.
+- The configured gateway, model aliases, and network mode match the intended environment.
 
 ## Troubleshooting
 
 - If `ant-code` is not found, rerun `npm link` from the repository root or use `node src/cli/index.js`.
 - If the TUI is not comfortable in the current terminal, use line-mode `ant-code chat` or print mode with `ant-code -p`.
 - If `doctor` says the model gateway is not configured, local slash commands still work; set `LAB_MODEL_GATEWAY_URL` only when model turns are needed.
-- If live gateway checks fail in `offline` mode, use a loopback adapter such as `127.0.0.1` or switch to a lab-approved `lab-only` host.
+- If live gateway checks fail in `offline` mode, use a loopback adapter such as `127.0.0.1` or switch to an approved `lab-only` host.
 - If metadata retention is too broad for the project, set `LAB_AGENT_SENSITIVITY=high` or use the high-sensitivity config template.
 - If command approvals are confusing, use `/status`, `/next`, and `/report` to inspect the current local workflow state before continuing.

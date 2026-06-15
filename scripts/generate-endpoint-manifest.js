@@ -46,7 +46,7 @@ const manifest = {
       name: "Lab model gateway",
       configuredBy: "LAB_MODEL_GATEWAY_URL",
       allowedByDefault: true,
-      notes: "All model traffic must pass through this lab-approved endpoint."
+      notes: "All model traffic must pass through this approved endpoint."
     },
     {
       name: "Lab model gateway health",
@@ -58,7 +58,7 @@ const manifest = {
       name: "Lab model gateway protocol",
       configuredBy: "LAB_MODEL_GATEWAY_PROTOCOL",
       allowedByDefault: true,
-      notes: "Protocol selector only; defaults to the lab-owned protocol and can enable OpenAI Chat compatible adapters."
+      notes: "Protocol selector only; defaults to the native protocol and can enable OpenAI Chat compatible adapters."
     },
     {
       name: "Lab model gateway adapter auth",

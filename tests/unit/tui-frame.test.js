@@ -20,7 +20,7 @@ import { makeExitFrame, makePermissionFrame, makePromptFrame, makeStartupFrame, 
 
 test("stage 1 startup frame harness enforces compact terminal bounds", () => {
   const frame = makeStartupFrame({
-    cwd: "C:\\saveproject\\LBJ-workspace\\lab-agent",
+    cwd: "C:\\workspace\\ant-code",
     trusted: true,
     session: {
       model: "example-coding-model",
@@ -243,7 +243,7 @@ test("prompt layout falls back safely when width is missing", () => {
 
 test("stage 1 and 2 acceptance frames fit compact and wide resize targets", () => {
   const startup = makeStartupFrame({
-    cwd: "C:\\saveproject\\LBJ-workspace\\lab-agent",
+    cwd: "C:\\workspace\\ant-code",
     trusted: false,
     session: {
       model: "example-fast-model",

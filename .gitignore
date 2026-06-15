@@ -26,6 +26,23 @@ recordings/
 test.txt
 test_file.txt
 
+# Local design, audit, provenance, and release-planning notes
+docs/architecture/
+docs/audit/
+docs/branding/
+docs/phase-1/
+docs/provenance/
+docs/specs/
+docs/deployment/lab-gateway-rollout-checklist.md
+docs/deployment/pre-launch-security-config.md
+docs/deployment/rc-acceptance-summary.md
+docs/deployment/release-candidate-package.md
+docs/deployment/v*-acceptance.md
+scripts/generate-audit-report.js
+scripts/generate-provenance-summary.js
+scripts/generate-rc-summary.js
+scripts/verify-provenance.js
+
 # Editor and OS files
 .DS_Store
 Thumbs.db

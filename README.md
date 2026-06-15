@@ -62,7 +62,7 @@ ant-code/
   tests/                       # unit and integration tests
   scripts/                     # verification, build, audit, and mock gateway helpers
   config/                      # configuration templates and bundled skills
-  docs/                        # architecture, deployment, security, specs, provenance
+  docs/                        # installation, gateway, quickstart, and security docs
   lab-agent.config.json         # default sample config
 ```
 
@@ -175,7 +175,6 @@ ant-code dashboard --project .
 npm run doctor
 npm run check:syntax
 npm run check:dependencies
-npm run check:provenance
 npm test
 npm run mock-gateway -- --port 8787
 node src/cli/index.js --version
@@ -193,3 +192,6 @@ stores, transcripts, or private project data.
 ## License
 
 GNU Affero General Public License v3.0. See [LICENSE](LICENSE).
+
+Bundled third-party runtime and Dashboard assets are listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

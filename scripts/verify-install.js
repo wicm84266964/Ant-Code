@@ -65,13 +65,13 @@ async function checkCliEntrypoint() {
 async function checkInstallDocs() {
   await requireDocMarkers("docs/deployment/local-installation.md", [
     "## Local Checkout",
-    "npm install",
+    "npm ci",
     "npm link",
     "ant-code doctor",
     "## PowerShell Environment",
     "## Troubleshooting"
   ]);
-  await requireDocMarkers("docs/deployment/lab-user-quickstart.md", [
+  await requireDocMarkers("docs/deployment/quickstart.md", [
     "ant-code doctor",
     "ant-code -p \"/status\"",
     "Ant Code can still run local slash commands"

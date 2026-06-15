@@ -168,7 +168,7 @@ function buildHealthHints(checks) {
     } else if (check.name.includes("live health") && check.code) {
       hints.push(...gatewayTroubleshootingHints(check.code));
     } else if (check.name.includes("health url")) {
-      hints.push("Set LAB_MODEL_GATEWAY_HEALTH_URL to the lab gateway health endpoint for live rollout checks.");
+      hints.push("Set LAB_MODEL_GATEWAY_HEALTH_URL to the configured gateway health endpoint for live rollout checks.");
     }
   }
   return Array.from(new Set(hints));

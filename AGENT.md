@@ -1,13 +1,13 @@
 # Ant Code Maintenance Notes
 
-This repository is the cleaned open-source Ant Code source tree.
+This repository is the Ant Code source tree.
 
 ## Development
 
 - Keep runtime source in `src/`.
 - Keep executable behavior covered by `tests/`.
 - Keep reusable local skills in `config/skills/`.
-- Keep architecture, deployment, security, and provenance notes in `docs/`.
+- Keep public installation, gateway, quickstart, and security notes in `docs/`.
 - Do not commit local sessions, transcripts, logs, build outputs, dependency
   folders, private configs, or credentials.
 
@@ -18,7 +18,6 @@ Use focused checks while developing:
 ```powershell
 npm run check:syntax
 npm run check:dependencies
-npm run check:provenance
 npm test
 ```
 
@@ -37,4 +36,4 @@ surfaces without an explicit migration plan.
 ## Security
 
 Gateway access tokens and provider credentials must stay outside repository
-files. The checked-in `lab-agent.config.json` is a sanitized sample only.
+files. The checked-in `lab-agent.config.json` is an example config only.

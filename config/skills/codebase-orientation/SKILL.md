@@ -1,7 +1,7 @@
 ---
 name: codebase-orientation
 description: 快速接手陌生仓库，建立架构地图、入口、关键模块和验证路径。
-when_to_use: 用户要求先了解项目、定位功能边界、接续 handoff 或开始一轮较大改动时。
+when_to_use: 用户要求先了解项目、定位功能边界、接续上下文或开始一轮较大改动时。
 allowed-tools: read_file, list_files, glob, grep, git_status, git_diff, todo_read, plan_update
 argument-hint: 目标模块或用户关心的问题
 context: instruction

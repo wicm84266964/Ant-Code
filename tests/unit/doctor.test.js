@@ -14,12 +14,10 @@ test("doctor reports deployment readiness checks and next steps", async () => {
 
   assert.equal(report.ok, true);
   assert.ok(report.checks.some((check) => check.name === "cli bins" && check.status === "ok"));
-  assert.ok(report.checks.some((check) => check.name === "clean-room release attestation" && check.status === "ok"));
   assert.ok(report.checks.some((check) => check.name === "local installation guide" && check.status === "ok"));
   assert.ok(report.checks.some((check) => check.name === "model adapter readiness guide" && check.status === "ok"));
-  assert.ok(report.checks.some((check) => check.name === "rc acceptance summary" && check.status === "ok"));
-  assert.ok(report.checks.some((check) => check.name === "release candidate package" && check.status === "ok"));
-  assert.ok(report.checks.some((check) => check.name === "lab user quickstart" && check.status === "ok"));
+  assert.ok(report.checks.some((check) => check.name === "quickstart guide" && check.status === "ok"));
+  assert.ok(report.checks.some((check) => check.name === "data boundary guide" && check.status === "ok"));
   assert.ok(report.checks.some((check) => check.name === "lab managed config" && check.status === "ok"));
   assert.ok(report.checks.some((check) => check.name === "model gateway" && check.status === "warn"));
   assert.ok(report.hints.some((hint) => /LAB_MODEL_GATEWAY_URL/.test(hint)));
@@ -28,7 +26,7 @@ test("doctor reports deployment readiness checks and next steps", async () => {
   assert.match(text, /Next steps/);
 });
 
-test("doctor checks release artifacts from package root when run outside checkout", async () => {
+test("doctor checks public docs from package root when run outside checkout", async () => {
   const projectCwd = await makeTempWorkspace();
   const report = await runDoctor({
     cwd: projectCwd,
@@ -41,8 +39,8 @@ test("doctor checks release artifacts from package root when run outside checkou
   assert.equal(report.ok, true);
   assert.equal(report.config.projectConfigPath, null);
   assert.ok(report.checks.some((check) => check.name === "cli bins" && check.status === "ok"));
-  assert.ok(report.checks.some((check) => check.name === "provenance policy" && check.status === "ok"));
-  assert.ok(report.checks.some((check) => check.name === "release audit report" && check.status === "ok"));
+  assert.ok(report.checks.some((check) => check.name === "quickstart guide" && check.status === "ok"));
+  assert.ok(report.checks.some((check) => check.name === "data boundary guide" && check.status === "ok"));
 });
 
 test("doctor errors when required metadata encryption lacks key material", async () => {
@@ -59,7 +57,7 @@ test("doctor errors when required metadata encryption lacks key material", async
   assert.match(check.message, /LAB_AGENT_TRANSCRIPT_KEY/);
 });
 
-test("doctor accepts configured lab gateway and transcript key", async () => {
+test("doctor accepts configured gateway and transcript key", async () => {
   const report = await runDoctor({
     cwd: process.cwd(),
     env: {

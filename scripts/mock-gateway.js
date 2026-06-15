@@ -13,8 +13,8 @@ if (isMainModule()) {
   server.listen(port, host, () => {
     const address = server.address();
     const actualPort = typeof address === "object" && address ? address.port : port;
-    console.log(`Mock lab gateway listening at http://${host}:${actualPort}/v1/chat`);
-    console.log(`Mock lab gateway health at http://${host}:${actualPort}/health`);
+    console.log(`Mock gateway listening at http://${host}:${actualPort}/v1/chat`);
+    console.log(`Mock gateway health at http://${host}:${actualPort}/health`);
   });
 
   process.on("SIGINT", () => {

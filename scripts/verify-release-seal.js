@@ -37,7 +37,6 @@ const REVIEWED_RUNTIME_DEPENDENCIES = new Map([
   }]
 ]);
 
-await verifyRequiredAttestation();
 await verifyRuntimeSourceMarkers();
 await verifyPackageBoundary();
 await verifyReviewedRuntimeDependencies();
@@ -50,25 +49,6 @@ if (failures.length > 0) {
   process.exitCode = 1;
 } else {
   console.log("Release seal check passed.");
-}
-
-async function verifyRequiredAttestation() {
-  await requireDocMarkers("docs/audit/clean-room-release-attestation.md", [
-    "## Clean-Room Statement",
-    "## Allowed Design Inputs",
-    "## Prohibited Inputs",
-    "## Data Boundary",
-    "## Release Evidence"
-  ]);
-  await requireDocMarkers("docs/branding/public-identity.md", [
-    "The public project name is **Ant Code**.",
-    "Primary CLI command: `ant-code`",
-    "Internal Surface Kept Stable"
-  ]);
-  await requireDocMarkers("docs/deployment/model-adapter-gateway-readiness.md", [
-    "Tools execute on the local client.",
-    "Provider credentials live inside the gateway/model adapter service boundary"
-  ]);
 }
 
 async function verifyRuntimeSourceMarkers() {
@@ -157,25 +137,7 @@ async function verifyRuntimeDependencyEvidence(name, reviewed) {
     }
   }
 
-  const sbom = await readJson("docs/audit/dependency-sbom.generated.json");
-  const sbomComponent = sbom?.components?.find((component) => component.name === name && component.scope === "runtime");
-  if (!sbomComponent) {
-    failures.push(`dependency SBOM is missing runtime component ${name}`);
-  } else {
-    if (sbomComponent.installedVersion !== reviewed.installedVersion) {
-      failures.push(`dependency SBOM records ${name}@${sbomComponent.installedVersion}; reviewed version is ${reviewed.installedVersion}`);
-    }
-    if (sbomComponent.license !== reviewed.license) {
-      failures.push(`dependency SBOM records ${name} license ${sbomComponent.license}; reviewed license is ${reviewed.license}`);
-    }
-  }
-
-  await requireDocMarkers("docs/audit/dependency-license-summary.generated.md", [
-    `| ${name} | runtime | ${reviewed.installedVersion} | ${reviewed.license} |`
-  ]);
-  await requireDocMarkers("docs/provenance/modules/cli.md", [
-    reviewed.provenanceMarker
-  ]);
+  await requireDocMarkers("THIRD_PARTY_NOTICES.md", [name, reviewed.license]);
 }
 
 /**

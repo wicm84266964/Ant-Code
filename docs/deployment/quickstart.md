@@ -1,6 +1,6 @@
-# Ant Code Lab User Quickstart
+# Ant Code Quickstart
 
-This quickstart is for lab members using Ant Code on a local research project. It avoids legacy-source language and focuses on safe daily use.
+This quickstart is for using Ant Code on a local project. It focuses on safe daily use.
 
 ## First Run
 
@@ -28,9 +28,9 @@ Expected result:
 - `/map` shows project type, manifests, key directories, and likely test entrypoints.
 - Interactive mode starts with the `ant-code>` prompt.
 
-## Connecting The Lab Gateway
+## Connecting The Model Gateway
 
-Use the lab-provided configuration or environment variables:
+Use your gateway configuration or environment variables:
 
 ```powershell
 $env:LAB_MODEL_GATEWAY_URL = "https://gateway.example.invalid/v1/chat"
@@ -45,7 +45,7 @@ ant-code gateway
 ant-code gateway --live
 ```
 
-The local client should never require provider API keys. Provider credentials belong inside the lab gateway service.
+The local client should never require provider API keys. Provider credentials belong inside the gateway or model adapter service.
 
 ## Dashboard Model And Image Use
 

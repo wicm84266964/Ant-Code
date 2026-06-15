@@ -1,9 +1,9 @@
 import { emptyResponse, normalizeGatewayResponse } from "./protocol.js";
 
 /**
- * Parse a lab gateway streaming response.
+ * Parse a gateway streaming response.
  *
- * MVP supports two lab-owned streaming encodings:
+ * MVP supports two native streaming encodings:
  * - text/event-stream with `data: {...}` records
  * - application/x-ndjson with one JSON object per line
  *

@@ -64,7 +64,7 @@ export function formatGatewayError(error) {
 export function gatewayTroubleshootingHints(code, status = null, protocol = undefined, options = {}) {
   if (code === "GATEWAY_NOT_CONFIGURED") {
     return [
-      "Set LAB_MODEL_GATEWAY_URL to the lab gateway chat endpoint.",
+      "Set LAB_MODEL_GATEWAY_URL to the configured gateway chat endpoint.",
       "Run /gateway or ant-code gateway before retrying the model turn."
     ];
   }
@@ -82,13 +82,13 @@ export function gatewayTroubleshootingHints(code, status = null, protocol = unde
       ];
     }
     if (status === 401 || status === 403) {
-      return ["Check lab gateway authentication and user authorization at the gateway service."];
+      return ["Check gateway authentication and user authorization at the gateway service."];
     }
     if (status === 404) {
       return [
         protocol === "openai-chat"
           ? "Check that LAB_MODEL_GATEWAY_URL points to the OpenAI-compatible Chat Completions route, usually /v1/chat/completions."
-          : "Check that LAB_MODEL_GATEWAY_URL points to the Ant Code lab gateway chat route, usually /v1/chat."
+          : "Check that LAB_MODEL_GATEWAY_URL points to the Ant Code gateway chat route, usually /v1/chat."
       ];
     }
     if (status && status >= 500) {
@@ -108,7 +108,7 @@ export function gatewayTroubleshootingHints(code, status = null, protocol = unde
       "Retry with a smaller prompt or after the gateway worker is healthy."
     ];
   }
-  return ["Run /gateway --live and verify the configured lab gateway endpoint."];
+  return ["Run /gateway --live and verify the configured gateway endpoint."];
 }
 
 /**

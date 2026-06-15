@@ -146,7 +146,7 @@ const DEFAULT_CONFIG = Object.freeze({
  */
 
 /**
- * Load config from defaults, project JSON, lab-managed JSON, and environment.
+ * Load config from defaults, project JSON, managed JSON, and environment.
  *
  * Precedence: defaults < project config < lab config < environment.
  *

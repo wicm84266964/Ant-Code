@@ -3,7 +3,7 @@ import { listSlashCommandGroups } from "../commands/registry.js";
 
 export function helpText() {
   return [
-    "Ant Code clean-room MVP",
+    "Ant Code",
     "",
     "Usage:",
     "  ant-code                    # 启动默认 TUI",

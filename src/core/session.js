@@ -280,7 +280,7 @@ export async function runSessionTurn(session, options) {
   if (!gateway.configured) {
     finalOutput = [
       "Print mode is scaffolded.",
-      "Set LAB_MODEL_GATEWAY_URL to enable model turns through the lab gateway.",
+      "Set LAB_MODEL_GATEWAY_URL to enable model turns through the configured gateway.",
       `Received prompt bytes: ${Buffer.byteLength(options.prompt, "utf8")}`
     ].join("\n");
     await emitEvent(eventOptions, {

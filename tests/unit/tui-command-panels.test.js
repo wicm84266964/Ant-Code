@@ -638,7 +638,7 @@ test("display clipboard formatter leaves user markdown untouched", () => {
 function fakeSession(config = {}) {
   return {
     id: "session-test",
-    cwd: "C:\\saveproject\\LBJ-workspace\\lab-agent",
+    cwd: "C:\\workspace\\ant-code",
     turnCount: 2,
     model: "example-coding-model",
     networkMode: "offline",
