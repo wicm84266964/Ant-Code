@@ -2,40 +2,57 @@
 
 中文说明见 [README.zh-CN.md](README.zh-CN.md).
 
-Ant Code is a local coding agent runtime with a terminal UI, local Dashboard,
-tool permissions, skills, MCP integration, subagents, session storage, and model
-gateway adapters.
+Ant Code is a local-first coding agent for repository-scale software work. It
+combines an interactive terminal UI, a loopback Dashboard, local tool
+permissions, skills, MCP integration, resumable sessions, and model gateway
+adapters into one runtime.
 
-Tools run on the user's machine. Model requests are sent only to the gateway
-configured by the user. Secrets such as gateway access tokens belong in
-environment variables or local user config, not in this repository.
+The core idea is simple: tools run on the user's machine, while model traffic
+goes only through the gateway configured by the user. File edits, shell
+commands, MCP calls, task state, approvals, transcripts, and validation history
+stay under local control.
 
 This repository is released under the GNU Affero General Public License v3.0.
 
-## Status
+## What Makes Ant Code Different
 
-This is a cleaned open-source source release. It intentionally excludes local
-runtime state, logs, transcripts, build outputs, private gateway configs,
-machine-specific backups, and handoff notes.
+- Local-first execution: file, shell, git, network, MCP, and workflow tools are
+  mediated by a local permission engine.
+- Subagent orchestration: Ant Code can delegate bounded work to explorer,
+  planner, verifier, reviewer, visual-verifier, browser-verifier, junior, and
+  code-worker style subagents.
+- Background task flow: long-running subagent work can be tracked through task
+  records, groups, budgets, wakeups, and parent-session summaries.
+- Planner packages: planning agents can persist structured implementation
+  plans that later commands and reviewers can inspect.
+- Validation-aware workflow: sessions keep local todo state, plans, validation
+  results, delivery status, and next-action hints.
+- Gateway-independent model layer: use the native `lab-agent-gateway` protocol
+  or an OpenAI Chat Completions-compatible adapter.
+- Text and vision routing: configure separate model aliases for coding and
+  image-aware workflows when your gateway supports them.
+- Dashboard and TUI over the same runtime: terminal users and browser users see
+  the same sessions, permissions, tasks, and local state.
+- Skills and MCP extension points: bundled skills and configured MCP servers can
+  extend the agent without putting provider credentials in the client.
+- High-sensitivity mode: transcript retention, network mode, and metadata
+  behavior can be tightened for private repositories or research data.
 
-The public project name is **Ant Code**. The internal compatibility codename
-`lab-agent` remains in config file names, protocol identifiers, and local state
-paths to avoid breaking existing installs.
+## Core Capabilities
 
-## Features
-
-- terminal coding agent with interactive TUI
-- local Dashboard/WebUI bound to `127.0.0.1`
-- print mode for one-shot prompts
-- local permission engine for file, shell, network, MCP, and workflow tools
-- configurable model gateway support
+- Interactive terminal coding agent (`ant-code`)
+- One-shot print mode for scripted prompts
+- Local Dashboard/WebUI bound to `127.0.0.1`
+- File read/write, exact replacement edits, diff previews, and git inspection
+- Local shell execution with approval boundaries
+- Configurable model gateway and health checks
 - OpenAI Chat Completions-compatible gateway mode
-- native `lab-agent-gateway` protocol mode
-- local skills loaded from `config/skills`
-- local MCP server configuration
-- subagents, background tasks, planner packages, and wakeup flows
-- session persistence, transcript chunks, and model-context resume
-- dashboard rendering for Markdown, code, images, PDF, files, Mermaid, and KaTeX
+- Native provider-independent gateway protocol mode
+- Local skills loaded from `config/skills`
+- Local MCP server configuration
+- Session persistence, transcript chunks, model-context resume, and compaction
+- Rich Dashboard rendering for Markdown, code, images, PDF, files, Mermaid, and
+  KaTeX
 
 ## Repository Layout
 
@@ -44,17 +61,10 @@ ant-code/
   src/                         # runtime source
   tests/                       # unit and integration tests
   scripts/                     # verification, build, audit, and mock gateway helpers
-  config/                      # sanitized config templates and bundled skills
+  config/                      # configuration templates and bundled skills
   docs/                        # architecture, deployment, security, specs, provenance
-  lab-agent.config.json         # sanitized default sample config
+  lab-agent.config.json         # default sample config
 ```
-
-Not included:
-
-- `.lab-agent/` local sessions, memory, plans, tasks, worktrees, and transcripts
-- `logs/`, `.tmp/`, `dist/`, `node_modules/`
-- private gateway configs or provider credentials
-- generated model outputs or user project data
 
 ## Requirements
 
@@ -104,7 +114,7 @@ Edit the copied file and set:
 - `allowedHosts`
 - `agents.modelTiers`
 
-Keep the gateway access token outside JSON:
+Keep gateway access tokens outside JSON:
 
 ```powershell
 [Environment]::SetEnvironmentVariable("LAB_MODEL_GATEWAY_API_KEY", "<gateway-access-token>", "User")
@@ -127,53 +137,36 @@ $env:LAB_MODEL_GATEWAY_PROTOCOL = "openai-chat"
 node .\src\cli\index.js -p "hello"
 ```
 
-## Dashboard
+## Run Ant Code
 
-Start the local Dashboard:
+Interactive terminal session:
+
+```sh
+ant-code
+```
+
+One-shot prompt:
+
+```sh
+ant-code -p "Summarize this repository and suggest the next validation step."
+```
+
+Local Dashboard:
 
 ```powershell
 ant-code dashboard
 ```
 
 The Dashboard binds to `127.0.0.1`, defaults to port `7410`, and rejects
-non-loopback hosts. It reuses the same local runtime, permission engine, and
-`.lab-agent/sessions` store as the TUI.
+non-loopback hosts. It reuses the same local runtime, permission engine, task
+store, and `.lab-agent/sessions` session store as the TUI.
 
-Common options:
+Common Dashboard options:
 
 ```powershell
 ant-code dashboard --port 7410
 ant-code dashboard --no-open
 ant-code dashboard --project .
-```
-
-## Agent Setup Prompt
-
-Give this prompt to an AI coding agent so it can understand and work with this
-repository without making you explain every subsystem by hand:
-
-```text
-Please adopt this repository as the Ant Code local coding-agent runtime.
-
-Repository: https://github.com/wicm84266964/ant-code
-
-Read README.md, README.zh-CN.md if useful, docs/branding/public-identity.md,
-docs/security/data-boundary.md, docs/deployment/local-installation.md, and
-AGENT.md. Treat src/ as the runtime source, tests/ as the executable contract,
-config/ as sanitized templates and bundled skills, and docs/ as architecture,
-deployment, security, and provenance context.
-
-When helping me work on this project:
-- Do not write secrets, gateway tokens, local sessions, transcripts, logs,
-  build outputs, node_modules, or machine-specific configs into the repository.
-- Keep the public name Ant Code, while preserving lab-agent compatibility names
-  in protocol, config, and local state paths unless a migration is explicit.
-- Use npm ci for dependency setup and npm test or focused node --test commands
-  for verification.
-- Prefer the mock gateway for tests and demos that do not need a real model.
-- Before release work, run syntax, dependency, provenance, install, and relevant
-  unit tests.
-- Treat model provider credentials as outside the client boundary.
 ```
 
 ## Useful Commands

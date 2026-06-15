@@ -1,34 +1,47 @@
 # Ant Code
 
-Ant Code 是一个本地运行的编码智能体运行时，包含终端 TUI、本机 Dashboard、
-工具权限、skills、MCP 集成、子智能体、会话存储和模型网关适配。
+Ant Code 是一个本地优先的代码智能体，面向真实仓库里的复杂软件工作。它把交互式
+终端 TUI、本机 Dashboard、工具权限、skills、MCP 集成、可恢复会话、子智能体编排
+和模型网关适配放在同一个运行时里。
 
-工具调用在用户本机执行。模型请求只会发往用户自己配置的模型网关。网关访问
-token 等密钥应该放在环境变量或本机用户配置里，不应该写进这个仓库。
+它的核心边界很明确：工具在用户本机执行，模型请求只发往用户配置的模型网关。文件
+编辑、Shell 命令、MCP 调用、任务状态、审批记录、transcript 和验证历史都由本地
+运行时控制。
 
 本仓库使用 GNU Affero General Public License v3.0 发布。
 
-## 当前状态
+## Ant Code 的特点
 
-这是整理后的开源源码版本。它刻意不包含本机运行状态、日志、transcript、构建产物、
-私有网关配置、机器备份和交接文档。
+- 本地优先执行：文件、Shell、Git、网络、MCP 和工作流工具都经过本地权限引擎。
+- 子智能体编排：可以把有边界的任务交给 explorer、planner、verifier、reviewer、
+  visual-verifier、browser-verifier、junior、code-worker 等类型的子智能体。
+- 后台任务流：长任务可以通过 task record、task group、预算、wakeup 和父会话摘要
+  持续跟踪。
+- Planner 计划包：规划型子智能体可以持久化结构化实现计划，方便后续命令和 reviewer
+  检查。
+- 面向验证的工作流：会话会记录本地 todo、plan、验证结果、交付状态和下一步建议。
+- 与模型供应商解耦：支持原生 `lab-agent-gateway` 协议，也支持 OpenAI Chat
+  Completions 兼容适配器。
+- 文本和视觉路由：当网关支持时，可以给编码任务和图像输入配置不同模型别名。
+- Dashboard 和 TUI 共用同一运行时：终端和浏览器界面看到的是同一套会话、权限、任务
+  和本地状态。
+- Skills 与 MCP 扩展：可通过内置 skills 和显式配置的 MCP server 扩展能力，同时不把
+  供应商凭据放进客户端。
+- 高敏感模式：可收紧 transcript 保留、网络模式和元数据策略，用于私有仓库或研究数据。
 
-公开项目名是 **Ant Code**。为了兼容已有安装，`lab-agent` 这个内部代号仍保留在
-配置文件名、协议标识和本地状态路径中。
+## 核心能力
 
-## 功能
-
-- 交互式终端编码智能体
+- 交互式终端编码智能体（`ant-code`）
+- 适合脚本化调用的一次性 print mode
 - 绑定 `127.0.0.1` 的本机 Dashboard/WebUI
-- 一次性 prompt 的 print mode
-- 本地文件、Shell、网络、MCP 和工作流工具权限控制
-- 可配置模型网关
+- 文件读写、精确替换、diff preview 和 Git 状态检查
+- 带审批边界的本地 Shell 执行
+- 可配置模型网关和健康检查
 - OpenAI Chat Completions 兼容网关模式
-- 原生 `lab-agent-gateway` 协议模式
+- 原生 provider-independent 网关协议模式
 - 从 `config/skills` 加载本地 skills
 - 本地 MCP server 配置
-- 子智能体、后台任务、planner 计划包和 wakeup 流程
-- 会话持久化、transcript 分片和 model-context 恢复
+- 会话持久化、transcript 分片、model-context resume 和 compaction
 - Dashboard 渲染 Markdown、代码、图片、PDF、文件、Mermaid 和 KaTeX
 
 ## 目录结构
@@ -38,17 +51,10 @@ ant-code/
   src/                         # 运行时源码
   tests/                       # 单元测试和集成测试
   scripts/                     # 校验、构建、审计和 mock gateway 脚本
-  config/                      # 脱敏配置模板和内置 skills
+  config/                      # 配置模板和内置 skills
   docs/                        # 架构、部署、安全、规格和 provenance 文档
-  lab-agent.config.json         # 脱敏默认示例配置
+  lab-agent.config.json         # 默认示例配置
 ```
-
-不包含：
-
-- `.lab-agent/` 本机会话、记忆、计划、任务、worktree 和 transcript
-- `logs/`、`.tmp/`、`dist/`、`node_modules/`
-- 私有网关配置或供应商凭据
-- 模型生成输出或用户项目数据
 
 ## 环境要求
 
@@ -121,48 +127,35 @@ $env:LAB_MODEL_GATEWAY_PROTOCOL = "openai-chat"
 node .\src\cli\index.js -p "hello"
 ```
 
-## Dashboard
+## 运行 Ant Code
 
-启动本机 Dashboard：
+交互式终端会话：
+
+```sh
+ant-code
+```
+
+一次性 prompt：
+
+```sh
+ant-code -p "总结这个仓库，并建议下一步验证命令。"
+```
+
+本机 Dashboard：
 
 ```powershell
 ant-code dashboard
 ```
 
 Dashboard 绑定 `127.0.0.1`，默认端口是 `7410`，并拒绝非 loopback host。它复用
-和 TUI 相同的本地运行时、权限引擎和 `.lab-agent/sessions` 会话存储。
+和 TUI 相同的本地运行时、权限引擎、任务存储和 `.lab-agent/sessions` 会话存储。
 
-常用参数：
+常用 Dashboard 参数：
 
 ```powershell
 ant-code dashboard --port 7410
 ant-code dashboard --no-open
 ant-code dashboard --project .
-```
-
-## 给智能体的安装提示词
-
-把下面这段提示词交给 AI 编程智能体，让它自己理解这个仓库：
-
-```text
-请把这个仓库内化为 Ant Code 本地编码智能体运行时。
-
-仓库地址：https://github.com/wicm84266964/ant-code
-
-请阅读 README.md、必要时阅读 README.zh-CN.md、docs/branding/public-identity.md、
-docs/security/data-boundary.md、docs/deployment/local-installation.md 和 AGENT.md。
-把 src/ 视为运行时源码，tests/ 视为可执行契约，config/ 视为脱敏模板和内置
-skills，docs/ 视为架构、部署、安全和 provenance 上下文。
-
-当你协助我维护这个项目时：
-- 不要把密钥、网关 token、本机会话、transcript、日志、构建产物、node_modules
-  或机器专属配置写入仓库。
-- 公开名称保持 Ant Code；除非有明确迁移方案，否则保留协议、配置和本地状态路径
-  里的 lab-agent 兼容名。
-- 使用 npm ci 安装依赖，用 npm test 或聚焦的 node --test 命令做验证。
-- 不需要真实模型的测试和演示优先使用 mock gateway。
-- 发布相关工作前运行语法、依赖、provenance、安装校验和相关单元测试。
-- 模型供应商凭据属于客户端外部的网关/适配器边界。
 ```
 
 ## 常用命令
