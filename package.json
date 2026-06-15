@@ -1,18 +1,18 @@
 {
   "name": "@ant-code/cli",
-  "version": "3.0.0",
+  "version": "1.0.0",
   "description": "AGPL-licensed local coding agent with a terminal UI, local dashboard, tool permissions, skills, MCP integration, and model gateway adapters.",
   "type": "module",
   "private": true,
   "license": "AGPL-3.0-only",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/wicm84266964/ant-code.git"
+    "url": "git+https://github.com/wicm84266964/Ant-Code.git"
   },
   "bugs": {
-    "url": "https://github.com/wicm84266964/ant-code/issues"
+    "url": "https://github.com/wicm84266964/Ant-Code/issues"
   },
-  "homepage": "https://github.com/wicm84266964/ant-code#readme",
+  "homepage": "https://github.com/wicm84266964/Ant-Code#readme",
   "bin": {
     "ant-code": "./src/cli/index.js",
     "lab-agent": "./src/cli/index.js"

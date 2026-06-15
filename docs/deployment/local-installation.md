@@ -22,7 +22,7 @@ licensed and remains available in this repository.
 From the directory containing the release tarball:
 
 ```powershell
-npm install -g .\dist\ant-code-cli-3.0.0.tgz
+npm install -g .\dist\ant-code-cli-1.0.0.tgz
 ant-code --version
 ant-code doctor
 ```
@@ -31,7 +31,7 @@ If you do not want a global install, install into a local tools directory:
 
 ```powershell
 mkdir .ant-code-tooling
-npm install --prefix .\.ant-code-tooling .\dist\ant-code-cli-3.0.0.tgz
+npm install --prefix .\.ant-code-tooling .\dist\ant-code-cli-1.0.0.tgz
 .\.ant-code-tooling\node_modules\.bin\ant-code.cmd --version
 ```
 
