@@ -1,0 +1,33 @@
+# Dependencies and build outputs
+node_modules/
+dist/
+build/
+out/
+coverage/
+.cache/
+.tmp/
+tmp/
+
+# Local secrets and machine state
+.env
+.env.*
+!.env.example
+*.local
+
+# Logs and transcripts
+*.log
+logs/
+transcripts/
+recordings/
+.lab-agent/
+.lab-agent/sessions/
+
+# Local scratch files created during manual verification
+test.txt
+test_file.txt
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

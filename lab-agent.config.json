@@ -1,0 +1,176 @@
+{
+  "appName": "lab-agent",
+  "modelAlias": "example-coding-model",
+  "models": [
+    {
+      "id": "example-coding-model",
+      "label": "Example Coding Model",
+      "description": "Replace with the model id exposed by your local gateway.",
+      "thinking": false,
+      "modalities": [
+        "text"
+      ],
+      "reasoningContentMode": "visible-when-no-content",
+      "contextTokens": 200000
+    },
+    {
+      "id": "example-vision-model",
+      "label": "Example Vision Model",
+      "description": "Optional model id for image-capable workflows on the same gateway.",
+      "thinking": false,
+      "modalities": [
+        "text",
+        "image"
+      ],
+      "reasoningContentMode": "visible-when-no-content",
+      "contextTokens": 200000
+    }
+  ],
+  "networkMode": "lab-only",
+  "allowedHosts": [
+    "gateway.example.com"
+  ],
+  "lab": {
+    "gatewayUrl": "https://gateway.example.com/v1/chat/completions",
+    "gatewayHealthUrl": "https://gateway.example.com/health",
+    "gatewayProtocol": "openai-chat"
+  },
+  "transcript": {
+    "enabled": true,
+    "retentionDays": 30,
+    "includeToolOutput": "policy",
+    "encryption": "optional"
+  },
+  "security": {
+    "sensitivity": "standard"
+  },
+  "context": {
+    "maxMessages": 100000,
+    "maxBytes": 800000,
+    "maxTokens": 200000,
+    "keepRecentMessages": 8,
+    "summaryBytes": 65536
+  },
+  "limits": {
+    "maxToolRounds": null
+  },
+  "agents": {
+    "maxRounds": null,
+    "delegationGuard": {
+      "enabled": true,
+      "mode": "remind",
+      "softThreshold": 3,
+      "strongThreshold": 5
+    },
+    "backgroundWakeup": {
+      "enabled": true,
+      "defaultForModelAgentRun": false,
+      "maxConcurrentBackground": 3,
+      "defaultWaitFor": "all",
+      "autoQueueParentPrompt": true,
+      "maxWakeSummaryBytes": 12000
+    },
+    "reviewGate": {
+      "enabled": true,
+      "mode": "remind",
+      "todoThreshold": 4,
+      "requireForWrites": false,
+      "requireForHighRisk": false
+    },
+    "vision": {
+      "enabled": false,
+      "model": "example-vision-model",
+      "autoUseWhenMainModelTextOnly": true
+    },
+    "modelTiers": {
+      "cheap": "example-coding-model",
+      "default": "example-coding-model",
+      "strong": "example-coding-model",
+      "vision": "example-vision-model"
+    },
+    "budgets": {
+      "defaults": {
+        "maxDurationMs": 1800000,
+        "maxOutputBytes": 320000
+      },
+      "web-researcher": {
+        "maxDurationMs": 1200000,
+        "maxOutputBytes": 256000,
+        "maxPermissionDenials": 6,
+        "maxConsecutiveFailures": 6
+      },
+      "junior.deep": {
+        "maxDurationMs": 2700000
+      },
+      "code-worker.deep": {
+        "maxDurationMs": 2700000
+      }
+    },
+    "profiles": []
+  },
+  "mcp": {
+    "servers": [
+      {
+        "name": "filesystem",
+        "description": "Optional local filesystem MCP server. Enable only when needed.",
+        "enabled": false,
+        "transport": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-filesystem",
+          "."
+        ],
+        "toolRisks": {
+          "read_file": "read",
+          "list_directory": "read",
+          "search_files": "read",
+          "write_file": "write",
+          "edit_file": "write"
+        }
+      },
+      {
+        "name": "memory",
+        "description": "Optional local memory MCP server. Enable only when needed.",
+        "enabled": false,
+        "transport": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-memory"
+        ],
+        "toolRisks": {
+          "read_graph": "read",
+          "search_nodes": "read",
+          "create_entities": "write",
+          "create_relations": "write",
+          "add_observations": "write"
+        }
+      },
+      {
+        "name": "playwright",
+        "description": "Optional browser automation MCP server for local web/frontend checks.",
+        "enabled": false,
+        "transport": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@playwright/mcp@latest"
+        ],
+        "toolRisks": {
+          "browser_navigate": "network",
+          "browser_click": "mcp",
+          "browser_type": "mcp",
+          "browser_snapshot": "read",
+          "browser_take_screenshot": "read"
+        }
+      }
+    ]
+  },
+  "skills": {
+    "enabled": true,
+    "paths": [
+      "config/skills"
+    ]
+  }
+}

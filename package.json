@@ -1,0 +1,78 @@
+{
+  "name": "@ant-code/cli",
+  "version": "3.0.0",
+  "description": "AGPL-licensed local coding agent with a terminal UI, local dashboard, tool permissions, skills, MCP integration, and model gateway adapters.",
+  "type": "module",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wicm84266964/ant-code.git"
+  },
+  "bugs": {
+    "url": "https://github.com/wicm84266964/ant-code/issues"
+  },
+  "homepage": "https://github.com/wicm84266964/ant-code#readme",
+  "bin": {
+    "ant-code": "./src/cli/index.js",
+    "lab-agent": "./src/cli/index.js"
+  },
+  "files": [
+    "lab-agent.config.json",
+    "config/lab-agent.high-sensitivity-template.json",
+    "config/lab-agent.lab-template.json",
+    "config/skills/",
+    "docs/architecture/",
+    "docs/audit/",
+    "docs/branding/",
+    "docs/deployment/",
+    "docs/phase-1/",
+    "docs/provenance/",
+    "docs/security/",
+    "docs/specs/",
+    "scripts/",
+    "src/",
+    "npm-shrinkwrap.json",
+    "package-lock.json",
+    "tsconfig.json"
+  ],
+  "scripts": {
+    "start": "node src/cli/index.js",
+    "doctor": "node src/cli/index.js doctor",
+    "mock-gateway": "node scripts/mock-gateway.js",
+    "verify:install": "node scripts/verify-install.js",
+    "check": "npm run check:syntax && npm run check:forbidden && npm run check:provenance && npm run check:dependencies && npm test",
+    "check:syntax": "node scripts/check-syntax.js",
+    "check:forbidden": "node scripts/verify-forbidden-endpoints.js",
+    "check:provenance": "node scripts/verify-provenance.js",
+    "check:release-seal": "node scripts/verify-release-seal.js",
+    "check:dependencies": "node scripts/verify-dependency-policy.js",
+    "verify:gateway": "node scripts/verify-gateway-compat.js",
+    "verify:readiness": "node scripts/verify-readiness-docs.js",
+    "audit:endpoints": "node scripts/generate-endpoint-manifest.js",
+    "audit:sbom": "node scripts/generate-dependency-sbom.js",
+    "audit:licenses": "node scripts/generate-license-summary.js",
+    "audit:provenance": "node scripts/generate-provenance-summary.js",
+    "audit:rc": "node scripts/generate-rc-summary.js",
+    "audit:report": "node scripts/generate-audit-report.js",
+    "audit": "npm run audit:endpoints && npm run audit:sbom && npm run audit:licenses && npm run audit:provenance && npm run audit:rc && npm run audit:report",
+    "build:dashboard-assets": "node scripts/build-dashboard-assets.js",
+    "build:exe": "node scripts/build-windows-exe.js",
+    "verify:release": "npm run check && npm run verify:install && npm run verify:gateway && npm run verify:readiness && npm run check:release-seal && npm run audit",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "ink": "^6.8.0",
+    "katex": "^0.16.46",
+    "mermaid": "^11.15.0",
+    "react": "^19.2.5",
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.0",
+    "postject": "^1.0.0-alpha.6"
+  }
+}

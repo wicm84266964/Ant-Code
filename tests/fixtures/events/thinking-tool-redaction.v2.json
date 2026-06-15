@@ -1,0 +1,109 @@
+[
+  {
+    "schemaVersion": 2,
+    "id": "fixture:000001:turn_start",
+    "sequence": 1,
+    "type": "turn_start",
+    "at": "2026-04-28T00:00:00.000Z",
+    "sessionId": "fixture-session",
+    "turnId": "fixture-session:turn-1",
+    "round": null,
+    "parentId": null,
+    "parentToolUseId": null,
+    "source": "session",
+    "visibility": "default",
+    "persistence": "persist",
+    "redaction": "none",
+    "payload": {
+      "turnIndex": 1,
+      "promptBytes": 10,
+      "queueState": "accepted"
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "id": "fixture:000002:assistant_message_start",
+    "sequence": 2,
+    "type": "assistant_message_start",
+    "at": "2026-04-28T00:00:00.000Z",
+    "sessionId": "fixture-session",
+    "turnId": "fixture-session:turn-1",
+    "round": 1,
+    "parentId": null,
+    "parentToolUseId": null,
+    "source": "gateway",
+    "visibility": "default",
+    "persistence": "persist",
+    "redaction": "none",
+    "payload": {
+      "round": 1,
+      "messageId": "message-1",
+      "model": "fixture-model"
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "id": "fixture:000003:assistant_thinking_start",
+    "sequence": 3,
+    "type": "assistant_thinking_start",
+    "at": "2026-04-28T00:00:00.000Z",
+    "sessionId": "fixture-session",
+    "turnId": "fixture-session:turn-1",
+    "round": 1,
+    "parentId": null,
+    "parentToolUseId": null,
+    "source": "gateway",
+    "visibility": "detail",
+    "persistence": "redact",
+    "redaction": "full",
+    "payload": {
+      "round": 1
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "id": "fixture:000004:assistant_thinking_delta",
+    "sequence": 4,
+    "type": "assistant_thinking_delta",
+    "at": "2026-04-28T00:00:00.000Z",
+    "sessionId": "fixture-session",
+    "turnId": "fixture-session:turn-1",
+    "round": 1,
+    "parentId": null,
+    "parentToolUseId": null,
+    "source": "gateway",
+    "visibility": "debug",
+    "persistence": "memory",
+    "redaction": "none",
+    "payload": {
+      "round": 1,
+      "text": "session-local reasoning only",
+      "bytes": 28
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "id": "fixture:000005:tool_input_delta",
+    "sequence": 5,
+    "type": "tool_input_delta",
+    "at": "2026-04-28T00:00:00.000Z",
+    "sessionId": "fixture-session",
+    "turnId": "fixture-session:turn-1",
+    "round": 1,
+    "parentId": null,
+    "parentToolUseId": null,
+    "source": "gateway",
+    "visibility": "detail",
+    "persistence": "redact",
+    "redaction": "partial",
+    "payload": {
+      "round": 1,
+      "index": 0,
+      "id": "tool-1",
+      "nameDelta": "read_file",
+      "argumentsDelta": "{\"path\":\"notes.txt\"}",
+      "argumentBytes": 20,
+      "partial": true
+    }
+  }
+]

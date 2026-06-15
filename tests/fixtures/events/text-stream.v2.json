@@ -1,0 +1,145 @@
+[
+  {
+    "schemaVersion": 2,
+    "id": "fixture:000001:turn_start",
+    "sequence": 1,
+    "type": "turn_start",
+    "at": "2026-04-28T00:00:00.000Z",
+    "sessionId": "fixture-session",
+    "turnId": "fixture-session:turn-1",
+    "round": null,
+    "parentId": null,
+    "parentToolUseId": null,
+    "source": "session",
+    "visibility": "default",
+    "persistence": "persist",
+    "redaction": "none",
+    "payload": {
+      "turnIndex": 1,
+      "promptBytes": 12,
+      "queueState": "accepted"
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "id": "fixture:000002:assistant_message_start",
+    "sequence": 2,
+    "type": "assistant_message_start",
+    "at": "2026-04-28T00:00:00.000Z",
+    "sessionId": "fixture-session",
+    "turnId": "fixture-session:turn-1",
+    "round": 1,
+    "parentId": null,
+    "parentToolUseId": null,
+    "source": "gateway",
+    "visibility": "default",
+    "persistence": "persist",
+    "redaction": "none",
+    "payload": {
+      "round": 1,
+      "messageId": "message-1",
+      "model": "fixture-model"
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "id": "fixture:000003:assistant_text_start",
+    "sequence": 3,
+    "type": "assistant_text_start",
+    "at": "2026-04-28T00:00:00.000Z",
+    "sessionId": "fixture-session",
+    "turnId": "fixture-session:turn-1",
+    "round": 1,
+    "parentId": null,
+    "parentToolUseId": null,
+    "source": "gateway",
+    "visibility": "default",
+    "persistence": "persist",
+    "redaction": "none",
+    "payload": {
+      "round": 1,
+      "partial": true
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "id": "fixture:000004:assistant_text_delta",
+    "sequence": 4,
+    "type": "assistant_text_delta",
+    "at": "2026-04-28T00:00:00.000Z",
+    "sessionId": "fixture-session",
+    "turnId": "fixture-session:turn-1",
+    "round": 1,
+    "parentId": null,
+    "parentToolUseId": null,
+    "source": "gateway",
+    "visibility": "default",
+    "persistence": "persist",
+    "redaction": "none",
+    "payload": {
+      "round": 1,
+      "text": "hello",
+      "bytes": 5,
+      "partial": true
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "id": "fixture:000005:assistant_text_stop",
+    "sequence": 5,
+    "type": "assistant_text_stop",
+    "at": "2026-04-28T00:00:00.000Z",
+    "sessionId": "fixture-session",
+    "turnId": "fixture-session:turn-1",
+    "round": 1,
+    "parentId": null,
+    "parentToolUseId": null,
+    "source": "gateway",
+    "visibility": "default",
+    "persistence": "persist",
+    "redaction": "none",
+    "payload": {
+      "round": 1
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "id": "fixture:000006:assistant_message_stop",
+    "sequence": 6,
+    "type": "assistant_message_stop",
+    "at": "2026-04-28T00:00:00.000Z",
+    "sessionId": "fixture-session",
+    "turnId": "fixture-session:turn-1",
+    "round": 1,
+    "parentId": null,
+    "parentToolUseId": null,
+    "source": "gateway",
+    "visibility": "default",
+    "persistence": "persist",
+    "redaction": "none",
+    "payload": {
+      "round": 1,
+      "stopReason": "stop"
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "id": "fixture:000007:turn_result",
+    "sequence": 7,
+    "type": "turn_result",
+    "at": "2026-04-28T00:00:00.000Z",
+    "sessionId": "fixture-session",
+    "turnId": "fixture-session:turn-1",
+    "round": 1,
+    "parentId": null,
+    "parentToolUseId": null,
+    "source": "session",
+    "visibility": "default",
+    "persistence": "persist",
+    "redaction": "none",
+    "payload": {
+      "status": "completed",
+      "outputBytes": 5
+    }
+  }
+]

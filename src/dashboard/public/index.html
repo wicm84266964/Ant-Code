@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ant Code Dashboard</title>
+    <link rel="stylesheet" href="/assets/vendor/katex.min.css" />
+    <link rel="stylesheet" href="/assets/styles.css?v=dashboard-agent-models" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="任务线程">
+        <div class="brand">
+          <div class="brand-mark">A</div>
+          <div>
+            <div class="brand-name">Ant Code</div>
+            <div class="brand-subtitle">Dashboard</div>
+          </div>
+        </div>
+        <button class="primary-action" id="new-task" type="button">新任务</button>
+        <div class="sidebar-section">
+          <div class="section-label">当前项目</div>
+          <div class="project-path" id="project-path">加载中</div>
+        </div>
+        <div class="sidebar-section grow">
+          <div class="section-row">
+            <div class="section-label">任务线程</div>
+            <div class="section-actions">
+              <span class="section-status" id="sessions-status" aria-live="polite"></span>
+              <button class="icon-button" id="collapse-sidebar" type="button" title="收起会话栏" aria-label="收起会话栏">‹</button>
+              <button class="icon-button" id="refresh-sessions" type="button" title="刷新">↻</button>
+            </div>
+          </div>
+          <div class="thread-list" id="thread-list"></div>
+        </div>
+        <div class="sidebar-footer">
+          <button class="shutdown-button" id="shutdown-button" type="button">关闭 Dashboard</button>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="workspace-header">
+          <div class="workspace-local" title="仅此电脑可打开，文件访问按当前权限执行">
+            <span class="local-dot" aria-hidden="true"></span>
+            <span>本地通用智能体</span>
+          </div>
+          <div class="header-actions">
+            <div class="status-pill" id="run-status">空闲</div>
+            <button class="header-shutdown" id="header-shutdown-button" type="button">关闭</button>
+          </div>
+        </header>
+
+        <section class="workflow-strip hidden" id="workflow-strip" aria-live="polite"></section>
+
+        <section class="transcript" id="transcript" aria-live="polite">
+          <div class="empty-state" id="empty-state">
+            <div class="empty-kicker">Ant Code Dashboard</div>
+            <div class="empty-title">我将全力配合你的工作</div>
+            <div class="empty-copy">过程会保持折叠，结果和文件会在这里清楚呈现。</div>
+          </div>
+        </section>
+
+        <section class="composer-shell">
+          <div class="live-status hidden" id="live-status" aria-live="polite">
+            <div class="live-main">
+              <span class="live-pulse" aria-hidden="true"></span>
+              <span id="live-title">正在处理</span>
+            </div>
+            <div class="live-subtasks" id="live-subtasks"></div>
+          </div>
+          <div class="shutdown-panel hidden" id="shutdown-panel">
+            <div>
+              <div class="shutdown-title">关闭 Dashboard 服务？</div>
+              <div class="shutdown-copy">确认后会停止本机 WebUI 进程，当前页面将不再连接服务。</div>
+            </div>
+            <div class="shutdown-actions">
+              <button type="button" id="shutdown-cancel">取消</button>
+              <button type="button" id="shutdown-confirm">确认关闭</button>
+            </div>
+          </div>
+          <div class="approval-panel hidden" id="approval-panel"></div>
+          <div class="question-panel hidden" id="question-panel"></div>
+          <div class="trust-panel hidden" id="trust-panel"></div>
+          <div class="context-panel hidden" id="context-panel"></div>
+          <div class="queue-panel hidden" id="queue-panel"></div>
+          <div class="mode-row">
+            <div class="segmented" id="permission-mode" role="group" aria-label="权限模式">
+              <button type="button" data-mode="plan" class="active">计划确认</button>
+              <button type="button" data-mode="workspace">工作区权限</button>
+              <button type="button" data-mode="fullAccess">完全访问</button>
+            </div>
+            <div class="mode-description" id="mode-description">写入和命令需确认</div>
+            <div class="context-actions">
+              <button type="button" id="context-clear">清空上下文</button>
+              <button type="button" id="context-compact">压缩上下文</button>
+            </div>
+          </div>
+          <div class="composer">
+            <div class="attachment-strip hidden" id="attachment-strip" aria-live="polite"></div>
+            <textarea id="prompt-input" rows="2" placeholder="输入任务需求，例如：整理这批实验数据并生成一份简洁报告"></textarea>
+            <input id="attachment-input" class="hidden" type="file" accept="image/*" multiple />
+            <button class="attach-button" id="attach-button" type="button" title="添加图片" aria-label="添加图片">+</button>
+            <button id="send-button" type="button">发送</button>
+          </div>
+          <div class="composer-footer" aria-live="polite">
+            <div class="model-status-button" id="model-status">模型 --</div>
+            <span id="context-status">上下文 -- / --</span>
+            <span id="change-status" class="change-status hidden"></span>
+          </div>
+          <div class="model-panel hidden" id="model-panel"></div>
+          <div class="model-config-panel hidden" id="model-config-panel" role="dialog" aria-modal="true" aria-labelledby="model-config-title"></div>
+        </section>
+      </main>
+
+      <aside class="preview" aria-label="文件预览">
+        <header class="preview-header">
+          <div>
+            <div class="section-label">产物与文件</div>
+            <div class="preview-subtitle">图片、文本、Markdown、PDF</div>
+          </div>
+          <button class="icon-button" id="collapse-preview" type="button" title="收起预览">›</button>
+        </header>
+        <div class="file-list" id="file-list"></div>
+        <div class="preview-body" id="preview-body">
+          <div class="preview-placeholder">任务产物会显示在这里</div>
+        </div>
+      </aside>
+    </div>
+    <div class="image-lightbox hidden" id="image-lightbox" aria-modal="true" role="dialog" aria-label="图片预览大图">
+      <button class="lightbox-backdrop" id="lightbox-backdrop" type="button" aria-label="关闭图片预览"></button>
+      <div class="lightbox-surface">
+        <div class="lightbox-bar">
+          <div>
+            <div class="lightbox-title" id="lightbox-title">图片预览</div>
+            <div class="lightbox-counter" id="lightbox-counter"></div>
+          </div>
+          <div class="lightbox-actions">
+            <a class="lightbox-open" id="lightbox-open" href="#" target="_blank" rel="noreferrer">新窗口打开</a>
+            <button class="icon-button" id="lightbox-close" type="button" title="关闭">×</button>
+          </div>
+        </div>
+        <div class="lightbox-canvas" id="lightbox-canvas">
+          <button class="lightbox-nav lightbox-prev" id="lightbox-previous" type="button" aria-label="上一张">‹</button>
+          <img id="lightbox-image" alt="" />
+          <div class="lightbox-table hidden" id="lightbox-table"></div>
+          <button class="lightbox-nav lightbox-next" id="lightbox-next" type="button" aria-label="下一张">›</button>
+        </div>
+      </div>
+    </div>
+    <script src="/assets/app.js?v=dashboard-agent-models" type="module"></script>
+  </body>
+</html>

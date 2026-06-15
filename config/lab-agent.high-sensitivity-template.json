@@ -1,0 +1,120 @@
+{
+  "appName": "lab-agent",
+  "modelAlias": "example-coding-model",
+  "models": [
+    {
+      "id": "example-coding-model",
+      "label": "Example Coding Model",
+      "description": "Replace with the model id exposed by your local gateway.",
+      "thinking": false,
+      "modalities": [
+        "text"
+      ],
+      "reasoningContentMode": "visible-when-no-content",
+      "contextTokens": 200000
+    },
+    {
+      "id": "example-vision-model",
+      "label": "Example Vision Model",
+      "description": "Optional model id for image-capable workflows on the same gateway.",
+      "thinking": false,
+      "modalities": [
+        "text",
+        "image"
+      ],
+      "reasoningContentMode": "visible-when-no-content",
+      "contextTokens": 200000
+    }
+  ],
+  "networkMode": "lab-only",
+  "allowedHosts": [
+    "gateway.example.com"
+  ],
+  "lab": {
+    "gatewayUrl": "https://gateway.example.com/v1/chat/completions",
+    "gatewayHealthUrl": "https://gateway.example.com/health",
+    "gatewayProtocol": "openai-chat"
+  },
+  "transcript": {
+    "enabled": false,
+    "retentionDays": 0,
+    "includeToolOutput": "policy",
+    "encryption": "off"
+  },
+  "security": {
+    "sensitivity": "high"
+  },
+  "context": {
+    "maxMessages": 100000,
+    "maxBytes": 800000,
+    "maxTokens": 200000,
+    "keepRecentMessages": 6,
+    "summaryBytes": 65536
+  },
+  "limits": {
+    "maxToolRounds": null
+  },
+  "agents": {
+    "maxRounds": null,
+    "delegationGuard": {
+      "enabled": true,
+      "mode": "remind",
+      "softThreshold": 2,
+      "strongThreshold": 4
+    },
+    "backgroundWakeup": {
+      "enabled": true,
+      "defaultForModelAgentRun": false,
+      "maxConcurrentBackground": 3,
+      "defaultWaitFor": "all",
+      "autoQueueParentPrompt": true,
+      "maxWakeSummaryBytes": 12000
+    },
+    "reviewGate": {
+      "enabled": true,
+      "mode": "remind",
+      "todoThreshold": 4,
+      "requireForWrites": false,
+      "requireForHighRisk": false
+    },
+    "vision": {
+      "enabled": false,
+      "model": "example-vision-model",
+      "autoUseWhenMainModelTextOnly": true
+    },
+    "modelTiers": {
+      "cheap": "example-coding-model",
+      "default": "example-coding-model",
+      "strong": "example-coding-model",
+      "vision": "example-vision-model"
+    },
+    "budgets": {
+      "defaults": {
+        "maxDurationMs": 1200000,
+        "maxOutputBytes": 192000
+      },
+      "web-researcher": {
+        "maxDurationMs": 900000,
+        "maxOutputBytes": 160000,
+        "maxPermissionDenials": 6,
+        "maxConsecutiveFailures": 6
+      },
+      "junior.deep": {
+        "maxDurationMs": 1800000
+      },
+      "code-worker.deep": {
+        "maxDurationMs": 1800000
+      }
+    },
+    "profiles": []
+  },
+  "mcp": {
+    "servers": []
+  },
+  "skills": {
+    "enabled": true,
+    "paths": [
+      "config/skills"
+    ]
+  }
+}

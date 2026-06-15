@@ -1,0 +1,2082 @@
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import http from "node:http";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import { createAgentTaskGroupStore } from "../../src/agents/task-group-store.js";
+import { createAgentTaskStore } from "../../src/agents/task-store.js";
+import { createDashboardRuntime } from "../../src/dashboard/sessions.js";
+import { createSessionStore } from "../../src/storage/session-store.js";
+
+test("dashboard runtime runs a turn and writes shared session metadata", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createGateway("dashboard answer"), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+
+  try {
+    await runtime.trustWorkspace();
+    const started = await runtime.startTurn({
+      prompt: "hello dashboard",
+      permissionMode: "plan"
+    });
+    assert.equal(started.ok, true);
+
+    const events = await waitForEvent(runtime, started.sessionId, (event) => event.type === "files_updated");
+    assert.match(events.find((event) => event.type === "assistant_final")?.text ?? "", /dashboard answer/);
+
+    const records = await runtime.listSessionRecords();
+    assert.equal(records.length, 1);
+    assert.equal(records[0].id, started.sessionId);
+    assert.equal(records[0].title, "hello dashboard");
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime exposes model and context status", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createGateway("status answer"), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+
+  try {
+    const initial = await runtime.status();
+    assert.equal(initial.ok, true);
+    assert.equal(typeof initial.sessionStatus.model, "string");
+    assert.notEqual(initial.sessionStatus.model.length, 0);
+    assert.ok(initial.models.some((model) => model.id === initial.sessionStatus.model && model.current === true));
+    assert.ok(initial.sessionStatus.context.maxTokens > 0);
+
+    await runtime.trustWorkspace();
+    const started = await runtime.startTurn({
+      prompt: "status please",
+      permissionMode: "workspace"
+    });
+    assert.equal(started.sessionStatus.model, initial.sessionStatus.model);
+
+    const events = await waitForEvent(runtime, started.sessionId, (event) => event.type === "files_updated");
+    const final = events.find((event) => event.type === "files_updated")?.sessionStatus;
+    assert.equal(final.model, initial.sessionStatus.model);
+    assert.ok(final.context.messageTokens > 0);
+    assert.equal(final.context.maxTokens, initial.sessionStatus.context.maxTokens);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime can switch registered model for the current session", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
+    modelAlias: "code-model",
+    models: [
+      { id: "code-model", label: "Code Model", modalities: ["text"], contextTokens: 200000 },
+      { id: "vision-model", label: "Vision Model", modalities: ["text", "image"], contextTokens: 128000 }
+    ]
+  }), "utf8");
+  const requests = [];
+  const server = await listen(createRecordingGateway(requests, "switched answer"), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+
+  try {
+    await runtime.trustWorkspace();
+    const initial = await runtime.status();
+    assert.deepEqual(initial.models.map((model) => [model.id, model.modalities, model.current]), [
+      ["code-model", ["text"], true],
+      ["vision-model", ["text", "image"], false]
+    ]);
+
+    const switched = await runtime.switchModel({ modelId: "vision-model" });
+    assert.equal(switched.ok, true);
+    assert.equal(switched.sessionStatus.model, "vision-model");
+    assert.equal(switched.models.find((model) => model.id === "vision-model").current, true);
+
+    const started = await runtime.startTurn({
+      prompt: "use selected model",
+      permissionMode: "plan"
+    });
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "files_updated");
+
+    assert.equal(requests[0].model, "vision-model");
+    assert.equal(started.sessionStatus.model, "vision-model");
+    assert.equal(started.sessionStatus.context.modelMaxTokens, 128000);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime can apply model agent defaults when switching", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
+    modelAlias: "code-model",
+    models: [
+      {
+        id: "code-model",
+        label: "Code Model",
+        modalities: ["text"],
+        contextTokens: 200000,
+        agentModelTiers: {
+          cheap: "code-flash",
+          default: "code-flash",
+          strong: "code-strong"
+        }
+      },
+      {
+        id: "vision-model",
+        label: "Vision Model",
+        modalities: ["text", "image"],
+        contextTokens: 128000,
+        agentModelTiers: {
+          cheap: "vision-flash",
+          default: "vision-default",
+          strong: "vision-strong"
+        }
+      }
+    ],
+    agents: {
+      modelTiers: {
+        cheap: "code-flash",
+        default: "code-flash",
+        strong: "code-strong"
+      }
+    }
+  }), "utf8");
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+
+  const switched = await runtime.switchModel({ modelId: "vision-model", applyAgentDefaults: true });
+
+  assert.equal(switched.ok, true);
+  assert.equal(switched.sessionStatus.model, "vision-model");
+  assert.deepEqual(switched.agentModelTiers, {
+    cheap: "vision-flash",
+    default: "vision-default",
+    strong: "vision-strong",
+    vision: "example-vision-model"
+  });
+  assert.deepEqual(switched.models.find((model) => model.id === "vision-model")?.agentModelTiers, {
+    cheap: "vision-flash",
+    default: "vision-default",
+    strong: "vision-strong"
+  });
+
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.deepEqual(local.agents.modelTiers, {
+    cheap: "vision-flash",
+    default: "vision-default",
+    strong: "vision-strong",
+    vision: "example-vision-model"
+  });
+});
+
+test("dashboard runtime saves local model gateway config", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+
+  const saved = await runtime.saveModelConfig({
+    gatewayUrl: "https://local.gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "secret-key",
+    modelId: "local-vision",
+    label: "Local Vision",
+    modalities: ["text", "image"],
+    thinking: true,
+    contextTokens: "128000",
+    agentCheapModel: "local-cheap",
+    agentDefaultModel: "local-default",
+    agentStrongModel: "local-strong",
+    visionAgentModel: "local-vision",
+    applyAgentDefaults: true,
+    switchToModel: true
+  });
+
+  assert.equal(saved.ok, true);
+  assert.equal(saved.sessionStatus.model, "local-vision");
+  assert.equal(saved.gatewayConfig.apiKeyConfigured, true);
+  assert.equal(saved.models.find((model) => model.id === "local-vision")?.current, true);
+  assert.deepEqual(saved.models.find((model) => model.id === "local-vision")?.modalities, ["text", "image"]);
+
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.equal(local.modelAlias, "local-vision");
+  assert.equal(local.lab.gatewayUrl, "https://local.gateway.example/v1/chat/completions");
+  assert.equal(local.lab.gatewayApiKey, "secret-key");
+  assert.ok(local.allowedHosts.includes("local.gateway.example"));
+  assert.deepEqual(local.models.find((model) => model.id === "local-vision").modalities, ["text", "image"]);
+  assert.deepEqual(local.models.find((model) => model.id === "local-vision").agentModelTiers, {
+    cheap: "local-cheap",
+    default: "local-default",
+    strong: "local-strong"
+  });
+  assert.deepEqual(local.agents.modelTiers, {
+    cheap: "local-cheap",
+    default: "local-default",
+    strong: "local-strong",
+    vision: "local-vision"
+  });
+  assert.deepEqual(local.agents.vision, {
+    enabled: true,
+    model: "local-vision",
+    autoUseWhenMainModelTextOnly: true
+  });
+});
+
+test("dashboard runtime refreshes idle active session after saving gateway key", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const requests = [];
+  const server = await listen(createAuthRecordingGateway(requests, "fresh answer", "new-key"), "127.0.0.1", 0);
+  const env = mockGatewayEnv(server, {
+    LAB_MODEL_GATEWAY_API_KEY: "old-key",
+    LAB_AGENT_MODEL: "mock-model"
+  });
+  const runtime = createDashboardRuntime({ cwd, env });
+
+  try {
+    await runtime.trustWorkspace();
+    const started = await runtime.startTurn({
+      prompt: "first attempt",
+      permissionMode: "plan"
+    });
+    assert.equal(started.ok, true);
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+    assert.equal(requests.at(-1)?.authorization, "Bearer old-key");
+    assert.equal(runtime.active.get(started.sessionId).session.config.lab.gatewayApiKey, "old-key");
+
+    const saved = await runtime.saveModelConfig({
+      sessionId: started.sessionId,
+      gatewayUrl: env.LAB_MODEL_GATEWAY_URL,
+      gatewayProtocol: "lab-agent-gateway",
+      gatewayApiKey: "new-key",
+      modelId: "mock-model",
+      label: "Mock Model",
+      modalities: ["text"],
+      switchToModel: true
+    });
+    assert.equal(saved.ok, true);
+    assert.equal(saved.sessionId, started.sessionId);
+    assert.equal(runtime.active.get(started.sessionId).session.config.lab.gatewayApiKey, "new-key");
+
+    const retried = await runtime.startTurn({
+      sessionId: started.sessionId,
+      prompt: "retry same session",
+      permissionMode: "plan"
+    });
+    assert.equal(retried.ok, true);
+    const events = await waitForEvent(runtime, started.sessionId, (event) => (
+      event.type === "files_updated" && event.sequence > retried.eventCursor
+    ));
+    const final = events.find((event) => event.type === "assistant_final" && event.sequence > retried.eventCursor);
+    assert.match(final?.text ?? "", /fresh answer/);
+    assert.equal(requests.at(-1)?.authorization, "Bearer new-key");
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime switches gateway profiles without mixing previous provider models", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
+    modelAlias: "alpha-pro",
+    models: [
+      { id: "alpha-pro", label: "Alpha Pro", modalities: ["text"] },
+      { id: "alpha-vision", label: "Alpha Vision", modalities: ["text", "image"] }
+    ],
+    lab: {
+      gatewayUrl: "https://alpha-gateway.example/v1/chat/completions",
+      gatewayProtocol: "openai-chat",
+      gatewayApiKey: "alpha-key"
+    },
+    agents: {
+      modelTiers: {
+        cheap: "alpha-vision",
+        default: "alpha-vision",
+        strong: "alpha-vision",
+        vision: "alpha-vision"
+      },
+      vision: {
+        enabled: true,
+        model: "alpha-vision",
+        autoUseWhenMainModelTextOnly: true
+      }
+    }
+  }), "utf8");
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+
+  const saved = await runtime.saveModelConfig({
+    gatewayUrl: "https://beta-gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "beta-key",
+    modelId: "beta-chat",
+    label: "Beta Chat",
+    modalities: ["text"],
+    switchToModel: true
+  });
+
+  assert.equal(saved.ok, true);
+  assert.equal(saved.sessionStatus.model, "beta-chat");
+  assert.deepEqual(saved.models.map((model) => model.id), ["beta-chat"]);
+  assert.equal(saved.gatewayProfiles.length, 2);
+  assert.equal(saved.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("beta-gateway"))?.current, true);
+  assert.equal(saved.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("alpha-gateway"))?.modelCount, 2);
+
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.deepEqual(local.models.map((model) => model.id), ["beta-chat"]);
+  assert.equal(local.agents.vision.enabled, false);
+  assert.equal(local.agents.vision.model, null);
+  assert.equal(local.agents.modelTiers.vision, undefined);
+
+  const alphaProfile = saved.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("alpha-gateway"));
+  const switched = await runtime.switchGatewayProfile({ profileId: alphaProfile.id });
+
+  assert.equal(switched.ok, true);
+  assert.equal(switched.gatewayConfig.gatewayUrl, "https://alpha-gateway.example/v1/chat/completions");
+  assert.deepEqual(switched.models.map((model) => model.id), ["alpha-pro", "alpha-vision"]);
+  assert.equal(switched.sessionStatus.model, "alpha-pro");
+  assert.deepEqual(switched.visionAgent, {
+    enabled: true,
+    model: "alpha-vision",
+    autoUseWhenMainModelTextOnly: true
+  });
+});
+
+test("dashboard model config ignores process gateway env overrides", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: {
+      LAB_MODEL_GATEWAY_URL: "https://env-gateway.example/v1/chat/completions",
+      LAB_MODEL_GATEWAY_PROTOCOL: "openai-chat",
+      LAB_MODEL_GATEWAY_API_KEY: "env-key",
+      LAB_AGENT_MODEL: "env-model"
+    }
+  });
+
+  const initial = await runtime.status();
+  assert.equal(initial.gatewayConfig.gatewayUrl, "https://env-gateway.example/v1/chat/completions");
+  assert.equal(initial.sessionStatus.model, "env-model");
+  assert.ok(initial.models.some((model) => model.id === "env-model"));
+
+  const saved = await runtime.saveModelConfig({
+    gatewayUrl: "https://beta-gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "beta-key",
+    modelId: "beta-chat",
+    label: "Beta Chat",
+    modalities: ["text"],
+    switchToModel: true
+  });
+
+  assert.equal(saved.ok, true);
+  assert.equal(saved.gatewayConfig.gatewayUrl, "https://beta-gateway.example/v1/chat/completions");
+  assert.deepEqual(saved.models.map((model) => model.id), ["beta-chat"]);
+  assert.equal(saved.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("beta-gateway"))?.current, true);
+
+  const after = await runtime.status();
+  assert.equal(after.gatewayConfig.gatewayUrl, "https://beta-gateway.example/v1/chat/completions");
+  assert.deepEqual(after.models.map((model) => model.id), ["beta-chat"]);
+});
+
+test("dashboard runtime adds models to the active gateway when key is unchanged", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+
+  await runtime.saveModelConfig({
+    gatewayUrl: "https://beta-gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "beta-key",
+    modelId: "beta-chat",
+    label: "Beta Chat",
+    modalities: ["text"],
+    switchToModel: true
+  });
+  const saved = await runtime.saveModelConfig({
+    gatewayUrl: "https://beta-gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    modelId: "beta-reasoner",
+    label: "Beta Reasoner",
+    modalities: ["text"],
+    switchToModel: true
+  });
+
+  assert.equal(saved.ok, true);
+  assert.deepEqual(saved.models.map((model) => model.id), ["beta-chat", "beta-reasoner"]);
+  assert.equal(saved.gatewayProfiles.find((profile) => profile.current)?.modelCount, 2);
+  assert.ok(saved.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("beta-gateway")));
+
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.deepEqual(local.models.map((model) => model.id), ["beta-chat", "beta-reasoner"]);
+  assert.equal(local.lab.gatewayApiKey, "beta-key");
+});
+
+test("dashboard runtime deletes a registered model from the active gateway", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+
+  await runtime.saveModelConfig({
+    gatewayUrl: "https://alpha-gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "alpha-key",
+    modelId: "alpha-pro",
+    label: "Alpha Pro",
+    modalities: ["text"],
+    switchToModel: true
+  });
+  await runtime.saveModelConfig({
+    gatewayUrl: "https://alpha-gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    modelId: "alpha-vision",
+    label: "Alpha Vision",
+    modalities: ["text", "image"],
+    visionAgentModel: "alpha-vision",
+    switchToModel: true
+  });
+
+  const deleted = await runtime.deleteModelConfig({ modelId: "alpha-vision" });
+
+  assert.equal(deleted.ok, true);
+  assert.equal(deleted.deletedModel, "alpha-vision");
+  assert.deepEqual(deleted.models.map((model) => [model.id, model.current]), [["alpha-pro", true]]);
+  assert.deepEqual(deleted.visionAgent, {
+    enabled: false,
+    model: "",
+    autoUseWhenMainModelTextOnly: true
+  });
+  assert.equal(deleted.gatewayProfiles.find((profile) => profile.current)?.modelCount, 1);
+
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.equal(local.modelAlias, "alpha-pro");
+  assert.deepEqual(local.models.map((model) => model.id), ["alpha-pro"]);
+  assert.equal(local.agents.vision.enabled, false);
+  assert.equal(local.agents.vision.model, null);
+  assert.equal(local.agents.modelTiers?.vision, undefined);
+  assert.equal(local.lab.gatewayProfiles.find((profile) => profile.current || profile.id === local.lab.activeGatewayProfile)?.models.length, 1);
+});
+
+test("dashboard runtime clears the active gateway when deleting its final model", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+
+  await runtime.saveModelConfig({
+    gatewayUrl: "https://beta-gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "beta-key",
+    modelId: "beta-chat",
+    label: "Beta Chat",
+    modalities: ["text"],
+    switchToModel: true
+  });
+
+  const deleted = await runtime.deleteModelConfig({ modelId: "beta-chat" });
+
+  assert.equal(deleted.ok, true);
+  assert.equal(deleted.deletedModel, "beta-chat");
+  assert.equal(deleted.clearedGateway, true);
+  assert.equal(deleted.gatewayConfig.gatewayUrl, "https://gateway.example.com/v1/chat/completions");
+  assert.equal(deleted.gatewayConfig.apiKeyConfigured, false);
+  assert.deepEqual(deleted.models.map((model) => model.id), ["example-coding-model", "example-vision-model"]);
+  assert.equal(deleted.sessionStatus.model, "example-coding-model");
+
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.equal(local.modelAlias, "example-coding-model");
+  assert.deepEqual(local.models.map((model) => model.id), ["example-coding-model", "example-vision-model"]);
+  assert.equal(local.lab.gatewayUrl, "https://gateway.example.com/v1/chat/completions");
+  assert.equal(local.lab.gatewayApiKey, undefined);
+  assert.equal(local.lab.gatewayProfiles.some((profile) => profile.gatewayUrl.includes("beta-gateway")), false);
+});
+
+test("dashboard runtime replaces the edited model id instead of keeping the stale entry", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+
+  await runtime.saveModelConfig({
+    gatewayUrl: "https://alpha-gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "alpha-key",
+    modelId: "wrong-model",
+    label: "Wrong Model",
+    modalities: ["text", "image"],
+    visionAgentModel: "wrong-model",
+    agentDefaultModel: "wrong-model",
+    switchToModel: true,
+    applyAgentDefaults: true
+  });
+
+  const saved = await runtime.saveModelConfig({
+    gatewayUrl: "https://alpha-gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    previousModelId: "wrong-model",
+    modelId: "alpha-correct",
+    label: "Alpha Correct",
+    modalities: ["text", "image"],
+    visionAgentModel: "alpha-correct",
+    agentDefaultModel: "alpha-correct",
+    switchToModel: true
+  });
+
+  assert.equal(saved.ok, true);
+  assert.deepEqual(saved.models.map((model) => model.id), ["alpha-correct"]);
+  assert.equal(saved.sessionStatus.model, "alpha-correct");
+
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.deepEqual(local.models.map((model) => model.id), ["alpha-correct"]);
+  assert.equal(local.modelAlias, "alpha-correct");
+  assert.equal(local.agents.modelTiers.default, "alpha-correct");
+  assert.equal(local.agents.vision.model, "alpha-correct");
+  assert.equal(local.lab.gatewayProfiles.find((profile) => profile.id === local.lab.activeGatewayProfile)?.models[0]?.id, "alpha-correct");
+});
+
+test("dashboard runtime accumulates per-turn change counters", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createWriteGateway(), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+
+  try {
+    await runtime.trustWorkspace();
+    const started = await runtime.startTurn({
+      prompt: "write file",
+      permissionMode: "workspace"
+    });
+
+    const events = await waitForEvent(runtime, started.sessionId, (event) => event.type === "files_updated");
+    const finish = events.find((event) => event.type === "activity" && event.toolName === "write_file" && event.status === "completed");
+    assert.deepEqual(finish?.changeStats, {
+      path: "created.md",
+      additions: 2,
+      deletions: 0,
+      files: 1,
+      redacted: false,
+      truncated: false,
+      approximate: false
+    });
+    assert.deepEqual(finish?.turnChangeStats, {
+      additions: 2,
+      deletions: 0,
+      files: 1,
+      redacted: false,
+      truncated: false,
+      approximate: false
+    });
+    assert.deepEqual(events.find((event) => event.type === "files_updated")?.changeStats, finish.turnChangeStats);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime reports net per-turn change counters for repeated edits", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  await fs.writeFile(path.join(cwd, "notes.md"), "alpha\nbeta\ngamma\n", "utf8");
+  const server = await listen(createRepeatedEditGateway(), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+
+  try {
+    await runtime.trustWorkspace();
+    const started = await runtime.startTurn({
+      prompt: "edit same file twice",
+      permissionMode: "workspace"
+    });
+
+    const events = await waitForEvent(runtime, started.sessionId, (event) => event.type === "files_updated");
+    const finishes = events.filter((event) => event.type === "activity" && event.toolName === "edit_file" && event.status === "completed");
+    assert.equal(finishes.length, 2);
+    assert.deepEqual(finishes.map((event) => event.changeStats), [
+      {
+        path: "notes.md",
+        additions: 1,
+        deletions: 1,
+        files: 1,
+        redacted: false,
+        truncated: false,
+        approximate: false
+      },
+      {
+        path: "notes.md",
+        additions: 1,
+        deletions: 1,
+        files: 1,
+        redacted: false,
+        truncated: false,
+        approximate: false
+      }
+    ]);
+    assert.deepEqual(finishes.at(-1)?.turnChangeStats, {
+      additions: 2,
+      deletions: 2,
+      files: 1,
+      redacted: false,
+      truncated: false,
+      approximate: false
+    });
+    assert.deepEqual(events.find((event) => event.type === "files_updated")?.changeStats, finishes.at(-1)?.turnChangeStats);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime returns collected files when reopening a saved session", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  await fs.writeFile(path.join(cwd, "chart.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  const server = await listen(createGateway("请查看 chart.png"), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+
+  try {
+    await runtime.trustWorkspace();
+    const started = await runtime.startTurn({
+      prompt: "image reference",
+      permissionMode: "plan"
+    });
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "files_updated");
+
+    const reopened = await runtime.readSession(started.sessionId);
+
+    assert.equal(reopened.ok, true);
+    assert.equal(reopened.session.cwd, cwd);
+    assert.equal(reopened.session.files.some((file) => file.relativePath === "chart.png" && file.kind === "image"), true);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime sends WebUI client surface in model context", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const requests = [];
+  const server = await listen(createRecordingGateway(requests, "dashboard surface answer"), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+
+  try {
+    await runtime.trustWorkspace();
+    const started = await runtime.startTurn({
+      prompt: "check dashboard surface",
+      permissionMode: "plan"
+    });
+    assert.equal(started.ok, true);
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "files_updated");
+
+    const systemText = requests[0]?.messages?.[0]?.content?.[0]?.text ?? "";
+    assert.match(systemText, /Client surface: dashboard WebUI/);
+    assert.match(systemText, /not the terminal TUI/);
+    assert.doesNotMatch(systemText, /TUI sidebar/);
+    assert.doesNotMatch(systemText, /The TUI will automatically continue/);
+
+    const metadata = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "sessions", `${started.sessionId}.json`), "utf8"));
+    assert.equal(metadata.clientSurface, "dashboard");
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime sends image attachments while persisting only metadata", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
+    modelAlias: "image-model",
+    models: [
+      { id: "image-model", label: "Image Model", modalities: ["text", "image"], contextTokens: 200000 }
+    ]
+  }), "utf8");
+  const requests = [];
+  const server = await listen(createRecordingGateway(requests, "image answer"), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+
+  try {
+    await runtime.trustWorkspace();
+    const started = await runtime.startTurn({
+      prompt: "describe attached image",
+      attachments: [{
+        type: "image",
+        name: "tiny.png",
+        mimeType: "image/png",
+        size: 5,
+        data: "aGVsbG8="
+      }],
+      permissionMode: "plan"
+    });
+    assert.equal(started.ok, true);
+
+    const events = await waitForEvent(runtime, started.sessionId, (event) => event.type === "files_updated");
+    const userEvent = events.find((event) => event.type === "user_message");
+    assert.equal(userEvent?.attachments?.[0]?.name, "tiny.png");
+    assert.equal(userEvent?.attachments?.[0]?.data, undefined);
+
+    const userMessage = requests[0]?.messages?.find((message) => message.role === "user");
+    assert.equal(userMessage.content.some((block) => block.type === "image" && block.data === "aGVsbG8="), true);
+
+    const metadata = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "sessions", `${started.sessionId}.json`), "utf8"));
+    const persisted = JSON.stringify(metadata);
+    assert.equal(persisted.includes("aGVsbG8="), false);
+    assert.equal(metadata.transcript.messages[0].content.some((block) => block.type === "image" && block.redacted === true), true);
+    assert.equal(metadata.transcript.contextMessages[0].content.some((block) => block.name === "tiny.png" && block.data === undefined), true);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime requires workspace trust before running a turn", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+  const blocked = await runtime.startTurn({ prompt: "first", permissionMode: "plan" });
+
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.status, 403);
+  assert.equal(blocked.trust.trusted, false);
+});
+
+test("dashboard runtime queues concurrent turns in same session", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createDelayedGateway(["first answer", "second answer"], 80), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+  await runtime.trustWorkspace();
+
+  try {
+  const first = await runtime.startTurn({ prompt: "first", permissionMode: "plan" });
+  const second = await runtime.startTurn({ prompt: "second", sessionId: first.sessionId, permissionMode: "plan" });
+
+  assert.equal(first.ok, true);
+    assert.equal(second.ok, true);
+    assert.equal(second.queued, true);
+    assert.equal(second.queueLength, 1);
+
+    const events = await waitForEvent(runtime, first.sessionId, () =>
+      runtime.listActiveEvents(first.sessionId).filter((event) => event.type === "files_updated").length >= 2
+    );
+    assert.deepEqual(events.filter((event) => event.type === "user_message").map((event) => event.text), ["first", "second"]);
+    assert.match(events.filter((event) => event.type === "assistant_final").map((event) => event.text).join("\n"), /first answer/);
+    assert.match(events.filter((event) => event.type === "assistant_final").map((event) => event.text).join("\n"), /second answer/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime coalesces repeated live status events", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createGateway("status answer", {
+    thinkingChunks: ["one ", "two ", "three "]
+  }), "127.0.0.1", 0);
+  try {
+    const runtime = createDashboardRuntime({
+      cwd,
+      env: mockGatewayEnv(server)
+    });
+    await runtime.trustWorkspace();
+    const result = await runtime.startTurn({
+      prompt: "coalesce live status",
+      permissionMode: "workspace"
+    });
+    await waitForEvent(runtime, result.sessionId, (event) => event.type === "files_updated");
+
+    const events = runtime.listActiveEvents(result.sessionId);
+    assert.equal(events.filter((event) => event.type === "activity" && event.coalesceKey === "thinking").length, 1);
+    assert.equal(events.filter((event) => event.type === "activity" && event.coalesceKey === "assistant-stream").length, 1);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime emits assistant draft events while streaming visible text", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createGateway("streamed dashboard answer", {
+    thinkingChunks: ["secret reasoning"],
+    textChunks: ["streamed ", "dashboard ", "answer"]
+  }), "127.0.0.1", 0);
+  try {
+    const runtime = createDashboardRuntime({
+      cwd,
+      env: mockGatewayEnv(server)
+    });
+    await runtime.trustWorkspace();
+    const result = await runtime.startTurn({
+      prompt: "stream draft",
+      permissionMode: "workspace"
+    });
+    await waitForEvent(runtime, result.sessionId, (event) => event.type === "files_updated");
+
+    const drafts = runtime.listActiveEvents(result.sessionId).filter((event) => event.type === "assistant_draft");
+    assert.equal(drafts.map((event) => event.text).join(""), "streamed dashboard answer");
+    assert.equal(runtime.listActiveEvents(result.sessionId).some((event) => /secret reasoning/.test(JSON.stringify(event))), false);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime replays active events after the requested sequence only", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createGateway("streamed dashboard answer", {
+    textChunks: ["streamed ", "dashboard ", "answer"]
+  }), "127.0.0.1", 0);
+  try {
+    const runtime = createDashboardRuntime({
+      cwd,
+      env: mockGatewayEnv(server)
+    });
+    await runtime.trustWorkspace();
+    const result = await runtime.startTurn({
+      prompt: "stream draft",
+      permissionMode: "workspace"
+    });
+    const cursor = result.eventCursor;
+    await waitForEvent(runtime, result.sessionId, (event) => event.type === "files_updated");
+
+    const replayed = [];
+    const unsubscribe = runtime.subscribe(result.sessionId, (event) => replayed.push(event), {
+      afterSequence: cursor
+    });
+    unsubscribe?.();
+
+    assert.deepEqual(replayed.filter((event) => event.type === "user_message").map((event) => event.text), ["stream draft"]);
+    assert.equal(replayed.some((event) => event.type === "assistant_draft"), true);
+    assert.equal(replayed.every((event) => event.sequence > cursor), true);
+    assert.equal(new Set(replayed.map((event) => event.turnId).filter(Boolean)).size, 1);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime exposes running active sessions for refresh recovery", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createHangingStreamGateway(), "127.0.0.1", 0);
+  try {
+    const runtime = createDashboardRuntime({
+      cwd,
+      env: mockGatewayEnv(server)
+    });
+    await runtime.trustWorkspace();
+    const started = await runtime.startTurn({
+      prompt: "recover streaming draft",
+      permissionMode: "workspace"
+    });
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "assistant_draft");
+
+    const records = await runtime.listSessionRecords();
+    const active = records.find((record) => record.id === started.sessionId);
+    const reopened = await runtime.readSession(started.sessionId);
+    const replayed = [];
+    const unsubscribe = runtime.subscribe(started.sessionId, (event) => replayed.push(event), {
+      afterSequence: reopened.session.eventCursor
+    });
+    unsubscribe?.();
+
+    assert.equal(active.running, true);
+    assert.equal(reopened.session.active, true);
+    assert.equal(reopened.session.running, true);
+    assert.equal(reopened.session.eventCursor, 0);
+    assert.deepEqual(replayed.filter((event) => event.type === "user_message").map((event) => event.text), ["recover streaming draft"]);
+    assert.equal(replayed.some((event) => event.type === "assistant_draft" && /partial draft/.test(event.text)), true);
+    runtime.interruptTurn(started.sessionId, "test-cleanup");
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime omits the active turn transcript during refresh recovery", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createGateway("stable answer"), "127.0.0.1", 0);
+  try {
+    const runtime = createDashboardRuntime({
+      cwd,
+      env: mockGatewayEnv(server)
+    });
+    await runtime.trustWorkspace();
+    const started = await runtime.startTurn({
+      prompt: "refresh during final",
+      permissionMode: "workspace"
+    });
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "assistant_final");
+
+    const reopened = await runtime.readSession(started.sessionId);
+    const replayed = [];
+    const unsubscribe = runtime.subscribe(started.sessionId, (event) => replayed.push(event), {
+      afterSequence: reopened.session.eventCursor
+    });
+    unsubscribe?.();
+
+    assert.equal(reopened.session.active, true);
+    assert.equal(reopened.session.running, true);
+    assert.deepEqual(reopened.session.transcript, []);
+    assert.equal(reopened.session.eventCursor, 0);
+    assert.deepEqual(replayed.filter((event) => event.type === "user_message").map((event) => event.text), ["refresh during final"]);
+    assert.match(replayed.find((event) => event.type === "assistant_final")?.text ?? "", /stable answer/);
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime emits workflow snapshots for visible progress", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createTodoGateway(), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+
+  try {
+    await runtime.trustWorkspace();
+    const started = await runtime.startTurn({
+      prompt: "show todo progress",
+      permissionMode: "workspace"
+    });
+    assert.equal(started.ok, true);
+
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "files_updated");
+    const snapshots = runtime.listActiveEvents(started.sessionId).filter((event) => event.type === "workflow_snapshot");
+
+    assert.equal(snapshots.length >= 2, true);
+    assert.deepEqual(snapshots[0].workflow.todos.map((item) => item.status), ["in_progress", "pending"]);
+    assert.deepEqual(snapshots.at(-1).workflow.todos.map((item) => item.status), ["completed", "completed"]);
+    assert.equal(snapshots.at(-1).summary.completed, 2);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime pauses for ask_user and resumes with the answer", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createQuestionGateway(), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+
+  try {
+    await runtime.trustWorkspace();
+    const started = await runtime.startTurn({
+      prompt: "clarify requirement",
+      permissionMode: "workspace"
+    });
+    assert.equal(started.ok, true);
+
+    const waitingEvents = await waitForEvent(runtime, started.sessionId, (event) => event.type === "question_required");
+    const question = waitingEvents.find((event) => event.type === "question_required")?.question;
+    assert.equal(question?.header, "需求核对");
+    assert.equal(question?.question, "输出格式选哪种？");
+    assert.equal(question?.multiple, true);
+    assert.equal(question?.allowCustom, true);
+    assert.deepEqual(question?.choices.map((choice) => choice.label), ["Markdown", "PDF"]);
+
+    const resolved = runtime.resolveQuestion(question.id, {
+      selectedChoices: ["md"],
+      customAnswer: "同时保留图表说明"
+    });
+    assert.equal(resolved.ok, true);
+
+    const finalEvents = await waitForEvent(runtime, started.sessionId, (event) => event.type === "files_updated");
+    const resolvedEvent = finalEvents.find((event) => event.type === "question_resolved");
+    assert.equal(resolvedEvent?.answer, "同时保留图表说明");
+    assert.deepEqual(resolvedEvent?.selectedChoices, ["Markdown"]);
+    assert.match(finalEvents.find((event) => event.type === "assistant_final")?.text ?? "", /Markdown/);
+    assert.match(finalEvents.find((event) => event.type === "assistant_final")?.text ?? "", /图表说明/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime resolves cancelled ask_user requests", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createQuestionGateway(), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+
+  try {
+    await runtime.trustWorkspace();
+    const started = await runtime.startTurn({
+      prompt: "cancel clarification",
+      permissionMode: "workspace"
+    });
+    assert.equal(started.ok, true);
+
+    const waitingEvents = await waitForEvent(runtime, started.sessionId, (event) => event.type === "question_required");
+    const question = waitingEvents.find((event) => event.type === "question_required")?.question;
+    const resolved = runtime.resolveQuestion(question.id, { cancelled: true });
+    assert.equal(resolved.ok, true);
+
+    const finalEvents = await waitForEvent(runtime, started.sessionId, (event) => event.type === "files_updated");
+    const resolvedEvent = finalEvents.find((event) => event.type === "question_resolved");
+    assert.equal(resolvedEvent?.cancelled, true);
+    assert.match(finalEvents.find((event) => event.type === "assistant_final")?.text ?? "", /已取消/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard approval denial blocks a requested file write", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createToolGateway(), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+
+  try {
+    await runtime.trustWorkspace();
+    const started = await runtime.startTurn({
+      prompt: "write file",
+      permissionMode: "plan"
+    });
+    assert.equal(started.ok, true);
+
+    const events = await waitForEvent(runtime, started.sessionId, (event) => event.type === "approval_required");
+    const approval = events.find((event) => event.type === "approval_required")?.approval;
+    assert.equal(approval?.toolName, "write_file");
+
+    const denied = runtime.resolveApproval(approval.id, "deny");
+    assert.equal(denied.ok, true);
+
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "files_updated");
+    await assert.rejects(() => fs.stat(path.join(cwd, "denied.md")), /ENOENT/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime interrupts the current turn", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createHangingStreamGateway(), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+  await runtime.trustWorkspace();
+
+  try {
+    const started = await runtime.startTurn({
+      prompt: "interrupt me",
+      permissionMode: "workspace"
+    });
+    assert.equal(started.ok, true);
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "assistant_draft");
+
+    const interrupted = runtime.interruptTurn(started.sessionId, "user");
+    assert.equal(interrupted.ok, true);
+
+    const events = await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+    assert.equal(events.some((event) => event.type === "turn_interrupt_requested"), true);
+    assert.equal(events.some((event) => event.rawType === "turn_interrupted" || event.coalesceKey === "turn"), true);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime queues guide prompts and interrupts active work", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createDelayedGateway(["old answer", "guided answer"], 80), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+  await runtime.trustWorkspace();
+
+  try {
+    const started = await runtime.startTurn({
+      prompt: "draft old plan",
+      permissionMode: "workspace"
+    });
+    assert.equal(started.ok, true);
+
+    const guided = runtime.guideTurn({
+      sessionId: started.sessionId,
+      guidance: "改成先检查测试",
+      permissionMode: "workspace"
+    });
+    assert.equal(guided.ok, true);
+    assert.equal(guided.queued, true);
+    assert.equal(guided.queue[0].kind, "guide");
+
+    const events = await waitForEvent(runtime, started.sessionId, () =>
+      runtime.listActiveEvents(started.sessionId).filter((event) => event.type === "files_updated").length >= 2
+    );
+    assert.equal(events.some((event) => event.type === "guide_queued"), true);
+    assert.equal(events.some((event) => event.type === "turn_interrupt_requested" && event.reason === "guided"), true);
+    assert.match(events.filter((event) => event.type === "user_message").map((event) => event.text).join("\n"), /改成先检查测试/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime converts queued prompts into guides without duplicating them", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createDelayedGateway(["old answer", "guided answer"], 80), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+  await runtime.trustWorkspace();
+
+  try {
+    const started = await runtime.startTurn({
+      prompt: "draft old plan",
+      permissionMode: "workspace"
+    });
+    assert.equal(started.ok, true);
+
+    const queued = await runtime.startTurn({
+      sessionId: started.sessionId,
+      prompt: "改成先检查测试",
+      permissionMode: "workspace"
+    });
+    assert.equal(queued.ok, true);
+    assert.equal(queued.queued, true);
+    assert.equal(queued.queueLength, 1);
+
+    const guided = runtime.guideTurn({
+      sessionId: started.sessionId,
+      queueItemId: queued.queue[0].id,
+      permissionMode: "workspace"
+    });
+    assert.equal(guided.ok, true);
+    assert.equal(guided.queued, true);
+    assert.equal(guided.queue.length, 1);
+    assert.equal(guided.queue[0].kind, "guide");
+    assert.match(guided.queue[0].preview, /改成先检查测试/);
+    assert.equal(guided.queue.some((item) => item.kind === "prompt" && /改成先检查测试/.test(item.preview)), false);
+
+    const events = await waitForEvent(runtime, started.sessionId, () =>
+      runtime.listActiveEvents(started.sessionId).filter((event) => event.type === "files_updated").length >= 2
+    );
+    assert.equal(events.some((event) => event.type === "guide_queued"), true);
+    assert.equal(events.some((event) => event.type === "turn_interrupt_requested" && event.reason === "guided"), true);
+    assert.deepEqual(events.filter((event) => event.type === "user_message").map((event) => event.text), [
+      "draft old plan",
+      "改成先检查测试"
+    ]);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime stores guide transcript using visible guidance only", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createDelayedGateway(["old answer", "guided answer"], 80), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+  await runtime.trustWorkspace();
+
+  try {
+    const started = await runtime.startTurn({
+      prompt: "draft old plan",
+      permissionMode: "workspace"
+    });
+    assert.equal(started.ok, true);
+
+    const guided = runtime.guideTurn({
+      sessionId: started.sessionId,
+      guidance: "改成先检查测试",
+      permissionMode: "workspace"
+    });
+    assert.equal(guided.ok, true);
+    assert.equal(guided.queued, true);
+
+    await waitForEvent(runtime, started.sessionId, () =>
+      runtime.listActiveEvents(started.sessionId).filter((event) => event.type === "files_updated").length >= 2
+    );
+
+    const reopened = await runtime.readSession(started.sessionId);
+    assert.equal(reopened.ok, true);
+    assert.equal(reopened.session.prompt, "改成先检查测试");
+    assert.equal(
+      reopened.session.transcript.some((message) => message.role === "user" && message.content === "改成先检查测试"),
+      true
+    );
+    assert.equal(JSON.stringify(reopened.session.transcript).includes("User guidance for the interrupted active turn"), false);
+    assert.equal(JSON.stringify(reopened.session.transcript).includes("Original active prompt"), false);
+
+    const metadata = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "sessions", `${started.sessionId}.json`), "utf8"));
+    assert.equal(metadata.prompt, "改成先检查测试");
+    assert.equal(
+      metadata.transcript.messages.some((message) => message.role === "user" && message.content === "改成先检查测试"),
+      true
+    );
+    assert.equal(JSON.stringify(metadata.transcript.messages).includes("User guidance for the interrupted active turn"), false);
+    assert.equal(JSON.stringify(metadata.transcript.messages).includes("Original active prompt"), false);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime consumes background subagent wake prompts", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const requests = [];
+  const server = await listen(createBackgroundWakeGateway(requests), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+  await runtime.trustWorkspace();
+
+  try {
+    const started = await runtime.startTurn({
+      prompt: "delegate background work",
+      permissionMode: "workspace"
+    });
+    assert.equal(started.ok, true);
+
+    const events = await waitForEvent(runtime, started.sessionId, () =>
+      runtime.listActiveEvents(started.sessionId).filter((event) => event.type === "files_updated").length >= 2
+    );
+    const parentRequests = requests.filter((item) => !String(item.sessionId ?? "").startsWith("agent-explorer-"));
+
+    assert.equal(events.some((event) => event.rawType === "subagent_group_wakeup"), true);
+    assert.equal(events.some((event) => event.type === "wakeup_queued"), true);
+    assert.equal(events.some((event) => event.type === "background_subagent_snapshot"), true);
+    assert.match(parentRequests.at(-1)?.messages?.at(-1)?.content ?? "", /Ant Code subagent group completed/);
+    assert.match(events.filter((event) => event.type === "assistant_final").map((event) => event.text).join("\n"), /parent consumed wake prompt/);
+
+    const group = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "task-groups", "group-dashboard-bg.json"), "utf8"));
+    assert.ok(group.wakePromptQueuedAt);
+    assert.ok(group.wakePromptConsumedAt);
+    const lastSnapshot = events.filter((event) => event.type === "background_subagent_snapshot").at(-1);
+    assert.deepEqual(lastSnapshot.groups, []);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime keeps still-running background siblings visible after wake prompt is consumed", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const requests = [];
+  const server = await listen(createBackgroundAnyWakeGateway(requests), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+  await runtime.trustWorkspace();
+
+  try {
+    const started = await runtime.startTurn({
+      prompt: "delegate any background work",
+      permissionMode: "workspace"
+    });
+    assert.equal(started.ok, true);
+
+    const events = await waitForEvent(runtime, started.sessionId, () =>
+      runtime.listActiveEvents(started.sessionId).filter((event) => event.type === "files_updated").length >= 2
+    );
+
+    assert.equal(events.some((event) => event.rawType === "subagent_group_wakeup"), true);
+    const snapshots = events.filter((event) => event.type === "background_subagent_snapshot");
+    assert.ok(snapshots.length >= 2);
+    const lastSnapshot = snapshots.at(-1);
+    assert.equal(lastSnapshot.groups.length, 1);
+    assert.equal(lastSnapshot.groups[0].groupId, "group-dashboard-any");
+    assert.equal(lastSnapshot.groups[0].status, "running");
+    assert.equal(lastSnapshot.groups[0].runningCount, 1);
+    assert.equal(lastSnapshot.groups[0].wakePromptQueued, false);
+
+    const group = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "task-groups", "group-dashboard-any.json"), "utf8"));
+    assert.ok(group.wakePromptConsumedAt);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime reports stale background subagents and can mark them recovered", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createGateway("snapshot refresh"), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+  await runtime.trustWorkspace();
+
+  try {
+    const started = await runtime.startTurn({
+      prompt: "seed session",
+      permissionMode: "workspace"
+    });
+    assert.equal(started.ok, true);
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "files_updated");
+
+    const taskStore = createAgentTaskStore({ cwd });
+    const groupStore = createAgentTaskGroupStore({ cwd });
+    const old = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+    await taskStore.createTask({
+      id: "task-lost-bg",
+      parentSessionId: started.sessionId,
+      groupId: "group-lost-bg",
+      childSessionId: "agent-explorer-lost",
+      profile: "explorer",
+      title: "Lost background task",
+      prompt: "hang",
+      status: "running",
+      startedAt: old,
+      heartbeatAt: old,
+      progressAt: old,
+      latestProgress: "still running"
+    });
+    await groupStore.createGroup({
+      id: "group-lost-bg",
+      parentSessionId: started.sessionId,
+      status: "running",
+      waitFor: "all",
+      wakeParent: true,
+      taskIds: ["task-lost-bg"],
+      latestProgress: "后台子任务仍在运行"
+    });
+
+    await runtime.startTurn({
+      sessionId: started.sessionId,
+      prompt: "refresh background status",
+      permissionMode: "workspace"
+    });
+    const events = await waitForEvent(runtime, started.sessionId, (event) =>
+      event.type === "background_subagent_snapshot"
+      && event.groups.some((group) => group.groupId === "group-lost-bg" && group.status === "lost")
+    );
+    const staleSnapshot = events.filter((event) => event.type === "background_subagent_snapshot").at(-1);
+    assert.equal(staleSnapshot.groups[0].status, "lost");
+    assert.equal(staleSnapshot.groups[0].stale, true);
+    assert.match(staleSnapshot.groups[0].staleReason, /heartbeat/);
+
+    const cancelled = await runtime.cancelBackgroundSubagent({
+      sessionId: started.sessionId,
+      groupId: "group-lost-bg"
+    });
+    assert.equal(cancelled.ok, true);
+    assert.deepEqual(cancelled.updatedTaskIds, ["task-lost-bg"]);
+    const readTask = await taskStore.readTask("task-lost-bg");
+    assert.equal(readTask.ok, true);
+    assert.equal(readTask.task.status, "interrupted");
+    assert.ok(readTask.task.cancelRequestedAt);
+    const afterCancel = runtime.listActiveEvents(started.sessionId).filter((event) => event.type === "background_subagent_snapshot").at(-1);
+    assert.deepEqual(afterCancel.groups, []);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime cancels queued prompts before they run", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createDelayedGateway(["first answer", "second answer"], 80), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+  await runtime.trustWorkspace();
+
+  try {
+    const started = await runtime.startTurn({
+      prompt: "first",
+      permissionMode: "workspace"
+    });
+    const queued = await runtime.startTurn({
+      sessionId: started.sessionId,
+      prompt: "second should cancel",
+      permissionMode: "workspace"
+    });
+    assert.equal(queued.ok, true);
+    assert.equal(queued.queued, true);
+
+    const cancelled = runtime.cancelQueuedTurn({
+      sessionId: started.sessionId,
+      queueItemId: queued.queue[0].id
+    });
+    assert.equal(cancelled.ok, true);
+    assert.equal(cancelled.queueLength, 0);
+
+    const events = await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+    assert.equal(events.some((event) => event.type === "queue_item_cancelled"), true);
+    assert.deepEqual(events.filter((event) => event.type === "user_message").map((event) => event.text), ["first"]);
+    assert.doesNotMatch(events.filter((event) => event.type === "assistant_final").map((event) => event.text).join("\n"), /second answer/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime deletes completed saved sessions", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createGateway("delete answer"), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+
+  try {
+    await runtime.trustWorkspace();
+    const started = await runtime.startTurn({
+      prompt: "delete me",
+      permissionMode: "workspace"
+    });
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "files_updated");
+
+    const deleted = await runtime.deleteSession({ sessionId: started.sessionId });
+
+    assert.equal(deleted.ok, true);
+    assert.equal((await runtime.readSession(started.sessionId)).ok, false);
+    assert.equal((await runtime.listSessionRecords()).some((record) => record.id === started.sessionId), false);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime pages archived transcript history for display", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+  const store = createSessionStore({ cwd });
+  const messages = Array.from({ length: 155 }, (_, index) => ({
+    role: index % 2 === 0 ? "user" : "assistant",
+    content: index % 2 === 0
+      ? `prompt ${index + 1}`
+      : [{ type: "text", text: `answer ${index + 1}` }]
+  }));
+  const archive = await store.writeTranscriptChunks("archived-dashboard-session", messages);
+  await store.writeMetadata({
+    id: "archived-dashboard-session",
+    prompt: "archived prompt",
+    title: "archived prompt",
+    status: "completed",
+    transcript: {
+      version: 2,
+      messages: messages.slice(-50),
+      archive
+    }
+  });
+
+  const reopened = await runtime.readSession("archived-dashboard-session");
+  const older = await runtime.readTranscriptPage({
+    sessionId: "archived-dashboard-session",
+    before: reopened.session.transcriptPage.cursor,
+    limit: 100
+  });
+
+  assert.equal(reopened.ok, true);
+  assert.equal(reopened.session.transcript.length, 100);
+  assert.equal(transcriptText(reopened.session.transcript[0]), "answer 56");
+  assert.equal(reopened.session.transcript.at(-1).content, "prompt 155");
+  assert.equal(reopened.session.transcriptPage.hasMore, true);
+  assert.equal(reopened.session.transcriptPage.cursor, "55");
+  assert.equal(reopened.session.transcriptPage.total, 155);
+  assert.equal(older.ok, true);
+  assert.equal(older.transcript.length, 55);
+  assert.equal(older.transcript[0].content, "prompt 1");
+  assert.equal(older.transcript.at(-1).content, "prompt 55");
+  assert.equal(older.transcriptPage.hasMore, false);
+});
+
+test("dashboard resume sends archived full context while display stays paged", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const requests = [];
+  const server = await listen(createRecordingGateway(requests, "continued with full context"), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+  const store = createSessionStore({ cwd });
+  const messages = [];
+  for (let index = 1; index <= 60; index += 1) {
+    messages.push({ role: "user", content: `prompt ${index}` });
+    messages.push({ role: "assistant", content: [{ type: "text", text: `answer ${index}` }] });
+  }
+  const archive = await store.writeTranscriptChunks("dashboard-full-context-session", messages);
+  await store.writeMetadata({
+    id: "dashboard-full-context-session",
+    prompt: "archived prompt",
+    title: "archived prompt",
+    status: "completed",
+    transcript: {
+      version: 2,
+      messages: messages.slice(-50),
+      contextMessages: messages.slice(-2),
+      contextWindow: {
+        summary: "Old compact summary that should not be sent when full archive is restored",
+        compactionCount: 1,
+        compactedMessages: 118
+      },
+      archive
+    }
+  });
+
+  try {
+    const reopened = await runtime.readSession("dashboard-full-context-session");
+    assert.equal(reopened.ok, true);
+    assert.equal(reopened.session.transcript.length, 100);
+    assert.equal(reopened.session.transcriptPage.hasMore, true);
+
+    await runtime.trustWorkspace();
+    const started = await runtime.startTurn({
+      sessionId: "dashboard-full-context-session",
+      prompt: "continue with full context",
+      permissionMode: "workspace"
+    });
+    assert.equal(started.ok, true);
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "files_updated");
+
+    assert.equal(requests.length, 1);
+    const request = requests[0];
+    const userMessages = request.messages.filter((message) => message.role === "user").map(requestMessageText);
+    const assistantMessages = request.messages.filter((message) => message.role === "assistant").map(requestMessageText);
+    assert.equal(userMessages.includes("prompt 1"), true);
+    assert.equal(assistantMessages.includes("answer 60"), true);
+    assert.equal(userMessages.includes("continue with full context"), true);
+    assert.doesNotMatch(JSON.stringify(request.messages), /Old compact summary/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime refuses deleting running sessions", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createHangingStreamGateway(), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+
+  try {
+    await runtime.trustWorkspace();
+    const started = await runtime.startTurn({
+      prompt: "do not delete running",
+      permissionMode: "workspace"
+    });
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "assistant_draft");
+
+    const deleted = await runtime.deleteSession({ sessionId: started.sessionId });
+
+    assert.equal(deleted.ok, false);
+    assert.equal(deleted.status, 409);
+    assert.equal(runtime.active.has(started.sessionId), true);
+    runtime.interruptTurn(started.sessionId, "test-cleanup");
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime clears and compacts context after confirmation routes call runtime", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createGateway("context answer"), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+  await runtime.trustWorkspace();
+
+  try {
+    const started = await runtime.startTurn({
+      prompt: "context seed",
+      permissionMode: "workspace"
+    });
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "files_updated");
+
+    const cleared = await runtime.clearContext({ sessionId: started.sessionId, permissionMode: "workspace" });
+    assert.equal(cleared.ok, true);
+    assert.equal(cleared.after.messages, 0);
+
+    runtime.active.get(started.sessionId).session.messages = [
+      { role: "user", content: "older context" },
+      { role: "assistant", content: [{ type: "text", text: "older answer" }] },
+      { role: "user", content: "new context" },
+      { role: "assistant", content: [{ type: "text", text: "new answer" }] }
+    ];
+    const compacted = await runtime.compactContext({ sessionId: started.sessionId, permissionMode: "workspace" });
+    assert.equal(compacted.ok, true);
+    assert.equal(["local", "agent:compaction", "none"].includes(compacted.result.strategy), true);
+    assert.equal(runtime.listActiveEvents(started.sessionId).some((event) => event.type === "context_compacted"), true);
+  } finally {
+    await close(server);
+  }
+});
+
+async function waitForEvent(runtime, sessionId, predicate) {
+  const existing = runtime.listActiveEvents(sessionId);
+  if (existing.some(predicate)) {
+    return existing;
+  }
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      unsubscribe?.();
+      reject(new Error("Timed out waiting for dashboard event"));
+    }, 5000);
+    let unsubscribe;
+    unsubscribe = runtime.subscribe(sessionId, (event) => {
+      if (predicate(event)) {
+        clearTimeout(timeout);
+        unsubscribe?.();
+        resolve(runtime.listActiveEvents(sessionId));
+      }
+    });
+  });
+}
+
+function transcriptText(message) {
+  if (typeof message?.content === "string") {
+    return message.content;
+  }
+  if (!Array.isArray(message?.content)) {
+    return "";
+  }
+  return message.content.map((item) => item?.text ?? "").join("");
+}
+
+function requestMessageText(message) {
+  if (typeof message?.content === "string") {
+    return message.content;
+  }
+  if (!Array.isArray(message?.content)) {
+    return "";
+  }
+  return message.content.map((item) => {
+    if (typeof item === "string") {
+      return item;
+    }
+    if (item && typeof item === "object" && "text" in item) {
+      return String(item.text ?? "");
+    }
+    return "";
+  }).join("");
+}
+
+function createGateway(text, options = {}) {
+  return http.createServer(async (req, res) => {
+    for await (const _ of req) {
+      // Drain request body.
+    }
+    if ((Array.isArray(options.thinkingChunks) && options.thinkingChunks.length > 0)
+      || (Array.isArray(options.textChunks) && options.textChunks.length > 0)) {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(`data: ${JSON.stringify({ type: "message_start", id: "mock-dashboard-stream", model: "mock-model" })}\n\n`);
+      for (const chunk of options.thinkingChunks ?? []) {
+        res.write(`data: ${JSON.stringify({ type: "thinking_delta", text: chunk })}\n\n`);
+      }
+      const textChunks = Array.isArray(options.textChunks) && options.textChunks.length > 0
+        ? options.textChunks
+        : [text];
+      for (const chunk of textChunks) {
+        res.write(`data: ${JSON.stringify({ type: "text_delta", text: chunk })}\n\n`);
+      }
+      res.write(`data: ${JSON.stringify({ type: "message_stop", stopReason: "stop" })}\n\n`);
+      return res.end();
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      id: "mock-dashboard-response",
+      model: "mock-model",
+      content: [{ type: "text", text }],
+      toolCalls: [],
+      stopReason: "stop"
+    }));
+  });
+}
+
+function createRecordingGateway(requests, text) {
+  return http.createServer(async (req, res) => {
+    let body = "";
+    for await (const chunk of req) {
+      body += Buffer.from(chunk).toString("utf8");
+    }
+    requests.push(JSON.parse(body));
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      id: `recording-${requests.length}`,
+      model: "mock-model",
+      content: [{ type: "text", text }],
+      toolCalls: [],
+      stopReason: "stop"
+    }));
+  });
+}
+
+function createAuthRecordingGateway(requests, text, validKey) {
+  return http.createServer(async (req, res) => {
+    let body = "";
+    for await (const chunk of req) {
+      body += Buffer.from(chunk).toString("utf8");
+    }
+    requests.push({
+      authorization: req.headers.authorization ?? "",
+      body: JSON.parse(body)
+    });
+    if (req.headers.authorization !== `Bearer ${validKey}`) {
+      res.writeHead(401, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        error: {
+          message: "Invalid API Key",
+          type: "invalid_key",
+          code: "401"
+        }
+      }));
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      id: `auth-recording-${requests.length}`,
+      model: "mock-model",
+      content: [{ type: "text", text }],
+      toolCalls: [],
+      stopReason: "stop"
+    }));
+  });
+}
+
+function createDelayedGateway(texts, delayMs) {
+  let calls = 0;
+  return http.createServer(async (req, res) => {
+    for await (const _ of req) {
+      // Drain request body.
+    }
+    const text = texts[Math.min(calls, texts.length - 1)];
+    calls += 1;
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      id: `delayed-${calls}`,
+      model: "mock-model",
+      content: [{ type: "text", text }],
+      toolCalls: [],
+      stopReason: "stop"
+    }));
+  });
+}
+
+function createHangingStreamGateway() {
+  return http.createServer(async (req, res) => {
+    for await (const _ of req) {
+      // Drain request body.
+    }
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.write(`data: ${JSON.stringify({ type: "message_start", id: "hanging", model: "mock-model" })}\n\n`);
+    res.write(`data: ${JSON.stringify({ type: "text_delta", text: "partial draft" })}\n\n`);
+  });
+}
+
+function createBackgroundWakeGateway(requests) {
+  return http.createServer(async (req, res) => {
+    let raw = "";
+    for await (const chunk of req) {
+      raw += Buffer.from(chunk).toString("utf8");
+    }
+    const body = JSON.parse(raw || "{}");
+    requests.push(body);
+    res.writeHead(200, { "content-type": "application/json" });
+
+    const sessionId = String(body.metadata?.sessionId ?? body.sessionId ?? "");
+    if (sessionId.startsWith("agent-explorer-")) {
+      res.end(JSON.stringify({
+        id: "dashboard-background-child-final",
+        model: "mock-model",
+        content: [{ type: "text", text: "dashboard background child done" }],
+        toolCalls: [],
+        stopReason: "stop"
+      }));
+      return;
+    }
+
+    const parentCalls = requests.filter((item) => !String(item.sessionId ?? "").startsWith("agent-explorer-")).length;
+    if (parentCalls === 1) {
+      res.end(JSON.stringify({
+        id: "dashboard-background-agent-run",
+        model: "mock-model",
+        content: [],
+        toolCalls: [
+          {
+            id: "delegate-dashboard-background",
+            name: "agent_run",
+            input: {
+              profile: "explorer",
+              query: "inspect current workspace in background",
+              background: true,
+              groupId: "group-dashboard-bg",
+              waitForGroup: "all",
+              wakeParent: true
+            }
+          }
+        ],
+        stopReason: "tool_calls"
+      }));
+      return;
+    }
+
+    const lastMessage = body.messages?.at(-1)?.content ?? "";
+    res.end(JSON.stringify({
+      id: "dashboard-background-parent-final",
+      model: "mock-model",
+      content: [{ type: "text", text: /Ant Code subagent group completed/.test(String(lastMessage)) ? "parent consumed wake prompt" : "parent did not receive wake prompt" }],
+      toolCalls: [],
+      stopReason: "stop"
+    }));
+  });
+}
+
+function createBackgroundAnyWakeGateway(requests) {
+  return http.createServer(async (req, res) => {
+    let raw = "";
+    for await (const chunk of req) {
+      raw += Buffer.from(chunk).toString("utf8");
+    }
+    const body = JSON.parse(raw || "{}");
+    requests.push(body);
+    res.writeHead(200, { "content-type": "application/json" });
+
+    const sessionId = String(body.metadata?.sessionId ?? body.sessionId ?? "");
+    if (sessionId.startsWith("agent-explorer-")) {
+      const slow = /slow sibling/.test(JSON.stringify(body.messages ?? []));
+      if (slow) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      const text = slow ? "slow sibling done later" : "fast sibling done";
+      res.end(JSON.stringify({
+        id: `dashboard-background-any-${requests.length}`,
+        model: "mock-model",
+        content: [{ type: "text", text }],
+        toolCalls: [],
+        stopReason: "stop"
+      }));
+      return;
+    }
+
+    const parentCalls = requests.filter((item) => !String(item.sessionId ?? "").startsWith("agent-explorer-")).length;
+    if (parentCalls === 1) {
+      res.end(JSON.stringify({
+        id: "dashboard-background-any-agent-run",
+        model: "mock-model",
+        content: [],
+        toolCalls: [
+          {
+            id: "delegate-dashboard-any-fast",
+            name: "agent_run",
+            input: {
+              profile: "explorer",
+              query: "fast sibling",
+              background: true,
+              groupId: "group-dashboard-any",
+              waitForGroup: "any",
+              wakeParent: true
+            }
+          },
+          {
+            id: "delegate-dashboard-any-slow",
+            name: "agent_run",
+            input: {
+              profile: "explorer",
+              query: "slow sibling",
+              background: true,
+              groupId: "group-dashboard-any",
+              waitForGroup: "any",
+              wakeParent: true
+            }
+          }
+        ],
+        stopReason: "tool_calls"
+      }));
+      return;
+    }
+
+    const lastMessage = body.messages?.at(-1)?.content ?? "";
+    res.end(JSON.stringify({
+      id: "dashboard-background-any-parent-final",
+      model: "mock-model",
+      content: [{ type: "text", text: /Ant Code subagent group completed/.test(String(lastMessage)) ? "parent consumed any wake prompt" : "parent missed any wake prompt" }],
+      toolCalls: [],
+      stopReason: "stop"
+    }));
+  });
+}
+
+function createToolGateway() {
+  let calls = 0;
+  return http.createServer(async (req, res) => {
+    for await (const _ of req) {
+      // Drain request body.
+    }
+    calls += 1;
+    res.writeHead(200, { "content-type": "application/json" });
+    if (calls === 1) {
+      res.end(JSON.stringify({
+        id: "tool-request",
+        model: "mock-model",
+        content: [],
+        toolCalls: [
+          {
+            id: "write-1",
+            name: "write_file",
+            input: {
+              path: "denied.md",
+              content: "should not be written"
+            }
+          }
+        ],
+        stopReason: "tool_calls"
+      }));
+      return;
+    }
+    res.end(JSON.stringify({
+      id: "final-after-deny",
+      model: "mock-model",
+      content: [{ type: "text", text: "write was denied" }],
+      toolCalls: [],
+      stopReason: "stop"
+    }));
+  });
+}
+
+function createWriteGateway() {
+  let calls = 0;
+  return http.createServer(async (req, res) => {
+    for await (const _ of req) {
+      // Drain request body.
+    }
+    calls += 1;
+    res.writeHead(200, { "content-type": "application/json" });
+    if (calls === 1) {
+      res.end(JSON.stringify({
+        id: "write-request",
+        model: "mock-model",
+        content: [],
+        toolCalls: [
+          {
+            id: "write-1",
+            name: "write_file",
+            input: {
+              path: "created.md",
+              content: "alpha\nbeta"
+            }
+          }
+        ],
+        stopReason: "tool_calls"
+      }));
+      return;
+    }
+    res.end(JSON.stringify({
+      id: "write-final",
+      model: "mock-model",
+      content: [{ type: "text", text: "write complete" }],
+      toolCalls: [],
+      stopReason: "stop"
+    }));
+  });
+}
+
+function createRepeatedEditGateway() {
+  let calls = 0;
+  return http.createServer(async (req, res) => {
+    for await (const _ of req) {
+      // Drain request body.
+    }
+    calls += 1;
+    res.writeHead(200, { "content-type": "application/json" });
+    if (calls === 1) {
+      res.end(JSON.stringify({
+        id: "edit-request-1",
+        model: "mock-model",
+        content: [],
+        toolCalls: [
+          {
+            id: "edit-1",
+            name: "edit_file",
+            input: {
+              path: "notes.md",
+              oldText: "beta",
+              newText: "delta"
+            }
+          }
+        ],
+        stopReason: "tool_calls"
+      }));
+      return;
+    }
+    if (calls === 2) {
+      res.end(JSON.stringify({
+        id: "edit-request-2",
+        model: "mock-model",
+        content: [],
+        toolCalls: [
+          {
+            id: "edit-2",
+            name: "edit_file",
+            input: {
+              path: "notes.md",
+              oldText: "gamma",
+              newText: "omega"
+            }
+          }
+        ],
+        stopReason: "tool_calls"
+      }));
+      return;
+    }
+    res.end(JSON.stringify({
+      id: "edit-final",
+      model: "mock-model",
+      content: [{ type: "text", text: "edits complete" }],
+      toolCalls: [],
+      stopReason: "stop"
+    }));
+  });
+}
+
+function createTodoGateway() {
+  let calls = 0;
+  return http.createServer(async (req, res) => {
+    for await (const _ of req) {
+      // Drain request body.
+    }
+    calls += 1;
+    res.writeHead(200, { "content-type": "application/json" });
+    if (calls === 1) {
+      res.end(JSON.stringify({
+        id: "todo-request",
+        model: "mock-model",
+        content: [],
+        toolCalls: [
+          {
+            id: "todo-1",
+            name: "todo_write",
+            input: {
+              items: [
+                { content: "确认需求", status: "进行中" },
+                { content: "汇总结果", status: "待办" }
+              ]
+            }
+          }
+        ],
+        stopReason: "tool_calls"
+      }));
+      return;
+    }
+    res.end(JSON.stringify({
+      id: "todo-final",
+      model: "mock-model",
+      content: [{ type: "text", text: "全部待办已完成。" }],
+      toolCalls: [],
+      stopReason: "stop"
+    }));
+  });
+}
+
+function createQuestionGateway() {
+  let calls = 0;
+  return http.createServer(async (req, res) => {
+    let body = "";
+    for await (const chunk of req) {
+      body += Buffer.from(chunk).toString("utf8");
+    }
+    calls += 1;
+    res.writeHead(200, { "content-type": "application/json" });
+    if (calls === 1) {
+      res.end(JSON.stringify({
+        id: "question-request",
+        model: "mock-model",
+        content: [],
+        toolCalls: [
+          {
+            id: "question-1",
+            name: "ask_user",
+            input: {
+              header: "需求核对",
+              question: "输出格式选哪种？",
+              choices: [
+                { label: "Markdown", value: "md", description: "生成可直接阅读的 Markdown" },
+                { label: "PDF", value: "pdf" }
+              ],
+              multiple: true,
+              allowCustom: true,
+              confirmLabel: "继续"
+            }
+          }
+        ],
+        stopReason: "tool_calls"
+      }));
+      return;
+    }
+
+    const parsed = JSON.parse(body);
+    const toolResults = parsed.toolResults ?? [];
+    const answerText = JSON.stringify(toolResults);
+    const cancelled = toolResults.some((result) => {
+      try {
+        return JSON.parse(result.content)?.result?.cancelled === true;
+      } catch {
+        return false;
+      }
+    });
+    res.end(JSON.stringify({
+      id: "question-final",
+      model: "mock-model",
+      content: [{
+        type: "text",
+        text: cancelled
+          ? "已取消需求核对。"
+          : `已按 Markdown 继续，并保留图表说明。${answerText.includes("workflowReminder") ? " 已收到 workflow 提醒。" : ""}`
+      }],
+      toolCalls: [],
+      stopReason: "stop"
+    }));
+  });
+}
+
+function listen(server, host, port) {
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, host, () => resolve(server));
+  });
+}
+
+function close(server) {
+  return new Promise((resolve) => {
+    if (!server.listening) {
+      resolve();
+      return;
+    }
+    server.close(resolve);
+  });
+}
+
+function mockGatewayEnv(server, extra = {}) {
+  const address = server.address();
+  return {
+    LAB_MODEL_GATEWAY_URL: `http://127.0.0.1:${address.port}`,
+    LAB_MODEL_GATEWAY_PROTOCOL: "lab-agent-gateway",
+    LAB_MODEL_GATEWAY_MAX_RETRIES: "0",
+    ...extra
+  };
+}
