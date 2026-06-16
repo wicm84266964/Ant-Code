@@ -2,6 +2,8 @@
 
 中文说明见 [README.zh-CN.md](README.zh-CN.md).
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20709743.svg)](https://doi.org/10.5281/zenodo.20709743)
+
 Ant Code is a local-first coding agent for repository-scale software work. It
 combines an interactive terminal UI, a loopback Dashboard, local tool
 permissions, skills, MCP integration, resumable sessions, and model gateway
@@ -192,6 +194,8 @@ stores, transcripts, or private project data.
 ## License
 
 GNU Affero General Public License v3.0. See [LICENSE](LICENSE).
+
+DOI: [10.5281/zenodo.20709743](https://doi.org/10.5281/zenodo.20709743).
 
 Bundled third-party runtime and Dashboard assets are listed in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
