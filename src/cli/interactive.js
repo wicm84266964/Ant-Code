@@ -7,6 +7,7 @@ import { buildDeliveryStatus, formatDeliveryStatus, formatTurnFooter } from "../
 import { createSession, runSessionTurn } from "../core/session.js";
 import { suggestValidationCommands } from "../core/validation-suggestions.js";
 import { createLabModelGateway } from "../model-gateway/client.js";
+import { approvalKeyFor } from "../permissions/approval-keys.js";
 
 /**
  * @param {{ cwd: string; env?: NodeJS.ProcessEnv; readonly?: boolean; allowWrite?: boolean; allowCommand?: boolean; fullAccess?: boolean; resume?: string | null }} options
@@ -269,44 +270,6 @@ function formatMetadataPolicy(transcript = {}) {
     return "zero-retention";
   }
   return `${transcript.retentionDays ?? 30}d, encryption=${transcript.encryption ?? "off"}`;
-}
-
-/**
- * @param {{ toolName: string; input: Record<string, any> }} request
- */
-function approvalKeyFor(request) {
-  const boundary = approvalBoundaryKey(request);
-  if (request.toolName === "write_file" || request.toolName === "edit_file") {
-    return `write:${boundary}:${request.toolName}:${request.input.path ?? ""}`;
-  }
-  if (request.toolName === "read_file" || request.toolName === "list_files" || request.toolName === "glob" || request.toolName === "grep" || request.toolName === "document_intake") {
-    return `path:${boundary}:${request.toolName}:${request.input.path ?? ""}:${request.input.pattern ?? ""}`;
-  }
-  if (request.toolName === "powershell" || request.toolName === "bash") {
-    return `command:${boundary}:${request.toolName}:${request.input.command ?? ""}`;
-  }
-  if (request.toolName === "mcp_call") {
-    return `mcp:${boundary}:${request.input.server ?? ""}:${request.input.tool ?? ""}:${request.decision?.targetPath ?? request.decision?.resolvedPath ?? ""}`;
-  }
-  const risk = request.definition?.risk;
-  if (risk === "network") {
-    return `network:${boundary}:${request.toolName}:${request.input.url ?? request.input.query ?? ""}`;
-  }
-  if (risk === "browser") {
-    return `browser:${boundary}:${request.input.server ?? ""}:${request.input.tool ?? request.toolName}`;
-  }
-  if (risk === "memory") {
-    return `memory:${boundary}:${request.input.server ?? ""}:${request.input.tool ?? request.toolName}`;
-  }
-  return `${boundary}:${request.toolName}`;
-}
-
-function approvalBoundaryKey(request) {
-  const decision = request?.decision ?? {};
-  return [
-    decision.sensitive === true ? "sensitive" : "normal",
-    decision.outsideWorkspace === true ? "outside" : "workspace"
-  ].join(":");
 }
 
 /**

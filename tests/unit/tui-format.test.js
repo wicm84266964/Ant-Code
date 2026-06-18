@@ -229,6 +229,12 @@ test("approval keys isolate path and risk boundaries", () => {
     decision: {},
     definition: { risk: "write" }
   });
+  const normalEdit = approvalKeyFor({
+    toolName: "edit_file",
+    input: { path: ".env" },
+    decision: {},
+    definition: { risk: "write" }
+  });
   const firstMcpPath = approvalKeyFor({
     toolName: "mcp_call",
     input: { server: "filesystem", tool: "read_file", arguments: { path: "C:\\tmp\\a.txt" } },
@@ -245,9 +251,40 @@ test("approval keys isolate path and risk boundaries", () => {
   assert.notEqual(outsideRead, otherOutsideRead);
   assert.notEqual(outsideRead, workspaceRead);
   assert.notEqual(sensitiveWrite, normalWrite);
+  assert.equal(normalWrite, normalEdit);
   assert.notEqual(firstMcpPath, secondMcpPath);
   assert.match(outsideRead, /outside/);
   assert.match(sensitiveWrite, /sensitive/);
+});
+
+test("approval keys group safe command families but keep risky commands exact", () => {
+  const firstNodeTest = approvalKeyFor({
+    toolName: "powershell",
+    input: { command: "node --test tests\\unit\\a.test.js" },
+    decision: {},
+    definition: { risk: "execute" }
+  });
+  const secondNodeTest = approvalKeyFor({
+    toolName: "powershell",
+    input: { command: "node --test tests\\unit\\b.test.js" },
+    decision: {},
+    definition: { risk: "execute" }
+  });
+  const firstHighRisk = approvalKeyFor({
+    toolName: "powershell",
+    input: { command: "Remove-Item -Recurse -Force .\\build" },
+    decision: {},
+    definition: { risk: "execute" }
+  });
+  const secondHighRisk = approvalKeyFor({
+    toolName: "powershell",
+    input: { command: "Remove-Item -Recurse -Force .\\dist" },
+    decision: {},
+    definition: { risk: "execute" }
+  });
+
+  assert.equal(firstNodeTest, secondNodeTest);
+  assert.notEqual(firstHighRisk, secondHighRisk);
 });
 
 test("prompt lines expose queue and permission modal states", () => {

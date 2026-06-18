@@ -1,5 +1,6 @@
 import { composerSegments, displayWidth } from "./input-editor.js";
 import { parseMarkdownBlocks, renderTable } from "./markdown-table.js";
+export { approvalKeyFor } from "../../permissions/approval-keys.js";
 
 export const SIDE_VIEWS = ["status", "workflow", "tasks"];
 export const DETAIL_MODES = ["compact", "detailed", "full"];
@@ -380,44 +381,6 @@ export function trustDialogLines(cwd, status = "needed") {
     lines.push("", "无法保存信任决定。按 Esc 退出。");
   }
   return lines;
-}
-
-/**
- * @param {{ toolName: string; input: Record<string, any> }} request
- */
-export function approvalKeyFor(request) {
-  const boundary = approvalBoundaryKey(request);
-  if (request.toolName === "write_file" || request.toolName === "edit_file") {
-    return `write:${boundary}:${request.toolName}:${request.input.path ?? ""}`;
-  }
-  if (request.toolName === "read_file" || request.toolName === "list_files" || request.toolName === "glob" || request.toolName === "grep" || request.toolName === "document_intake") {
-    return `path:${boundary}:${request.toolName}:${request.input.path ?? ""}:${request.input.pattern ?? ""}`;
-  }
-  if (request.toolName === "powershell" || request.toolName === "bash") {
-    return `command:${boundary}:${request.toolName}:${request.input.command ?? ""}`;
-  }
-  if (request.toolName === "mcp_call") {
-    return `mcp:${boundary}:${request.input.server ?? ""}:${request.input.tool ?? ""}:${request.decision?.targetPath ?? request.decision?.resolvedPath ?? ""}`;
-  }
-  const risk = request.definition?.risk;
-  if (risk === "network") {
-    return `network:${boundary}:${request.toolName}:${request.input.url ?? request.input.query ?? ""}`;
-  }
-  if (risk === "browser") {
-    return `browser:${boundary}:${request.input.server ?? ""}:${request.input.tool ?? request.toolName}`;
-  }
-  if (risk === "memory") {
-    return `memory:${boundary}:${request.input.server ?? ""}:${request.input.tool ?? request.toolName}`;
-  }
-  return `${boundary}:${request.toolName}`;
-}
-
-function approvalBoundaryKey(request) {
-  const decision = request?.decision ?? {};
-  return [
-    decision.sensitive === true ? "sensitive" : "normal",
-    decision.outsideWorkspace === true ? "outside" : "workspace"
-  ].join(":");
 }
 
 /**

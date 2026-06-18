@@ -1,3 +1,5 @@
+export { approvalKeyFor } from "../permissions/approval-keys.js";
+
 export const PERMISSION_MODES = Object.freeze(["plan", "workspace", "fullAccess"]);
 
 export const APPROVAL_ACTIONS = Object.freeze([
@@ -71,36 +73,6 @@ export function permissionModeDescription(mode) {
 }
 
 /**
- * @param {{ toolName: string; input: Record<string, any>; decision?: Record<string, any>; definition?: Record<string, any> }} request
- */
-export function approvalKeyFor(request) {
-  const boundary = approvalBoundaryKey(request);
-  if (request.toolName === "write_file" || request.toolName === "edit_file") {
-    return `write:${boundary}:${request.toolName}:${request.input?.path ?? ""}`;
-  }
-  if (request.toolName === "read_file" || request.toolName === "list_files" || request.toolName === "glob" || request.toolName === "grep" || request.toolName === "document_intake") {
-    return `path:${boundary}:${request.toolName}:${request.input?.path ?? ""}:${request.input?.pattern ?? ""}`;
-  }
-  if (request.toolName === "powershell" || request.toolName === "bash") {
-    return `command:${boundary}:${request.toolName}:${request.input?.command ?? ""}`;
-  }
-  if (request.toolName === "mcp_call") {
-    return `mcp:${boundary}:${request.input?.server ?? ""}:${request.input?.tool ?? ""}:${request.decision?.targetPath ?? request.decision?.resolvedPath ?? ""}`;
-  }
-  const risk = request.definition?.risk;
-  if (risk === "network") {
-    return `network:${boundary}:${request.toolName}:${request.input?.url ?? request.input?.query ?? ""}`;
-  }
-  if (risk === "browser") {
-    return `browser:${boundary}:${request.input?.server ?? ""}:${request.input?.tool ?? request.toolName}`;
-  }
-  if (risk === "memory") {
-    return `memory:${boundary}:${request.input?.server ?? ""}:${request.input?.tool ?? request.toolName}`;
-  }
-  return `${boundary}:${request.toolName}`;
-}
-
-/**
  * @param {Record<string, any>} request
  */
 export function buildApprovalPreview(request = {}) {
@@ -141,14 +113,6 @@ export function buildApprovalPreview(request = {}) {
     ];
   }
   return [`输入：${truncate(JSON.stringify(input), 220)}`];
-}
-
-function approvalBoundaryKey(request) {
-  const decision = request?.decision ?? {};
-  return [
-    decision.sensitive === true ? "sensitive" : "normal",
-    decision.outsideWorkspace === true ? "outside" : "workspace"
-  ].join(":");
 }
 
 function truncate(value, max) {
