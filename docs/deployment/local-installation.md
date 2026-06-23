@@ -86,9 +86,11 @@ deployment must block public web access.
 
 ## Local Checkout
 
-From the repository root:
+From a fresh source checkout:
 
 ```sh
+git clone https://github.com/wicm84266964/Ant-Code.git
+cd Ant-Code
 npm ci
 npm run verify:install
 npm run verify:release
@@ -96,6 +98,9 @@ node src/cli/index.js doctor
 node src/cli/index.js tui
 node src/cli/index.js -p "/status"
 ```
+
+If the repository is already checked out, run the commands from the repository
+root, starting with `npm ci`.
 
 This repository uses reviewed public open-source runtime dependencies for the
 terminal UI layer. `npm ci` installs the locked dependency graph from

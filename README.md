@@ -80,6 +80,8 @@ The tests and mock gateway can run without a real model provider.
 ## Install From Source
 
 ```sh
+git clone https://github.com/wicm84266964/Ant-Code.git
+cd Ant-Code
 npm ci
 npm run verify:install
 node src/cli/index.js doctor
