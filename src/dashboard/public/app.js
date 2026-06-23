@@ -140,6 +140,7 @@ const FILE_REFERENCE_PATTERN = /(?:[A-Za-z0-9_.-]+[\\/])*[A-Za-z0-9_.-]+\.[A-Za-
 const DRAFT_RENDER_INTERVAL_MS = 180;
 const MAX_IMAGE_ATTACHMENTS = 6;
 const MAX_IMAGE_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+const CURRENT_SESSION_STORAGE_KEY = "ant-code-dashboard-current-session";
 
 await init();
 
@@ -157,6 +158,7 @@ async function init() {
   els.projectPath.textContent = status.cwd;
   await loadTrust();
   await loadSessions();
+  await restoreInitialSession();
   updateSendButton();
   renderComposerStatus();
 }
@@ -319,6 +321,43 @@ async function loadSessions(options = {}) {
   }
 }
 
+async function restoreInitialSession() {
+  if (state.currentSessionId) {
+    return;
+  }
+  const sessionId = initialSessionId() || latestBackgroundSessionId();
+  if (!sessionId || !state.sessions.some((session) => session.id === sessionId)) {
+    return;
+  }
+  await openSession(sessionId);
+}
+
+function latestBackgroundSessionId() {
+  return state.sessions.find((session) => session.backgroundVisible === true)?.id ?? "";
+}
+
+function initialSessionId() {
+  try {
+    const params = new URLSearchParams(window.location?.search ?? "");
+    return params.get("sessionId") || window.localStorage?.getItem(CURRENT_SESSION_STORAGE_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function rememberCurrentSession(sessionId) {
+  try {
+    const id = String(sessionId ?? "").trim();
+    if (id) {
+      window.localStorage?.setItem(CURRENT_SESSION_STORAGE_KEY, id);
+    } else {
+      window.localStorage?.removeItem(CURRENT_SESSION_STORAGE_KEY);
+    }
+  } catch {
+    // Local storage can be unavailable in hardened browser contexts.
+  }
+}
+
 function renderSessions() {
   els.threadList.innerHTML = "";
   if (state.sessions.length === 0) {
@@ -386,6 +425,16 @@ function sessionStatusView(session) {
   if (session.running || raw === "running") {
     return { label: "运行中", tone: "running", detail: session.queueLength > 0 ? "有排队" : "" };
   }
+  if (session.backgroundVisible) {
+    const kinds = Array.isArray(session.backgroundKinds) ? session.backgroundKinds : [];
+    if (kinds.includes("terminal") && !kinds.includes("subagent")) {
+      return { label: "终端后台", tone: "running", detail: session.backgroundCount > 1 ? `${session.backgroundCount} 个任务` : "" };
+    }
+    if (kinds.includes("terminal")) {
+      return { label: "后台运行", tone: "running", detail: session.backgroundCount > 1 ? `${session.backgroundCount} 个任务` : "" };
+    }
+    return { label: "子智能体后台", tone: "running", detail: session.backgroundCount > 1 ? `${session.backgroundCount} 个任务` : "" };
+  }
   if (raw.includes("引导")) {
     return { label: "引导中", tone: "running", detail: "" };
   }
@@ -420,7 +469,12 @@ function setSidebarCollapsed(collapsed) {
 }
 
 function sessionsNeedRefresh() {
-  return state.sessions.some((session) => session.running || session.queueLength > 0 || String(session.status ?? "").toLowerCase() === "running");
+  return state.sessions.some((session) =>
+    session.running
+    || session.backgroundVisible
+    || session.queueLength > 0
+    || String(session.status ?? "").toLowerCase() === "running"
+  );
 }
 
 function scheduleSessionsRefresh(delayMs = 800) {
@@ -470,6 +524,7 @@ async function openSession(id) {
     return;
   }
   state.currentSessionId = id;
+  rememberCurrentSession(id);
   disconnectEvents();
   hideApproval();
   hideQuestion();
@@ -494,6 +549,7 @@ async function openSession(id) {
   setTranscriptPaging(result.session.transcriptPage);
   renderTranscriptMessages(result.session.transcript ?? []);
   scrollTranscript({ force: true });
+  const hasBackground = restoreBackgroundSnapshot(result.session.backgroundSnapshot);
   if (result.session.active && result.session.running) {
     rememberEventCursor(result.session.eventCursor);
     ensureEventsConnected(id);
@@ -501,8 +557,21 @@ async function openSession(id) {
     setLiveTitle(result.session.status === "引导中" ? "正在按引导继续" : "正在恢复运行中的任务");
     state.running = true;
     updateSendButton();
+  } else if (result.session.active && hasBackground) {
+    rememberEventCursor(result.session.eventCursor);
+    ensureEventsConnected(id);
+    applyIdleRunStatus("完成");
+    updateSendButton();
   }
   renderSessions();
+}
+
+function restoreBackgroundSnapshot(snapshot) {
+  if (!snapshot || !Array.isArray(snapshot.groups)) {
+    return false;
+  }
+  reconcileBackgroundSubagentSnapshot(snapshot.groups);
+  return state.backgroundSubagents.size > 0;
 }
 
 async function deleteSession(sessionId) {
@@ -523,6 +592,7 @@ async function deleteSession(sessionId) {
   }
   if (state.currentSessionId === sessionId) {
     newTask();
+    rememberCurrentSession(null);
   }
   await loadSessions();
 }
@@ -571,6 +641,7 @@ async function copySessionId(sessionId) {
 
 function newTask() {
   state.currentSessionId = null;
+  rememberCurrentSession(null);
   disconnectEvents();
   hideApproval();
   hideQuestion();
@@ -727,6 +798,7 @@ async function sendPrompt() {
   updateSendButton();
   const previousSessionId = state.currentSessionId;
   state.currentSessionId = result.sessionId;
+  rememberCurrentSession(result.sessionId);
   if (previousSessionId !== result.sessionId) {
     resetEventReplayState();
   }
@@ -833,7 +905,11 @@ async function cancelBackgroundSubagent(groupId, taskId) {
   }
   state.backgroundCancelling.add(key);
   updateLiveStatus();
-  const result = await postJson("/api/background-subagents/cancel", {
+  const item = Array.from(state.backgroundSubagents.values()).find((value) => (
+    (groupId && value.groupId === groupId) || (taskId && value.taskId === taskId)
+  ));
+  const endpoint = item?.kind === "terminal" ? "/api/background-terminals/cancel" : "/api/background-subagents/cancel";
+  const result = await postJson(endpoint, {
     sessionId: state.currentSessionId,
     groupId,
     taskId
@@ -849,7 +925,7 @@ async function cancelBackgroundSubagent(groupId, taskId) {
     if ((groupId && item.groupId === groupId) || (taskId && item.taskId === taskId)) {
       state.backgroundSubagents.set(itemKey, {
         ...item,
-        summary: "已请求回收后台子智能体，等待状态刷新",
+        summary: item.kind === "terminal" ? "已请求回收后台终端任务，等待状态刷新" : "已请求回收后台子智能体，等待状态刷新",
         status: "stale"
       });
     }
@@ -1011,6 +1087,11 @@ function handleDashboardEvent(event) {
   }
   if (event.type === "background_subagent_cancelled") {
     clearBackgroundSubagentStatus(event.groupId || event.taskId);
+    applyIdleRunStatus("空闲");
+    return;
+  }
+  if (event.type === "background_terminal_cancelled") {
+    clearBackgroundSubagentStatus(event.taskId);
     applyIdleRunStatus("空闲");
     return;
   }
@@ -1637,7 +1718,8 @@ function reconcileBackgroundSubagentSnapshot(groups) {
       backgroundSubagent: true,
       coalesceKey: key,
       rawType: "background_subagent_snapshot",
-      title: group.status === "waiting" ? "等待子智能体唤醒主控" : "子智能体后台运行中",
+      title: group.kind === "terminal" ? "终端后台运行中" : group.status === "waiting" ? "等待子智能体唤醒主控" : "子智能体后台运行中",
+      kind: group.kind ?? previous.kind ?? "subagent",
       groupId: group.groupId ?? previous.groupId ?? null,
       taskId: group.taskId ?? previous.taskId ?? null,
       profile: group.profile ?? previous.profile ?? null,
@@ -1749,6 +1831,9 @@ function updateLiveStatus() {
 function liveStatusTitle(primary, subtasks, background) {
   if (background.length > 0 && (!primary || primary.title === "开始任务")) {
     const counts = backgroundSubagentCounts();
+    if (counts.terminals > 0) {
+      return `${counts.terminals} 个终端后台任务运行中`;
+    }
     if (counts.running > 0) {
       return `${counts.running} 个子智能体后台运行中`;
     }
@@ -1814,6 +1899,10 @@ function renderBackgroundSubagentStatus(background) {
 }
 
 function backgroundSubagentCompactLabel(item) {
+  if (item.kind === "terminal") {
+    if (item.status === "stale") return "终端任务回收中";
+    return "终端后台运行";
+  }
   const profile = item.profile ? `${item.profile} ` : "";
   if (item.status === "waiting") return `${profile}等待唤醒`;
   if (item.status === "lost") return `${profile}疑似失联`;
@@ -1822,6 +1911,10 @@ function backgroundSubagentCompactLabel(item) {
 }
 
 function backgroundSubagentTitle(item) {
+  if (item.kind === "terminal") {
+    if (item.status === "stale") return "终端后台任务回收中";
+    return "终端后台任务运行中";
+  }
   const profile = item.profile ? `${item.profile} ` : "";
   if (item.status === "waiting") return `${profile}等待主控接续`;
   if (item.status === "lost") return `${profile}子智能体疑似失联`;
@@ -1830,6 +1923,13 @@ function backgroundSubagentTitle(item) {
 }
 
 function backgroundSubagentMeta(item) {
+  if (item.kind === "terminal") {
+    return [
+      item.taskId ? `task=${item.taskId}` : null,
+      item.runningCount === 1 ? "运行中" : null,
+      item.lastProgressAt ? `更新 ${formatRelativeTime(item.lastProgressAt)}` : null
+    ].filter(Boolean).join(" · ");
+  }
   return [
     item.groupId ? `group=${item.groupId}` : null,
     item.taskId ? `task=${item.taskId}` : null,
@@ -1859,16 +1959,26 @@ function resetLiveStatus(options = {}) {
 
 function backgroundSubagentCounts() {
   const items = Array.from(state.backgroundSubagents.values()).filter(backgroundSubagentVisible);
+  const subagents = items.filter((item) => item.kind !== "terminal");
+  const terminals = items.filter((item) => item.kind === "terminal");
   return {
-    running: items.filter((item) => item.status === "running").length,
-    stale: items.filter((item) => item.status === "stale").length,
-    lost: items.filter((item) => item.status === "lost").length,
-    waiting: items.filter((item) => item.status === "waiting").length
+    running: subagents.filter((item) => item.status === "running").length,
+    terminals: terminals.filter((item) => item.status === "running").length,
+    terminalStale: terminals.filter((item) => item.status === "stale").length,
+    stale: subagents.filter((item) => item.status === "stale").length,
+    lost: subagents.filter((item) => item.status === "lost").length,
+    waiting: subagents.filter((item) => item.status === "waiting").length
   };
 }
 
 function idleRunStatus(fallback) {
   const counts = backgroundSubagentCounts();
+  if (counts.terminals > 0) {
+    return "终端后台任务运行中";
+  }
+  if (counts.terminalStale > 0) {
+    return "终端后台任务回收中";
+  }
   if (counts.running > 0) {
     return "子智能体运行中";
   }
@@ -1896,7 +2006,7 @@ function updateRunStatusForBackground(fallback = "空闲") {
     return;
   }
   const current = els.runStatus.textContent.trim();
-  const base = /子智能体|唤醒/.test(current) ? fallback : current || fallback;
+  const base = /子智能体|终端后台任务|唤醒/.test(current) ? fallback : current || fallback;
   els.runStatus.textContent = idleRunStatus(base);
 }
 
@@ -2239,11 +2349,11 @@ function renderModelConfigPanel() {
         </label>
         <label>
           <span>模型 ID</span>
-          <input name="modelId" required spellcheck="false" value="${escapeAttribute(current.id || "")}" placeholder="example-vision-model" />
+          <input name="modelId" required spellcheck="false" value="${escapeAttribute(current.id || "")}" placeholder="example-chat-model" />
         </label>
         <label>
           <span>显示名称</span>
-          <input name="label" spellcheck="false" value="${escapeAttribute(current.label || "")}" placeholder="Vision Model" />
+          <input name="label" spellcheck="false" value="${escapeAttribute(current.label || "")}" placeholder="Example Chat Model" />
         </label>
         <label>
           <span>上下文窗口</span>
@@ -2255,11 +2365,11 @@ function renderModelConfigPanel() {
         </label>
         <label>
           <span>子智能体 default</span>
-          <input name="agentDefaultModel" spellcheck="false" value="${escapeAttribute(currentAgentTiers.default)}" placeholder="例如 example-vision-model" />
+          <input name="agentDefaultModel" spellcheck="false" value="${escapeAttribute(currentAgentTiers.default)}" placeholder="例如 example-chat-model" />
         </label>
         <label>
           <span>子智能体 strong</span>
-          <input name="agentStrongModel" spellcheck="false" value="${escapeAttribute(currentAgentTiers.strong)}" placeholder="例如 example-vision-model" />
+          <input name="agentStrongModel" spellcheck="false" value="${escapeAttribute(currentAgentTiers.strong)}" placeholder="例如 example-chat-model" />
         </label>
         <label>
           <span>视觉子智能体</span>
@@ -2701,6 +2811,7 @@ function normalizeComparableText(text) {
 function showApproval(approval) {
   state.pendingApproval = approval;
   els.approvalPanel.classList.remove("hidden");
+  els.approvalPanel.setAttribute("tabindex", "-1");
   els.approvalPanel.innerHTML = `
     <div class="approval-title">需要权限确认 · ${escapeHtml(approval.toolName)}</div>
     <div class="approval-preview">${escapeHtml([
@@ -2719,6 +2830,7 @@ function showApproval(approval) {
   els.approvalPanel.querySelectorAll("button[data-action]").forEach((button) => {
     button.addEventListener("click", () => resolveApproval(button.dataset.action));
   });
+  revealInteractionPanel(els.approvalPanel, "button[data-action]");
 }
 
 async function resolveApproval(action) {
@@ -2740,6 +2852,19 @@ function showQuestion(question) {
     customDraft: ""
   };
   renderQuestionPanel();
+  revealInteractionPanel(els.questionPanel, ".question-input, button[data-choice], button[data-action='submit']");
+}
+
+function revealInteractionPanel(panel, focusSelector) {
+  if (!panel || panel.classList.contains("hidden")) {
+    return;
+  }
+  panel.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  const target = focusSelector ? panel.querySelector(focusSelector) : null;
+  const focusTarget = target ?? panel;
+  if (typeof focusTarget.focus === "function") {
+    focusTarget.focus({ preventScroll: true });
+  }
 }
 
 function renderQuestionPanel() {
@@ -3077,7 +3202,7 @@ function updateSendButton() {
     return;
   }
   if (state.running) {
-    els.sendButton.textContent = "运行中";
+    els.sendButton.textContent = "中断";
     els.sendButton.title = "点击中断当前任务";
   } else {
     els.sendButton.textContent = "发送";

@@ -140,6 +140,22 @@ export const BUILT_IN_TOOLS = Object.freeze([
     }
   },
   {
+    name: "background_shell",
+    description: "Start a long-running terminal command as a registered background task with stdout/stderr logs, then return immediately. Use for discover, crawls, downloads, renders, servers, or other long jobs the user should be able to monitor and cancel while continuing the conversation.",
+    risk: "execute",
+    supportsAbort: false,
+    inputSchema: {
+      type: "object",
+      required: ["command"],
+      properties: {
+        command: { type: "string" },
+        title: { type: "string" },
+        taskId: { type: "string" },
+        logDir: { type: "string" }
+      }
+    }
+  },
+  {
     name: "mcp_list",
     description: "List configured MCP servers, tools, prompts, resources, or read a resource from one configured MCP server.",
     risk: "mcp",

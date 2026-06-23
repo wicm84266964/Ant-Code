@@ -14,7 +14,7 @@ import { BUILT_IN_TOOLS } from "./definitions.js";
 import { documentIntakeTool } from "./document-tools.js";
 import { editFileTool, globTool, grepTool, listFilesTool, readFileTool, writeFileTool } from "./file-tools.js";
 import { gitDiffTool, gitStatusTool } from "./git-tools.js";
-import { bashTool, powershellTool } from "./shell-tools.js";
+import { backgroundShellTool, bashTool, powershellTool } from "./shell-tools.js";
 import { networkHostsForWebTool, webFetchTool, webSearchTool } from "./web-tools.js";
 import { createWorkflowState, planUpdateTool, recordFileChange, recordValidation, todoReadTool, todoWriteTool } from "./workflow-tools.js";
 
@@ -31,11 +31,12 @@ const HANDLERS = Object.freeze({
   write_file: writeFileTool,
   edit_file: editFileTool,
   powershell: powershellTool,
-  bash: bashTool
+  bash: bashTool,
+  background_shell: backgroundShellTool
 });
 
 /**
- * @param {{ cwd: string; config?: Record<string, any>; env?: NodeJS.ProcessEnv; policy?: Record<string, any>; workflowState?: ReturnType<typeof createWorkflowState>; parentSessionId?: string; hooksTrusted?: boolean; allowedSkills?: string[]; allowedMcpServers?: string[]; signal?: AbortSignal; mcpRuntime?: { callTool: (serverName: string, toolName: string, args?: Record<string, any>, signal?: AbortSignal) => Promise<Record<string, any>> }; approve?: (request: { toolName: string; input: Record<string, any>; decision: Record<string, any>; definition: Record<string, any> }) => Promise<boolean>; askUser?: (input: Record<string, any>) => Promise<Record<string, any>>; onBackgroundAgentEvent?: (event: Record<string, any>) => void | Promise<void> }} options
+ * @param {{ cwd: string; config?: Record<string, any>; env?: NodeJS.ProcessEnv; policy?: Record<string, any>; workflowState?: ReturnType<typeof createWorkflowState>; parentSessionId?: string; backgroundParentSessionId?: string; hooksTrusted?: boolean; allowedSkills?: string[]; allowedMcpServers?: string[]; signal?: AbortSignal; mcpRuntime?: { callTool: (serverName: string, toolName: string, args?: Record<string, any>, signal?: AbortSignal) => Promise<Record<string, any>> }; approve?: (request: { toolName: string; input: Record<string, any>; decision: Record<string, any>; definition: Record<string, any> }) => Promise<boolean>; askUser?: (input: Record<string, any>) => Promise<Record<string, any>>; onBackgroundAgentEvent?: (event: Record<string, any>) => void | Promise<void>; onBackgroundTerminalEvent?: (event: Record<string, any>) => void | Promise<void> }} options
  */
 export function createToolRuntime(options) {
   const tools = new Map(BUILT_IN_TOOLS.map((tool) => [tool.name, tool]));
@@ -208,6 +209,16 @@ export function createToolRuntime(options) {
       if (!handler) {
         return finishTool(options, name, input, definition, { ok: false, error: { code: "TOOL_NOT_IMPLEMENTED", message: `${name} is scaffolded but not implemented yet` } });
       }
+      if ((name === "powershell" || name === "bash") && isKnownLongTerminalCommand(input.command)) {
+        return finishTool(options, name, input, definition, {
+          ok: false,
+          blocked: true,
+          error: {
+            code: "BACKGROUND_SHELL_REQUIRED",
+            message: "This discover command is a known long-running terminal task. Use background_shell with the same command, a stable taskId, and report the log paths instead of running it in the foreground shell."
+          }
+        });
+      }
 
       try {
         const result = await handler({
@@ -215,6 +226,9 @@ export function createToolRuntime(options) {
           cwd: options.cwd,
           config: options.config,
           env: options.env,
+          parentSessionId: name === "background_shell"
+            ? options.backgroundParentSessionId ?? options.parentSessionId
+            : options.parentSessionId,
           signal: options.signal,
           policy: {
             ...(options.policy ?? {}),
@@ -222,6 +236,16 @@ export function createToolRuntime(options) {
             approvedOutsideWorkspace: approvedByUser && decision.outsideWorkspace === true
           }
         });
+        if (name === "background_shell" && result?.started === true) {
+          await notifyBackgroundTerminalEvent(options, {
+            type: "background_terminal_started",
+            taskId: result.taskId,
+            pid: result.pid,
+            stdoutPath: result.stdoutPath,
+            stderrPath: result.stderrPath,
+            command: result.command
+          });
+        }
         if (options.signal?.aborted || result?.interrupted === true) {
           recordToolEffect(workflowState, name, input, result);
           if (name === "write_file" || (name === "edit_file" && result.edited !== false)) {
@@ -724,7 +748,9 @@ async function runSkillSubagent(options, skill, message) {
     fullAccess: Boolean(options.policy?.fullAccess),
     workflowState: options.workflowState,
     approvalCallback: options.approve,
+    onBackgroundTerminalEvent: options.onBackgroundTerminalEvent,
     parentSessionId: options.parentSessionId,
+    backgroundParentSessionId: options.backgroundParentSessionId ?? options.parentSessionId,
     hooksTrusted: options.hooksTrusted,
     profileName,
     allowHiddenProfile: true,
@@ -807,7 +833,9 @@ async function runAgentTool(options, input, definition) {
     fullAccess: Boolean(options.policy?.fullAccess),
     workflowState: options.workflowState,
     approvalCallback: options.approve,
+    onBackgroundTerminalEvent: options.onBackgroundTerminalEvent,
     parentSessionId: options.parentSessionId,
+    backgroundParentSessionId: options.backgroundParentSessionId ?? options.parentSessionId,
     hooksTrusted: options.hooksTrusted,
     taskId: typeof input.taskId === "string" && input.taskId.trim() ? input.taskId.trim() : undefined,
     profileName: profile.name,
@@ -901,7 +929,9 @@ async function startBackgroundAgentTool(options, input, definition, profile, run
     fullAccess: Boolean(options.policy?.fullAccess),
     workflowState: options.workflowState,
     approvalCallback: options.approve,
+    onBackgroundTerminalEvent: options.onBackgroundTerminalEvent,
     parentSessionId: options.parentSessionId,
+    backgroundParentSessionId: options.backgroundParentSessionId ?? options.parentSessionId,
     groupId,
     hooksTrusted: options.hooksTrusted,
     taskId,
@@ -1081,6 +1111,17 @@ async function notifyBackgroundAgentEvent(options, event) {
     await options.onBackgroundAgentEvent(event);
   } catch {
     // UI notifications must not break background agent completion.
+  }
+}
+
+async function notifyBackgroundTerminalEvent(options, event) {
+  if (typeof options.onBackgroundTerminalEvent !== "function") {
+    return;
+  }
+  try {
+    await options.onBackgroundTerminalEvent(event);
+  } catch {
+    // UI notifications must not break tool execution.
   }
 }
 
@@ -1315,6 +1356,11 @@ function normalizeToolInput(name, input = {}) {
     }
   }
   return input;
+}
+
+function isKnownLongTerminalCommand(command) {
+  const text = String(command ?? "").toLowerCase();
+  return text.includes("antscan_downloader.cli") && /\bdiscover\b/.test(text);
 }
 
 function normalizeLooseHttpUrl(value) {

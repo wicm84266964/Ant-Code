@@ -35,8 +35,10 @@ const TASK_HEARTBEAT_INTERVAL_MS = 10_000;
  *   fullAccess?: boolean;
  *   workflowState?: Parameters<typeof createToolRuntime>[0]["workflowState"];
  *   approvalCallback?: Parameters<typeof createToolRuntime>[0]["approve"];
+ *   onBackgroundTerminalEvent?: Parameters<typeof createToolRuntime>[0]["onBackgroundTerminalEvent"];
  *   signal?: AbortSignal;
  *   groupId?: string;
+ *   backgroundParentSessionId?: string;
  *   routeDecision?: Record<string, any>;
  *   contextPack?: Record<string, any>;
  *   writeScope?: unknown;
@@ -304,10 +306,12 @@ async function runModelSubagent(options) {
     workflowState: options.workflowState,
     approve: options.approvalCallback,
     parentSessionId: options.childSessionId,
+    backgroundParentSessionId: options.backgroundParentSessionId ?? options.parentSessionId ?? options.childSessionId,
     hooksTrusted: options.hooksTrusted,
     policy: createAgentPolicy(options),
     allowedSkills: options.profile.skills,
-    allowedMcpServers: options.profile.mcpServers
+    allowedMcpServers: options.profile.mcpServers,
+    onBackgroundTerminalEvent: options.onBackgroundTerminalEvent
   });
   const messages = [
     {

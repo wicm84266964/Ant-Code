@@ -201,11 +201,11 @@ function reviewGateLabel(reasons) {
 }
 
 function isImplementationTool(name) {
-  return ["write_file", "edit_file", "powershell", "bash", "skill_run"].includes(name);
+  return ["write_file", "edit_file", "powershell", "bash", "background_shell", "skill_run"].includes(name);
 }
 
 function isMeaningfulFailureForReview(name) {
-  return ["agent_run", "write_file", "edit_file", "powershell", "bash", "skill_run", "todo_write", "plan_update"].includes(name);
+  return ["agent_run", "write_file", "edit_file", "powershell", "bash", "background_shell", "skill_run", "todo_write", "plan_update"].includes(name);
 }
 
 function workflowStatsFromItems(items) {

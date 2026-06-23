@@ -15,6 +15,7 @@ import { createToolRuntime } from "../../src/tools/runtime.js";
 import { parseDuckDuckGoHtml } from "../../src/tools/web-tools.js";
 import { createWorkflowState, syncWorkflowCompletionOnFinal } from "../../src/tools/workflow-tools.js";
 import { listBackgroundAgentTasks } from "../../src/agents/background-registry.js";
+import { listBackgroundTerminalTasks } from "../../src/agents/background-terminal-registry.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -1605,8 +1606,124 @@ test("shell tools stop promptly when the runtime signal is aborted", async () =>
   assert.ok(Date.now() - startedAt < 5000);
 });
 
+test("foreground shell refuses known long discover commands", async () => {
+  const cwd = await makeTempWorkspace();
+  const runtime = createToolRuntime({
+    cwd,
+    policy: {
+      networkMode: "offline",
+      approvals: { workspaceCommands: true }
+    }
+  });
+  const result = await runtime.execute(process.platform === "win32" ? "powershell" : "bash", {
+    command: "python -m antscan_downloader.cli discover --config config.toml",
+    timeoutMs: 60_000
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.blocked, true);
+  assert.equal(result.error.code, "BACKGROUND_SHELL_REQUIRED");
+});
+
+test("background shell persists terminal task records", async () => {
+  const cwd = await makeTempWorkspace();
+  const runtime = createToolRuntime({
+    cwd,
+    parentSessionId: "session-persisted-terminal",
+    policy: {
+      networkMode: "offline",
+      approvals: { workspaceCommands: true }
+    }
+  });
+  const command = process.platform === "win32"
+    ? "Start-Sleep -Seconds 10"
+    : "sleep 10";
+  const result = await runtime.execute("background_shell", {
+    command,
+    title: "Persisted terminal",
+    taskId: "persisted-terminal"
+  });
+
+  try {
+    assert.equal(result.ok, true);
+    assert.equal(result.result.started, true);
+    const tasks = listBackgroundTerminalTasks({
+      cwd,
+      parentSessionId: "session-persisted-terminal",
+      taskId: "persisted-terminal"
+    });
+    assert.equal(tasks.length, 1);
+    assert.equal(tasks[0].status, "running");
+    assert.equal(tasks[0].pid, result.result.pid);
+    const record = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "background-terminal", "tasks", "persisted-terminal.json"), "utf8"));
+    assert.equal(record.taskId, "persisted-terminal");
+    assert.equal(record.parentSessionId, "session-persisted-terminal");
+  } finally {
+    if (result.result?.pid) {
+      await killProcessTree(result.result.pid);
+    }
+  }
+});
+
+test("background shell registry reconciles externally killed terminal tasks", async () => {
+  const cwd = await makeTempWorkspace();
+  const runtime = createToolRuntime({
+    cwd,
+    parentSessionId: "session-killed-terminal",
+    policy: {
+      networkMode: "offline",
+      approvals: { workspaceCommands: true }
+    }
+  });
+  const command = process.platform === "win32"
+    ? "Start-Sleep -Seconds 20"
+    : "sleep 20";
+  const result = await runtime.execute("background_shell", {
+    command,
+    title: "Killed terminal",
+    taskId: "killed-terminal"
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.result.started, true);
+  await killProcessTree(result.result.pid);
+  await waitFor(() => {
+    const tasks = listBackgroundTerminalTasks({
+      cwd,
+      parentSessionId: "session-killed-terminal",
+      taskId: "killed-terminal"
+    });
+    return tasks.length === 1 && tasks[0].status !== "running";
+  }, 3000);
+  const tasks = listBackgroundTerminalTasks({
+    cwd,
+    parentSessionId: "session-killed-terminal",
+    taskId: "killed-terminal"
+  });
+  assert.equal(tasks[0].status, "completed");
+  const record = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "background-terminal", "tasks", "killed-terminal.json"), "utf8"));
+  assert.equal(record.status, "completed");
+  assert.ok(record.finishedAt);
+});
+
 async function makeTempWorkspace() {
   return fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
+}
+
+async function killProcessTree(pid) {
+  if (process.platform === "win32") {
+    await execFileAsync("taskkill", ["/pid", String(pid), "/t", "/f"]).catch(() => null);
+    return;
+  }
+  try {
+    process.kill(-pid, "SIGTERM");
+  } catch {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {
+      // Already exited.
+    }
+  }
 }
 
 function createToolGateway(requests, fixture) {

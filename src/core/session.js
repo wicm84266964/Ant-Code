@@ -227,8 +227,10 @@ export async function runSessionTurn(session, options) {
     approve: options.approvalCallback,
     askUser: options.userInputCallback,
     parentSessionId: session.id,
+    backgroundParentSessionId: session.id,
     hooksTrusted: options.hooksTrusted,
     onBackgroundAgentEvent: (event) => emitEvent(eventOptions, event),
+    onBackgroundTerminalEvent: (event) => emitEvent(eventOptions, event),
     policy: {
       networkMode: session.config.networkMode,
       allowedHosts: session.config.allowedHosts,

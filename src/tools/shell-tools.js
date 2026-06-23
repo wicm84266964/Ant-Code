@@ -1,8 +1,12 @@
 import { spawn } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { registerBackgroundTerminalTask, updateBackgroundTerminalTask } from "../agents/background-terminal-registry.js";
 import { scrubEnvironment } from "./env-scrubber.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 120_000;
+const DEFAULT_BACKGROUND_LOG_DIR = ".lab-agent/background-terminal";
 
 /**
  * @param {{ cwd: string; command: string; timeoutMs?: number; env?: NodeJS.ProcessEnv; signal?: AbortSignal; policy?: Record<string, any> }} input
@@ -33,6 +37,153 @@ export async function bashTool(input) {
     signal: input.signal,
     policy: input.policy
   });
+}
+
+/**
+ * @param {{ cwd: string; command: string; title?: string; taskId?: string; logDir?: string; env?: NodeJS.ProcessEnv; policy?: Record<string, any>; parentSessionId?: string }} input
+ */
+export async function backgroundShellTool(input) {
+  const taskId = sanitizeTaskId(input.taskId) || `terminal-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const logDir = path.resolve(input.cwd, input.logDir || DEFAULT_BACKGROUND_LOG_DIR);
+  await fs.promises.mkdir(logDir, { recursive: true });
+  const stdoutPath = path.join(logDir, `${taskId}.stdout.log`);
+  const stderrPath = path.join(logDir, `${taskId}.stderr.log`);
+  const scrubbed = scrubEnvironment(input.env ?? process.env, { allowSensitive: input.policy?.fullAccess === true });
+  const started = process.platform === "win32"
+    ? await startWindowsBackgroundShell({ ...input, taskId, logDir, stdoutPath, stderrPath, scrubbed })
+    : startPosixBackgroundShell({ ...input, taskId, stdoutPath, stderrPath, scrubbed });
+  if (started.error) {
+    return {
+      taskId,
+      command: input.command,
+      exitCode: null,
+      started: false,
+      stdoutPath,
+      stderrPath,
+      scrubbedEnv: scrubbed.removed,
+      error: started.error
+    };
+  }
+  registerBackgroundTerminalTask({
+    taskId,
+    parentSessionId: input.parentSessionId,
+    title: input.title,
+    command: input.command,
+    cwd: input.cwd,
+    pid: started.pid,
+    stdoutPath,
+    stderrPath
+  });
+  return {
+    taskId,
+    command: input.command,
+    pid: started.pid,
+    started: true,
+    detached: true,
+    stdoutPath,
+    stderrPath,
+    scrubbedEnv: scrubbed.removed
+  };
+}
+
+async function startWindowsBackgroundShell(input) {
+  const workerPath = path.join(input.logDir, `${input.taskId}.worker.ps1`);
+  const launcherPath = path.join(input.logDir, `${input.taskId}.launcher.ps1`);
+  await fs.promises.writeFile(workerPath, [
+    "$ErrorActionPreference = 'Continue'",
+    `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8`,
+    `& {`,
+    input.command,
+    `} 1>> ${powerShellSingleQuoted(input.stdoutPath)} 2>> ${powerShellSingleQuoted(input.stderrPath)}`,
+    ""
+  ].join("\r\n"), "utf8");
+  await fs.promises.writeFile(launcherPath, [
+    "$ErrorActionPreference = 'Stop'",
+    `$process = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoLogo','-NoProfile','-ExecutionPolicy','Bypass','-File', ${powerShellSingleQuoted(workerPath)}) -WorkingDirectory ${powerShellSingleQuoted(input.cwd)} -WindowStyle Hidden -PassThru`,
+    "Write-Output $process.Id",
+    ""
+  ].join("\r\n"), "utf8");
+  return new Promise((resolve) => {
+    const launcher = spawn("powershell.exe", ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", launcherPath], {
+      cwd: input.cwd,
+      env: input.scrubbed.env,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    const stdout = [];
+    const stderr = [];
+    launcher.stdout.on("data", (chunk) => stdout.push(Buffer.from(chunk)));
+    launcher.stderr.on("data", (chunk) => stderr.push(Buffer.from(chunk)));
+    launcher.on("error", (error) => {
+      resolve({
+        error: {
+          code: "BACKGROUND_SHELL_SPAWN_ERROR",
+          message: error instanceof Error ? error.message : String(error)
+        }
+      });
+    });
+    launcher.on("close", (exitCode) => {
+      const pid = Number(Buffer.concat(stdout).toString("utf8").trim().split(/\s+/).find((part) => /^\d+$/.test(part)));
+      if (exitCode !== 0 || !Number.isFinite(pid)) {
+        resolve({
+          error: {
+            code: "BACKGROUND_SHELL_SPAWN_ERROR",
+            message: Buffer.concat(stderr).toString("utf8").trim() || `Background launcher exited ${exitCode}`
+          }
+        });
+        return;
+      }
+      resolve({ pid });
+    });
+  });
+}
+
+function startPosixBackgroundShell(input) {
+  const stdout = fs.openSync(input.stdoutPath, "a");
+  const stderr = fs.openSync(input.stderrPath, "a");
+  let child;
+  let streamsClosed = false;
+  const closeStreams = () => {
+    if (streamsClosed) {
+      return;
+    }
+    streamsClosed = true;
+    fs.closeSync(stdout);
+    fs.closeSync(stderr);
+  };
+  try {
+    child = spawn("bash", ["-lc", input.command], {
+      cwd: input.cwd,
+      env: input.scrubbed.env,
+      detached: true,
+      stdio: ["ignore", stdout, stderr]
+    });
+  } catch (error) {
+    closeStreams();
+    return {
+      error: {
+        code: "BACKGROUND_SHELL_SPAWN_ERROR",
+        message: error instanceof Error ? error.message : String(error)
+      }
+    };
+  }
+  child.unref?.();
+  child.on("close", (exitCode, signal) => {
+    updateBackgroundTerminalTask(input.taskId, {
+      status: exitCode === 0 ? "completed" : "failed",
+      exitCode,
+      signal
+    });
+    closeStreams();
+  });
+  child.on("error", (error) => {
+    updateBackgroundTerminalTask(input.taskId, {
+      status: "failed",
+      error: error instanceof Error ? error.message : String(error)
+    });
+    closeStreams();
+  });
+  return { pid: child.pid };
 }
 
 /**
@@ -182,6 +333,18 @@ function runShellCommand(input) {
       });
     });
   });
+}
+
+function sanitizeTaskId(value) {
+  return String(value ?? "")
+    .trim()
+    .replace(/[^a-zA-Z0-9_.-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+}
+
+function powerShellSingleQuoted(value) {
+  return `'${String(value ?? "").replace(/'/g, "''")}'`;
 }
 
 /**

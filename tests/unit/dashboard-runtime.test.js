@@ -1231,6 +1231,18 @@ test("dashboard runtime keeps still-running background siblings visible after wa
     assert.equal(lastSnapshot.groups[0].runningCount, 1);
     assert.equal(lastSnapshot.groups[0].wakePromptQueued, false);
 
+    const reopened = await runtime.readSession(started.sessionId);
+    assert.equal(reopened.ok, true);
+    assert.equal(reopened.session.active, true);
+    assert.equal(reopened.session.running, false);
+    assert.equal(reopened.session.backgroundSnapshot.groups.length, 1);
+    assert.equal(reopened.session.backgroundSnapshot.groups[0].groupId, "group-dashboard-any");
+    assert.equal(reopened.session.backgroundSnapshot.groups[0].status, "running");
+    const records = await runtime.listSessionRecords();
+    const record = records.find((item) => item.id === started.sessionId);
+    assert.equal(record.backgroundVisible, true);
+    assert.deepEqual(record.backgroundKinds, ["subagent"]);
+
     const group = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "task-groups", "group-dashboard-any.json"), "utf8"));
     assert.ok(group.wakePromptConsumedAt);
   } finally {
@@ -1305,6 +1317,82 @@ test("dashboard runtime reports stale background subagents and can mark them rec
     assert.ok(readTask.task.cancelRequestedAt);
     const afterCancel = runtime.listActiveEvents(started.sessionId).filter((event) => event.type === "background_subagent_snapshot").at(-1);
     assert.deepEqual(afterCancel.groups, []);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime starts cancellable background terminal tasks without blocking the turn", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-terminal-"));
+  const command = process.platform === "win32"
+    ? "Start-Sleep -Seconds 10; Write-Output done"
+    : "sleep 10; echo done";
+  const server = await listen(createSequenceGateway([
+    {
+      content: "starting background terminal",
+      toolCalls: [
+        {
+          id: "call-background-terminal",
+          name: "background_shell",
+          input: {
+            command,
+            title: "Long discover",
+            taskId: "discover-test"
+          }
+        }
+      ],
+      stopReason: "tool_calls"
+    },
+    {
+      content: "discover is running in the background",
+      toolCalls: [],
+      stopReason: "stop"
+    }
+  ]), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+  await runtime.trustWorkspace();
+
+  try {
+    const startedAt = Date.now();
+    const started = await runtime.startTurn({
+      prompt: "run long discover",
+      permissionMode: "workspace"
+    });
+    assert.equal(started.ok, true);
+
+    const startedEvents = await waitForEvent(runtime, started.sessionId, (event) =>
+      event.type === "background_subagent_snapshot"
+      && event.groups.some((group) => group.kind === "terminal" && group.taskId === "discover-test" && group.status === "running")
+    );
+    assert.equal(startedEvents.some((event) => event.rawType === "background_terminal_started"), true);
+    assert.equal(runtime.active.get(started.sessionId).running, true);
+
+    const events = await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+    assert.ok(Date.now() - startedAt < 5000);
+    const snapshot = events.filter((event) => event.type === "background_subagent_snapshot").at(-1);
+    assert.equal(snapshot.groups.some((group) => group.kind === "terminal" && group.taskId === "discover-test" && group.status === "running"), true);
+
+    const reopened = await runtime.readSession(started.sessionId);
+    assert.equal(reopened.ok, true);
+    assert.equal(reopened.session.active, true);
+    assert.equal(reopened.session.running, false);
+    assert.equal(
+      reopened.session.backgroundSnapshot.groups.some((group) =>
+        group.kind === "terminal" && group.taskId === "discover-test" && group.status === "running"
+      ),
+      true
+    );
+    const records = await runtime.listSessionRecords();
+    const record = records.find((item) => item.id === started.sessionId);
+    assert.equal(record.backgroundVisible, true);
+    assert.deepEqual(record.backgroundKinds, ["terminal"]);
+
+    const cancelled = await runtime.cancelBackgroundTerminal({
+      sessionId: started.sessionId,
+      taskId: "discover-test"
+    });
+    assert.equal(cancelled.ok, true);
+    assert.deepEqual(cancelled.cancelledTaskIds, ["discover-test"]);
   } finally {
     await close(server);
   }
@@ -1622,6 +1710,25 @@ function createRecordingGateway(requests, text) {
       content: [{ type: "text", text }],
       toolCalls: [],
       stopReason: "stop"
+    }));
+  });
+}
+
+function createSequenceGateway(responses) {
+  let index = 0;
+  return http.createServer(async (req, res) => {
+    for await (const _chunk of req) {
+      // Drain request body.
+    }
+    const response = responses[Math.min(index, responses.length - 1)] ?? {};
+    index += 1;
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      id: `tool-gateway-${index}`,
+      model: "mock-model",
+      content: [{ type: "text", text: response.content ?? "" }],
+      toolCalls: response.toolCalls ?? [],
+      stopReason: response.stopReason ?? "stop"
     }));
   });
 }

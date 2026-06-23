@@ -9,6 +9,7 @@ const TOOL_LABELS = Object.freeze({
   edit_file: "编辑文件",
   powershell: "运行 PowerShell",
   bash: "运行 Shell",
+  background_shell: "启动后台终端",
   web_fetch: "访问网页",
   web_search: "搜索网页",
   document_intake: "读取文档",
@@ -94,6 +95,11 @@ export function mapSessionEventToDashboard(event) {
       title: "子智能体后台运行中",
       status: "running",
       detail: backgroundSubagentStartedDetail(event)
+    })];
+  }
+  if (type === "background_terminal_started") {
+    return [activity("background-terminal-started", "终端后台任务运行中", backgroundTerminalStartedDetail(event), "running", "tool", event, {
+      coalesceKey: `background-terminal:${event.taskId ?? "unknown"}`
     })];
   }
   if (type === "subagent_group_progress") {
@@ -212,6 +218,15 @@ function backgroundSubagentStartedDetail(event) {
     event.groupId ? `group=${event.groupId}` : null,
     event.waitFor ? `waitFor=${event.waitFor}` : null,
     event.wakeParent === false ? "完成后仅记录结果" : "完成后自动唤醒主控"
+  ].filter(Boolean);
+  return parts.join(" · ");
+}
+
+function backgroundTerminalStartedDetail(event) {
+  const parts = [
+    event.taskId ? `task=${event.taskId}` : null,
+    event.pid ? `pid=${event.pid}` : null,
+    event.stdoutPath ? `stdout=${event.stdoutPath}` : null
   ].filter(Boolean);
   return parts.join(" · ");
 }

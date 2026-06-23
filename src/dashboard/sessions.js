@@ -9,6 +9,7 @@ import { resolveWorkspaceTrust, trustWorkspace as saveWorkspaceTrust } from "../
 import { createSessionStore } from "../storage/session-store.js";
 import { GATEWAY_PROTOCOLS, loadConfig, localProjectConfigPath } from "../config/load-config.js";
 import { cancelBackgroundAgentTasks } from "../agents/background-registry.js";
+import { cancelBackgroundTerminalTasks, listBackgroundTerminalTasks } from "../agents/background-terminal-registry.js";
 import { createAgentTaskStore } from "../agents/task-store.js";
 import { createAgentTaskGroupStore, summarizeGroupStatus } from "../agents/task-group-store.js";
 import { cloneWorkflowState } from "../tools/workflow-tools.js";
@@ -343,7 +344,8 @@ export function createDashboardRuntime(options) {
       }));
       const byId = new Map(persisted.map((record) => [record.id, record]));
       for (const state of active.values()) {
-        const activeRecord = activeSessionRecord(state, byId.get(state.session.id));
+        const snapshot = await buildBackgroundSubagentSnapshot(state);
+        const activeRecord = activeSessionRecord(state, byId.get(state.session.id), snapshot);
         byId.set(activeRecord.id, activeRecord);
       }
       return Array.from(byId.values()).sort(compareSessionRecords);
@@ -365,6 +367,8 @@ export function createDashboardRuntime(options) {
         : storedTranscript;
       const transcriptPage = createTranscriptPage(transcript);
       const finalText = activeState?.finalOutput || assistantTranscriptText(transcript);
+      const snapshotState = activeState ?? createSnapshotReadState(metadata, options.cwd);
+      const backgroundSnapshot = snapshotState ? await buildBackgroundSubagentSnapshot(snapshotState) : null;
       return {
         ok: true,
         session: {
@@ -388,6 +392,7 @@ export function createDashboardRuntime(options) {
             workflow: session.workflow ?? metadata.workflow ?? null
           }, finalText),
           workflow: session.workflow ?? metadata.workflow ?? null,
+          backgroundSnapshot: backgroundSnapshot ? publicBackgroundSnapshot(backgroundSnapshot) : null,
           modifiedAt: result.modifiedAt ?? null,
           finishedAt: metadata.finishedAt ?? null
         }
@@ -637,6 +642,38 @@ export function createDashboardRuntime(options) {
         taskId: taskId || null,
         abortedTaskIds: aborted.map((task) => task.taskId),
         updatedTaskIds: updatedTasks.map((task) => task.id),
+        sessionStatus: sessionStatusSummary(state.session)
+      };
+    },
+    async cancelBackgroundTerminal(input = {}) {
+      const sessionId = String(input.sessionId ?? "").trim();
+      const state = active.get(sessionId);
+      if (!state) {
+        return { ok: false, status: 404, error: "会话不存在" };
+      }
+      const taskId = String(input.taskId ?? "").trim();
+      if (!taskId) {
+        return { ok: false, status: 400, error: "请选择要回收的后台终端任务" };
+      }
+      const cancelled = cancelBackgroundTerminalTasks({
+        parentSessionId: state.session.id,
+        cwd: state.session.cwd,
+        taskId
+      });
+      appendDashboardEvent(state, {
+        type: "background_terminal_cancelled",
+        id: eventId("background-terminal-cancelled"),
+        taskId,
+        cancelledTaskIds: cancelled.map((task) => task.taskId),
+        sessionStatus: sessionStatusSummary(state.session),
+        at: new Date().toISOString()
+      });
+      await appendBackgroundSubagentSnapshot(state);
+      return {
+        ok: true,
+        sessionId: state.session.id,
+        taskId,
+        cancelledTaskIds: cancelled.map((task) => task.taskId),
         sessionStatus: sessionStatusSummary(state.session)
       };
     },
@@ -1710,6 +1747,33 @@ function createTurnState(session) {
   };
 }
 
+function createSnapshotReadState(metadata = {}, cwd) {
+  const id = String(metadata.id ?? "").trim();
+  if (!id) {
+    return null;
+  }
+  return {
+    session: {
+      id,
+      cwd: metadata.cwd ?? cwd,
+      model: metadata.model ?? "",
+      config: {},
+      messages: Array.isArray(metadata.transcript?.messages) ? metadata.transcript.messages : [],
+      contextWindow: metadata.context ?? null,
+      workflow: metadata.workflow ?? null
+    }
+  };
+}
+
+function publicBackgroundSnapshot(snapshot) {
+  return {
+    groups: snapshot.groups,
+    totalGroups: snapshot.totalGroups,
+    visibleGroups: snapshot.groups.length,
+    hasRecords: snapshot.hasRecords === true
+  };
+}
+
 function assistantTranscriptText(messages = []) {
   if (!Array.isArray(messages)) {
     return "";
@@ -1835,8 +1899,10 @@ function activeReplayCursor(state) {
   return index > 0 ? nonNegativeInteger(state.events[index - 1].sequence) : 0;
 }
 
-function activeSessionRecord(state, persisted = null) {
+function activeSessionRecord(state, persisted = null, backgroundSnapshot = null) {
   const modifiedAt = latestEventTime(state) ?? persisted?.modifiedAt ?? new Date().toISOString();
+  const visibleBackground = Array.isArray(backgroundSnapshot?.groups) ? backgroundSnapshot.groups : [];
+  const backgroundKinds = [...new Set(visibleBackground.map((group) => group.kind === "terminal" ? "terminal" : "subagent"))];
   return {
     id: state.session.id,
     title: state.session.title || persisted?.title || state.session.prompt || "未命名任务",
@@ -1849,7 +1915,10 @@ function activeSessionRecord(state, persisted = null) {
     encrypted: persisted?.encrypted === true,
     active: true,
     running: state.running === true,
-    queueLength: state.queuedPrompts.length
+    queueLength: state.queuedPrompts.length,
+    backgroundVisible: visibleBackground.length > 0,
+    backgroundKinds,
+    backgroundCount: visibleBackground.length
   };
 }
 
@@ -1946,6 +2015,9 @@ function runTurnInBackground(state, item, env) {
             appendDashboardEvent(state, mapped);
           }
           if (String(event.type ?? "").startsWith("subagent_group_")) {
+            await appendBackgroundSubagentSnapshot(state);
+          }
+          if (event.type === "background_terminal_started") {
             await appendBackgroundSubagentSnapshot(state);
           }
           if (event.type === "tool_finish" && (event.name === "todo_write" || event.name === "plan_update")) {
@@ -2293,6 +2365,15 @@ async function markWakePromptConsumed(state, event) {
 async function appendBackgroundSubagentSnapshot(state) {
   const snapshot = await buildBackgroundSubagentSnapshot(state);
   if (!snapshot.hasRecords && snapshot.groups.length === 0) {
+    appendDashboardEvent(state, {
+      type: "background_subagent_snapshot",
+      id: eventId("background-subagents"),
+      groups: [],
+      totalGroups: 0,
+      visibleGroups: 0,
+      sessionStatus: sessionStatusSummary(state.session),
+      at: new Date().toISOString()
+    });
     stopBackgroundSnapshotPolling(state);
     return;
   }
@@ -2346,7 +2427,40 @@ async function buildBackgroundSubagentSnapshot(state) {
         updatedAt: latestSnapshotTimestamp(group, tasks)
       });
     }
-    return { hasRecords: groups.length > 0, totalGroups: groups.length, groups: visible };
+    const terminals = listBackgroundTerminalTasks({ parentSessionId: state.session.id, cwd: state.session.cwd })
+      .filter((task) => task.status === "running")
+      .map((task) => ({
+        groupId: null,
+        taskId: task.taskId,
+        kind: "terminal",
+        profile: "terminal",
+        waitFor: null,
+        wakeParent: false,
+        status: "running",
+        stale: false,
+        staleKind: null,
+        staleReason: "",
+        lastProgressAt: task.updatedAt,
+        heartbeatAt: task.updatedAt,
+        staleSeconds: null,
+        heartbeatAgeSeconds: null,
+        cancellable: true,
+        completed: false,
+        wakePromptQueued: false,
+        summary: [
+          task.title,
+          task.pid ? `pid=${task.pid}` : null,
+          task.stdoutPath ? `stdout=${task.stdoutPath}` : null
+        ].filter(Boolean).join(" · "),
+        taskCount: 1,
+        runningCount: 1,
+        updatedAt: task.updatedAt
+      }));
+    return {
+      hasRecords: groups.length > 0 || terminals.length > 0,
+      totalGroups: groups.length + terminals.length,
+      groups: [...visible, ...terminals]
+    };
   } catch {
     return { hasRecords: false, totalGroups: 0, groups: [] };
   }

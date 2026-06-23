@@ -233,6 +233,11 @@ async function routeRequest(req, res, options) {
     const result = await options.runtime.cancelBackgroundSubagent(body);
     return sendJson(res, result.ok ? 200 : result.status ?? 400, result);
   }
+  if (req.method === "POST" && url.pathname === "/api/background-terminals/cancel") {
+    const body = await readJson(req);
+    const result = await options.runtime.cancelBackgroundTerminal(body);
+    return sendJson(res, result.ok ? 200 : result.status ?? 400, result);
+  }
   if (req.method === "POST" && url.pathname === "/api/turns/guide") {
     const body = await readJson(req);
     const result = options.runtime.guideTurn(body);

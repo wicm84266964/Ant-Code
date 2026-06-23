@@ -57,6 +57,14 @@ test("dashboard context status prefers active model messages over latest gateway
   assert.equal(text, "20k / 200k · 10% · 输入 40k");
 });
 
+test("dashboard running send button exposes interrupt action", async () => {
+  const appPath = path.resolve("src/dashboard/public/app.js");
+  const source = await fs.readFile(appPath, "utf8");
+
+  assert.match(source, /els\.sendButton\.textContent = "中断"/);
+  assert.match(source, /els\.sendButton\.title = "点击中断当前任务"/);
+});
+
 test("dashboard app keeps directory paths when linkifying file references", async () => {
   const appPath = path.resolve("src/dashboard/public/app.js");
   const source = await fs.readFile(appPath, "utf8");
@@ -185,6 +193,9 @@ test("dashboard app exposes session actions and reconnects active sessions", asy
   assert.match(source, /thread-status-badge/);
   assert.match(source, /function scheduleSessionsRefresh\(delayMs = 800\)/);
   assert.match(source, /sessionsNeedRefresh\(\)/);
+  assert.match(source, /session\.backgroundVisible/);
+  assert.match(source, /终端后台/);
+  assert.match(source, /子智能体后台/);
   assert.match(css, /\.sidebar-collapsed \.app-shell\s*\{/);
   assert.match(css, /\.thread-status-badge\[data-tone="running"\]/);
   assert.match(css, /@keyframes threadPulse/);
@@ -197,10 +208,17 @@ test("dashboard app exposes session actions and reconnects active sessions", asy
   assert.match(source, /\/transcript\?\$\{new URLSearchParams/);
   assert.match(source, /previousTop \+ delta/);
   assert.match(source, /加载更早记录/);
+  assert.match(source, /CURRENT_SESSION_STORAGE_KEY/);
+  assert.match(source, /await restoreInitialSession\(\)/);
+  assert.match(source, /initialSessionId\(\) \|\| latestBackgroundSessionId\(\)/);
+  assert.match(source, /function latestBackgroundSessionId\(\)/);
+  assert.match(source, /window\.localStorage\?\.setItem\(CURRENT_SESSION_STORAGE_KEY, id\)/);
   assert.match(source, /function copySessionId\(sessionId\)/);
   assert.match(source, /function deleteSession\(sessionId\)/);
   assert.match(source, /method: "DELETE"/);
+  assert.match(source, /const hasBackground = restoreBackgroundSnapshot\(result\.session\.backgroundSnapshot\)/);
   assert.match(source, /result\.session\.active && result\.session\.running/);
+  assert.match(source, /result\.session\.active && hasBackground/);
   assert.match(source, /rememberEventCursor\(result\.session\.eventCursor\)/);
   assert.match(source, /ensureEventsConnected\(id\)/);
 });
@@ -256,11 +274,17 @@ test("dashboard keeps background subagent status visible after the main turn end
   assert.match(app, /liveStatusExpanded: false/);
   assert.match(app, /isBackgroundSubagentActivity\(event\)/);
   assert.match(app, /handleBackgroundSubagentActivity\(event\)/);
+  assert.match(app, /function restoreBackgroundSnapshot\(snapshot\)/);
+  assert.match(app, /reconcileBackgroundSubagentSnapshot\(snapshot\.groups\)/);
   assert.match(app, /event\.type === "wakeup_queued"/);
   assert.match(app, /clearBackgroundSubagentStatus\(event\.groupId\)/);
   assert.match(app, /resetLiveStatus\(\{ keepBackgroundSubagents: true \}\)/);
   assert.match(app, /applyIdleRunStatus\("空闲"\)/);
   assert.match(app, /applyIdleRunStatus\("完成"\)/);
+  assert.match(app, /const subagents = items\.filter\(\(item\) => item\.kind !== "terminal"\)/);
+  assert.match(app, /terminals: terminals\.filter\(\(item\) => item\.status === "running"\)\.length/);
+  assert.match(app, /return "终端后台任务运行中"/);
+  assert.match(app, /return "终端后台任务回收中"/);
   assert.match(app, /return "子智能体运行中"/);
   assert.match(app, /return "等待子智能体唤醒"/);
   assert.match(app, /return "子智能体疑似失联"/);
@@ -290,6 +314,13 @@ test("dashboard composer controls keep confirmations compact and critical status
   const queueRender = app.slice(app.indexOf("function renderQueuePanel()"), app.indexOf("function renderQueueItem"));
 
   assert.match(app, /<span class="model-status-caret" aria-hidden="true">▾<\/span>/);
+  assert.ok(html.indexOf('id="question-panel"') < html.indexOf('id="live-status"'));
+  assert.ok(html.indexOf('id="approval-panel"') < html.indexOf('id="live-status"'));
+  assert.match(app, /function revealInteractionPanel\(panel, focusSelector\)/);
+  assert.match(app, /showApproval[\s\S]*revealInteractionPanel\(els\.approvalPanel, "button\[data-action\]"\)/);
+  assert.match(app, /showQuestion[\s\S]*revealInteractionPanel\(els\.questionPanel, "\.question-input, button\[data-choice\], button\[data-action='submit'\]"\)/);
+  assert.match(app, /scrollIntoView\?\.\(\{ block: "nearest", inline: "nearest" \}\)/);
+  assert.match(app, /focus\(\{ preventScroll: true \}\)/);
   assert.match(questionRender, /<div class="question-read-pane">[\s\S]*question-copy[\s\S]*question-input[\s\S]*<div class="question-actions">/);
   assert.match(questionReadPane, /question-title/);
   assert.match(questionReadPane, /question-copy/);
