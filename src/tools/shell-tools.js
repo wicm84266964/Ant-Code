@@ -7,6 +7,7 @@ import { scrubEnvironment } from "./env-scrubber.js";
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 120_000;
 const DEFAULT_BACKGROUND_LOG_DIR = ".lab-agent/background-terminal";
+const DEFAULT_BACKGROUND_LAUNCH_TIMEOUT_MS = 15_000;
 
 /**
  * @param {{ cwd: string; command: string; timeoutMs?: number; env?: NodeJS.ProcessEnv; signal?: AbortSignal; policy?: Record<string, any> }} input
@@ -49,35 +50,57 @@ export async function backgroundShellTool(input) {
   const stdoutPath = path.join(logDir, `${taskId}.stdout.log`);
   const stderrPath = path.join(logDir, `${taskId}.stderr.log`);
   const scrubbed = scrubEnvironment(input.env ?? process.env, { allowSensitive: input.policy?.fullAccess === true });
-  const started = process.platform === "win32"
-    ? await startWindowsBackgroundShell({ ...input, taskId, logDir, stdoutPath, stderrPath, scrubbed })
-    : startPosixBackgroundShell({ ...input, taskId, stdoutPath, stderrPath, scrubbed });
-  if (started.error) {
-    return {
-      taskId,
-      command: input.command,
-      exitCode: null,
-      started: false,
-      stdoutPath,
-      stderrPath,
-      scrubbedEnv: scrubbed.removed,
-      error: started.error
-    };
-  }
   registerBackgroundTerminalTask({
     taskId,
     parentSessionId: input.parentSessionId,
     title: input.title,
     command: input.command,
     cwd: input.cwd,
-    pid: started.pid,
+    pid: null,
     stdoutPath,
-    stderrPath
+    stderrPath,
+    status: "starting"
+  });
+  await notifyBackgroundTerminalEvent(input, {
+    type: "background_terminal_registered",
+    taskId,
+    stdoutPath,
+    stderrPath,
+    command: input.command,
+    status: "starting"
+  });
+  const started = process.platform === "win32"
+    ? await startWindowsBackgroundShell({ ...input, taskId, logDir, stdoutPath, stderrPath, scrubbed })
+    : startPosixBackgroundShell({ ...input, taskId, stdoutPath, stderrPath, scrubbed });
+  if (started.error) {
+    updateBackgroundTerminalTask(taskId, {
+      status: started.cancelled ? "cancelled" : "failed",
+      error: started.error.message,
+      launcherPid: started.launcherPid ?? null,
+      cancelledAt: started.cancelled ? new Date().toISOString() : null
+    });
+    return {
+      taskId,
+      command: input.command,
+      exitCode: null,
+      started: false,
+      launcherPid: started.launcherPid ?? null,
+      stdoutPath,
+      stderrPath,
+      scrubbedEnv: scrubbed.removed,
+      error: started.error
+    };
+  }
+  updateBackgroundTerminalTask(taskId, {
+    status: "running",
+    pid: started.pid,
+    launcherPid: started.launcherPid ?? null
   });
   return {
     taskId,
     command: input.command,
     pid: started.pid,
+    launcherPid: started.launcherPid ?? null,
     started: true,
     detached: true,
     stdoutPath,
@@ -104,18 +127,66 @@ async function startWindowsBackgroundShell(input) {
     ""
   ].join("\r\n"), "utf8");
   return new Promise((resolve) => {
+    let settled = false;
+    let launcherPid = null;
     const launcher = spawn("powershell.exe", ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", launcherPath], {
       cwd: input.cwd,
       env: input.scrubbed.env,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"]
     });
+    const finish = (result) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      input.signal?.removeEventListener?.("abort", onAbort);
+      resolve({ launcherPid, ...result });
+    };
+    const terminateLauncher = () => {
+      if (launcher.pid) {
+        killWindowsProcessTree(launcher.pid);
+      }
+      try {
+        launcher.kill("SIGTERM");
+      } catch {
+        // The launcher may already have exited.
+      }
+    };
+    const onAbort = () => {
+      terminateLauncher();
+      finish({
+        cancelled: true,
+        error: {
+          code: "BACKGROUND_SHELL_INTERRUPTED",
+          message: "Background shell launcher was interrupted by the local user."
+        }
+      });
+    };
+    const timeout = setTimeout(() => {
+      terminateLauncher();
+      finish({
+        error: {
+          code: "BACKGROUND_SHELL_LAUNCH_TIMEOUT",
+          message: "Background shell launcher timed out before returning a process id."
+        }
+      });
+    }, DEFAULT_BACKGROUND_LAUNCH_TIMEOUT_MS);
+    input.signal?.addEventListener?.("abort", onAbort, { once: true });
     const stdout = [];
     const stderr = [];
     launcher.stdout.on("data", (chunk) => stdout.push(Buffer.from(chunk)));
     launcher.stderr.on("data", (chunk) => stderr.push(Buffer.from(chunk)));
+    launcher.on("spawn", () => {
+      launcherPid = launcher.pid ?? null;
+      updateBackgroundTerminalTask(input.taskId, { launcherPid });
+      if (input.signal?.aborted) {
+        onAbort();
+      }
+    });
     launcher.on("error", (error) => {
-      resolve({
+      finish({
         error: {
           code: "BACKGROUND_SHELL_SPAWN_ERROR",
           message: error instanceof Error ? error.message : String(error)
@@ -123,9 +194,12 @@ async function startWindowsBackgroundShell(input) {
       });
     });
     launcher.on("close", (exitCode) => {
+      if (settled) {
+        return;
+      }
       const pid = Number(Buffer.concat(stdout).toString("utf8").trim().split(/\s+/).find((part) => /^\d+$/.test(part)));
       if (exitCode !== 0 || !Number.isFinite(pid)) {
-        resolve({
+        finish({
           error: {
             code: "BACKGROUND_SHELL_SPAWN_ERROR",
             message: Buffer.concat(stderr).toString("utf8").trim() || `Background launcher exited ${exitCode}`
@@ -133,7 +207,7 @@ async function startWindowsBackgroundShell(input) {
         });
         return;
       }
-      resolve({ pid });
+      finish({ pid });
     });
   });
 }
@@ -184,6 +258,13 @@ function startPosixBackgroundShell(input) {
     closeStreams();
   });
   return { pid: child.pid };
+}
+
+async function notifyBackgroundTerminalEvent(input, event) {
+  if (typeof input.onBackgroundTerminalEvent !== "function") {
+    return;
+  }
+  await input.onBackgroundTerminalEvent(event);
 }
 
 /**

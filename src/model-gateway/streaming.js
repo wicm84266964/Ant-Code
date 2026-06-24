@@ -1,15 +1,15 @@
 import { emptyResponse, normalizeGatewayResponse } from "./protocol.js";
 
 /**
- * Parse a gateway streaming response.
+ * Parse a lab gateway streaming response.
  *
- * MVP supports two native streaming encodings:
+ * MVP supports two lab-owned streaming encodings:
  * - text/event-stream with `data: {...}` records
  * - application/x-ndjson with one JSON object per line
  *
  * @param {ReadableStream<Uint8Array> | null} body
  * @param {string | null} contentType
- * @param {{ onEvent?: (event: Record<string, any>) => void | Promise<void> }} [options]
+ * @param {{ onEvent?: (event: Record<string, any>) => void | Promise<void>; signal?: AbortSignal; idleTimeoutMs?: number }} [options]
  */
 export async function parseGatewayStream(body, contentType, options = {}) {
   if (!body) {
@@ -58,7 +58,7 @@ async function parseServerSentEvents(body, options = {}) {
   const records = [];
   const response = emptyResponse();
   let text = "";
-  for await (const chunk of streamTextChunks(body)) {
+  for await (const chunk of streamTextChunks(body, options)) {
     text += chunk;
     const parts = text.split(/\r?\n\r?\n/);
     text = parts.pop() ?? "";
@@ -101,7 +101,7 @@ async function parseNewlineDelimitedJson(body, options = {}) {
   const records = [];
   const response = emptyResponse();
   let text = "";
-  for await (const chunk of streamTextChunks(body)) {
+  for await (const chunk of streamTextChunks(body, options)) {
     text += chunk;
     const lines = text.split(/\r?\n/);
     text = lines.pop() ?? "";
@@ -212,20 +212,88 @@ function applyStreamRecordPayload(response, record) {
 /**
  * @param {ReadableStream<Uint8Array>} body
  */
-async function* streamTextChunks(body) {
+async function* streamTextChunks(body, options = {}) {
   const reader = body.getReader();
   const decoder = new TextDecoder();
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
+  try {
+    while (true) {
+      const { done, value } = await readStreamChunk(reader, options);
+      if (done) {
+        break;
+      }
+      yield decoder.decode(value, { stream: true });
     }
-    yield decoder.decode(value, { stream: true });
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // Reader may already be released after stream completion.
+    }
   }
   const rest = decoder.decode();
   if (rest) {
     yield rest;
   }
+}
+
+function readStreamChunk(reader, options = {}) {
+  const signal = options.signal;
+  const idleTimeoutMs = Number.isFinite(options.idleTimeoutMs) ? Math.max(1000, Math.trunc(options.idleTimeoutMs)) : null;
+  if (signal?.aborted) {
+    return Promise.reject(abortError(signal.reason));
+  }
+  if (!idleTimeoutMs) {
+    return reader.read();
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener?.("abort", onAbort);
+      callback(value);
+    };
+    const timer = setTimeout(() => {
+      cancelReader(reader, timeoutError(idleTimeoutMs));
+      finish(reject, timeoutError(idleTimeoutMs));
+    }, idleTimeoutMs);
+    const onAbort = () => {
+      cancelReader(reader, signal.reason);
+      finish(reject, abortError(signal.reason));
+    };
+    signal?.addEventListener?.("abort", onAbort, { once: true });
+    reader.read().then(
+      (chunk) => finish(resolve, chunk),
+      (error) => finish(reject, error)
+    );
+  });
+}
+
+function cancelReader(reader, reason) {
+  try {
+    Promise.resolve(reader.cancel(reason)).catch(() => {});
+  } catch {
+    // Best effort.
+  }
+}
+
+function abortError(reason) {
+  if (reason instanceof Error) {
+    return reason;
+  }
+  const error = new Error("stream read aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function timeoutError(ms) {
+  const error = new Error(`Gateway stream idle timeout after ${ms}ms`);
+  error.name = "AbortError";
+  error.code = "GATEWAY_STREAM_IDLE_TIMEOUT";
+  return error;
 }
 
 /**

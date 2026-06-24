@@ -134,7 +134,9 @@ const DEFAULT_CONFIG = Object.freeze({
     gatewayHealthUrl: null,
     gatewayProtocol: "lab-agent-gateway",
     gatewayApiKey: null,
-    gatewayMaxRetries: 2
+    gatewayMaxRetries: 2,
+    gatewayTimeoutMs: 180000,
+    gatewayIdleTimeoutMs: 60000
   }
 });
 
@@ -146,7 +148,7 @@ const DEFAULT_CONFIG = Object.freeze({
  */
 
 /**
- * Load config from defaults, project JSON, managed JSON, and environment.
+ * Load config from defaults, project JSON, lab-managed JSON, and environment.
  *
  * Precedence: defaults < project config < lab config < environment.
  *
@@ -176,6 +178,8 @@ export async function loadConfig(options = {}) {
     gatewayProtocol: env.LAB_MODEL_GATEWAY_PROTOCOL ?? hardened.lab?.gatewayProtocol ?? "lab-agent-gateway",
     gatewayApiKey: env.LAB_MODEL_GATEWAY_API_KEY ?? hardened.lab?.gatewayApiKey ?? null,
     gatewayMaxRetries: parseOptionalInteger(env.LAB_MODEL_GATEWAY_MAX_RETRIES, hardened.lab?.gatewayMaxRetries ?? 2),
+    gatewayTimeoutMs: parseOptionalInteger(env.LAB_MODEL_GATEWAY_TIMEOUT_MS, hardened.lab?.gatewayTimeoutMs ?? 180000),
+    gatewayIdleTimeoutMs: parseOptionalInteger(env.LAB_MODEL_GATEWAY_IDLE_TIMEOUT_MS, hardened.lab?.gatewayIdleTimeoutMs ?? 60000),
     activeGatewayProfile: typeof hardened.lab?.activeGatewayProfile === "string" ? hardened.lab.activeGatewayProfile : "",
     gatewayProfiles: Array.isArray(hardened.lab?.gatewayProfiles) ? hardened.lab.gatewayProfiles : [],
     configPath: labConfigPath
@@ -772,7 +776,7 @@ function validateVisionAgentConfig(value) {
 }
 
 /**
- * @param {{ gatewayProtocol?: string; gatewayApiKey?: string | null; gatewayMaxRetries?: number }} lab
+ * @param {{ gatewayProtocol?: string; gatewayApiKey?: string | null; gatewayMaxRetries?: number; gatewayTimeoutMs?: number; gatewayIdleTimeoutMs?: number }} lab
  */
 function validateLabConfig(lab) {
   const protocol = lab.gatewayProtocol ?? "lab-agent-gateway";
@@ -784,6 +788,12 @@ function validateLabConfig(lab) {
   }
   if (!Number.isInteger(lab.gatewayMaxRetries) || lab.gatewayMaxRetries < 0 || lab.gatewayMaxRetries > 5) {
     throw new Error(`Unsupported lab.gatewayMaxRetries: ${lab.gatewayMaxRetries}`);
+  }
+  if (!Number.isInteger(lab.gatewayTimeoutMs) || lab.gatewayTimeoutMs < 1000 || lab.gatewayTimeoutMs > 900000) {
+    throw new Error(`Unsupported lab.gatewayTimeoutMs: ${lab.gatewayTimeoutMs}`);
+  }
+  if (!Number.isInteger(lab.gatewayIdleTimeoutMs) || lab.gatewayIdleTimeoutMs < 1000 || lab.gatewayIdleTimeoutMs > 300000) {
+    throw new Error(`Unsupported lab.gatewayIdleTimeoutMs: ${lab.gatewayIdleTimeoutMs}`);
   }
 }
 

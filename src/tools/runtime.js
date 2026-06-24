@@ -229,6 +229,9 @@ export function createToolRuntime(options) {
           parentSessionId: name === "background_shell"
             ? options.backgroundParentSessionId ?? options.parentSessionId
             : options.parentSessionId,
+          onBackgroundTerminalEvent: name === "background_shell"
+            ? options.onBackgroundTerminalEvent
+            : undefined,
           signal: options.signal,
           policy: {
             ...(options.policy ?? {}),

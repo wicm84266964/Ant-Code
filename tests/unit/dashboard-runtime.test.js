@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { createAgentTaskGroupStore } from "../../src/agents/task-group-store.js";
 import { createAgentTaskStore } from "../../src/agents/task-store.js";
+import { registerBackgroundTerminalTask } from "../../src/agents/background-terminal-registry.js";
 import { createDashboardRuntime } from "../../src/dashboard/sessions.js";
 import { createSessionStore } from "../../src/storage/session-store.js";
 
@@ -29,6 +30,36 @@ test("dashboard runtime runs a turn and writes shared session metadata", async (
     assert.equal(records.length, 1);
     assert.equal(records[0].id, started.sessionId);
     assert.equal(records[0].title, "hello dashboard");
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime force-releases a turn when an interrupted gateway request hangs", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createHangingGateway(), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: mockGatewayEnv(server, {
+      ANT_CODE_INTERRUPT_FORCE_SETTLE_MS: "50",
+      LAB_MODEL_GATEWAY_TIMEOUT_MS: "600000"
+    })
+  });
+
+  try {
+    await runtime.trustWorkspace();
+    const started = await runtime.startTurn({
+      prompt: "hang then interrupt",
+      permissionMode: "plan"
+    });
+    assert.equal(started.ok, true);
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "activity" && event.rawType === "gateway_request_start");
+
+    const interrupted = runtime.interruptTurn(started.sessionId, "user");
+    assert.equal(interrupted.ok, true);
+    const events = await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+    assert.equal(runtime.active.get(started.sessionId).running, false);
+    assert.equal(events.some((event) => event.type === "activity" && event.rawType === "turn_interrupted"), true);
   } finally {
     await close(server);
   }
@@ -1398,6 +1429,42 @@ test("dashboard runtime starts cancellable background terminal tasks without blo
   }
 });
 
+test("dashboard runtime shows starting background terminal tasks before pid is available", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-terminal-starting-"));
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+  await runtime.trustWorkspace();
+  const started = await runtime.startTurn({
+    prompt: "seed session",
+    permissionMode: "workspace"
+  });
+  assert.equal(started.ok, true);
+  await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+
+  registerBackgroundTerminalTask({
+    taskId: "starting-terminal",
+    parentSessionId: started.sessionId,
+    title: "Starting terminal",
+    command: "blocked by endpoint security",
+    cwd,
+    stdoutPath: path.join(cwd, ".lab-agent", "background-terminal", "starting-terminal.stdout.log"),
+    stderrPath: path.join(cwd, ".lab-agent", "background-terminal", "starting-terminal.stderr.log"),
+    status: "starting"
+  });
+
+  const reopened = await runtime.readSession(started.sessionId);
+  assert.equal(reopened.ok, true);
+  assert.equal(
+    reopened.session.backgroundSnapshot.groups.some((group) =>
+      group.kind === "terminal" && group.taskId === "starting-terminal" && group.status === "starting"
+    ),
+    true
+  );
+  const records = await runtime.listSessionRecords();
+  const record = records.find((item) => item.id === started.sessionId);
+  assert.equal(record.backgroundVisible, true);
+  assert.deepEqual(record.backgroundKinds, ["terminal"]);
+});
+
 test("dashboard runtime cancels queued prompts before they run", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
   const server = await listen(createDelayedGateway(["first answer", "second answer"], 80), "127.0.0.1", 0);
@@ -2097,6 +2164,15 @@ function createTodoGateway() {
       toolCalls: [],
       stopReason: "stop"
     }));
+  });
+}
+
+function createHangingGateway() {
+  return http.createServer(async (req, res) => {
+    for await (const _ of req) {
+      // Drain request body, then deliberately never complete the response.
+    }
+    res.writeHead(200, { "content-type": "application/json" });
   });
 }
 

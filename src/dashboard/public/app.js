@@ -792,9 +792,14 @@ async function sendPrompt() {
   els.promptInput.value = "";
   clearAttachments();
   state.queue = result.queue ?? state.queue;
+  state.running = result.running === true || state.running;
   updateSessionStatus(result.sessionStatus);
   updateTurnChangeStats(result.changeStats, { replace: true });
   renderQueuePanel();
+  if (result.running === true) {
+    els.runStatus.textContent = "运行中";
+    setLiveTitle("正在处理你的任务");
+  }
   updateSendButton();
   const previousSessionId = state.currentSessionId;
   state.currentSessionId = result.sessionId;
@@ -1769,7 +1774,7 @@ function backgroundSubagentDisplayStatus(activity, previous) {
 }
 
 function backgroundSubagentVisible(activity) {
-  return activity.status === "running" || activity.status === "waiting" || activity.status === "stale" || activity.status === "lost";
+  return activity.status === "starting" || activity.status === "running" || activity.status === "waiting" || activity.status === "stale" || activity.status === "lost";
 }
 
 function updateLiveActivity(activity) {
@@ -1831,6 +1836,9 @@ function updateLiveStatus() {
 function liveStatusTitle(primary, subtasks, background) {
   if (background.length > 0 && (!primary || primary.title === "开始任务")) {
     const counts = backgroundSubagentCounts();
+    if (counts.terminalStarting > 0) {
+      return `${counts.terminalStarting} 个终端后台任务启动中`;
+    }
     if (counts.terminals > 0) {
       return `${counts.terminals} 个终端后台任务运行中`;
     }
@@ -1900,6 +1908,7 @@ function renderBackgroundSubagentStatus(background) {
 
 function backgroundSubagentCompactLabel(item) {
   if (item.kind === "terminal") {
+    if (item.status === "starting") return "终端任务启动中";
     if (item.status === "stale") return "终端任务回收中";
     return "终端后台运行";
   }
@@ -1912,6 +1921,7 @@ function backgroundSubagentCompactLabel(item) {
 
 function backgroundSubagentTitle(item) {
   if (item.kind === "terminal") {
+    if (item.status === "starting") return "终端后台任务启动中";
     if (item.status === "stale") return "终端后台任务回收中";
     return "终端后台任务运行中";
   }
@@ -1926,6 +1936,7 @@ function backgroundSubagentMeta(item) {
   if (item.kind === "terminal") {
     return [
       item.taskId ? `task=${item.taskId}` : null,
+      item.status === "starting" ? "启动中" : null,
       item.runningCount === 1 ? "运行中" : null,
       item.lastProgressAt ? `更新 ${formatRelativeTime(item.lastProgressAt)}` : null
     ].filter(Boolean).join(" · ");
@@ -1942,7 +1953,7 @@ function backgroundSubagentMeta(item) {
 }
 
 function backgroundSubagentCancellable(item) {
-  return item.cancellable !== false && (item.status === "running" || item.status === "stale" || item.status === "lost");
+  return item.cancellable !== false && (item.status === "starting" || item.status === "running" || item.status === "stale" || item.status === "lost");
 }
 
 function resetLiveStatus(options = {}) {
@@ -1963,6 +1974,7 @@ function backgroundSubagentCounts() {
   const terminals = items.filter((item) => item.kind === "terminal");
   return {
     running: subagents.filter((item) => item.status === "running").length,
+    terminalStarting: terminals.filter((item) => item.status === "starting").length,
     terminals: terminals.filter((item) => item.status === "running").length,
     terminalStale: terminals.filter((item) => item.status === "stale").length,
     stale: subagents.filter((item) => item.status === "stale").length,
@@ -1973,6 +1985,9 @@ function backgroundSubagentCounts() {
 
 function idleRunStatus(fallback) {
   const counts = backgroundSubagentCounts();
+  if (counts.terminalStarting > 0) {
+    return "终端后台任务启动中";
+  }
   if (counts.terminals > 0) {
     return "终端后台任务运行中";
   }
@@ -2349,11 +2364,11 @@ function renderModelConfigPanel() {
         </label>
         <label>
           <span>模型 ID</span>
-          <input name="modelId" required spellcheck="false" value="${escapeAttribute(current.id || "")}" placeholder="example-chat-model" />
+          <input name="modelId" required spellcheck="false" value="${escapeAttribute(current.id || "")}" placeholder="mimo-v2.5" />
         </label>
         <label>
           <span>显示名称</span>
-          <input name="label" spellcheck="false" value="${escapeAttribute(current.label || "")}" placeholder="Example Chat Model" />
+          <input name="label" spellcheck="false" value="${escapeAttribute(current.label || "")}" placeholder="Mimo v2.5" />
         </label>
         <label>
           <span>上下文窗口</span>
@@ -2365,15 +2380,15 @@ function renderModelConfigPanel() {
         </label>
         <label>
           <span>子智能体 default</span>
-          <input name="agentDefaultModel" spellcheck="false" value="${escapeAttribute(currentAgentTiers.default)}" placeholder="例如 example-chat-model" />
+          <input name="agentDefaultModel" spellcheck="false" value="${escapeAttribute(currentAgentTiers.default)}" placeholder="例如 mimo-v2.5" />
         </label>
         <label>
           <span>子智能体 strong</span>
-          <input name="agentStrongModel" spellcheck="false" value="${escapeAttribute(currentAgentTiers.strong)}" placeholder="例如 example-chat-model" />
+          <input name="agentStrongModel" spellcheck="false" value="${escapeAttribute(currentAgentTiers.strong)}" placeholder="例如 mimo-v2.5" />
         </label>
         <label>
           <span>视觉子智能体</span>
-          <input name="visionAgentModel" spellcheck="false" value="${escapeAttribute(visionAgentModel)}" placeholder="例如 example-vision-model" />
+          <input name="visionAgentModel" spellcheck="false" value="${escapeAttribute(visionAgentModel)}" placeholder="例如 mimo-v2.5" />
         </label>
       </div>
       <div class="model-config-toggles">

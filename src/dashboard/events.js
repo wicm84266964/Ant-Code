@@ -102,6 +102,11 @@ export function mapSessionEventToDashboard(event) {
       coalesceKey: `background-terminal:${event.taskId ?? "unknown"}`
     })];
   }
+  if (type === "background_terminal_registered") {
+    return [activity("background-terminal-registered", "终端后台任务启动中", backgroundTerminalStartedDetail(event), "running", "tool", event, {
+      coalesceKey: `background-terminal:${event.taskId ?? "unknown"}`
+    })];
+  }
   if (type === "subagent_group_progress") {
     return [backgroundSubagentActivity(event, {
       title: event.completed ? "子任务组已完成" : "子任务组仍在运行",

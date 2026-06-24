@@ -5,6 +5,7 @@ import path from "node:path";
 const running = new Map();
 const terminal = new Map();
 const DEFAULT_REGISTRY_DIR = ".lab-agent/background-terminal/tasks";
+const ACTIVE_STATUSES = new Set(["starting", "running"]);
 
 export function registerBackgroundTerminalTask(task) {
   const id = String(task?.taskId ?? "").trim();
@@ -19,23 +20,28 @@ export function registerBackgroundTerminalTask(task) {
     command: task.command ? String(task.command) : "",
     cwd: task.cwd ? String(task.cwd) : null,
     pid: Number.isFinite(task.pid) ? task.pid : null,
+    launcherPid: Number.isFinite(task.launcherPid) ? task.launcherPid : null,
     stdoutPath: task.stdoutPath ? String(task.stdoutPath) : null,
     stderrPath: task.stderrPath ? String(task.stderrPath) : null,
     exitCode: null,
     signal: null,
-    status: "running",
+    status: task.status ? String(task.status) : "running",
     startedAt: now,
     updatedAt: now,
     finishedAt: null,
     cancelledAt: null
   });
-  running.set(id, entry);
+  if (ACTIVE_STATUSES.has(entry.status)) {
+    running.set(id, entry);
+  } else {
+    running.delete(id);
+  }
   terminal.set(id, entry);
   persistTask(entry);
   return () => {
     running.delete(id);
     const current = terminal.get(id);
-    if (current && current.status === "running") {
+    if (current && ACTIVE_STATUSES.has(current.status)) {
       current.status = "completed";
       current.updatedAt = new Date().toISOString();
       current.finishedAt = current.updatedAt;
@@ -55,7 +61,7 @@ export function updateBackgroundTerminalTask(taskId, patch = {}) {
     patch = rest;
   }
   Object.assign(current, patch, { updatedAt: new Date().toISOString() });
-  if (current.status !== "running") {
+  if (!ACTIVE_STATUSES.has(current.status)) {
     running.delete(id);
     current.finishedAt = current.finishedAt ?? current.updatedAt;
   }
@@ -79,13 +85,16 @@ export function cancelBackgroundTerminalTasks(options = {}) {
   const parentSessionId = options.parentSessionId ? String(options.parentSessionId) : null;
   const taskId = options.taskId ? String(options.taskId) : null;
   const tasks = [...terminal.values()]
-    .filter((task) => task.status === "running")
+    .filter((task) => ACTIVE_STATUSES.has(task.status))
     .filter((task) => !parentSessionId || task.parentSessionId === parentSessionId)
     .filter((task) => !taskId || task.taskId === taskId);
   const now = new Date().toISOString();
   for (const task of tasks) {
     if (task.pid) {
       terminateProcessTree(task.pid);
+    }
+    if (task.launcherPid && task.launcherPid !== task.pid) {
+      terminateProcessTree(task.launcherPid);
     }
     task.status = "cancelled";
     task.cancelledAt = now;
@@ -105,7 +114,7 @@ function refreshPersistedTasks(cwd) {
     const next = reconcileTerminalTaskLiveness(source);
     refreshed.add(next.taskId);
     terminal.set(next.taskId, next);
-    if (next.status === "running") {
+    if (ACTIVE_STATUSES.has(next.status)) {
       running.set(next.taskId, next);
     } else {
       running.delete(next.taskId);
@@ -123,7 +132,7 @@ function refreshPersistedTasks(cwd) {
       continue;
     }
     terminal.set(next.taskId, next);
-    if (next.status === "running") {
+    if (ACTIVE_STATUSES.has(next.status)) {
       running.set(next.taskId, next);
     } else {
       running.delete(next.taskId);
@@ -133,13 +142,23 @@ function refreshPersistedTasks(cwd) {
 }
 
 function reconcileTerminalTaskLiveness(task) {
-  if (!task || task.status !== "running" || isProcessAlive(task.pid)) {
+  if (!task || !ACTIVE_STATUSES.has(task.status)) {
+    return task;
+  }
+  if (task.status === "starting" && task.launcherPid && isProcessAlive(task.launcherPid)) {
+    return task;
+  }
+  if (task.status === "starting" && !task.launcherPid) {
+    return task;
+  }
+  if (task.status === "running" && isProcessAlive(task.pid)) {
     return task;
   }
   const now = new Date().toISOString();
   return {
     ...task,
-    status: "completed",
+    status: task.status === "starting" ? "failed" : "completed",
+    error: task.status === "starting" ? "Background terminal launcher exited before a worker process id was recorded." : task.error,
     finishedAt: task.finishedAt ?? now,
     updatedAt: now
   };
@@ -203,6 +222,7 @@ function normalizeTask(task) {
     command: task?.command ? String(task.command) : "",
     cwd: task?.cwd ? String(task.cwd) : null,
     pid: Number.isFinite(task?.pid) ? task.pid : null,
+    launcherPid: Number.isFinite(task?.launcherPid) ? task.launcherPid : null,
     stdoutPath: task?.stdoutPath ? String(task.stdoutPath) : null,
     stderrPath: task?.stderrPath ? String(task.stderrPath) : null,
     exitCode: Number.isFinite(task?.exitCode) ? task.exitCode : null,

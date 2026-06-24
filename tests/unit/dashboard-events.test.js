@@ -128,6 +128,22 @@ test("dashboard maps background subagent group start to live activity", () => {
   assert.match(events[0].detail, /自动唤醒主控/);
 });
 
+test("dashboard maps background terminal registration before pid is available", () => {
+  const events = mapSessionEventToDashboard({
+    type: "background_terminal_registered",
+    taskId: "terminal-starting",
+    stdoutPath: "out.log"
+  });
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, "activity");
+  assert.equal(events[0].title, "终端后台任务启动中");
+  assert.equal(events[0].status, "running");
+  assert.equal(events[0].coalesceKey, "background-terminal:terminal-starting");
+  assert.match(events[0].detail, /task=terminal-starting/);
+  assert.match(events[0].detail, /stdout=out\.log/);
+});
+
 test("dashboard maps background subagent progress without wake prompt text", () => {
   const events = mapSessionEventToDashboard({
     type: "subagent_group_progress",

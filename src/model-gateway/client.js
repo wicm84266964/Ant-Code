@@ -10,9 +10,11 @@ import { createGatewayRequest, normalizeGatewayResponse } from "./protocol.js";
 import { parseGatewayStream } from "./streaming.js";
 
 const DEFAULT_GATEWAY_MAX_RETRIES = 2;
+const DEFAULT_GATEWAY_TIMEOUT_MS = 180000;
+const DEFAULT_GATEWAY_IDLE_TIMEOUT_MS = 60000;
 const BASE_RETRY_DELAY_MS = 350;
 const MAX_RETRY_DELAY_MS = 1500;
-const TRANSIENT_GATEWAY_RETRY_ERROR_PATTERN = /KVTransferError|WaitingForInput|Decode transfer failed|premature close|stream.*interrupted/i;
+const MIMO_RETRY_ERROR_PATTERN = /KVTransferError|WaitingForInput|Decode transfer failed|premature close|stream.*interrupted/i;
 
 /**
  * @param {import("../config/load-config.js").LabAgentConfig} config
@@ -68,32 +70,39 @@ export function createLabModelGateway(config) {
 
       const maxRetries = resolveGatewayMaxRetries(config);
       const maxAttempts = maxRetries + 1;
+      const timeoutMs = resolveGatewayTimeoutMs(config);
+      const idleTimeoutMs = resolveGatewayIdleTimeoutMs(config);
       const retryHistory = [];
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         let response;
         const startedAt = Date.now();
+        const attemptAbort = createGatewayAttemptAbort(request.signal, timeoutMs);
         try {
           response = await fetch(config.lab.gatewayUrl, {
             method: "POST",
             headers: createHeaders(config, request.sessionId),
             body: JSON.stringify(gatewayRequest),
-            signal: request.signal
+            signal: attemptAbort.signal
           });
         } catch (error) {
+          attemptAbort.cleanup();
           const retryable = shouldRetryGatewayFetchError(error, {
             attempt,
             maxAttempts,
-            signal: request.signal
+            signal: attemptAbort.signal
           });
           retryHistory.push(errorRetrySummary(error, attempt, retryable, "fetch"));
           if (!retryable) {
             return {
               ok: false,
               error: normalizeGatewayError(error, {
+                code: attemptAbort.timedOut ? "GATEWAY_TIMEOUT" : undefined,
+                message: attemptAbort.timedOut ? `Gateway request timed out after ${timeoutMs}ms` : undefined,
                 details: {
                   attempts: attempt,
                   maxAttempts,
                   retryable: false,
+                  timeoutMs,
                   retryHistory
                 }
               })
@@ -115,7 +124,53 @@ export function createLabModelGateway(config) {
 
         const responseHeaderMs = Date.now() - startedAt;
         if (!response.ok) {
-          const body = await boundedResponseText(response);
+          let body;
+          try {
+            body = await boundedResponseText(response, {
+              signal: attemptAbort.signal,
+              idleTimeoutMs
+            });
+          } catch (error) {
+            attemptAbort.cleanup();
+            const retryable = shouldRetryGatewayFetchError(error, {
+              attempt,
+              maxAttempts,
+              signal: attemptAbort.signal
+            });
+            retryHistory.push(errorRetrySummary(error, attempt, retryable, "http_body"));
+            if (!retryable) {
+              return {
+                ok: false,
+                error: normalizeGatewayError(error, {
+                  code: attemptAbort.timedOut ? "GATEWAY_TIMEOUT" : undefined,
+                  message: attemptAbort.timedOut ? `Gateway request timed out after ${timeoutMs}ms` : undefined,
+                  details: {
+                    attempts: attempt,
+                    maxAttempts,
+                    retryable: false,
+                    responseHeaderMs,
+                    timeoutMs,
+                    idleTimeoutMs,
+                    retryHistory
+                  }
+                })
+              };
+            }
+            const delayed = await emitRetryAndDelay(request, {
+              attempt,
+              maxAttempts,
+              retryHistory,
+              delayMs: retryDelayMs(attempt),
+              error,
+              stage: "http_body"
+            });
+            if (!delayed) {
+              return abortedRetryError(attempt, maxAttempts, retryHistory);
+            }
+            continue;
+          } finally {
+            attemptAbort.cleanup();
+          }
           const error = normalizeGatewayError(null, {
             code: "GATEWAY_HTTP_ERROR",
             message: `Gateway returned HTTP ${response.status}`,
@@ -156,24 +211,32 @@ export function createLabModelGateway(config) {
         let data;
         try {
           const contentType = response.headers.get("content-type");
-          data = isStreamingContentType(contentType)
-            ? await parseStreamForProtocol(protocol, response.body, contentType, request.onEvent, config)
-            : normalizeResponseForProtocol(protocol, await response.json(), config);
+          data = await parseResponseForProtocol(protocol, response, contentType, request.onEvent, config, {
+            signal: attemptAbort.signal,
+            idleTimeoutMs
+          });
+          attemptAbort.cleanup();
         } catch (error) {
+          attemptAbort.cleanup();
           const contentType = response.headers.get("content-type") ?? "";
           const streamInterrupted = isGatewayStreamInterruptedError(error);
           const normalized = normalizeGatewayError(error, {
-            code: streamInterrupted ? "GATEWAY_STREAM_INTERRUPTED" : "GATEWAY_RESPONSE_PARSE_ERROR",
-            message: streamInterrupted
-              ? "Gateway response stream was interrupted before it could be fully read"
-              : "Gateway response could not be parsed",
+            code: attemptAbort.timedOut ? "GATEWAY_TIMEOUT" : streamInterrupted ? "GATEWAY_STREAM_INTERRUPTED" : "GATEWAY_RESPONSE_PARSE_ERROR",
+            message: attemptAbort.timedOut
+              ? `Gateway request timed out after ${timeoutMs}ms`
+              : streamInterrupted
+                ? "Gateway response stream was interrupted before it could be fully read"
+                : "Gateway response could not be parsed",
             details: {
               protocol,
               contentType,
+              bodyPreview: error?.gatewayBodyPreview ?? undefined,
               responseReadStage: streamInterrupted ? "read_body" : "parse_body",
               attempts: attempt,
               maxAttempts,
               responseHeaderMs,
+              timeoutMs,
+              idleTimeoutMs,
               retryHistory
             }
           });
@@ -218,6 +281,57 @@ function resolveGatewayMaxRetries(config) {
     return DEFAULT_GATEWAY_MAX_RETRIES;
   }
   return Math.max(0, Math.min(5, Math.trunc(value)));
+}
+
+/**
+ * @param {import("../config/load-config.js").LabAgentConfig} config
+ */
+function resolveGatewayTimeoutMs(config) {
+  const value = Number(config.lab?.gatewayTimeoutMs ?? DEFAULT_GATEWAY_TIMEOUT_MS);
+  if (!Number.isFinite(value)) {
+    return DEFAULT_GATEWAY_TIMEOUT_MS;
+  }
+  return Math.max(50, Math.min(900000, Math.trunc(value)));
+}
+
+/**
+ * @param {import("../config/load-config.js").LabAgentConfig} config
+ */
+function resolveGatewayIdleTimeoutMs(config) {
+  const value = Number(config.lab?.gatewayIdleTimeoutMs ?? DEFAULT_GATEWAY_IDLE_TIMEOUT_MS);
+  if (!Number.isFinite(value)) {
+    return DEFAULT_GATEWAY_IDLE_TIMEOUT_MS;
+  }
+  return Math.max(50, Math.min(300000, Math.trunc(value)));
+}
+
+function createGatewayAttemptAbort(parentSignal, timeoutMs) {
+  const controller = new AbortController();
+  let timedOut = false;
+  const abort = (reason) => {
+    if (!controller.signal.aborted) {
+      controller.abort(reason);
+    }
+  };
+  const onParentAbort = () => abort(parentSignal?.reason ?? abortError());
+  const timer = setTimeout(() => {
+    timedOut = true;
+    abort(timeoutError(timeoutMs));
+  }, timeoutMs);
+  parentSignal?.addEventListener?.("abort", onParentAbort, { once: true });
+  if (parentSignal?.aborted) {
+    onParentAbort();
+  }
+  return {
+    signal: controller.signal,
+    get timedOut() {
+      return timedOut;
+    },
+    cleanup() {
+      clearTimeout(timer);
+      parentSignal?.removeEventListener?.("abort", onParentAbort);
+    }
+  };
 }
 
 /**
@@ -343,7 +457,7 @@ function shouldRetryGatewayHttpError(error, options) {
   if (Number(error.status) >= 500) {
     return true;
   }
-  return isTransientGatewayRetryable(error);
+  return isMimoGatewayRetryable(error, options.config);
 }
 
 /**
@@ -354,20 +468,44 @@ function shouldRetryGatewayResponseError(error, options) {
   if (options.signal?.aborted || options.attempt >= options.maxAttempts) {
     return false;
   }
-  return error.code === "GATEWAY_STREAM_INTERRUPTED" || isTransientGatewayRetryable(error);
+  return error.code === "GATEWAY_STREAM_INTERRUPTED"
+    || isRetryableGatewayParseError(error)
+    || isMimoGatewayRetryable(error, options.config);
+}
+
+function isRetryableGatewayParseError(error) {
+  if (error?.code !== "GATEWAY_RESPONSE_PARSE_ERROR") {
+    return false;
+  }
+  const contentType = String(error?.details?.contentType ?? "").trim().toLowerCase();
+  const bodyPreview = String(error?.details?.bodyPreview ?? "").trim().toLowerCase();
+  if (!contentType) {
+    return true;
+  }
+  return /<html|bad gateway|gateway timeout|upstream|temporar|try again|service unavailable/.test(bodyPreview);
 }
 
 /**
  * @param {Record<string, any>} error
  * @param {import("../config/load-config.js").LabAgentConfig} config
  */
-function isTransientGatewayRetryable(error) {
+function isMimoGatewayRetryable(error, config) {
+  if (!isMimoModel(config)) {
+    return false;
+  }
   const text = [
     error?.message,
     error?.details?.body,
     error?.details?.responseReadStage
   ].filter(Boolean).join("\n");
-  return TRANSIENT_GATEWAY_RETRY_ERROR_PATTERN.test(text);
+  return MIMO_RETRY_ERROR_PATTERN.test(text);
+}
+
+/**
+ * @param {import("../config/load-config.js").LabAgentConfig} config
+ */
+function isMimoModel(config) {
+  return /mimo/i.test(String(config?.modelAlias ?? ""));
 }
 
 /**
@@ -404,9 +542,86 @@ function delay(ms, signal) {
   });
 }
 
+async function readResponseText(body, options = {}) {
+  if (!body) {
+    return "";
+  }
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  try {
+    while (true) {
+      const { done, value } = await readStreamChunk(reader, options);
+      if (done) {
+        break;
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // Reader may already be released.
+    }
+  }
+  const rest = decoder.decode();
+  return rest ? text + rest : text;
+}
+
+function readStreamChunk(reader, options = {}) {
+  const signal = options.signal;
+  const idleTimeoutMs = Number.isFinite(options.idleTimeoutMs) ? Math.max(50, Math.trunc(options.idleTimeoutMs)) : null;
+  if (signal?.aborted) {
+    return Promise.reject(abortError());
+  }
+  if (!idleTimeoutMs) {
+    return reader.read();
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener?.("abort", onAbort);
+      callback(value);
+    };
+    const timer = setTimeout(() => {
+      cancelReader(reader, timeoutError(idleTimeoutMs));
+      finish(reject, timeoutError(idleTimeoutMs));
+    }, idleTimeoutMs);
+    const onAbort = () => {
+      cancelReader(reader, signal.reason);
+      finish(reject, abortError());
+    };
+    signal?.addEventListener?.("abort", onAbort, { once: true });
+    reader.read().then(
+      (chunk) => finish(resolve, chunk),
+      (error) => finish(reject, error)
+    );
+  });
+}
+
+function cancelReader(reader, reason) {
+  try {
+    Promise.resolve(reader.cancel(reason)).catch(() => {});
+  } catch {
+    // Best effort.
+  }
+}
+
 function abortError() {
   const error = new Error("operation aborted");
   error.name = "AbortError";
+  return error;
+}
+
+function timeoutError(ms) {
+  const error = new Error(`Gateway response idle timeout after ${ms}ms`);
+  error.name = "AbortError";
+  error.code = "GATEWAY_RESPONSE_IDLE_TIMEOUT";
   return error;
 }
 
@@ -416,11 +631,75 @@ function abortError() {
  * @param {string | null} contentType
  * @param {(event: Record<string, any>) => void | Promise<void>} [onEvent]
  * @param {import("../config/load-config.js").LabAgentConfig} [config]
+ * @param {{ signal?: AbortSignal; idleTimeoutMs?: number }} [options]
  */
-function parseStreamForProtocol(protocol, body, contentType, onEvent, config) {
+function parseStreamForProtocol(protocol, body, contentType, onEvent, config, options = {}) {
   return protocol === "openai-chat"
-    ? parseOpenAIChatCompletionStream(body, { onEvent, reasoningContentMode: resolveReasoningContentMode(config) })
-    : parseGatewayStream(body, contentType, { onEvent });
+    ? parseOpenAIChatCompletionStream(body, { onEvent, reasoningContentMode: resolveReasoningContentMode(config), ...options })
+    : parseGatewayStream(body, contentType, { onEvent, ...options });
+}
+
+/**
+ * @param {string} protocol
+ * @param {Response} response
+ * @param {string | null} contentType
+ * @param {(event: Record<string, any>) => void | Promise<void>} [onEvent]
+ * @param {import("../config/load-config.js").LabAgentConfig} [config]
+ * @param {{ signal?: AbortSignal; idleTimeoutMs?: number }} [options]
+ */
+async function parseResponseForProtocol(protocol, response, contentType, onEvent, config, options = {}) {
+  if (isStreamingContentType(contentType)) {
+    return parseStreamForProtocol(protocol, response.body, contentType, onEvent, config, options);
+  }
+  const text = await readResponseText(response.body, options);
+  try {
+    if (looksLikeStreamingResponseText(text, protocol)) {
+      return await parseStreamForProtocol(protocol, textToReadableStream(text), sniffedStreamContentType(text), onEvent, config, options);
+    }
+    return normalizeResponseForProtocol(protocol, JSON.parse(text), config);
+  } catch (error) {
+    attachGatewayBodyPreview(error, text);
+    throw error;
+  }
+}
+
+function looksLikeStreamingResponseText(text, protocol) {
+  const trimmed = String(text ?? "").trimStart();
+  if (trimmed.startsWith("data:")) {
+    return true;
+  }
+  if (protocol !== "openai-chat" && looksLikeNewlineDelimitedJson(trimmed)) {
+    return true;
+  }
+  return false;
+}
+
+function looksLikeNewlineDelimitedJson(text) {
+  const lines = String(text ?? "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  return lines.length > 1 && lines.every((line) => line.startsWith("{") || line.startsWith("["));
+}
+
+function sniffedStreamContentType(text) {
+  return String(text ?? "").trimStart().startsWith("data:")
+    ? "text/event-stream"
+    : "application/x-ndjson";
+}
+
+function textToReadableStream(text) {
+  const encoder = new TextEncoder();
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(text));
+      controller.close();
+    }
+  });
+}
+
+function attachGatewayBodyPreview(error, text) {
+  if (!error || typeof error !== "object") {
+    return;
+  }
+  error.gatewayBodyPreview = redactGatewayText(String(text ?? "")).slice(0, 1000);
 }
 
 /**
@@ -489,8 +768,8 @@ function resolveOpenAIExtraBody(config) {
 /**
  * @param {Response} response
  */
-async function boundedResponseText(response) {
-  const text = await response.text().catch(() => "");
+async function boundedResponseText(response, options = {}) {
+  const text = await readResponseText(response.body, options);
   return redactGatewayText(text).slice(0, 1000);
 }
 

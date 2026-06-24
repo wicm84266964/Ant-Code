@@ -90,7 +90,7 @@ export async function parseOpenAIChatCompletionStream(body, options = {}) {
   const aggregate = createOpenAIStreamAggregate();
   const stream = await readOpenAIStream(body, async (record) => {
     await applyOpenAIStreamRecord(aggregate, record, options.onEvent);
-  });
+  }, options);
   const text = stream.text;
   const trimmed = text.trim();
   if (!trimmed) {
@@ -292,7 +292,7 @@ function parseArguments(value) {
 }
 
 /**
- * Some OpenAI-compatible adapters concatenate an initial empty object
+ * Some OpenAI-compatible Claude adapters concatenate an initial empty object
  * with the final tool arguments, for example `{}{"path":"README.md"}`.
  *
  * @param {string} value
@@ -315,8 +315,9 @@ function parseLastJsonObject(value) {
 /**
  * @param {ReadableStream<Uint8Array> | null} body
  * @param {(record: unknown) => void | Promise<void>} onRecord
+ * @param {{ signal?: AbortSignal; idleTimeoutMs?: number }} [options]
  */
-async function readOpenAIStream(body, onRecord) {
+async function readOpenAIStream(body, onRecord, options = {}) {
   if (!body) {
     return { text: "", records: [] };
   }
@@ -347,15 +348,23 @@ async function readOpenAIStream(body, onRecord) {
     }
   };
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) {
-      break;
+  try {
+    while (true) {
+      const { value, done } = await readStreamChunk(reader, options);
+      if (done) {
+        break;
+      }
+      const chunk = decoder.decode(value, { stream: true });
+      text += chunk;
+      lineBuffer += chunk;
+      await drainLines(false);
     }
-    const chunk = decoder.decode(value, { stream: true });
-    text += chunk;
-    lineBuffer += chunk;
-    await drainLines(false);
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // Reader may already be released after stream completion.
+    }
   }
   const tail = decoder.decode();
   if (tail) {
@@ -364,6 +373,66 @@ async function readOpenAIStream(body, onRecord) {
   }
   await drainLines(true);
   return { text, records };
+}
+
+function readStreamChunk(reader, options = {}) {
+  const signal = options.signal;
+  const idleTimeoutMs = Number.isFinite(options.idleTimeoutMs) ? Math.max(1000, Math.trunc(options.idleTimeoutMs)) : null;
+  if (signal?.aborted) {
+    return Promise.reject(abortError(signal.reason));
+  }
+  if (!idleTimeoutMs) {
+    return reader.read();
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener?.("abort", onAbort);
+      callback(value);
+    };
+    const timer = setTimeout(() => {
+      cancelReader(reader, timeoutError(idleTimeoutMs));
+      finish(reject, timeoutError(idleTimeoutMs));
+    }, idleTimeoutMs);
+    const onAbort = () => {
+      cancelReader(reader, signal.reason);
+      finish(reject, abortError(signal.reason));
+    };
+    signal?.addEventListener?.("abort", onAbort, { once: true });
+    reader.read().then(
+      (chunk) => finish(resolve, chunk),
+      (error) => finish(reject, error)
+    );
+  });
+}
+
+function cancelReader(reader, reason) {
+  try {
+    Promise.resolve(reader.cancel(reason)).catch(() => {});
+  } catch {
+    // Best effort.
+  }
+}
+
+function abortError(reason) {
+  if (reason instanceof Error) {
+    return reason;
+  }
+  const error = new Error("stream read aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function timeoutError(ms) {
+  const error = new Error(`Gateway stream idle timeout after ${ms}ms`);
+  error.name = "AbortError";
+  error.code = "GATEWAY_STREAM_IDLE_TIMEOUT";
+  return error;
 }
 
 /**

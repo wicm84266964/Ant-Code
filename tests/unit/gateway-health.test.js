@@ -154,6 +154,37 @@ test("gateway client normalizes HTTP errors with bounded response body", async (
   }
 });
 
+test("gateway client times out hung HTTP error responses", async () => {
+  const server = await listen(http.createServer(async (request, response) => {
+    await readRequestText(request);
+    response.writeHead(503, { "content-type": "application/json" });
+  }), "127.0.0.1");
+  try {
+    const gateway = createLabModelGateway({
+      modelAlias: "test-model",
+      networkMode: "offline",
+      allowedHosts: [],
+      lab: {
+        gatewayUrl: `${serverUrl(server)}/v1/chat`,
+        gatewayMaxRetries: 0,
+        gatewayTimeoutMs: 500,
+        gatewayIdleTimeoutMs: 50
+      }
+    });
+
+    const result = await gateway.sendChat({
+      messages: [{ role: "user", content: "hello" }]
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error.code, "GATEWAY_TIMEOUT");
+    assert.equal(result.error.details.timeoutMs, 500);
+    assert.equal(result.error.details.retryHistory[0].stage, "fetch");
+  } finally {
+    await close(server);
+  }
+});
+
 test("gateway client can use OpenAI-compatible chat protocol with bearer auth", async () => {
   const requests = [];
   const server = await listen(http.createServer(async (request, response) => {
@@ -297,7 +328,7 @@ test("gateway client sends session affinity header", async () => {
   }
 });
 
-test("gateway client retries transient gateway HTTP 500 responses", async () => {
+test("gateway client retries Mimo KVTransfer HTTP 500 responses", async () => {
   const originalFetch = globalThis.fetch;
   const events = [];
   let calls = 0;
@@ -316,8 +347,8 @@ test("gateway client retries transient gateway HTTP 500 responses", async () => 
         });
       }
       return new Response(JSON.stringify({
-        id: "transient-retry-ok",
-        model: "example-vision-model",
+        id: "mimo-retry-ok",
+        model: "mimo-v2.5",
         content: [{ type: "text", text: "recovered" }],
         toolCalls: [],
         stopReason: "stop"
@@ -328,7 +359,7 @@ test("gateway client retries transient gateway HTTP 500 responses", async () => 
     };
 
     const gateway = createLabModelGateway({
-      modelAlias: "example-vision-model",
+      modelAlias: "mimo-v2.5",
       networkMode: "offline",
       allowedHosts: [],
       lab: {
@@ -376,7 +407,7 @@ test("gateway client retries interrupted streams", async () => {
         });
       }
       return new Response([
-        'data: {"id":"retry-ok","model":"example-vision-model","choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}',
+        'data: {"id":"retry-ok","model":"mimo-v2.5","choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}',
         "",
         "data: [DONE]",
         ""
@@ -387,7 +418,7 @@ test("gateway client retries interrupted streams", async () => {
     };
 
     const gateway = createLabModelGateway({
-      modelAlias: "example-vision-model",
+      modelAlias: "mimo-v2.5",
       networkMode: "offline",
       allowedHosts: [],
       lab: {
@@ -466,6 +497,135 @@ test("gateway client normalizes malformed JSON responses", async () => {
     assert.equal(result.ok, false);
     assert.equal(result.error.code, "GATEWAY_RESPONSE_PARSE_ERROR");
     assert.equal(result.error.message, "Gateway response could not be parsed");
+  } finally {
+    await close(server);
+  }
+});
+
+test("gateway client parses event streams when content type is missing", async () => {
+  const server = await listen(http.createServer((request, response) => {
+    response.writeHead(200);
+    response.write("data: {\"id\":\"chatcmpl-missing-type\",\"object\":\"chat.completion.chunk\",\"model\":\"mock\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n");
+    response.end("data: [DONE]\n\n");
+  }), "127.0.0.1");
+  try {
+    const gateway = createLabModelGateway({
+      modelAlias: "test-model",
+      networkMode: "offline",
+      allowedHosts: [],
+      lab: {
+        gatewayUrl: `${serverUrl(server)}/v1/chat`,
+        gatewayProtocol: "openai-chat"
+      }
+    });
+
+    const result = await gateway.sendChat({
+      messages: [{ role: "user", content: "hello" }]
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.data.text, "hello");
+  } finally {
+    await close(server);
+  }
+});
+
+test("gateway client includes a bounded body preview for parse errors", async () => {
+  const server = await listen(http.createServer((request, response) => {
+    response.writeHead(200);
+    response.end("<html><body>upstream gateway timeout</body></html>");
+  }), "127.0.0.1");
+  try {
+    const gateway = createLabModelGateway({
+      modelAlias: "test-model",
+      networkMode: "offline",
+      allowedHosts: [],
+      lab: { gatewayUrl: `${serverUrl(server)}/v1/chat` }
+    });
+
+    const result = await gateway.sendChat({
+      messages: [{ role: "user", content: "hello" }]
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error.code, "GATEWAY_RESPONSE_PARSE_ERROR");
+    assert.match(result.error.details.bodyPreview, /upstream gateway timeout/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("gateway client retries transient parse errors", async () => {
+  let calls = 0;
+  const server = await listen(http.createServer((request, response) => {
+    calls += 1;
+    if (calls === 1) {
+      response.writeHead(200);
+      response.end("<html><body>upstream gateway timeout</body></html>");
+      return;
+    }
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      id: "retry-parse-ok",
+      model: "mock-model",
+      content: [{ type: "text", text: "recovered" }],
+      toolCalls: [],
+      stopReason: "stop"
+    }));
+  }), "127.0.0.1");
+  try {
+    const events = [];
+    const gateway = createLabModelGateway({
+      modelAlias: "test-model",
+      networkMode: "offline",
+      allowedHosts: [],
+      lab: {
+        gatewayUrl: `${serverUrl(server)}/v1/chat`,
+        gatewayMaxRetries: 1
+      }
+    });
+
+    const result = await gateway.sendChat({
+      messages: [{ role: "user", content: "hello" }],
+      onEvent: (event) => events.push(event)
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.data.text, "recovered");
+    assert.equal(calls, 2);
+    const retry = events.find((event) => event.type === "gateway_retry");
+    assert.equal(retry.stage, "parse_body");
+    assert.equal(retry.error.code, "GATEWAY_RESPONSE_PARSE_ERROR");
+  } finally {
+    await close(server);
+  }
+});
+
+test("gateway client times out hung responses", async () => {
+  const server = await listen(http.createServer(async (request, response) => {
+    await readRequestText(request);
+    response.writeHead(200, { "content-type": "application/json" });
+  }), "127.0.0.1");
+  try {
+    const gateway = createLabModelGateway({
+      modelAlias: "test-model",
+      networkMode: "offline",
+      allowedHosts: [],
+      lab: {
+        gatewayUrl: `${serverUrl(server)}/v1/chat`,
+        gatewayMaxRetries: 0,
+        gatewayTimeoutMs: 50,
+        gatewayIdleTimeoutMs: 50
+      }
+    });
+
+    const result = await gateway.sendChat({
+      messages: [{ role: "user", content: "hello" }]
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error.code, "GATEWAY_TIMEOUT");
+    assert.equal(result.error.details.timeoutMs, 50);
   } finally {
     await close(server);
   }

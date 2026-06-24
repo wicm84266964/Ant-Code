@@ -25,6 +25,7 @@ const MAX_TRANSCRIPT_PAGE_LIMIT = 200;
 const BACKGROUND_SNAPSHOT_INTERVAL_MS = 15_000;
 const BACKGROUND_STALE_PROGRESS_MS = 10 * 60 * 1000;
 const BACKGROUND_DEAD_HEARTBEAT_MS = 5 * 60 * 1000;
+const DEFAULT_INTERRUPT_FORCE_SETTLE_MS = 5_000;
 const VISIBLE_TRANSCRIPT_ROLES = new Set(["user", "assistant"]);
 const TERMINAL_TASK_STATUSES = new Set(["completed", "failed", "partial", "blocked", "cancelled", "interrupted"]);
 const TERMINAL_GROUP_STATUSES = new Set(["completed", "failed", "partial", "blocked", "cancelled", "interrupted"]);
@@ -499,11 +500,15 @@ export function createDashboardRuntime(options) {
         };
       }
 
-      beginPrompt(state, createQueueItem(prompt, mode, "prompt", "", attachments), configEnv);
+      const item = createQueueItem(prompt, mode, "prompt", "", attachments);
+      beginPrompt(state, item, configEnv);
       return {
         ok: true,
         sessionId: state.session.id,
         eventCursor,
+        running: true,
+        queue: queueSnapshot(state),
+        current: publicQueueItem(item),
         permission: permissionModeSummary(state.session),
         sessionStatus: sessionStatusSummary(state.session)
       };
@@ -1146,6 +1151,8 @@ function withoutGatewayEnvOverrides(env = {}) {
     "LAB_MODEL_GATEWAY_PROTOCOL",
     "LAB_MODEL_GATEWAY_API_KEY",
     "LAB_MODEL_GATEWAY_MAX_RETRIES",
+    "LAB_MODEL_GATEWAY_TIMEOUT_MS",
+    "LAB_MODEL_GATEWAY_IDLE_TIMEOUT_MS",
     "LAB_AGENT_MODEL",
     "LAB_AGENT_MODELS"
   ]) {
@@ -1962,6 +1969,7 @@ function beginPrompt(state, item, env) {
   state.currentPermissionMode = item.permissionMode;
   state.turnChangeStats = emptyChangeStats();
   state.controller = new AbortController();
+  state.turnEnv = env;
   appendDashboardEvent(state, {
     type: "run_state",
     id: eventId("run-state"),
@@ -1987,7 +1995,9 @@ function beginPrompt(state, item, env) {
 
 function runTurnInBackground(state, item, env) {
   const controller = state.controller;
+  const turnId = state.currentTurnId;
   const eventStartIndex = state.events.length;
+  state.forceSettleTimer = null;
   queueMicrotask(async () => {
     try {
       const result = await runSessionTurn(state.session, {
@@ -2001,10 +2011,15 @@ function runTurnInBackground(state, item, env) {
         approvalCallback: (request) => askApproval(state, request),
         userInputCallback: (request) => askQuestion(state, request),
         onEvent: async (event) => {
+          const currentTurn = isCurrentTurn(state, controller, turnId);
+          const backgroundEvent = isBackgroundLifecycleEvent(event);
+          if (!currentTurn && !backgroundEvent) {
+            return;
+          }
           for (const mapped of mapSessionEventToDashboard(event)) {
-            mapped.turnId = state.currentTurnId;
+            mapped.turnId = turnId;
             mapped.sessionStatus = sessionStatusSummary(state.session);
-            if (mapped.type === "activity" && mapped.changeStats) {
+            if (currentTurn && mapped.type === "activity" && mapped.changeStats) {
               if (mapped.turnChangeStats) {
                 state.turnChangeStats = normalizeChangeStats(mapped.turnChangeStats);
               } else {
@@ -2017,13 +2032,13 @@ function runTurnInBackground(state, item, env) {
           if (String(event.type ?? "").startsWith("subagent_group_")) {
             await appendBackgroundSubagentSnapshot(state);
           }
-          if (event.type === "background_terminal_started") {
+          if (String(event.type ?? "").startsWith("background_terminal_")) {
             await appendBackgroundSubagentSnapshot(state);
           }
-          if (event.type === "tool_finish" && (event.name === "todo_write" || event.name === "plan_update")) {
+          if (currentTurn && event.type === "tool_finish" && (event.name === "todo_write" || event.name === "plan_update")) {
             appendWorkflowSnapshot(state, event.name);
           }
-          if (event.type === "workflow_updated") {
+          if (currentTurn && event.type === "workflow_updated") {
             appendWorkflowSnapshot(state, event.reason ?? "workflow_updated");
           }
           if (event.type === "subagent_group_wakeup") {
@@ -2031,6 +2046,9 @@ function runTurnInBackground(state, item, env) {
           }
         }
       });
+      if (!isCurrentTurn(state, controller, turnId)) {
+        return;
+      }
       state.finalOutput = result.output ?? "";
       const turnEvents = state.events.slice(eventStartIndex);
       if (!result.interrupted && !turnEvents.some((event) => event.type === "assistant_final")) {
@@ -2053,6 +2071,9 @@ function runTurnInBackground(state, item, env) {
       });
       state.status = result.interrupted ? "interrupted" : "completed";
     } catch (error) {
+      if (!isCurrentTurn(state, controller, turnId)) {
+        return;
+      }
       appendDashboardEvent(state, {
         type: "error",
         id: eventId("error"),
@@ -2061,9 +2082,11 @@ function runTurnInBackground(state, item, env) {
       });
       state.status = "failed";
     } finally {
-      if (state.controller === controller) {
-        state.controller = null;
+      if (state.forceSettledTurnId === turnId || state.controller !== controller || state.currentTurnId !== turnId) {
+        return;
       }
+      clearForceSettleTimer(state);
+      state.controller = null;
       state.running = false;
       await appendBackgroundSubagentSnapshot(state);
       state.currentPrompt = "";
@@ -2084,9 +2107,20 @@ function runTurnInBackground(state, item, env) {
         });
         state.currentTurnId = "";
         state.currentTranscriptStart = activeTranscriptMessages(state).length;
+        state.turnEnv = null;
+        state.forceSettledTurnId = "";
       }
     }
   });
+}
+
+function isCurrentTurn(state, controller, turnId) {
+  return state.controller === controller && state.currentTurnId === turnId && state.forceSettledTurnId !== turnId;
+}
+
+function isBackgroundLifecycleEvent(event) {
+  const type = String(event?.type ?? "");
+  return type.startsWith("subagent_group_") || type.startsWith("background_terminal_");
 }
 
 function requestTurnInterrupt(state, reason) {
@@ -2101,6 +2135,80 @@ function requestTurnInterrupt(state, reason) {
   if (state.controller && !state.controller.signal.aborted) {
     state.controller.abort(reason);
   }
+  scheduleForceSettleInterruptedTurn(state, reason);
+}
+
+function scheduleForceSettleInterruptedTurn(state, reason) {
+  clearForceSettleTimer(state);
+  const turnId = state.currentTurnId;
+  if (!state.running || !turnId) {
+    return;
+  }
+  const delayMs = interruptForceSettleMs(state.turnEnv);
+  state.forceSettleTimer = setTimeout(() => {
+    if (!state.running || state.currentTurnId !== turnId) {
+      return;
+    }
+    forceSettleInterruptedTurn(state, reason, turnId);
+  }, delayMs);
+  state.forceSettleTimer.unref?.();
+}
+
+function interruptForceSettleMs(env = process.env) {
+  const value = Number(env?.ANT_CODE_INTERRUPT_FORCE_SETTLE_MS ?? DEFAULT_INTERRUPT_FORCE_SETTLE_MS);
+  if (!Number.isFinite(value)) {
+    return DEFAULT_INTERRUPT_FORCE_SETTLE_MS;
+  }
+  return Math.max(50, Math.min(30000, Math.trunc(value)));
+}
+
+function clearForceSettleTimer(state) {
+  if (state.forceSettleTimer) {
+    clearTimeout(state.forceSettleTimer);
+    state.forceSettleTimer = null;
+  }
+}
+
+function forceSettleInterruptedTurn(state, reason, turnId) {
+  state.forceSettleTimer = null;
+  state.forceSettledTurnId = turnId;
+  state.running = false;
+  state.status = "interrupted";
+  if (state.controller && !state.controller.signal.aborted) {
+    state.controller.abort(reason);
+  }
+  state.controller = null;
+  cancelPendingInteractions(state, reason);
+  appendDashboardEvent(state, {
+    type: "error",
+    id: eventId("error"),
+    message: "任务已中断，但底层请求未及时返回；Dashboard 已强制释放当前会话状态。",
+    turnId,
+    interrupted: true,
+    at: new Date().toISOString()
+  });
+  void appendBackgroundSubagentSnapshot(state);
+  const next = state.queuedPrompts.shift();
+  if (next) {
+    appendQueueUpdated(state);
+    beginPrompt(state, next, state.turnEnv ?? process.env);
+    return;
+  }
+  appendDashboardEvent(state, {
+    type: "run_state",
+    id: eventId("run-state"),
+    running: false,
+    turnId,
+    queue: queueSnapshot(state),
+    sessionStatus: sessionStatusSummary(state.session),
+    changeStats: { ...state.turnChangeStats },
+    forced: true,
+    at: new Date().toISOString()
+  });
+  state.currentPrompt = "";
+  state.currentTurnId = "";
+  state.currentTranscriptStart = activeTranscriptMessages(state).length;
+  state.turnEnv = null;
 }
 
 function cancelPendingInteractions(state, reason) {
@@ -2428,7 +2536,7 @@ async function buildBackgroundSubagentSnapshot(state) {
       });
     }
     const terminals = listBackgroundTerminalTasks({ parentSessionId: state.session.id, cwd: state.session.cwd })
-      .filter((task) => task.status === "running")
+      .filter((task) => task.status === "running" || task.status === "starting")
       .map((task) => ({
         groupId: null,
         taskId: task.taskId,
@@ -2436,7 +2544,7 @@ async function buildBackgroundSubagentSnapshot(state) {
         profile: "terminal",
         waitFor: null,
         wakeParent: false,
-        status: "running",
+        status: task.status === "starting" ? "starting" : "running",
         stale: false,
         staleKind: null,
         staleReason: "",
@@ -2453,7 +2561,7 @@ async function buildBackgroundSubagentSnapshot(state) {
           task.stdoutPath ? `stdout=${task.stdoutPath}` : null
         ].filter(Boolean).join(" · "),
         taskCount: 1,
-        runningCount: 1,
+        runningCount: task.status === "running" ? 1 : 0,
         updatedAt: task.updatedAt
       }));
     return {

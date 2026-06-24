@@ -223,6 +223,15 @@ test("dashboard app exposes session actions and reconnects active sessions", asy
   assert.match(source, /ensureEventsConnected\(id\)/);
 });
 
+test("dashboard app enters running state immediately after turn start response", async () => {
+  const source = await fs.readFile(path.resolve("src/dashboard/public/app.js"), "utf8");
+
+  assert.match(source, /state\.running = result\.running === true \|\| state\.running/);
+  assert.match(source, /if \(result\.running === true\) \{/);
+  assert.match(source, /els\.runStatus\.textContent = "运行中"/);
+  assert.match(source, /setLiveTitle\("正在处理你的任务"\)/);
+});
+
 test("dashboard app labels approximate change stats when present", async () => {
   const source = await fs.readFile(path.resolve("src/dashboard/public/app.js"), "utf8");
 
@@ -269,7 +278,10 @@ test("dashboard keeps background subagent status visible after the main turn end
   assert.match(events, /subagent_group_started/);
   assert.match(events, /subagent_group_progress/);
   assert.match(events, /subagent_group_wakeup/);
+  assert.match(events, /background_terminal_registered/);
   assert.match(events, /backgroundSubagent: true/);
+  const sessions = await fs.readFile(path.resolve("src/dashboard/sessions.js"), "utf8");
+  assert.match(sessions, /startsWith\("background_terminal_"\)/);
   assert.match(app, /backgroundSubagents: new Map\(\)/);
   assert.match(app, /liveStatusExpanded: false/);
   assert.match(app, /isBackgroundSubagentActivity\(event\)/);
@@ -282,7 +294,9 @@ test("dashboard keeps background subagent status visible after the main turn end
   assert.match(app, /applyIdleRunStatus\("空闲"\)/);
   assert.match(app, /applyIdleRunStatus\("完成"\)/);
   assert.match(app, /const subagents = items\.filter\(\(item\) => item\.kind !== "terminal"\)/);
+  assert.match(app, /terminalStarting: terminals\.filter\(\(item\) => item\.status === "starting"\)\.length/);
   assert.match(app, /terminals: terminals\.filter\(\(item\) => item\.status === "running"\)\.length/);
+  assert.match(app, /return "终端后台任务启动中"/);
   assert.match(app, /return "终端后台任务运行中"/);
   assert.match(app, /return "终端后台任务回收中"/);
   assert.match(app, /return "子智能体运行中"/);

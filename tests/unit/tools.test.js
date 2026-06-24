@@ -1665,6 +1665,57 @@ test("background shell persists terminal task records", async () => {
   }
 });
 
+test("background shell exposes a starting terminal record before launcher completion", async () => {
+  const cwd = await makeTempWorkspace();
+  const controller = new AbortController();
+  const terminalEvents = [];
+  const runtime = createToolRuntime({
+    cwd,
+    parentSessionId: "session-starting-terminal",
+    signal: controller.signal,
+    onBackgroundTerminalEvent: (event) => terminalEvents.push(event),
+    policy: {
+      networkMode: "offline",
+      approvals: { workspaceCommands: true }
+    }
+  });
+  const command = process.platform === "win32"
+    ? "Start-Sleep -Seconds 10"
+    : "sleep 10";
+  const pending = runtime.execute("background_shell", {
+    command,
+    title: "Starting terminal",
+    taskId: "starting-terminal"
+  });
+
+  try {
+    await waitFor(() => {
+      const tasks = listBackgroundTerminalTasks({
+        cwd,
+        parentSessionId: "session-starting-terminal",
+        taskId: "starting-terminal"
+      });
+      return tasks.length === 1 && ["starting", "running"].includes(tasks[0].status);
+    }, 3000);
+  } finally {
+    controller.abort();
+  }
+  const result = await pending;
+  assert.equal(terminalEvents[0]?.type, "background_terminal_registered");
+  assert.equal(terminalEvents[0]?.taskId, "starting-terminal");
+  assert.equal(terminalEvents[0]?.status, "starting");
+  const tasks = listBackgroundTerminalTasks({
+    cwd,
+    parentSessionId: "session-starting-terminal",
+    taskId: "starting-terminal"
+  });
+  assert.equal(tasks.length, 1);
+  assert.equal(["cancelled", "failed", "completed", "running"].includes(tasks[0].status), true);
+  if (result.result?.pid) {
+    await killProcessTree(result.result.pid);
+  }
+});
+
 test("background shell registry reconciles externally killed terminal tasks", async () => {
   const cwd = await makeTempWorkspace();
   const runtime = createToolRuntime({
