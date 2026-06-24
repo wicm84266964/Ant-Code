@@ -404,7 +404,7 @@ test("dashboard model config ignores process gateway env overrides", async () =>
   assert.deepEqual(after.models.map((model) => model.id), ["beta-chat"]);
 });
 
-test("dashboard runtime adds models to the active gateway when key is unchanged", async () => {
+test("dashboard runtime adds models to the active gateway when the same key is submitted again", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
   const runtime = createDashboardRuntime({ cwd, env: {} });
 
@@ -420,6 +420,7 @@ test("dashboard runtime adds models to the active gateway when key is unchanged"
   const saved = await runtime.saveModelConfig({
     gatewayUrl: "https://beta-gateway.example/v1/chat/completions",
     gatewayProtocol: "openai-chat",
+    gatewayApiKey: "beta-key",
     modelId: "beta-reasoner",
     label: "Beta Reasoner",
     modalities: ["text"],

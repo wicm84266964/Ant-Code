@@ -1290,12 +1290,17 @@ function shouldReplaceModelEntries(config, normalized) {
   if (normalized.replaceModels) {
     return true;
   }
-  if (normalized.gatewayApiKey) {
-    return true;
-  }
   const currentUrl = String(config.lab?.gatewayUrl ?? "").trim();
   const currentProtocol = String(config.lab?.gatewayProtocol ?? "lab-agent-gateway").trim();
-  return currentUrl !== normalized.gatewayUrl || currentProtocol !== normalized.gatewayProtocol;
+  if (currentUrl !== normalized.gatewayUrl || currentProtocol !== normalized.gatewayProtocol) {
+    return true;
+  }
+  const nextApiKey = String(normalized.gatewayApiKey ?? "").trim();
+  if (!nextApiKey) {
+    return false;
+  }
+  const currentApiKey = String(config.lab?.gatewayApiKey ?? "").trim();
+  return !currentApiKey || currentApiKey !== nextApiKey;
 }
 
 function buildGatewayProfileSwitchConfig(local, config, profileId) {
