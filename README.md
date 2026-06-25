@@ -29,6 +29,10 @@ This repository is released under the GNU Affero General Public License v3.0.
   plans that later commands and reviewers can inspect.
 - Validation-aware workflow: sessions keep local todo state, plans, validation
   results, delivery status, and next-action hints.
+- Tiered verification memory: `/verify suggest` groups local checks into
+  `minimal`, `related`, and `full` tiers, while `/verify`, `/next`, and
+  `/report` show session-local pending, passed, failed, and stale validation
+  state.
 - Gateway-independent model layer: use the native `lab-agent-gateway` protocol
   or an OpenAI Chat Completions-compatible adapter.
 - Text and vision routing: configure separate model aliases for coding and

@@ -13,6 +13,7 @@ import { formatCapabilities, listCapabilities } from "../capabilities/registry.j
 import { loadConfig } from "../config/load-config.js";
 import { buildDeliveryStatus, formatDeliveryStatus } from "../core/delivery.js";
 import { buildRepoMap, formatRepoMap } from "../core/repo-map.js";
+import { buildValidationMemory, formatValidationMemory } from "../core/validation-memory.js";
 import { formatValidationSuggestions, selectValidationSuggestion, suggestValidationCommands } from "../core/validation-suggestions.js";
 import { runDoctor, formatDoctorReport } from "../diagnostics/doctor.js";
 import { formatHooksReport } from "../hooks/report.js";
@@ -46,6 +47,7 @@ const DEFAULT_SLASH_PROCESS_TIMEOUT_MS = 30_000;
  *   sessionInfo?: Record<string, any>;
  *   approvalCallback?: Parameters<typeof createToolRuntime>[0]["approve"];
  *   setModelCallback?: (model: Record<string, any>) => void | Promise<void>;
+ *   signal?: AbortSignal;
  *   trusted?: boolean;
  * }} options
  */
@@ -309,7 +311,7 @@ async function runDiffCommand(options, config) {
   }
   args.push("--", ...parsed.pathspecs);
 
-  const result = await runProcess("git", args, options.cwd, options.env);
+  const result = await runProcess("git", args, options.cwd, options.env, options.signal);
   return formatProcessResult(result, "No git diff output.");
 }
 
@@ -375,16 +377,16 @@ async function runReviewCommand(options, config) {
   }
 
   if (mode === "patch" || mode === "--patch") {
-    const result = await runProcess("git", ["diff", "--", ...parsed.pathspecs], options.cwd, options.env);
+    const result = await runProcess("git", ["diff", "--", ...parsed.pathspecs], options.cwd, options.env, options.signal);
     return formatProcessResult(result, "No git diff output.");
   }
   if (mode === "stat" || mode === "--stat") {
-    const result = await runProcess("git", ["diff", "--stat", "--", ...parsed.pathspecs], options.cwd, options.env);
+    const result = await runProcess("git", ["diff", "--stat", "--", ...parsed.pathspecs], options.cwd, options.env, options.signal);
     return formatProcessResult(result, "No git diff output.");
   }
   if (mode === "files" || mode === "--files") {
-    const status = await runProcess("git", ["status", "--short", "--", ...parsed.pathspecs], options.cwd, options.env);
-    const names = await runProcess("git", ["diff", "--name-only", "--", ...parsed.pathspecs], options.cwd, options.env);
+    const status = await runProcess("git", ["status", "--short", "--", ...parsed.pathspecs], options.cwd, options.env, options.signal);
+    const names = await runProcess("git", ["diff", "--name-only", "--", ...parsed.pathspecs], options.cwd, options.env, options.signal);
     return [
       "Git status",
       formatProcessResult(status, "No git status output."),
@@ -394,8 +396,8 @@ async function runReviewCommand(options, config) {
     ].join("\n");
   }
 
-  const status = await runProcess("git", ["status", "--short", "--", ...parsed.pathspecs], options.cwd, options.env);
-  const stat = await runProcess("git", ["diff", "--stat", "--", ...parsed.pathspecs], options.cwd, options.env);
+  const status = await runProcess("git", ["status", "--short", "--", ...parsed.pathspecs], options.cwd, options.env, options.signal);
+  const stat = await runProcess("git", ["diff", "--stat", "--", ...parsed.pathspecs], options.cwd, options.env, options.signal);
   return [
     "Ant Code review summary",
     "",
@@ -421,10 +423,22 @@ async function runVerifyCommand(options, config) {
   const [subcommand] = options.command.args;
   if (subcommand === "suggest") {
     const suggestions = await suggestValidationCommands(options.cwd);
-    return formatValidationSuggestions(suggestions);
+    const memory = buildValidationMemory({ workflow: options.workflowState, suggestions });
+    return [
+      formatValidationSuggestions(suggestions),
+      "",
+      formatValidationMemory(memory, { includeHistory: false })
+    ].join("\n");
   }
   if (!subcommand || subcommand === "list") {
-    return formatValidations(options.workflowState?.validations ?? []);
+    const suggestions = await suggestValidationCommands(options.cwd);
+    const memory = buildValidationMemory({ workflow: options.workflowState, suggestions });
+    return [
+      formatValidationMemory(memory),
+      "",
+      "Validation history",
+      formatValidations(options.workflowState?.validations ?? [])
+    ].join("\n");
   }
   if (subcommand !== "run") {
     return "Usage: /verify | /verify suggest | /verify run <command>";
@@ -459,14 +473,15 @@ async function runVerifyCommand(options, config) {
 async function runReportCommand(options, config) {
   const decision = readonlyGitDecision(options, config, "git status --short");
   const status = decision.decision === "allow"
-    ? await runProcess("git", ["status", "--short"], options.cwd, options.env)
+    ? await runProcess("git", ["status", "--short"], options.cwd, options.env, options.signal)
     : null;
   const stat = decision.decision === "allow"
-    ? await runProcess("git", ["diff", "--stat"], options.cwd, options.env)
+    ? await runProcess("git", ["diff", "--stat"], options.cwd, options.env, options.signal)
     : null;
   const workflow = options.workflowState;
   const session = options.sessionInfo ?? {};
   const validationSuggestions = await suggestValidationCommands(options.cwd);
+  const validationMemory = buildValidationMemory({ workflow, suggestions: validationSuggestions });
   const repoMap = await buildRepoMap(options.cwd);
   const delivery = buildDeliveryStatus({ workflow, sessionInfo: session, validationSuggestions });
 
@@ -496,6 +511,9 @@ async function runReportCommand(options, config) {
     formatRecordedChanges(workflow?.changes ?? []),
     "",
     "Validation",
+    formatValidationMemory(validationMemory),
+    "",
+    "Validation history",
     formatValidations(workflow?.validations ?? []),
     "",
     "Suggested validation",
@@ -514,6 +532,7 @@ async function runReportCommand(options, config) {
  */
 async function runNextCommand(options) {
   const validationSuggestions = await suggestValidationCommands(options.cwd);
+  const validationMemory = buildValidationMemory({ workflow: options.workflowState, suggestions: validationSuggestions });
   const repoMap = await buildRepoMap(options.cwd);
   const delivery = buildDeliveryStatus({
     workflow: options.workflowState,
@@ -531,6 +550,8 @@ async function runNextCommand(options) {
     "",
     "Suggested validation",
     formatValidationSuggestions(validationSuggestions),
+    "",
+    formatValidationMemory(validationMemory, { includeHistory: false }),
     "",
     "Useful commands",
     "- /verify suggest",
@@ -772,6 +793,7 @@ async function executeBuiltInTool(options, config, toolName, input) {
     approve: options.approvalCallback,
     workflowState: options.workflowState,
     policy: createPolicy(options, config),
+    signal: options.signal,
     hooksTrusted: options.trusted === true
   });
 
@@ -1186,26 +1208,65 @@ function formatProcessResult(result, emptyMessage) {
  * @param {string[]} args
  * @param {string} cwd
  * @param {NodeJS.ProcessEnv | undefined} env
+ * @param {AbortSignal | undefined} signal
  */
-function runProcess(executable, args, cwd, env) {
+function runProcess(executable, args, cwd, env, signal = undefined) {
   const startedAt = Date.now();
+
+  if (signal?.aborted) {
+    return Promise.resolve(interruptedProcessResult(startedAt, "Process was interrupted before it started."));
+  }
 
   return new Promise((resolve) => {
     let settled = false;
     const child = spawn(executable, args, {
       cwd,
       env: env ?? process.env,
-      windowsHide: true
+      windowsHide: true,
+      detached: process.platform !== "win32"
     });
 
     let stdout = Buffer.alloc(0);
     let stderr = Buffer.alloc(0);
     let timedOut = false;
+    let interrupted = false;
+    let escalationTimer = null;
 
     const timeout = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
+      requestProcessTermination(child);
     }, DEFAULT_SLASH_PROCESS_TIMEOUT_MS);
+
+    const onAbort = () => {
+      interrupted = true;
+      requestProcessTermination(child);
+    };
+
+    function requestProcessTermination(target) {
+      if (!target.pid) {
+        target.kill("SIGTERM");
+        return;
+      }
+      if (process.platform === "win32") {
+        killWindowsProcessTree(target.pid);
+        target.kill("SIGTERM");
+        return;
+      }
+      try {
+        process.kill(-target.pid, "SIGTERM");
+      } catch {
+        target.kill("SIGTERM");
+      }
+      if (!escalationTimer) {
+        escalationTimer = setTimeout(() => {
+          try {
+            process.kill(-target.pid, "SIGKILL");
+          } catch {
+            target.kill("SIGKILL");
+          }
+        }, 750);
+      }
+    }
 
     /**
      * @param {Record<string, any>} result
@@ -1216,8 +1277,15 @@ function runProcess(executable, args, cwd, env) {
       }
       settled = true;
       clearTimeout(timeout);
+      if (escalationTimer) {
+        clearTimeout(escalationTimer);
+        escalationTimer = null;
+      }
+      signal?.removeEventListener?.("abort", onAbort);
       resolve(result);
     };
+
+    signal?.addEventListener?.("abort", onAbort, { once: true });
 
     child.stdout.on("data", (chunk) => {
       stdout = appendBounded(stdout, Buffer.from(chunk));
@@ -1238,9 +1306,17 @@ function runProcess(executable, args, cwd, env) {
         error: {
           code: error && typeof error === "object" && "code" in error ? String(error.code) : "PROCESS_SPAWN_ERROR",
           message: error instanceof Error ? error.message : String(error)
-        }
+        },
+        ...(interrupted ? interruptedProcessFields("Process was interrupted by the local user.") : {})
       });
     });
+
+    child.on("spawn", () => {
+      if (signal?.aborted) {
+        onAbort();
+      }
+    });
+
     child.on("close", (exitCode, signal) => {
       finish({
         exitCode,
@@ -1250,10 +1326,47 @@ function runProcess(executable, args, cwd, env) {
         stdout: stdout.toString("utf8"),
         stderr: stderr.toString("utf8"),
         stdoutTruncated: stdout.length >= MAX_SLASH_OUTPUT_BYTES,
-        stderrTruncated: stderr.length >= MAX_SLASH_OUTPUT_BYTES
+        stderrTruncated: stderr.length >= MAX_SLASH_OUTPUT_BYTES,
+        ...(interrupted ? interruptedProcessFields("Process was interrupted by the local user.") : {})
       });
     });
   });
+}
+
+function interruptedProcessResult(startedAt, message) {
+  return {
+    exitCode: null,
+    signal: null,
+    timedOut: false,
+    durationMs: Date.now() - startedAt,
+    stdout: "",
+    stderr: "",
+    stdoutTruncated: false,
+    stderrTruncated: false,
+    ...interruptedProcessFields(message)
+  };
+}
+
+function interruptedProcessFields(message) {
+  return {
+    interrupted: true,
+    error: { code: "PROCESS_INTERRUPTED", message }
+  };
+}
+
+/**
+ * @param {number} pid
+ */
+function killWindowsProcessTree(pid) {
+  try {
+    const killer = spawn("taskkill", ["/pid", String(pid), "/t", "/f"], {
+      windowsHide: true,
+      stdio: "ignore"
+    });
+    killer.unref?.();
+  } catch {
+    // child.kill fallback is attempted by the caller.
+  }
 }
 
 /**
@@ -1594,7 +1707,7 @@ async function runAgentsCommand(options, config) {
       "- /agents review <task-id>",
       "- /agents cancel <task-id>",
       "",
-      "边界：子智能体使用同一个实验室模型网关和本地权限引擎；写文件、执行命令、MCP 调用仍受父会话策略约束。"
+      "边界：子智能体使用同一个本地模型网关和本地权限引擎；写文件、执行命令、MCP 调用仍受父会话策略约束。"
     ].join("\n");
   }
 

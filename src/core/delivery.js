@@ -1,5 +1,6 @@
 import { createWorkflowState, summarizeWorkflow } from "../tools/workflow-tools.js";
 import { buildTaskLifecycle, formatLifecycleLine } from "./task-lifecycle.js";
+import { buildValidationMemory } from "./validation-memory.js";
 
 const MAX_HINT_COMMAND_CHARS = 180;
 
@@ -15,6 +16,7 @@ export function buildDeliveryStatus(input = {}) {
   const lifecycle = buildTaskLifecycle({ workflow, latestValidation, unresolvedFailures });
   const state = lifecycle.state;
   const validationSuggestions = normalizeSuggestions(input.validationSuggestions);
+  const validationMemory = buildValidationMemory({ workflow, suggestions: validationSuggestions });
   const nextActions = buildNextActions(lifecycle.stage, latestValidation, summary, validationSuggestions);
 
   return {
@@ -34,6 +36,7 @@ export function buildDeliveryStatus(input = {}) {
       : null,
     unresolvedFailures,
     validationSuggestions,
+    validationMemory,
     nextActions
   };
 }
@@ -54,7 +57,8 @@ export function formatDeliveryStatus(status, options = {}) {
     `todos: ${formatStatusCounts(status.summary.todos)}`,
     `plan: ${formatStatusCounts(status.summary.planSteps)}`,
     `changes: total=${status.summary.changes.total}, created=${status.summary.changes.created}, edited=${status.summary.changes.edited}`,
-    `validation: total=${status.summary.validations.total}, passed=${status.summary.validations.passed}, failed=${status.summary.validations.failed}, timedOut=${status.summary.validations.timedOut}`
+    `validation: total=${status.summary.validations.total}, passed=${status.summary.validations.passed}, failed=${status.summary.validations.failed}, timedOut=${status.summary.validations.timedOut}`,
+    `validation memory: pending=${status.validationMemory.summary.pending}, stale=${status.validationMemory.summary.stale}, unresolved=${status.validationMemory.summary.failed}`
   );
 
   if (status.latestValidation) {
@@ -154,7 +158,11 @@ function normalizeSuggestions(suggestions) {
   }
   return suggestions.map((item) => ({
     command: typeof item?.command === "string" ? item.command : "",
-    reason: typeof item?.reason === "string" ? item.reason : ""
+    reason: typeof item?.reason === "string" ? item.reason : "",
+    tier: typeof item?.tier === "string" ? item.tier : "related",
+    source: typeof item?.source === "string" ? item.source : "",
+    confidence: typeof item?.confidence === "string" ? item.confidence : "",
+    relatedFiles: Array.isArray(item?.relatedFiles) ? item.relatedFiles.map(String) : []
   })).filter((item) => item.command.length > 0);
 }
 

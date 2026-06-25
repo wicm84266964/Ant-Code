@@ -24,6 +24,7 @@ test("delivery status reports changed but unvalidated work", () => {
   assert.match(status.nextActions[0], /\/verify run npm test/);
   assert.match(formatTurnFooter(status), /state=needs_validation/);
   assert.match(formatDeliveryStatus(status), /suggested validation/);
+  assert.match(formatDeliveryStatus(status), /validation memory: pending=1/);
 });
 
 test("delivery status reports unresolved validation failures", () => {
@@ -97,5 +98,6 @@ test("delivery status treats stale validation as needing validation", () => {
   assert.equal(status.lifecycle.stage, "validate");
   assert.equal(status.lifecycle.validationFresh, false);
   assert.match(formatDeliveryStatus(status), /validationFresh=false/);
+  assert.match(formatDeliveryStatus(status), /stale=1/);
   assert.match(status.nextActions[0], /\/verify run npm test/);
 });

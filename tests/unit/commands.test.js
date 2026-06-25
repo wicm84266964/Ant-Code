@@ -312,6 +312,104 @@ test("verify suggest reports project validation commands", async () => {
   assert.match(output, /npm test/);
 });
 
+test("verify suggest orders lightweight checks before full release validation", async () => {
+  if (!await gitAvailable()) {
+    return;
+  }
+  const cwd = await makeTempWorkspace();
+  await fs.mkdir(path.join(cwd, "src"), { recursive: true });
+  await fs.writeFile(path.join(cwd, "package.json"), JSON.stringify({
+    scripts: {
+      "check:syntax": "node scripts/check-syntax.js",
+      lint: "eslint .",
+      "test:unit": "node --test tests/unit",
+      test: "node --test",
+      check: "npm run check:syntax && npm test",
+      "verify:release": "npm run check"
+    }
+  }), "utf8");
+  await execGit(cwd, ["init"]);
+  await execGit(cwd, ["config", "user.email", "test@example.com"]);
+  await execGit(cwd, ["config", "user.name", "Test User"]);
+  await execGit(cwd, ["add", "package.json"]);
+  await execGit(cwd, ["commit", "-m", "init"]);
+  await fs.writeFile(path.join(cwd, "src", "app.js"), "export const value = 1;\n", "utf8");
+
+  const output = await runSlashCommand({
+    command: parseSlashCommand("/verify suggest"),
+    cwd,
+    env: {}
+  });
+
+  assert.match(output, /1\. npm run check:syntax/);
+  assert.match(output, /minimal validation:/);
+  assert.match(output, /related validation:/);
+  assert.match(output, /full validation:/);
+  assert.match(output, /npm run lint/);
+  assert.match(output, /npm run test:unit/);
+  assert.match(output, /npm run check/);
+  assert.match(output, /npm run verify:release/);
+});
+
+test("verify suggest avoids test suggestions for docs-only changes when check exists", async () => {
+  if (!await gitAvailable()) {
+    return;
+  }
+  const cwd = await makeTempWorkspace();
+  await fs.mkdir(path.join(cwd, "docs"), { recursive: true });
+  await fs.writeFile(path.join(cwd, "package.json"), JSON.stringify({
+    scripts: {
+      test: "node --test",
+      check: "npm test"
+    }
+  }), "utf8");
+  await execGit(cwd, ["init"]);
+  await execGit(cwd, ["config", "user.email", "test@example.com"]);
+  await execGit(cwd, ["config", "user.name", "Test User"]);
+  await execGit(cwd, ["add", "package.json"]);
+  await execGit(cwd, ["commit", "-m", "init"]);
+  await fs.writeFile(path.join(cwd, "docs", "note.md"), "# Note\n", "utf8");
+
+  const output = await runSlashCommand({
+    command: parseSlashCommand("/verify suggest"),
+    cwd,
+    env: {}
+  });
+
+  assert.match(output, /npm run check/);
+  assert.doesNotMatch(output, /npm test/);
+});
+
+test("verify suggest reports related test file suggestions", async () => {
+  if (!await gitAvailable()) {
+    return;
+  }
+  const cwd = await makeTempWorkspace();
+  await fs.mkdir(path.join(cwd, "src"), { recursive: true });
+  await fs.mkdir(path.join(cwd, "tests"), { recursive: true });
+  await fs.writeFile(path.join(cwd, "package.json"), JSON.stringify({
+    scripts: {
+      "test:unit": "node --test tests/unit"
+    }
+  }), "utf8");
+  await fs.writeFile(path.join(cwd, "tests", "math.test.ts"), "import '../src/math';\n", "utf8");
+  await execGit(cwd, ["init"]);
+  await execGit(cwd, ["config", "user.email", "test@example.com"]);
+  await execGit(cwd, ["config", "user.name", "Test User"]);
+  await execGit(cwd, ["add", "package.json", "tests/math.test.ts"]);
+  await execGit(cwd, ["commit", "-m", "init"]);
+  await fs.writeFile(path.join(cwd, "src", "math.ts"), "export const add = (a: number, b: number) => a + b;\n", "utf8");
+
+  const output = await runSlashCommand({
+    command: parseSlashCommand("/verify suggest"),
+    cwd,
+    env: {}
+  });
+
+  assert.match(output, /npm run test:unit -- tests[\\/]math\.test\.ts/);
+  assert.match(output, /related test file/);
+});
+
 test("verify run suggested executes the first suggested validation command", async () => {
   const workflowState = createWorkflowState();
   const cwd = await makeTempWorkspace();
@@ -333,6 +431,45 @@ test("verify run suggested executes the first suggested validation command", asy
   assert.equal(workflowState.validations.length, 1);
   assert.equal(workflowState.validations[0].command, "npm run check");
   assert.equal(workflowState.validations[0].passed, true);
+});
+
+test("verify list reports validation memory with pending and stale states", async () => {
+  const workflowState = createWorkflowState();
+  workflowState.validations.push({
+    command: "npm test",
+    exitCode: 0,
+    passed: true,
+    timedOut: false,
+    durationMs: 10,
+    recordedAt: "2026-04-28T00:01:00.000Z"
+  });
+  workflowState.changes.push({
+    toolName: "edit_file",
+    path: "src/app.js",
+    edited: true,
+    diffBytes: 10,
+    recordedAt: "2026-04-28T00:02:00.000Z"
+  });
+  const cwd = await makeTempWorkspace();
+  await fs.writeFile(path.join(cwd, "package.json"), JSON.stringify({
+    scripts: {
+      test: "node --test",
+      check: "npm test"
+    }
+  }), "utf8");
+
+  const output = await runSlashCommand({
+    command: parseSlashCommand("/verify"),
+    cwd,
+    env: {},
+    workflowState
+  });
+
+  assert.match(output, /Validation memory/);
+  assert.match(output, /pending=2/);
+  assert.match(output, /stale=1/);
+  assert.match(output, /pending suggestions:/);
+  assert.match(output, /\[passed, stale\] npm test/);
 });
 
 test("next slash command shows concrete validation guidance", async () => {
@@ -798,6 +935,66 @@ test("agents cancel-group aborts matching in-process background tasks", async ()
   }
 });
 
+test("run slash command interrupts long shell commands through the turn signal", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-run-abort-"));
+  const controller = new AbortController();
+  const command = process.platform === "win32"
+    ? "/run --powershell Start-Sleep -Seconds 10; Write-Output done"
+    : "/run --bash sleep 10; echo done";
+
+  const startedAt = Date.now();
+  const pending = runSlashCommand({
+    command: parseSlashCommand(command),
+    cwd,
+    env: {},
+    allowCommand: true,
+    signal: controller.signal
+  });
+  setTimeout(() => controller.abort(), 50);
+  const output = await pending;
+  const parsed = JSON.parse(output);
+
+  assert.match(output, /PROCESS_INTERRUPTED|SHELL_INTERRUPTED|interrupted/i);
+  assert.doesNotMatch(parsed.result?.stdout ?? "", /done/);
+  assert.ok(Date.now() - startedAt < 5000);
+});
+
+test("report slash command interrupts self-managed process calls through the turn signal", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-report-abort-"));
+  const bin = path.join(cwd, "bin");
+  const markerPath = path.join(cwd, "fake-git-done.txt");
+  await fs.mkdir(bin, { recursive: true });
+  if (process.platform === "win32") {
+    const escapedMarker = markerPath.replace(/'/g, "''");
+    await fs.writeFile(path.join(bin, "git.cmd"), `@echo off\r\npowershell -NoProfile -Command "Start-Sleep -Seconds 10; Set-Content -LiteralPath '${escapedMarker}' -Value done; Write-Output fake-git-done"\r\n`, "utf8");
+  } else {
+    const gitPath = path.join(bin, "git");
+    await fs.writeFile(gitPath, `#!/bin/sh\nsleep 10\necho done > ${shellQuote(markerPath)}\necho fake-git-done\n`, "utf8");
+    await fs.chmod(gitPath, 0o755);
+  }
+
+  const controller = new AbortController();
+  const startedAt = Date.now();
+  const pending = runSlashCommand({
+    command: parseSlashCommand("/report"),
+    cwd,
+    env: {
+      ...process.env,
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`
+    },
+    allowCommand: true,
+    signal: controller.signal
+  });
+  setTimeout(() => controller.abort(), 50);
+  const output = await pending;
+
+  assert.match(output, /PROCESS_INTERRUPTED|interrupted/i);
+  assert.doesNotMatch(output, /stdout:\s*fake-git-done/i);
+  assert.ok(Date.now() - startedAt < 5000);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.equal(await fileExists(markerPath), false);
+});
+
 test("gateway slash command reports dry-run gateway health", async () => {
   const output = await runSlashCommand({
     command: parseSlashCommand("/gateway"),
@@ -1143,4 +1340,23 @@ async function writeProjectConfig(cwd) {
  */
 function escapeRegex(value) {
   return value.replace(/[|\\{}()[\]^$+*?.]/g, "\\$&");
+}
+
+/**
+ * @param {string} value
+ */
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * @param {string} filePath
+ */
+async function fileExists(filePath) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
 }
