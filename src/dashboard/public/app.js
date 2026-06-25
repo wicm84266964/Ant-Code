@@ -2459,7 +2459,12 @@ async function saveModelConfig(event) {
     state.modelConfigSaving = false;
     hideModelConfigPanel();
     hideModelPanel();
-    showNotice("模型配置已保存");
+    if (payload.switchToModel) {
+      const activeModelId = String(result.sessionStatus?.model ?? payload.modelId ?? "").trim();
+      showNotice("模型配置已保存", `模型已切换为 ${modelDisplayName(activeModelId, payload.label || payload.modelId)}`);
+    } else {
+      showNotice("模型配置已保存", "本地配置已更新");
+    }
   } catch (error) {
     showError(error.message ?? "保存模型配置失败");
   } finally {
@@ -2493,6 +2498,7 @@ async function switchModel(modelId) {
     state.visionAgent = normalizeVisionAgent(result.visionAgent);
     updateSessionStatus(result.sessionStatus);
     hideModelPanel();
+    showNotice("模型已切换", `当前会话将使用 ${modelDisplayName(modelId)}`);
   } catch (error) {
     showError(error.message ?? "切换模型失败");
   } finally {
@@ -2621,6 +2627,13 @@ function markCurrentModel(models, currentModel) {
 
 function currentModelInfo(modelId) {
   return (state.models ?? []).find((model) => model.id === modelId) ?? null;
+}
+
+function modelDisplayName(modelId, fallback = "") {
+  const id = String(modelId ?? "").trim();
+  const fallbackLabel = String(fallback ?? "").trim();
+  const model = currentModelInfo(id);
+  return model?.label || fallbackLabel || id || "当前模型";
 }
 
 function normalizeAgentModelTiers(value) {
@@ -3789,11 +3802,11 @@ function showError(message) {
   });
 }
 
-function showNotice(message) {
+function showNotice(message, detail = "本地配置已更新") {
   hideEmptyState();
   appendActivity({
     title: message,
-    detail: ".lab-agent/config.json 已更新",
+    detail,
     severity: "info",
     collapsed: false
   });
