@@ -49,7 +49,8 @@ This repository is released under the GNU Affero General Public License v3.0.
 - Interactive terminal coding agent (`ant-code`)
 - One-shot print mode for scripted prompts
 - Local Dashboard/WebUI bound to `127.0.0.1`
-- File read/write, exact replacement edits, diff previews, and git inspection
+- File read/write, exact replacement edits, diff previews, and structured git
+  read/write tools
 - Local ripgrep-backed search tools for regex, glob, context, file listing,
   matching-file discovery, and counts
 - Local TypeScript/JavaScript semantic tools for symbols, diagnostics,
@@ -204,6 +205,11 @@ access, and workflow actions are mediated by the local permission system.
 Provider credentials should live in the configured gateway/model adapter or in
 local environment variables. Do not commit `.env`, gateway tokens, session
 stores, transcripts, or private project data.
+
+Git tools run through local `git` argument arrays rather than arbitrary shell
+strings. Read tools expose status, diff, log, show, branch, stash, and tag
+metadata; write tools such as add, commit, branch, stash, and tag still use the
+normal local approval flow and reject broad staging such as `git_add` with `.`.
 
 ## License
 

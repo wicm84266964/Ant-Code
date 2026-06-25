@@ -1612,8 +1612,98 @@ test("git status and diff tools return full git output", async (t) => {
 
   assert.equal(status.ok, true);
   assert.match(status.result.stdout, /notes\.txt/);
+  assert.equal(status.result.status.unstaged.some((file) => file.path === "notes.txt"), true);
   assert.equal(diff.ok, true);
   assert.match(diff.result.stdout, /\+after/);
+});
+
+test("git read tools expose structured log, show, branch, stash, and tag data", async (t) => {
+  if (!(await gitAvailable())) {
+    t.skip("git executable is not available");
+    return;
+  }
+
+  const cwd = await makeTempWorkspace();
+  await execGit(cwd, ["init"]);
+  await fs.writeFile(path.join(cwd, "notes.txt"), "hello\n", "utf8");
+  await execGit(cwd, ["add", "notes.txt"]);
+  await execGit(cwd, ["-c", "user.email=test@example.invalid", "-c", "user.name=Test User", "commit", "-m", "init"]);
+  await execGit(cwd, ["tag", "v0.1.0"]);
+
+  const runtime = createToolRuntime({ cwd });
+  const log = await runtime.execute("git_log", { maxCount: 5 });
+  const show = await runtime.execute("git_show", { revision: "HEAD", stat: true });
+  const branches = await runtime.execute("git_branch_list", {});
+  const tags = await runtime.execute("git_tag_list", { pattern: "v*" });
+  const stashes = await runtime.execute("git_stash_list", {});
+
+  assert.equal(log.ok, true);
+  assert.equal(log.result.commits[0].subject, "init");
+  assert.equal(show.ok, true);
+  assert.match(show.result.stdout, /notes\.txt/);
+  assert.equal(branches.ok, true);
+  assert.equal(branches.result.branches.some((branch) => branch.current), true);
+  assert.equal(tags.ok, true);
+  assert.deepEqual(tags.result.tags, ["v0.1.0"]);
+  assert.equal(stashes.ok, true);
+  assert.deepEqual(stashes.result.stashes, []);
+});
+
+test("git write tools require approval and commit explicit staged paths", async (t) => {
+  if (!(await gitAvailable())) {
+    t.skip("git executable is not available");
+    return;
+  }
+
+  const cwd = await makeTempWorkspace();
+  await execGit(cwd, ["init"]);
+  await execGit(cwd, ["config", "user.email", "test@example.invalid"]);
+  await execGit(cwd, ["config", "user.name", "Test User"]);
+  await fs.writeFile(path.join(cwd, "notes.txt"), "hello\n", "utf8");
+  const approvals = [];
+  const runtime = createToolRuntime({
+    cwd,
+    approve: async (request) => {
+      approvals.push(request);
+      return true;
+    }
+  });
+
+  const add = await runtime.execute("git_add", { paths: ["notes.txt"] });
+  const commit = await runtime.execute("git_commit", { message: "add notes" });
+  const log = await runtime.execute("git_log", { maxCount: 1 });
+
+  assert.equal(add.ok, true);
+  assert.equal(commit.ok, true);
+  assert.equal(commit.result.committed, true);
+  assert.deepEqual(commit.result.stagedFiles, ["notes.txt"]);
+  assert.equal(log.result.commits[0].subject, "add notes");
+  assert.deepEqual(approvals.map((item) => item.toolName), ["git_add", "git_commit"]);
+});
+
+test("git write tools reject broad add paths and empty commits", async (t) => {
+  if (!(await gitAvailable())) {
+    t.skip("git executable is not available");
+    return;
+  }
+
+  const cwd = await makeTempWorkspace();
+  await execGit(cwd, ["init"]);
+  await execGit(cwd, ["config", "user.email", "test@example.invalid"]);
+  await execGit(cwd, ["config", "user.name", "Test User"]);
+  const runtime = createToolRuntime({
+    cwd,
+    policy: { approvals: { workspaceWrites: true } }
+  });
+
+  const broad = await runtime.execute("git_add", { paths: ["."] });
+  const emptyCommit = await runtime.execute("git_commit", { message: "empty" });
+
+  assert.equal(broad.ok, false);
+  assert.match(broad.error.message, /explicit file or directory paths/);
+  assert.equal(emptyCommit.ok, true);
+  assert.equal(emptyCommit.result.committed, false);
+  assert.equal(emptyCommit.result.error.code, "GIT_NOTHING_STAGED");
 });
 
 test("ask_user requires an interactive callback", async () => {

@@ -9,6 +9,8 @@ import { getToolDefinitions } from "../tools/definitions.js";
 import { serializeToolResult } from "../tools/result.js";
 import { createToolRuntime } from "../tools/runtime.js";
 import { estimatePromptPayload } from "../core/context-window.js";
+import { buildValidationMemory, formatValidationMemory } from "../core/validation-memory.js";
+import { suggestValidationCommands } from "../core/validation-suggestions.js";
 import { accumulateProviderUsage } from "../core/provider-usage.js";
 import { createBudgetTracker, checkBudget, recordBudgetToolResult, resolveAgentBudget, resolveAgentModel } from "./budget.js";
 import { buildContextPack, formatContextPack, hasWriteScope } from "./context-pack.js";
@@ -81,6 +83,11 @@ export async function runSubagent(options) {
     contextPack: options.contextPack,
     writeScope: options.writeScope,
     acceptance: options.acceptance,
+    validationMemory: await buildAgentValidationMemoryContext({
+      cwd: options.cwd,
+      profile,
+      workflowState: options.workflowState
+    }),
     cwd: options.cwd
   });
   const budget = resolveAgentBudget({
@@ -238,6 +245,18 @@ export async function runSubagent(options) {
     childSessionId,
     ...(persistedPlanPackage ? { planPackage: persistedPlanPackage } : {})
   };
+}
+
+async function buildAgentValidationMemoryContext(options) {
+  if (options.profile?.name !== "reviewer" || !options.workflowState) {
+    return [];
+  }
+  const suggestions = await suggestValidationCommands(options.cwd);
+  const memory = buildValidationMemory({ workflow: options.workflowState, suggestions });
+  return [
+    formatValidationMemory(memory, { includeHistory: false, maxItems: 4 }),
+    "Reviewer instruction: use this as validation evidence only. Do not trigger verifier or run validation automatically; report missing, stale, or failed checks as review findings or residual risk."
+  ];
 }
 
 function startTaskHeartbeat(taskStore, taskId) {
@@ -802,7 +821,7 @@ async function buildAgentSystemPrompt(options) {
     options.profile.system,
     "",
     "Boundary:",
-    "- You run inside the local Ant Code client. Model traffic goes only through the configured gateway.",
+    "- You run inside the local lab-agent client. Model traffic goes only through the configured lab gateway.",
     "- Use only the tools provided in this subagent request.",
     "- Keep the parent session in control: ask for approvals through normal tool calls and do not assume broad write access.",
     "- Do not reveal secrets, raw credentials, or unnecessary large data excerpts.",

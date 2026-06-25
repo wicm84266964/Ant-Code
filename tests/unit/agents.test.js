@@ -136,6 +136,61 @@ test("model-driven subagent system prompt includes delegated operating doctrine"
   }
 });
 
+test("reviewer subagent receives validation memory without launching verifier", async () => {
+  const cwd = await makeTempWorkspace();
+  await fs.writeFile(path.join(cwd, "package.json"), JSON.stringify({
+    scripts: {
+      test: "node --test",
+      check: "npm test"
+    }
+  }), "utf8");
+  const workflowState = {
+    todos: [],
+    plan: { steps: [] },
+    changes: [{
+      toolName: "edit_file",
+      path: "src/app.js",
+      edited: true,
+      diffBytes: 12,
+      recordedAt: "2026-04-28T00:02:00.000Z"
+    }],
+    validations: [{
+      command: "npm test",
+      exitCode: 0,
+      passed: true,
+      timedOut: false,
+      durationMs: 10,
+      recordedAt: "2026-04-28T00:01:00.000Z"
+    }]
+  };
+  const requests = [];
+  const server = await listen(createFinalOnlyGateway(requests, "reviewer saw validation memory"), "127.0.0.1");
+
+  try {
+    const result = await runSubagent({
+      cwd,
+      profileName: "reviewer",
+      query: "review current changes",
+      env: mockGatewayEnv(serverUrl(server)),
+      workflowState
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.profile, "reviewer");
+    const systemText = requests[0].messages.find((message) => message.role === "system")?.content?.[0]?.text ?? "";
+    const userText = requests[0].messages.find((message) => message.role === "user")?.content ?? "";
+    assert.match(systemText, /Always check any validationMemory/);
+    assert.match(systemText, /Do not launch verifier/);
+    assert.match(userText, /validationMemory:/);
+    assert.match(userText, /Validation memory/);
+    assert.match(userText, /stale=1/);
+    assert.match(userText, /Do not trigger verifier/);
+    assert.equal(requests.length, 1);
+  } finally {
+    await close(server);
+  }
+});
+
 test("model-driven explorer preserves explicit read_file requests", async () => {
   const cwd = await makeTempWorkspace();
   const largeText = `${"0123456789abcdef".repeat(1024)}\n`;
@@ -1173,6 +1228,27 @@ function createToolGateway(requests, fixture) {
       id: "mock-agent-final",
       model: body.model,
       content: [{ type: "text", text: fixture.finalText }],
+      toolCalls: [],
+      stopReason: "stop"
+    }));
+  });
+}
+
+function createFinalOnlyGateway(requests, finalText) {
+  return http.createServer(async (request, response) => {
+    if (request.method !== "POST" || request.url !== "/v1/chat") {
+      response.writeHead(404, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { code: "NOT_FOUND" } }));
+      return;
+    }
+
+    const body = await readRequestJson(request);
+    requests.push(body);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      id: "mock-agent-final",
+      model: body.model,
+      content: [{ type: "text", text: finalText }],
       toolCalls: [],
       stopReason: "stop"
     }));

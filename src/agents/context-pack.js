@@ -1,5 +1,5 @@
 /**
- * @param {{ query: string; profile?: Record<string, any>; routeDecision?: Record<string, any>; contextPack?: Record<string, any>; writeScope?: unknown; acceptance?: unknown; constraints?: unknown; knownFacts?: unknown; filesOfInterest?: unknown; doNotTouch?: unknown; cwd?: string }} options
+ * @param {{ query: string; profile?: Record<string, any>; routeDecision?: Record<string, any>; contextPack?: Record<string, any>; writeScope?: unknown; acceptance?: unknown; constraints?: unknown; knownFacts?: unknown; filesOfInterest?: unknown; doNotTouch?: unknown; validationMemory?: unknown; cwd?: string }} options
  */
 export function buildContextPack(options) {
   const input = options.contextPack && typeof options.contextPack === "object" ? options.contextPack : {};
@@ -15,6 +15,7 @@ export function buildContextPack(options) {
     knownFacts: stringList(input.knownFacts ?? options.knownFacts),
     filesOfInterest: stringList(input.filesOfInterest ?? options.filesOfInterest),
     doNotTouch: stringList(input.doNotTouch ?? options.doNotTouch),
+    validationMemory: stringList(input.validationMemory ?? options.validationMemory),
     writeScope: stringList(input.writeScope ?? options.writeScope),
     acceptance: stringList(input.acceptance ?? options.acceptance),
     returnFormat: input.returnFormat ?? options.profile?.outputContract?.type ?? options.profile?.purpose

@@ -4,6 +4,8 @@ import { normalizeOutputContract } from "./contracts.js";
 
 const RG_TOOLS = Object.freeze(["rg_search", "rg_files", "rg_files_with_matches", "rg_count"]);
 const TYPESCRIPT_TOOLS = Object.freeze(["ts_symbols", "ts_diagnostics", "ts_find_definition", "ts_find_references"]);
+const GIT_READ_TOOLS = Object.freeze(["git_log", "git_show", "git_branch_list", "git_stash_list", "git_tag_list"]);
+const GIT_WRITE_TOOLS = Object.freeze(["git_add", "git_commit", "git_branch", "git_stash", "git_tag"]);
 
 export const AGENT_PROFILES = Object.freeze([
   {
@@ -212,6 +214,8 @@ export const AGENT_PROFILES = Object.freeze([
       "Review the assigned plan, diff, task result, or release state with a skeptical engineering lens. You are read-only and you do not fix issues yourself.",
       "Prioritize concrete bugs, behavioral regressions, permission/security risks, data loss risks, broken UX, and missing validation. Prefer high-signal findings over style opinions.",
       "Use evidence efficiently: inspect the changed files, nearby contracts, tests, and relevant docs. Avoid rereading unrelated code after you have enough support for a finding.",
+      "Always check any validationMemory supplied in the context pack. Treat failed validations as blockers, stale validations as needing rerun, pending validations as validation gaps, and passed validations as evidence only for the code state they cover.",
+      "Do not launch verifier, do not run validation just because validationMemory is incomplete, and do not create a verify-review loop. Report the missing `/verify run ...` step instead.",
       "Each finding must explain impact, evidence, and the smallest credible fix direction. If a suspected issue lacks evidence, put it under residual risk instead of presenting it as a finding.",
       "Do not edit files, do not run mutating commands, and do not call another subagent.",
       "Return findings first, ordered by severity, with file/path evidence where possible. If no issue is found, say so clearly and list missing tests or residual risk."
@@ -611,11 +615,13 @@ function positiveIntegerOrNull(value) {
 }
 
 function cloneProfile(profile) {
-  const tools = Array.isArray(profile.tools) ? [...profile.tools] : [];
+  const tools = Array.isArray(profile.tools)
+    ? profile.source === "builtin" ? expandLocalCodingTools(profile.tools) : [...profile.tools]
+    : [];
   return {
     ...profile,
     aliases: Array.isArray(profile.aliases) ? [...profile.aliases] : [],
-    tools: expandBuiltinCodeTools(profile, tools),
+    tools,
     disallowedTools: Array.isArray(profile.disallowedTools) ? [...profile.disallowedTools] : [],
     skills: Array.isArray(profile.skills) ? [...profile.skills] : [],
     mcpServers: Array.isArray(profile.mcpServers) ? [...profile.mcpServers] : [],
@@ -624,24 +630,48 @@ function cloneProfile(profile) {
   };
 }
 
-function expandBuiltinCodeTools(profile, tools) {
-  if (profile.source !== "builtin" || !tools.includes("grep")) {
-    return tools;
-  }
-  const shouldAddSemanticTools = tools.includes("read_file") && tools.includes("git_status");
-  for (const extra of RG_TOOLS) {
-    if (!tools.includes(extra)) {
-      tools.push(extra);
+function expandLocalCodingTools(tools) {
+  const result = [];
+  const seen = new Set();
+  for (const tool of tools) {
+    if (!seen.has(tool)) {
+      result.push(tool);
+      seen.add(tool);
     }
-  }
-  if (shouldAddSemanticTools) {
-    for (const extra of TYPESCRIPT_TOOLS) {
-      if (!tools.includes(extra)) {
-        tools.push(extra);
+    if (tool === "grep") {
+      for (const extra of RG_TOOLS) {
+        if (!seen.has(extra)) {
+          result.push(extra);
+          seen.add(extra);
+        }
+      }
+      if (tools.includes("read_file")) {
+        for (const extra of TYPESCRIPT_TOOLS) {
+          if (!seen.has(extra)) {
+            result.push(extra);
+            seen.add(extra);
+          }
+        }
+      }
+    }
+    if (tool === "git_diff") {
+      for (const extra of GIT_READ_TOOLS) {
+        if (!seen.has(extra)) {
+          result.push(extra);
+          seen.add(extra);
+        }
+      }
+      if (tools.includes("write_file")) {
+        for (const extra of GIT_WRITE_TOOLS) {
+          if (!seen.has(extra)) {
+            result.push(extra);
+            seen.add(extra);
+          }
+        }
       }
     }
   }
-  return tools;
+  return result;
 }
 
 function cloneOutputContract(value) {

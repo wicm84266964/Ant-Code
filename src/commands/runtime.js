@@ -398,13 +398,18 @@ async function runReviewCommand(options, config) {
 
   const status = await runProcess("git", ["status", "--short", "--", ...parsed.pathspecs], options.cwd, options.env, options.signal);
   const stat = await runProcess("git", ["diff", "--stat", "--", ...parsed.pathspecs], options.cwd, options.env, options.signal);
+  const validationSuggestions = await suggestValidationCommands(options.cwd);
+  const validationMemory = buildValidationMemory({ workflow: options.workflowState, suggestions: validationSuggestions });
   return [
     "Ant Code review summary",
     "",
     "Recorded changes",
     formatRecordedChanges(options.workflowState?.changes ?? []),
     "",
-    "Validation status",
+    "Validation evidence",
+    formatValidationMemory(validationMemory),
+    "",
+    "Validation history",
     formatValidations(options.workflowState?.validations ?? []),
     "",
     "Git status",

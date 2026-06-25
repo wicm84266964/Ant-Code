@@ -109,6 +109,13 @@ test("builtin code-oriented profiles receive rg and TypeScript semantic tools", 
     assert.ok(explorer.tools.includes(tool), `explorer should include ${tool}`);
     assert.ok(reviewer.tools.includes(tool), `reviewer should include ${tool}`);
   }
+  for (const tool of ["git_log", "git_show", "git_branch_list", "git_stash_list", "git_tag_list"]) {
+    assert.ok(explorer.tools.includes(tool), `explorer should include ${tool}`);
+    assert.ok(reviewer.tools.includes(tool), `reviewer should include ${tool}`);
+  }
+  for (const tool of ["git_add", "git_commit", "git_branch", "git_stash", "git_tag"]) {
+    assert.equal(reviewer.tools.includes(tool), false, `reviewer should not include ${tool}`);
+  }
   assert.equal(web.tools.includes("rg_search"), false);
   assert.equal(web.tools.includes("ts_symbols"), false);
 });

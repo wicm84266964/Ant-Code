@@ -571,6 +571,53 @@ test("review slash command shows diff stat", async (t) => {
   assert.match(output, /notes\.txt/);
 });
 
+test("review slash command reports validation memory evidence", async (t) => {
+  if (!(await gitAvailable())) {
+    t.skip("git executable is not available");
+    return;
+  }
+
+  const cwd = await makeTempWorkspace();
+  await execGit(cwd, ["init"]);
+  await fs.writeFile(path.join(cwd, "package.json"), JSON.stringify({
+    scripts: {
+      test: "node --test",
+      check: "npm test"
+    }
+  }), "utf8");
+  await execGit(cwd, ["add", "package.json"]);
+  await execGit(cwd, ["-c", "user.email=test@example.invalid", "-c", "user.name=Test User", "commit", "-m", "init"]);
+  const workflowState = createWorkflowState();
+  workflowState.validations.push({
+    command: "npm test",
+    exitCode: 0,
+    passed: true,
+    timedOut: false,
+    durationMs: 10,
+    recordedAt: "2026-04-28T00:01:00.000Z"
+  });
+  workflowState.changes.push({
+    toolName: "edit_file",
+    path: "src/app.js",
+    edited: true,
+    diffBytes: 10,
+    recordedAt: "2026-04-28T00:02:00.000Z"
+  });
+
+  const output = await runSlashCommand({
+    command: parseSlashCommand("/review"),
+    cwd,
+    env: process.env,
+    workflowState
+  });
+
+  assert.match(output, /Validation evidence/);
+  assert.match(output, /Validation memory/);
+  assert.match(output, /pending=/);
+  assert.match(output, /stale=1/);
+  assert.match(output, /\[passed, stale\] npm test/);
+});
+
 test("diff slash command shows local git changes without shell interpolation", async (t) => {
   if (!(await gitAvailable())) {
     t.skip("git executable is not available");

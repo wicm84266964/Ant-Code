@@ -226,6 +226,152 @@ export const BUILT_IN_TOOLS = Object.freeze([
     }
   },
   {
+    name: "git_log",
+    description: "Show bounded local git commit history without shell interpolation.",
+    risk: "read",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        maxCount: { type: "number" },
+        path: { type: "string" },
+        author: { type: "string" },
+        grep: { type: "string" },
+        since: { type: "string" }
+      }
+    }
+  },
+  {
+    name: "git_show",
+    description: "Show a bounded local git object, commit, tag, or file at a revision without shell interpolation.",
+    risk: "read",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      required: ["revision"],
+      properties: {
+        revision: { type: "string" },
+        path: { type: "string" },
+        stat: { type: "boolean" },
+        maxBytes: { type: "number" }
+      }
+    }
+  },
+  {
+    name: "git_branch_list",
+    description: "List local and remote git branches with current/upstream metadata.",
+    risk: "read",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        all: { type: "boolean" },
+        maxCount: { type: "number" }
+      }
+    }
+  },
+  {
+    name: "git_stash_list",
+    description: "List local git stash entries without shell interpolation.",
+    risk: "read",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        maxCount: { type: "number" }
+      }
+    }
+  },
+  {
+    name: "git_tag_list",
+    description: "List local git tags without shell interpolation.",
+    risk: "read",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        pattern: { type: "string" },
+        maxCount: { type: "number" }
+      }
+    }
+  },
+  {
+    name: "git_add",
+    description: "Stage explicit workspace paths for git commit after write approval. Does not accept broad '.' staging.",
+    risk: "write",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      required: ["paths"],
+      properties: {
+        paths: { type: "array" }
+      }
+    }
+  },
+  {
+    name: "git_commit",
+    description: "Create a git commit from already staged changes after write approval.",
+    risk: "write",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      required: ["message"],
+      properties: {
+        message: { type: "string" },
+        body: { type: "string" }
+      }
+    }
+  },
+  {
+    name: "git_branch",
+    description: "Create, switch, or delete local git branches after write approval. Delete requires explicit force=true.",
+    risk: "write",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      required: ["action", "name"],
+      properties: {
+        action: { type: "string", enum: ["create", "switch", "delete"] },
+        name: { type: "string" },
+        startPoint: { type: "string" },
+        force: { type: "boolean" }
+      }
+    }
+  },
+  {
+    name: "git_stash",
+    description: "Run explicit git stash actions after write approval. Supports push, apply, pop, drop, and show.",
+    risk: "write",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      required: ["action"],
+      properties: {
+        action: { type: "string", enum: ["push", "apply", "pop", "drop", "show"] },
+        ref: { type: "string" },
+        message: { type: "string" },
+        includeUntracked: { type: "boolean" },
+        paths: { type: "array" }
+      }
+    }
+  },
+  {
+    name: "git_tag",
+    description: "Create or delete local git tags after write approval.",
+    risk: "write",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      required: ["action", "name"],
+      properties: {
+        action: { type: "string", enum: ["create", "delete"] },
+        name: { type: "string" },
+        target: { type: "string" },
+        message: { type: "string" }
+      }
+    }
+  },
+  {
     name: "write_file",
     description: "Create or replace a text file after policy approval; approved/full-access mode allows paths outside the workspace.",
     risk: "write",
@@ -316,7 +462,7 @@ export const BUILT_IN_TOOLS = Object.freeze([
   },
   {
     name: "mcp_call",
-    description: "Call a configured local or approved MCP tool through the permission engine.",
+    description: "Call a configured local or lab-approved MCP tool through the permission engine.",
     risk: "mcp",
     supportsAbort: true,
     inputSchema: {
@@ -417,7 +563,7 @@ export const BUILT_IN_TOOLS = Object.freeze([
   },
   {
     name: "agent_run",
-    description: "Run a configured one-shot local subagent with a focused task through the same configured gateway and local permission engine. Built-in profiles include explorer, readonly-researcher, planner, verifier, junior, reviewer, browser-verifier, visual-verifier, and code-worker. For broad work, split the job into bounded slices, set difficulty/modelTier deliberately, and provide writeScope plus acceptance for junior/write tasks.",
+    description: "Run a configured one-shot local subagent with a focused task through the same lab gateway and local permission engine. Built-in profiles include explorer, readonly-researcher, planner, verifier, junior, reviewer, browser-verifier, visual-verifier, and code-worker. For broad work, split the job into bounded slices, set difficulty/modelTier deliberately, and provide writeScope plus acceptance for junior/write tasks.",
     risk: "read",
     supportsAbort: true,
     inputSchema: {
