@@ -56,6 +56,151 @@ export const BUILT_IN_TOOLS = Object.freeze([
     }
   },
   {
+    name: "rg_search",
+    description: "Search workspace files with local ripgrep using regex, glob filters, context lines, and bounded structured results. Falls back only by explicit caller choice; the legacy grep tool remains unchanged.",
+    risk: "read",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      required: ["pattern"],
+      properties: {
+        pattern: { type: "string" },
+        path: { type: "string" },
+        glob: { type: "array" },
+        ignoreCase: { type: "boolean" },
+        caseSensitive: { type: "boolean" },
+        fixedStrings: { type: "boolean" },
+        wordRegexp: { type: "boolean" },
+        multiline: { type: "boolean" },
+        hidden: { type: "boolean" },
+        noIgnore: { type: "boolean" },
+        beforeContext: { type: "number" },
+        afterContext: { type: "number" },
+        maxResults: { type: "number" },
+        timeoutMs: { type: "number" }
+      }
+    }
+  },
+  {
+    name: "rg_files",
+    description: "List workspace files with local ripgrep, honoring .gitignore by default and supporting glob filters.",
+    risk: "read",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        glob: { type: "array" },
+        hidden: { type: "boolean" },
+        noIgnore: { type: "boolean" },
+        maxResults: { type: "number" },
+        timeoutMs: { type: "number" }
+      }
+    }
+  },
+  {
+    name: "rg_files_with_matches",
+    description: "Return only workspace file paths that match a ripgrep pattern.",
+    risk: "read",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      required: ["pattern"],
+      properties: {
+        pattern: { type: "string" },
+        path: { type: "string" },
+        glob: { type: "array" },
+        ignoreCase: { type: "boolean" },
+        fixedStrings: { type: "boolean" },
+        hidden: { type: "boolean" },
+        noIgnore: { type: "boolean" },
+        maxResults: { type: "number" },
+        timeoutMs: { type: "number" }
+      }
+    }
+  },
+  {
+    name: "rg_count",
+    description: "Count ripgrep matches or matching files in the workspace without returning every match.",
+    risk: "read",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      required: ["pattern"],
+      properties: {
+        pattern: { type: "string" },
+        path: { type: "string" },
+        mode: { type: "string", enum: ["matches", "files"] },
+        glob: { type: "array" },
+        ignoreCase: { type: "boolean" },
+        fixedStrings: { type: "boolean" },
+        hidden: { type: "boolean" },
+        noIgnore: { type: "boolean" },
+        timeoutMs: { type: "number" }
+      }
+    }
+  },
+  {
+    name: "ts_symbols",
+    description: "List TypeScript/JavaScript symbols for a workspace source file using the local TypeScript language service.",
+    risk: "read",
+    supportsAbort: false,
+    inputSchema: {
+      type: "object",
+      required: ["file"],
+      properties: {
+        file: { type: "string" },
+        maxResults: { type: "number" }
+      }
+    }
+  },
+  {
+    name: "ts_diagnostics",
+    description: "Return bounded TypeScript/JavaScript syntactic and semantic diagnostics for a file or workspace.",
+    risk: "read",
+    supportsAbort: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        file: { type: "string" },
+        maxResults: { type: "number" },
+        maxFiles: { type: "number" }
+      }
+    }
+  },
+  {
+    name: "ts_find_definition",
+    description: "Find the true TypeScript/JavaScript definition at a 1-based file line and column.",
+    risk: "read",
+    supportsAbort: false,
+    inputSchema: {
+      type: "object",
+      required: ["file", "line", "column"],
+      properties: {
+        file: { type: "string" },
+        line: { type: "number" },
+        column: { type: "number" },
+        maxResults: { type: "number" }
+      }
+    }
+  },
+  {
+    name: "ts_find_references",
+    description: "Find true TypeScript/JavaScript references at a 1-based file line and column.",
+    risk: "read",
+    supportsAbort: false,
+    inputSchema: {
+      type: "object",
+      required: ["file", "line", "column"],
+      properties: {
+        file: { type: "string" },
+        line: { type: "number" },
+        column: { type: "number" },
+        maxResults: { type: "number" }
+      }
+    }
+  },
+  {
     name: "git_status",
     description: "Show local git status without shell interpolation.",
     risk: "read",

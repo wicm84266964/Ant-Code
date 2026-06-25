@@ -46,6 +46,10 @@ This repository is released under the GNU Affero General Public License v3.0.
 - One-shot print mode for scripted prompts
 - Local Dashboard/WebUI bound to `127.0.0.1`
 - File read/write, exact replacement edits, diff previews, and git inspection
+- Local ripgrep-backed search tools for regex, glob, context, file listing,
+  matching-file discovery, and counts
+- Local TypeScript/JavaScript semantic tools for symbols, diagnostics,
+  definitions, and references
 - Local shell execution with approval boundaries
 - Configurable model gateway and health checks
 - OpenAI Chat Completions-compatible gateway mode
@@ -87,6 +91,10 @@ npm run verify:install
 node src/cli/index.js doctor
 node src/cli/index.js tui
 ```
+
+`npm ci` installs the locked local toolchain, including the bundled ripgrep
+binary resolver (`@vscode/ripgrep`) and the TypeScript language service. No
+separate search or TypeScript setup script is required.
 
 For local development from any project directory:
 

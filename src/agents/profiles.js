@@ -2,6 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { normalizeOutputContract } from "./contracts.js";
 
+const RG_TOOLS = Object.freeze(["rg_search", "rg_files", "rg_files_with_matches", "rg_count"]);
+const TYPESCRIPT_TOOLS = Object.freeze(["ts_symbols", "ts_diagnostics", "ts_find_definition", "ts_find_references"]);
+
 export const AGENT_PROFILES = Object.freeze([
   {
     name: "build",
@@ -608,16 +611,37 @@ function positiveIntegerOrNull(value) {
 }
 
 function cloneProfile(profile) {
+  const tools = Array.isArray(profile.tools) ? [...profile.tools] : [];
   return {
     ...profile,
     aliases: Array.isArray(profile.aliases) ? [...profile.aliases] : [],
-    tools: Array.isArray(profile.tools) ? [...profile.tools] : [],
+    tools: expandBuiltinCodeTools(profile, tools),
     disallowedTools: Array.isArray(profile.disallowedTools) ? [...profile.disallowedTools] : [],
     skills: Array.isArray(profile.skills) ? [...profile.skills] : [],
     mcpServers: Array.isArray(profile.mcpServers) ? [...profile.mcpServers] : [],
     triggerHints: Array.isArray(profile.triggerHints) ? [...profile.triggerHints] : [],
     outputContract: cloneOutputContract(profile.outputContract)
   };
+}
+
+function expandBuiltinCodeTools(profile, tools) {
+  if (profile.source !== "builtin" || !tools.includes("grep")) {
+    return tools;
+  }
+  const shouldAddSemanticTools = tools.includes("read_file") && tools.includes("git_status");
+  for (const extra of RG_TOOLS) {
+    if (!tools.includes(extra)) {
+      tools.push(extra);
+    }
+  }
+  if (shouldAddSemanticTools) {
+    for (const extra of TYPESCRIPT_TOOLS) {
+      if (!tools.includes(extra)) {
+        tools.push(extra);
+      }
+    }
+  }
+  return tools;
 }
 
 function cloneOutputContract(value) {

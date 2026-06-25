@@ -103,10 +103,12 @@ If the repository is already checked out, run the commands from the repository
 root, starting with `npm ci`.
 
 This repository uses reviewed public open-source runtime dependencies for the
-terminal UI layer. `npm ci` installs the locked dependency graph from
-`package-lock.json`; packed releases carry the same graph through
-`npm-shrinkwrap.json`. Release checks verify the reviewed allowlist, lockfile
-integrity, dependency notices, and shrinkwrap parity.
+terminal UI layer, local ripgrep-backed search, and TypeScript/JavaScript
+semantic analysis. `npm ci` installs the locked dependency graph from
+`package-lock.json`, including `@vscode/ripgrep` and `typescript`; no separate
+search or TypeScript setup script is required. Packed releases carry the same
+graph through `npm-shrinkwrap.json`. Release checks verify the reviewed
+allowlist, lockfile integrity, dependency notices, and shrinkwrap parity.
 
 ## Linked CLI
 

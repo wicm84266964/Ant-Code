@@ -1,6 +1,6 @@
 {
   "name": "@ant-code/cli",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "description": "AGPL-licensed local coding agent with a terminal UI, local dashboard, tool permissions, skills, MCP integration, and model gateway adapters.",
   "type": "module",
   "private": true,
@@ -73,10 +73,12 @@
     "node": ">=20"
   },
   "dependencies": {
+    "@vscode/ripgrep": "1.18.0",
     "ink": "^6.8.0",
     "katex": "^0.16.46",
     "mermaid": "^11.15.0",
     "react": "^19.2.5",
+    "typescript": "6.0.3",
     "yaml": "^2.9.0"
   },
   "devDependencies": {

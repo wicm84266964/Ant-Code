@@ -328,7 +328,7 @@ test("gateway client sends session affinity header", async () => {
   }
 });
 
-test("gateway client retries Mimo KVTransfer HTTP 500 responses", async () => {
+test("gateway client retries configured transient HTTP 500 responses", async () => {
   const originalFetch = globalThis.fetch;
   const events = [];
   let calls = 0;
@@ -347,8 +347,8 @@ test("gateway client retries Mimo KVTransfer HTTP 500 responses", async () => {
         });
       }
       return new Response(JSON.stringify({
-        id: "mimo-retry-ok",
-        model: "mimo-v2.5",
+        id: "example-retry-ok",
+        model: "example-retry-model",
         content: [{ type: "text", text: "recovered" }],
         toolCalls: [],
         stopReason: "stop"
@@ -359,7 +359,7 @@ test("gateway client retries Mimo KVTransfer HTTP 500 responses", async () => {
     };
 
     const gateway = createLabModelGateway({
-      modelAlias: "mimo-v2.5",
+      modelAlias: "example-retry-model",
       networkMode: "offline",
       allowedHosts: [],
       lab: {
@@ -407,7 +407,7 @@ test("gateway client retries interrupted streams", async () => {
         });
       }
       return new Response([
-        'data: {"id":"retry-ok","model":"mimo-v2.5","choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}',
+        'data: {"id":"retry-ok","model":"example-retry-model","choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}',
         "",
         "data: [DONE]",
         ""
@@ -418,7 +418,7 @@ test("gateway client retries interrupted streams", async () => {
     };
 
     const gateway = createLabModelGateway({
-      modelAlias: "mimo-v2.5",
+      modelAlias: "example-retry-model",
       networkMode: "offline",
       allowedHosts: [],
       lab: {

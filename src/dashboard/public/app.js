@@ -2364,11 +2364,11 @@ function renderModelConfigPanel() {
         </label>
         <label>
           <span>模型 ID</span>
-          <input name="modelId" required spellcheck="false" value="${escapeAttribute(current.id || "")}" placeholder="mimo-v2.5" />
+          <input name="modelId" required spellcheck="false" value="${escapeAttribute(current.id || "")}" placeholder="example-coding-model" />
         </label>
         <label>
           <span>显示名称</span>
-          <input name="label" spellcheck="false" value="${escapeAttribute(current.label || "")}" placeholder="Mimo v2.5" />
+          <input name="label" spellcheck="false" value="${escapeAttribute(current.label || "")}" placeholder="Example Coding Model" />
         </label>
         <label>
           <span>上下文窗口</span>
@@ -2380,15 +2380,15 @@ function renderModelConfigPanel() {
         </label>
         <label>
           <span>子智能体 default</span>
-          <input name="agentDefaultModel" spellcheck="false" value="${escapeAttribute(currentAgentTiers.default)}" placeholder="例如 mimo-v2.5" />
+          <input name="agentDefaultModel" spellcheck="false" value="${escapeAttribute(currentAgentTiers.default)}" placeholder="例如 example-coding-model" />
         </label>
         <label>
           <span>子智能体 strong</span>
-          <input name="agentStrongModel" spellcheck="false" value="${escapeAttribute(currentAgentTiers.strong)}" placeholder="例如 mimo-v2.5" />
+          <input name="agentStrongModel" spellcheck="false" value="${escapeAttribute(currentAgentTiers.strong)}" placeholder="例如 example-strong-model" />
         </label>
         <label>
           <span>视觉子智能体</span>
-          <input name="visionAgentModel" spellcheck="false" value="${escapeAttribute(visionAgentModel)}" placeholder="例如 mimo-v2.5" />
+          <input name="visionAgentModel" spellcheck="false" value="${escapeAttribute(visionAgentModel)}" placeholder="例如 example-vision-model" />
         </label>
       </div>
       <div class="model-config-toggles">

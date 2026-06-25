@@ -141,8 +141,11 @@ export function classifyToolUse(toolName, input = {}, execution = {}, context = 
   if (name === "glob") {
     return classifyGlob(input, context);
   }
-  if (name === "grep") {
+  if (name === "grep" || name === "rg_search" || name === "rg_files_with_matches" || name === "rg_count") {
     return classifyGrep(input, context);
+  }
+  if (name === "rg_files") {
+    return classifyGlob({ ...input, pattern: input.glob ?? input.path ?? "**/*" }, context);
   }
   if (name === "read_file") {
     return classifyReadFile(input, execution, context);

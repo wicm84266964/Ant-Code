@@ -14,6 +14,8 @@ import { BUILT_IN_TOOLS } from "./definitions.js";
 import { documentIntakeTool } from "./document-tools.js";
 import { editFileTool, globTool, grepTool, listFilesTool, readFileTool, writeFileTool } from "./file-tools.js";
 import { gitDiffTool, gitStatusTool } from "./git-tools.js";
+import { rgCountTool, rgFilesTool, rgFilesWithMatchesTool, rgSearchTool } from "./rg-tools.js";
+import { tsDiagnosticsTool, tsFindDefinitionTool, tsFindReferencesTool, tsSymbolsTool } from "./semantic-tools.js";
 import { backgroundShellTool, bashTool, powershellTool } from "./shell-tools.js";
 import { networkHostsForWebTool, webFetchTool, webSearchTool } from "./web-tools.js";
 import { createWorkflowState, planUpdateTool, recordFileChange, recordValidation, todoReadTool, todoWriteTool } from "./workflow-tools.js";
@@ -23,6 +25,14 @@ const HANDLERS = Object.freeze({
   list_files: listFilesTool,
   glob: globTool,
   grep: grepTool,
+  rg_search: rgSearchTool,
+  rg_files: rgFilesTool,
+  rg_files_with_matches: rgFilesWithMatchesTool,
+  rg_count: rgCountTool,
+  ts_symbols: tsSymbolsTool,
+  ts_diagnostics: tsDiagnosticsTool,
+  ts_find_definition: tsFindDefinitionTool,
+  ts_find_references: tsFindReferencesTool,
   git_status: gitStatusTool,
   git_diff: gitDiffTool,
   web_fetch: webFetchTool,

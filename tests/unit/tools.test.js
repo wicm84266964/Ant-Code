@@ -7,6 +7,8 @@ import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { editFileTool, globTool, grepTool, readFileTool, writeFileTool } from "../../src/tools/file-tools.js";
+import { formatRgCloseResult, rgCountTool, rgFilesTool, rgFilesWithMatchesTool, rgSearchTool, windowsReservedDeviceGlobArgs } from "../../src/tools/rg-tools.js";
+import { tsDiagnosticsTool, tsFindDefinitionTool, tsFindReferencesTool, tsSymbolsTool } from "../../src/tools/semantic-tools.js";
 import { scrubEnvironment } from "../../src/tools/env-scrubber.js";
 import { createMcpRuntime } from "../../src/mcp/runtime.js";
 import { documentIntakeTool } from "../../src/tools/document-tools.js";
@@ -87,6 +89,158 @@ test("grep skips binary model/data artifacts while preserving text matches", asy
   assert.equal(result.truncated, false);
   assert.deepEqual(result.matches.map((match) => match.path), ["source.py"]);
   assert.equal(result.matches[0].text, "needle-in-source");
+});
+
+test("rg_search supports regex, glob filters, and context lines", async () => {
+  if (!await rgAvailable()) return;
+  const cwd = await makeTempWorkspace();
+  await fs.mkdir(path.join(cwd, "src"), { recursive: true });
+  await fs.writeFile(path.join(cwd, "src", "math.ts"), [
+    "const hidden = 1;",
+    "export function add(a: number, b: number) {",
+    "  return a + b;",
+    "}"
+  ].join("\n"), "utf8");
+  await fs.writeFile(path.join(cwd, "src", "notes.md"), "export function ignored() {}\n", "utf8");
+
+  const result = await rgSearchTool({
+    cwd,
+    pattern: "export\\s+function\\s+add",
+    glob: ["*.ts"],
+    beforeContext: 1,
+    afterContext: 1,
+    maxResults: 10
+  });
+
+  assert.equal(result.ok, undefined);
+  assert.equal(result.matches.some((item) => item.type === "match" && item.path === "src/math.ts" && item.line === 2), true);
+  assert.equal(result.matches.some((item) => item.type === "context" && item.line === 1), true);
+  assert.equal(result.matches.some((item) => item.path.endsWith("notes.md")), false);
+});
+
+test("rg_files, rg_files_with_matches, and rg_count expose bounded search helpers", async () => {
+  if (!await rgAvailable()) return;
+  const cwd = await makeTempWorkspace();
+  await fs.mkdir(path.join(cwd, "src"), { recursive: true });
+  await fs.writeFile(path.join(cwd, "src", "one.ts"), "const marker = 1;\n", "utf8");
+  await fs.writeFile(path.join(cwd, "src", "two.js"), "const marker = 2;\nconst markerAgain = 3;\n", "utf8");
+  await fs.writeFile(path.join(cwd, "README.md"), "marker docs\n", "utf8");
+
+  const files = await rgFilesTool({ cwd, glob: ["*.ts", "*.js"], maxResults: 10 });
+  const matched = await rgFilesWithMatchesTool({ cwd, pattern: "marker", glob: ["*.ts", "*.js"], maxResults: 10 });
+  const count = await rgCountTool({ cwd, pattern: "marker", glob: ["*.ts", "*.js"] });
+
+  assert.deepEqual(files.files.sort(), ["src/one.ts", "src/two.js"]);
+  assert.deepEqual(matched.files.sort(), ["src/one.ts", "src/two.js"]);
+  assert.equal(count.count, 3);
+});
+
+test("rg_search can use bundled ripgrep when PATH is unavailable", async () => {
+  const cwd = await makeTempWorkspace();
+  await fs.writeFile(path.join(cwd, "sample.ts"), "export const marker = 1;\n", "utf8");
+  const previousPath = process.env.PATH;
+  try {
+    process.env.PATH = "";
+    const result = await rgSearchTool({ cwd, pattern: "marker", glob: ["*.ts"] });
+    assert.equal(result.matches.some((item) => item.path === "sample.ts"), true);
+  } finally {
+    process.env.PATH = previousPath;
+  }
+});
+
+test("rg wrapper keeps partial output when ripgrep reports a path-level failure", () => {
+  const result = formatRgCloseResult({
+    command: "rg --json marker .",
+    exitCode: 2,
+    timedOut: false,
+    durationMs: 12,
+    stdout: "{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"src/math.ts\"},\"lines\":{\"text\":\"export const marker = 1;\\n\"},\"line_number\":1,\"submatches\":[{\"match\":{\"text\":\"marker\"},\"start\":13,\"end\":19}]}}\n",
+    stderr: "rg: ./nul: Incorrect function. (os error 1)\n",
+    truncated: false
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.partialFailure, true);
+  assert.equal(result.warning.code, "RG_PARTIAL_FAILURE");
+  assert.match(result.stdout, /marker/);
+  assert.match(result.warning.message, /nul/);
+});
+
+test("rg wrapper excludes Windows reserved device names by default on Windows", () => {
+  const winArgs = windowsReservedDeviceGlobArgs("win32");
+  const linuxArgs = windowsReservedDeviceGlobArgs("linux");
+
+  assert.equal(linuxArgs.length, 0);
+  assert.equal(winArgs.includes("--glob"), true);
+  assert.equal(winArgs.includes("!nul"), true);
+  assert.equal(winArgs.includes("!**/nul"), true);
+  assert.equal(winArgs.includes("!con.*"), true);
+});
+
+test("TypeScript semantic tools report symbols, diagnostics, definitions, and references", async () => {
+  const cwd = await makeTempWorkspace();
+  await fs.mkdir(path.join(cwd, "src"), { recursive: true });
+  await fs.writeFile(path.join(cwd, "tsconfig.json"), JSON.stringify({
+    compilerOptions: {
+      target: "ES2022",
+      module: "ESNext",
+      strict: true,
+      allowJs: true,
+      checkJs: true
+    },
+    include: ["src/**/*"]
+  }), "utf8");
+  await fs.writeFile(path.join(cwd, "src", "math.ts"), [
+    "export interface NumericBox { value: number }",
+    "export function add(a: number, b: number): number {",
+    "  return a + b;",
+    "}",
+    "export class Calculator {",
+    "  add(value: number) {",
+    "    return add(value, this.zero());",
+    "  }",
+    "  zero() { return 0; }",
+    "}"
+  ].join("\n"), "utf8");
+  await fs.writeFile(path.join(cwd, "src", "usage.ts"), [
+    "import { add, Calculator } from './math';",
+    "const total = add(1, 2);",
+    "const calc = new Calculator();",
+    "calc.add(total);"
+  ].join("\n"), "utf8");
+  await fs.writeFile(path.join(cwd, "src", "broken.ts"), [
+    "import { add } from './math';",
+    "const bad: string = add(1, 2);"
+  ].join("\n"), "utf8");
+
+  const symbols = await tsSymbolsTool({ cwd, file: "src/math.ts" });
+  const diagnostics = await tsDiagnosticsTool({ cwd, file: "src/broken.ts" });
+  const definition = await tsFindDefinitionTool({ cwd, file: "src/usage.ts", line: 2, column: 15 });
+  const references = await tsFindReferencesTool({ cwd, file: "src/math.ts", line: 2, column: 17 });
+
+  assert.equal(symbols.symbols.some((item) => item.name === "add" && /function/i.test(item.kind)), true);
+  assert.equal(symbols.symbols.some((item) => item.name === "Calculator" && /class/i.test(item.kind)), true);
+  assert.equal(diagnostics.diagnostics.some((item) => item.code === 2322), true);
+  assert.equal(definition.definitions.some((item) => item.file === "src/math.ts" && item.startLine === 2), true);
+  assert.equal(references.references.some((item) => item.file === "src/usage.ts" && item.startLine === 2), true);
+});
+
+test("TypeScript semantic tools work without a tsconfig", async () => {
+  const cwd = await makeTempWorkspace();
+  await fs.mkdir(path.join(cwd, "src"), { recursive: true });
+  await fs.writeFile(path.join(cwd, "src", "plain.js"), [
+    "export function double(value) {",
+    "  return value * 2;",
+    "}",
+    "double('3');"
+  ].join("\n"), "utf8");
+
+  const symbols = await tsSymbolsTool({ cwd, file: "src/plain.js" });
+  const diagnostics = await tsDiagnosticsTool({ cwd, maxFiles: 10 });
+
+  assert.equal(symbols.symbols.some((item) => item.name === "double"), true);
+  assert.equal(Array.isArray(diagnostics.diagnostics), true);
+  assert.equal(diagnostics.fileCount, 1);
 });
 
 test("tool result serializer preserves oversized JSON for model context", () => {
@@ -1874,6 +2028,15 @@ async function waitFor(predicate, timeoutMs = 1000) {
 async function gitAvailable() {
   try {
     await execFileAsync("git", ["--version"]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function rgAvailable() {
+  try {
+    await execFileAsync("rg", ["--version"]);
     return true;
   } catch {
     return false;

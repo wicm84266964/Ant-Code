@@ -14,7 +14,7 @@ const DEFAULT_GATEWAY_TIMEOUT_MS = 180000;
 const DEFAULT_GATEWAY_IDLE_TIMEOUT_MS = 60000;
 const BASE_RETRY_DELAY_MS = 350;
 const MAX_RETRY_DELAY_MS = 1500;
-const MIMO_RETRY_ERROR_PATTERN = /KVTransferError|WaitingForInput|Decode transfer failed|premature close|stream.*interrupted/i;
+const GATEWAY_TRANSIENT_ERROR_PATTERN = /KVTransferError|WaitingForInput|Decode transfer failed|premature close|stream.*interrupted/i;
 
 /**
  * @param {import("../config/load-config.js").LabAgentConfig} config
@@ -457,7 +457,7 @@ function shouldRetryGatewayHttpError(error, options) {
   if (Number(error.status) >= 500) {
     return true;
   }
-  return isMimoGatewayRetryable(error, options.config);
+  return isConfiguredGatewayRetryable(error, options.config);
 }
 
 /**
@@ -470,7 +470,7 @@ function shouldRetryGatewayResponseError(error, options) {
   }
   return error.code === "GATEWAY_STREAM_INTERRUPTED"
     || isRetryableGatewayParseError(error)
-    || isMimoGatewayRetryable(error, options.config);
+    || isConfiguredGatewayRetryable(error, options.config);
 }
 
 function isRetryableGatewayParseError(error) {
@@ -489,8 +489,8 @@ function isRetryableGatewayParseError(error) {
  * @param {Record<string, any>} error
  * @param {import("../config/load-config.js").LabAgentConfig} config
  */
-function isMimoGatewayRetryable(error, config) {
-  if (!isMimoModel(config)) {
+function isConfiguredGatewayRetryable(error, config) {
+  if (!usesGatewayRetryProfile(config)) {
     return false;
   }
   const text = [
@@ -498,14 +498,14 @@ function isMimoGatewayRetryable(error, config) {
     error?.details?.body,
     error?.details?.responseReadStage
   ].filter(Boolean).join("\n");
-  return MIMO_RETRY_ERROR_PATTERN.test(text);
+  return GATEWAY_TRANSIENT_ERROR_PATTERN.test(text);
 }
 
 /**
  * @param {import("../config/load-config.js").LabAgentConfig} config
  */
-function isMimoModel(config) {
-  return /mimo/i.test(String(config?.modelAlias ?? ""));
+function usesGatewayRetryProfile(config) {
+  return /retry/i.test(String(config?.modelAlias ?? config?.lab?.gatewayRetryProfile ?? ""));
 }
 
 /**

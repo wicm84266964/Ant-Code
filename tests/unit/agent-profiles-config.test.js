@@ -99,6 +99,20 @@ test("builtin output contracts align with profile return fields", () => {
   assert.ok(visual.outputContract.required.includes("recommendedFollowup"));
 });
 
+test("builtin code-oriented profiles receive rg and TypeScript semantic tools", () => {
+  const config = { agents: { profiles: [] } };
+  const explorer = getAgentProfile("explorer", config, { cwd: process.cwd() });
+  const reviewer = getAgentProfile("reviewer", config, { cwd: process.cwd() });
+  const web = getAgentProfile("web-researcher", config, { cwd: process.cwd() });
+
+  for (const tool of ["rg_search", "rg_files", "rg_files_with_matches", "rg_count", "ts_symbols", "ts_diagnostics", "ts_find_definition", "ts_find_references"]) {
+    assert.ok(explorer.tools.includes(tool), `explorer should include ${tool}`);
+    assert.ok(reviewer.tools.includes(tool), `reviewer should include ${tool}`);
+  }
+  assert.equal(web.tools.includes("rg_search"), false);
+  assert.equal(web.tools.includes("ts_symbols"), false);
+});
+
 test("agent profiles load markdown frontmatter from local agent directories", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-agents-"));
   await fs.mkdir(path.join(cwd, ".lab-agent", "agents"), { recursive: true });

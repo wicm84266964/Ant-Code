@@ -5,6 +5,9 @@ runtime assets from the following third-party packages:
 
 | Component | Use | License |
 | --- | --- | --- |
+| `@vscode/ripgrep` | local ripgrep executable resolver for workspace search tools | MIT |
+| `@vscode/ripgrep-*` platform packages | optional platform-local ripgrep binaries installed by npm for the current OS/CPU | MIT |
+| `typescript` | local JavaScript/TypeScript language service for symbols, diagnostics, definitions, and references | Apache-2.0 |
 | `ink` | terminal UI runtime dependency | MIT |
 | `react` | UI runtime dependency | MIT |
 | `katex` | math rendering runtime dependency; Dashboard CSS and font assets | MIT |
@@ -62,3 +65,10 @@ indirect, or consequential damages or any damages whatsoever resulting from loss
 of use, data or profits, whether in an action of contract, negligence or other
 tortious action, arising out of or in connection with the use or performance of
 this software.
+
+## Apache License 2.0 Notice
+
+`typescript` is licensed under the Apache License, Version 2.0. A copy of the
+license is available from the Apache Software Foundation at:
+
+https://www.apache.org/licenses/LICENSE-2.0

@@ -5,6 +5,12 @@ import { ROOT, collectFiles, rel } from "./audit-common.js";
 
 const failures = [];
 const REVIEWED_RUNTIME_DEPENDENCIES = new Map([
+  ["@vscode/ripgrep", {
+    versionSpec: "1.18.0",
+    installedVersion: "1.18.0",
+    license: "MIT",
+    provenanceMarker: "open_source: VS Code ripgrep wrapper, MIT licensed, public npm package; resolves local platform ripgrep binary"
+  }],
   ["ink", {
     versionSpec: "^6.8.0",
     installedVersion: "6.8.0",
@@ -28,6 +34,12 @@ const REVIEWED_RUNTIME_DEPENDENCIES = new Map([
     installedVersion: "19.2.5",
     license: "MIT",
     provenanceMarker: "open_source: React UI library, MIT licensed, public npm package"
+  }],
+  ["typescript", {
+    versionSpec: "6.0.3",
+    installedVersion: "6.0.3",
+    license: "Apache-2.0",
+    provenanceMarker: "open_source: TypeScript language service, Apache-2.0 licensed, public npm package"
   }],
   ["yaml", {
     versionSpec: "^2.9.0",
