@@ -223,6 +223,8 @@ test("dashboard runtime saves local model gateway config", async () => {
 
   assert.equal(saved.ok, true);
   assert.equal(saved.sessionStatus.model, "local-vision");
+  assert.equal(saved.sessionStatus.context.maxTokens, 128000);
+  assert.equal(saved.sessionStatus.context.modelMaxTokens, 128000);
   assert.equal(saved.gatewayConfig.apiKeyConfigured, true);
   assert.equal(saved.models.find((model) => model.id === "local-vision")?.current, true);
   assert.deepEqual(saved.models.find((model) => model.id === "local-vision")?.modalities, ["text", "image"]);
@@ -231,6 +233,10 @@ test("dashboard runtime saves local model gateway config", async () => {
   assert.equal(local.modelAlias, "local-vision");
   assert.equal(local.lab.gatewayUrl, "https://local.gateway.example/v1/chat/completions");
   assert.equal(local.lab.gatewayApiKey, "secret-key");
+  assert.equal(local.context.maxTokens, 128000);
+  assert.equal(local.context.maxBytes, 512000);
+  assert.ok(local.context.resumeMaxTokens >= local.context.maxTokens);
+  assert.ok(local.context.resumeMaxBytes >= local.context.maxBytes);
   assert.ok(local.allowedHosts.includes("local.gateway.example"));
   assert.deepEqual(local.models.find((model) => model.id === "local-vision").modalities, ["text", "image"]);
   assert.deepEqual(local.models.find((model) => model.id === "local-vision").agentModelTiers, {
@@ -298,6 +304,53 @@ test("dashboard runtime refreshes idle active session after saving gateway key",
     const final = events.find((event) => event.type === "assistant_final" && event.sequence > retried.eventCursor);
     assert.match(final?.text ?? "", /fresh answer/);
     assert.equal(requests.at(-1)?.authorization, "Bearer new-key");
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime preserves running context usage when saving model window", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createHangingGateway(), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: mockGatewayEnv(server, {
+      ANT_CODE_INTERRUPT_FORCE_SETTLE_MS: "50",
+      LAB_MODEL_GATEWAY_TIMEOUT_MS: "600000",
+      LAB_AGENT_MODEL: "mock-model"
+    })
+  });
+
+  try {
+    await runtime.trustWorkspace();
+    const started = await runtime.startTurn({
+      prompt: "keep the visible context usage while this request is running",
+      permissionMode: "plan"
+    });
+    assert.equal(started.ok, true);
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "activity" && event.rawType === "gateway_request_start");
+
+    const before = runtime.active.get(started.sessionId).session.lastPromptEstimate.tokens;
+    assert.ok(before > 0);
+
+    const saved = await runtime.saveModelConfig({
+      sessionId: started.sessionId,
+      gatewayUrl: runtime.env.LAB_MODEL_GATEWAY_URL,
+      gatewayProtocol: "lab-agent-gateway",
+      modelId: "mock-model",
+      label: "Mock Model",
+      contextTokens: "400000",
+      modalities: ["text"],
+      switchToModel: true
+    });
+
+    assert.equal(saved.ok, true);
+    assert.equal(saved.sessionStatus.context.promptTokens, before);
+    assert.equal(saved.sessionStatus.context.maxTokens, 400000);
+    assert.equal(saved.sessionStatus.context.modelMaxTokens, 400000);
+
+    runtime.interruptTurn(started.sessionId, "test cleanup");
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
   } finally {
     await close(server);
   }

@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { createSession, runSessionTurn } from "../core/session.js";
-import { clearSessionContext, compactSessionContextWithModel, summarizeContextWindow } from "../core/context-window.js";
+import { clearSessionContext, compactSessionContextWithModel, createContextWindow, summarizeContextWindow } from "../core/context-window.js";
 import { createLabModelGateway } from "../model-gateway/client.js";
 import { listConfiguredModels, normalizeAgentModelTiers, resolveModelSelection } from "../model-gateway/models.js";
 import { resolveWorkspaceTrust, trustWorkspace as saveWorkspaceTrust } from "../permissions/workspace-trust.js";
@@ -156,12 +156,13 @@ export function createDashboardRuntime(options) {
       }
       const modelConfig = selectedModelId ? { ...refreshed, modelAlias: selectedModelId } : refreshed;
       const syncedState = syncIdleSessionConfig(active, input.sessionId, modelConfig);
-      const activeConfig = syncedState?.session.config ?? modelConfig;
+      const state = syncedState ?? activeStateForSession(active, input.sessionId);
+      const activeConfig = syncedState?.session.config ?? (state?.session.config ? configForStatusLists(state.session.config, modelConfig) : modelConfig);
       return {
         ok: true,
         configPath: localPath,
         sessionId: syncedState?.session.id,
-        sessionStatus: syncedState ? sessionStatusSummary(syncedState.session) : sessionStatusFromConfig(modelConfig),
+        sessionStatus: state ? sessionStatusForConfigUpdate(state.session, modelConfig) : sessionStatusFromConfig(modelConfig),
         models: modelOptions(activeConfig),
         agentModelTiers: publicAgentModelTiers(activeConfig),
         visionAgent: publicVisionAgent(activeConfig),
@@ -942,23 +943,29 @@ function applySessionModel(session, modelId) {
   }
   session.model = id;
   session.config = { ...session.config, modelAlias: id };
-  const previous = session.contextWindow ?? {};
-  session.contextWindow = {
-    ...previous,
-    modelMaxTokens: modelContextTokens(session.config),
-    maxTokens: session.config.context?.maxTokens ?? previous.maxTokens
-  };
+  refreshSessionContextWindow(session);
 }
 
 function applySessionConfig(session, config) {
   const id = String(config.modelAlias ?? session.model ?? "").trim();
   session.model = id;
   session.config = { ...config, modelAlias: id };
+  refreshSessionContextWindow(session);
+}
+
+function refreshSessionContextWindow(session) {
   const previous = session.contextWindow ?? {};
+  const next = createContextWindow(session.config ?? {});
   session.contextWindow = {
-    ...previous,
-    modelMaxTokens: modelContextTokens(session.config),
-    maxTokens: session.config.context?.maxTokens ?? previous.maxTokens
+    ...next,
+    summary: typeof previous.summary === "string" ? previous.summary : next.summary,
+    compactionCount: Number.isFinite(previous.compactionCount) ? previous.compactionCount : next.compactionCount,
+    compactedMessages: Number.isFinite(previous.compactedMessages) ? previous.compactedMessages : next.compactedMessages,
+    lastCompactedAt: previous.lastCompactedAt ?? next.lastCompactedAt,
+    lastReason: previous.lastReason ?? next.lastReason,
+    lastStrategy: previous.lastStrategy ?? next.lastStrategy,
+    lastFallbackReason: previous.lastFallbackReason ?? next.lastFallbackReason,
+    lastInternalAgent: previous.lastInternalAgent ?? next.lastInternalAgent
   };
 }
 
@@ -968,6 +975,36 @@ function configForExistingSession(session, config) {
     return { ...config, modelAlias: currentModel };
   }
   return config;
+}
+
+function activeStateForSession(active, sessionId) {
+  const id = String(sessionId ?? "").trim();
+  return id ? active.get(id) ?? null : null;
+}
+
+function configForStatusLists(sessionConfig, refreshedConfig) {
+  return {
+    ...refreshedConfig,
+    modelAlias: sessionConfig.modelAlias ?? refreshedConfig.modelAlias
+  };
+}
+
+function sessionStatusForConfigUpdate(session, config) {
+  if (!session) {
+    return sessionStatusFromConfig(config);
+  }
+  const current = sessionStatusSummary(session);
+  const configured = sessionStatusFromConfig(config);
+  return {
+    ...current,
+    model: current.model || configured.model,
+    context: {
+      ...(current.context ?? {}),
+      maxTokens: configured.context?.maxTokens ?? current.context?.maxTokens,
+      maxBytes: configured.context?.maxBytes ?? current.context?.maxBytes,
+      modelMaxTokens: configured.context?.modelMaxTokens ?? current.context?.modelMaxTokens
+    }
+  };
 }
 
 function syncIdleSessionConfig(active, sessionId, config) {
@@ -1203,6 +1240,7 @@ function buildLocalModelConfig(local, config, normalized) {
     allowedHosts,
     lab
   };
+  applyModelContextBudget(next, local, config, normalized.model.contextTokens);
   if (replacingExistingModel) {
     next.agents = replaceModelInAgentConfig(
       {
@@ -1253,6 +1291,22 @@ function buildLocalModelConfig(local, config, normalized) {
   next.lab.gatewayProfiles = upsertGatewayProfileEntries(local, config, normalized, next);
   next.lab.activeGatewayProfile = gatewayProfileIdFromParts(normalized.gatewayProtocol, normalized.gatewayUrl);
   return next;
+}
+
+function applyModelContextBudget(next, local, config, contextTokens) {
+  if (!Number.isFinite(contextTokens) || contextTokens <= 0) {
+    return;
+  }
+  const nextContext = {
+    ...(isPlainObject(config.context) ? config.context : {}),
+    ...(isPlainObject(local.context) ? local.context : {}),
+    ...(isPlainObject(next.context) ? next.context : {})
+  };
+  nextContext.maxTokens = contextTokens;
+  nextContext.maxBytes = contextTokens * 4;
+  nextContext.resumeMaxTokens = Math.max(positiveIntegerOrNull(nextContext.resumeMaxTokens) ?? 0, contextTokens);
+  nextContext.resumeMaxBytes = Math.max(positiveIntegerOrNull(nextContext.resumeMaxBytes) ?? 0, contextTokens * 4);
+  next.context = nextContext;
 }
 
 function replaceModelInAgentConfig(agents, previousModelId, nextModelId) {
