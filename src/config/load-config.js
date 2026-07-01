@@ -217,11 +217,12 @@ function normalizeContextConfig(config, env) {
   const context = config.context ?? {};
   const maxMessages = context.maxMessages;
   const maxTokens = context.maxTokens;
-  const maxBytes = context.maxBytes;
+  const maxBytes = normalizeContextMaxBytes(context, env);
   return {
     ...config,
     context: {
       ...context,
+      maxBytes,
       resumeMaxMessages: env.LAB_AGENT_CONTEXT_RESUME_MAX_MESSAGES
         ? context.resumeMaxMessages
         : Math.max(context.resumeMaxMessages ?? maxMessages, maxMessages),
@@ -233,6 +234,16 @@ function normalizeContextConfig(config, env) {
         : Math.max(context.resumeMaxBytes ?? maxBytes, maxBytes)
     }
   };
+}
+
+function normalizeContextMaxBytes(context, env) {
+  const maxTokens = Number.isInteger(context.maxTokens) && context.maxTokens > 0 ? context.maxTokens : null;
+  const currentMaxBytes = Number.isInteger(context.maxBytes) && context.maxBytes > 0 ? context.maxBytes : null;
+  const tokenAlignedMaxBytes = maxTokens ? maxTokens * 4 : null;
+  if (env.LAB_AGENT_CONTEXT_MAX_BYTES) {
+    return currentMaxBytes;
+  }
+  return Math.max(currentMaxBytes ?? 0, tokenAlignedMaxBytes ?? 0) || currentMaxBytes;
 }
 
 /**
@@ -572,7 +583,7 @@ function validateConfig(config) {
   if (
     context.promptCompactRatio !== undefined
     && context.promptCompactRatio !== null
-    && (!Number.isFinite(context.promptCompactRatio) || context.promptCompactRatio <= 0 || context.promptCompactRatio >= 1)
+    && (!Number.isFinite(context.promptCompactRatio) || context.promptCompactRatio <= 0 || context.promptCompactRatio > 1)
   ) {
     throw new Error(`Unsupported context.promptCompactRatio: ${context.promptCompactRatio}`);
   }

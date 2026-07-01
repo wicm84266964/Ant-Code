@@ -1909,6 +1909,95 @@ test("background shell persists terminal task records", async () => {
   }
 });
 
+test("background terminal tools list and cancel registered tasks", async () => {
+  const cwd = await makeTempWorkspace();
+  const runtime = createToolRuntime({
+    cwd,
+    parentSessionId: "session-terminal-tools",
+    policy: {
+      networkMode: "offline",
+      approvals: { workspaceCommands: true }
+    }
+  });
+  const command = process.platform === "win32"
+    ? "Start-Sleep -Seconds 10"
+    : "sleep 10";
+  const started = await runtime.execute("background_shell", {
+    command,
+    title: "Terminal tools target",
+    taskId: "terminal-tools-target"
+  });
+
+  try {
+    assert.equal(started.ok, true);
+    assert.equal(started.result.started, true);
+
+    const listed = await runtime.execute("background_terminal_list", {});
+    assert.equal(listed.ok, true);
+    assert.equal(listed.result.count, 1);
+    assert.equal(listed.result.tasks[0].taskId, "terminal-tools-target");
+    assert.equal(listed.result.tasks[0].status, "running");
+
+    const cancelled = await runtime.execute("background_terminal_cancel", {
+      taskId: "terminal-tools-target"
+    });
+    assert.equal(cancelled.ok, true);
+    assert.deepEqual(cancelled.result.cancelledTaskIds, ["terminal-tools-target"]);
+
+    const all = await runtime.execute("background_terminal_list", {
+      activeOnly: false
+    });
+    assert.equal(all.ok, true);
+    assert.equal(all.result.tasks.find((task) => task.taskId === "terminal-tools-target").status, "cancelled");
+  } finally {
+    if (started.result?.pid) {
+      await killProcessTree(started.result.pid);
+    }
+  }
+});
+
+test("background terminal cancel respects readonly permission policy", async () => {
+  const cwd = await makeTempWorkspace();
+  const starter = createToolRuntime({
+    cwd,
+    parentSessionId: "session-terminal-readonly",
+    policy: {
+      networkMode: "offline",
+      approvals: { workspaceCommands: true }
+    }
+  });
+  const readonly = createToolRuntime({
+    cwd,
+    parentSessionId: "session-terminal-readonly",
+    policy: {
+      readonly: true,
+      networkMode: "offline"
+    }
+  });
+  const command = process.platform === "win32"
+    ? "Start-Sleep -Seconds 10"
+    : "sleep 10";
+  const started = await starter.execute("background_shell", {
+    command,
+    title: "Readonly cancel target",
+    taskId: "readonly-cancel-target"
+  });
+
+  try {
+    assert.equal(started.ok, true);
+    const result = await readonly.execute("background_terminal_cancel", {
+      taskId: "readonly-cancel-target"
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.blocked, true);
+    assert.equal(result.decision.decision, "deny");
+  } finally {
+    if (started.result?.pid) {
+      await killProcessTree(started.result.pid);
+    }
+  }
+});
+
 test("background shell exposes a starting terminal record before launcher completion", async () => {
   const cwd = await makeTempWorkspace();
   const controller = new AbortController();

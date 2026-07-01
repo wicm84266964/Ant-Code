@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import path from "node:path";
 import { registerBackgroundAgentTask } from "../agents/background-registry.js";
+import { cancelBackgroundTerminalTasks, listBackgroundTerminalTasks } from "../agents/background-terminal-registry.js";
 import { createAgentTaskStore } from "../agents/task-store.js";
 import { createAgentTaskGroupStore, safeGroupId, summarizeGroupStatus } from "../agents/task-group-store.js";
 import { buildSubagentGroupWakePrompt } from "../agents/wakeup.js";
@@ -171,6 +172,13 @@ export function createToolRuntime(options) {
         return finishTool(options, name, input, definition, { ok: true, result: await options.askUser(input) });
       }
 
+      if (name === "background_terminal_list") {
+        return finishTool(options, name, input, definition, {
+          ok: true,
+          result: listBackgroundTerminalsForTool(options, input)
+        });
+      }
+
       if (name === "agent_run") {
         const execution = await runAgentTool(options, input, definition);
         return finishTool(options, name, input, definition, options.signal?.aborted && execution.interrupted !== true
@@ -195,7 +203,7 @@ export function createToolRuntime(options) {
           cwd: options.cwd,
           targetPaths: input.path ? [input.path] : [],
           networkHosts: networkHostsForWebTool(name, input, options.config, options.env),
-          command: input.command,
+          command: permissionCommandForTool(name, input),
           summary: definition.description
         },
         { workspace: options.cwd, ...(options.policy ?? {}) }
@@ -237,6 +245,16 @@ export function createToolRuntime(options) {
             steps: input.steps ?? input.plan ?? input.items
           })
         });
+      }
+
+      if (name === "background_terminal_cancel") {
+        const result = cancelBackgroundTerminalForTool(options, input);
+        await notifyBackgroundTerminalEvent(options, {
+          type: "background_terminal_cancelled",
+          taskId: result.taskId,
+          cancelledTaskIds: result.cancelledTaskIds
+        });
+        return finishTool(options, name, input, definition, { ok: true, result });
       }
 
       if (!handler) {
@@ -599,6 +617,69 @@ function isTerminalFetchMcpResult(execution) {
     "MCP_TRANSPORT_UNSUPPORTED",
     "MCP_REQUEST_FAILED"
   ].includes(code);
+}
+
+function listBackgroundTerminalsForTool(options, input = {}) {
+  const parentSessionId = input.includeAllSessions === true ? null : options.backgroundParentSessionId ?? options.parentSessionId ?? null;
+  const tasks = listBackgroundTerminalTasks({
+    cwd: options.cwd,
+    parentSessionId,
+    taskId: typeof input.taskId === "string" && input.taskId.trim() ? input.taskId.trim() : undefined
+  });
+  const activeOnly = input.activeOnly !== false;
+  const filtered = activeOnly
+    ? tasks.filter((task) => task.status === "starting" || task.status === "running")
+    : tasks;
+  return {
+    parentSessionId,
+    activeOnly,
+    count: filtered.length,
+    tasks: filtered.map(formatBackgroundTerminalTask)
+  };
+}
+
+function cancelBackgroundTerminalForTool(options, input = {}) {
+  const taskId = String(input.taskId ?? "").trim();
+  const parentSessionId = input.includeAllSessions === true ? null : options.backgroundParentSessionId ?? options.parentSessionId ?? null;
+  const cancelled = cancelBackgroundTerminalTasks({
+    cwd: options.cwd,
+    parentSessionId,
+    taskId
+  });
+  return {
+    taskId,
+    parentSessionId,
+    cancelledTaskIds: cancelled.map((task) => task.taskId),
+    cancelled: cancelled.map(formatBackgroundTerminalTask)
+  };
+}
+
+function formatBackgroundTerminalTask(task) {
+  return {
+    taskId: task.taskId,
+    parentSessionId: task.parentSessionId,
+    title: task.title,
+    command: task.command,
+    cwd: task.cwd,
+    pid: task.pid,
+    launcherPid: task.launcherPid,
+    status: task.status,
+    startedAt: task.startedAt,
+    updatedAt: task.updatedAt,
+    finishedAt: task.finishedAt,
+    cancelledAt: task.cancelledAt,
+    stdoutPath: task.stdoutPath,
+    stderrPath: task.stderrPath,
+    exitCode: task.exitCode,
+    signal: task.signal
+  };
+}
+
+function permissionCommandForTool(name, input = {}) {
+  if (name === "background_terminal_cancel") {
+    return `cancel background terminal ${String(input.taskId ?? "").trim()}`;
+  }
+  return input.command;
 }
 
 /**

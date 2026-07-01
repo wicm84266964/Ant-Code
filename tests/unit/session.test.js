@@ -327,6 +327,50 @@ test("session compacts before gateway request when full prompt payload exceeds t
   }
 });
 
+test("session does not compact before the configured context window is reached by default", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
+  await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
+    context: {
+      maxMessages: 100,
+      maxTokens: 20000,
+      keepRecentMessages: 2,
+      summaryBytes: 4096
+    }
+  }), "utf8");
+  const requests = [];
+  const events = [];
+  const server = await listen(createRecordingGateway(requests), "127.0.0.1");
+
+  try {
+    const env = mockGatewayEnv(serverUrl(server));
+    delete env.LAB_AGENT_TRANSCRIPT_ENABLED;
+    const session = await createSession({
+      cwd,
+      mode: "interactive",
+      env
+    });
+    session.messages = [
+      { role: "user", content: "older context " + "alpha ".repeat(3200) },
+      { role: "assistant", content: [{ type: "text", text: "older answer " + "beta ".repeat(3200) }] },
+      { role: "user", content: "recent question" },
+      { role: "assistant", content: [{ type: "text", text: "recent answer" }] }
+    ];
+
+    await runSessionTurn(session, {
+      prompt: "continue before full context",
+      env,
+      onEvent: (event) => events.push(event)
+    });
+
+    assert.equal(session.contextWindow.compactionCount, 0);
+    assert.equal(events.some((event) => event.type === "context_compacted"), false);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].messages.some((message) => String(message.content?.[0]?.text ?? "").includes("context compactor")), false);
+  } finally {
+    await close(server);
+  }
+});
+
 test("OpenAI-compatible prompt compaction drops leading orphan tool messages", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
   await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({

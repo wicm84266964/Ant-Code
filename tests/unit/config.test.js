@@ -123,9 +123,35 @@ test("resume context budget follows active context budget by default", async () 
 
   const config = await loadConfig({ cwd, env: {} });
 
+  assert.equal(config.context.maxBytes, 2000000);
   assert.equal(config.context.resumeMaxMessages, 100000);
   assert.equal(config.context.resumeMaxTokens, 500000);
   assert.equal(config.context.resumeMaxBytes, 2000000);
+});
+
+test("context byte budget follows a larger token window by default", async () => {
+  const cwd = await makeTempWorkspace();
+  await writeJson(cwd, {
+    context: {
+      maxMessages: 100000,
+      maxBytes: 2000000,
+      maxTokens: 800000,
+      keepRecentMessages: 8,
+      tailTurns: 2,
+      preserveRecentTokens: 8000,
+      summaryBytes: 65536,
+      resumeMaxMessages: 100000,
+      resumeMaxTokens: 800000,
+      resumeMaxBytes: 2000000
+    }
+  });
+
+  const config = await loadConfig({ cwd, env: {} });
+
+  assert.equal(config.context.maxTokens, 800000);
+  assert.equal(config.context.maxBytes, 3200000);
+  assert.equal(config.context.resumeMaxTokens, 800000);
+  assert.equal(config.context.resumeMaxBytes, 3200000);
 });
 
 test("resume context budget env overrides remain explicit", async () => {
@@ -154,6 +180,35 @@ test("resume context budget env overrides remain explicit", async () => {
   assert.equal(config.context.resumeMaxMessages, 200);
   assert.equal(config.context.resumeMaxTokens, 200000);
   assert.equal(config.context.resumeMaxBytes, 1000000);
+});
+
+test("explicit context byte env override remains a hard budget", async () => {
+  const cwd = await makeTempWorkspace();
+  await writeJson(cwd, {
+    context: {
+      maxMessages: 100000,
+      maxBytes: 2000000,
+      maxTokens: 800000,
+      keepRecentMessages: 8,
+      tailTurns: 2,
+      preserveRecentTokens: 8000,
+      summaryBytes: 65536,
+      resumeMaxMessages: 100000,
+      resumeMaxTokens: 800000,
+      resumeMaxBytes: 2000000
+    }
+  });
+
+  const config = await loadConfig({
+    cwd,
+    env: {
+      LAB_AGENT_CONTEXT_MAX_BYTES: "1600000"
+    }
+  });
+
+  assert.equal(config.context.maxTokens, 800000);
+  assert.equal(config.context.maxBytes, 1600000);
+  assert.equal(config.context.resumeMaxBytes, 2000000);
 });
 
 test("loads tool round budgets from environment", async () => {
@@ -288,7 +343,6 @@ test("project config sets custom model window and leaves in-flight compaction of
       tailTurns: 2,
       preserveRecentTokens: 8000,
       summaryBytes: 65536,
-      promptCompactRatio: 0.64,
       resumeMaxMessages: 100000,
       resumeMaxTokens: 400000,
       resumeMaxBytes: 2000000,
@@ -327,7 +381,7 @@ test("project config sets custom model window and leaves in-flight compaction of
 
   assert.equal(config.context.maxTokens, 400000);
   assert.equal(config.context.maxBytes, 2000000);
-  assert.equal(config.context.promptCompactRatio, 0.64);
+  assert.equal(config.context.promptCompactRatio, undefined);
   assert.equal(config.context.tailTurns, 2);
   assert.equal(config.context.preserveRecentTokens, 8000);
   assert.equal(config.context.inFlightCompactRatio, null);

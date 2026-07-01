@@ -22,7 +22,7 @@ import { accumulateProviderUsage, normalizeProviderUsageAggregate, sanitizeProvi
 import { resolveMainToolRounds } from "./tool-rounds.js";
 import { diagnoseWorkspace } from "./workspace-diagnostics.js";
 
-const DEFAULT_PROMPT_COMPACT_RATIO = 0.82;
+const DEFAULT_PROMPT_COMPACT_RATIO = 1;
 const OUTPUT_HEALTH_CHECK_ENABLED = false;
 const OUTPUT_HEALTH_MAX_RETRIES = 1;
 const OUTPUT_HEALTH_RETRY_REQUIRED_REASONS = new Set([
@@ -1267,7 +1267,7 @@ function promptEstimateOverBudget(estimate, contextWindow) {
 
 function boundedContextRatio(value, fallback) {
   const number = Number(value);
-  return Number.isFinite(number) && number > 0 && number < 1 ? number : fallback;
+  return Number.isFinite(number) && number > 0 && number <= 1 ? number : fallback;
 }
 
 function sessionGatewayProtocol(session) {

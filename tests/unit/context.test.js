@@ -69,6 +69,8 @@ test("context builder explains compact, MCP, and local subagent boundaries", asy
   assert.match(systemText, /background=true/);
   assert.match(systemText, /group completion prompt/);
   assert.match(systemText, /review gate/);
+  assert.match(systemText, /background_terminal_list/);
+  assert.match(systemText, /background_terminal_cancel/);
   assert.match(systemText, /configured low-cost model/);
   assert.match(systemText, /Use the Subagent routing guide and Complex-task orchestration sections above as the authoritative routing policy/);
   assert.match(systemText, /code-worker/);

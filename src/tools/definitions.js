@@ -447,6 +447,34 @@ export const BUILT_IN_TOOLS = Object.freeze([
     }
   },
   {
+    name: "background_terminal_list",
+    description: "List registered background terminal tasks for the current session/workspace before starting or restarting long-running services.",
+    risk: "read",
+    supportsAbort: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        taskId: { type: "string" },
+        activeOnly: { type: "boolean" },
+        includeAllSessions: { type: "boolean" }
+      }
+    }
+  },
+  {
+    name: "background_terminal_cancel",
+    description: "Cancel a registered background terminal task by taskId through the same process-tree cleanup used by the Dashboard.",
+    risk: "execute",
+    supportsAbort: false,
+    inputSchema: {
+      type: "object",
+      required: ["taskId"],
+      properties: {
+        taskId: { type: "string" },
+        includeAllSessions: { type: "boolean" }
+      }
+    }
+  },
+  {
     name: "mcp_list",
     description: "List configured MCP servers, tools, prompts, resources, or read a resource from one configured MCP server.",
     risk: "mcp",

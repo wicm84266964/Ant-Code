@@ -99,6 +99,20 @@ test("builtin output contracts align with profile return fields", () => {
   assert.ok(visual.outputContract.required.includes("recommendedFollowup"));
 });
 
+test("execution profiles can inspect and recycle background terminal tasks", () => {
+  const config = { agents: { profiles: [] } };
+  const build = getAgentProfile("build", config, { cwd: process.cwd(), includeHidden: true });
+  const verifier = getAgentProfile("verifier", config, { cwd: process.cwd() });
+  const browser = getAgentProfile("browser-verifier", config, { cwd: process.cwd() });
+  const explorer = getAgentProfile("explorer", config, { cwd: process.cwd() });
+
+  for (const profile of [build, verifier, browser]) {
+    assert.ok(profile.tools.includes("background_terminal_list"), `${profile.name} should list background terminals`);
+    assert.ok(profile.tools.includes("background_terminal_cancel"), `${profile.name} should cancel background terminals`);
+  }
+  assert.equal(explorer.tools.includes("background_terminal_cancel"), false);
+});
+
 test("builtin code-oriented profiles receive rg and TypeScript semantic tools", () => {
   const config = { agents: { profiles: [] } };
   const explorer = getAgentProfile("explorer", config, { cwd: process.cwd() });
