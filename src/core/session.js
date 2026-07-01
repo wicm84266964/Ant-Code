@@ -424,9 +424,30 @@ export async function runSessionTurn(session, options) {
         code: "GATEWAY_ERROR",
         message: "request failed"
       });
+      const failedDraft = appendFailedGatewayDraft({
+        session,
+        metadata,
+        prompt: options.prompt,
+        displayPrompt,
+        draft: interruptedDraft,
+        reason: `gateway_error:${response.error?.code ?? "GATEWAY_ERROR"}`
+      });
+      if (failedDraft) {
+        await emitEvent(eventOptions, {
+          type: "assistant_interrupted_draft",
+          reason: failedDraft.reason,
+          text: failedDraft.text,
+          outputBytes: failedDraft.bytes,
+          thinking: failedDraft.thinking,
+          thinkingBytes: failedDraft.thinkingBytes
+        });
+      }
       await emitEvent(eventOptions, {
         type: "gateway_error",
         error: response.error,
+        draftText: failedDraft?.text ?? "",
+        draftBytes: failedDraft?.bytes ?? 0,
+        draftThinkingBytes: failedDraft?.thinkingBytes ?? 0,
         outputBytes: Buffer.byteLength(finalOutput, "utf8")
       });
       await persistSessionMetadata(sessionStore, metadata, finalOutput, "gateway_error", session, options);
@@ -2620,6 +2641,23 @@ function normalizeInterruptedDraft(draft) {
     bytes,
     thinking: thinkingPreview.text,
     thinkingBytes
+  };
+}
+
+function appendFailedGatewayDraft(options) {
+  const draft = normalizeInterruptedDraft(options.draft);
+  if (!draft) {
+    return null;
+  }
+  options.metadata.interruptedDraft = {
+    textBytes: draft.bytes,
+    thinkingBytes: draft.thinkingBytes,
+    reason: options.reason
+  };
+  appendInterruptedDraftMessages(options.session, options.prompt, options.displayPrompt ?? options.prompt, draft, options.reason);
+  return {
+    ...draft,
+    reason: options.reason
   };
 }
 

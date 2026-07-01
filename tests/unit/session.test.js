@@ -1532,6 +1532,113 @@ test("interrupted assistant draft persists in session metadata for resume", asyn
   }
 });
 
+test("gateway failures persist streamed assistant draft for resume", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  const events = [];
+  const encoder = new TextEncoder();
+  let fetchCalls = 0;
+
+  try {
+    globalThis.fetch = async (_url, options) => {
+      fetchCalls += 1;
+      requests.push(JSON.parse(String(options.body ?? "{}")));
+      if (fetchCalls > 1) {
+        return new Response(JSON.stringify({
+          id: "chatcmpl-resume-ok",
+          model: "mock-openai",
+          choices: [
+            {
+              finish_reason: "stop",
+              message: {
+                role: "assistant",
+                content: "resumed from phase 3 draft"
+              }
+            }
+          ]
+        }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      let streamStep = 0;
+      const body = new ReadableStream({
+        pull(controller) {
+          streamStep += 1;
+          if (streamStep === 1) {
+            controller.enqueue(encoder.encode('data: {"id":"chatcmpl-failing-draft","model":"mock-openai","choices":[{"delta":{"reasoning_content":"Need to keep the latest phase."}}]}\n\n'));
+            return;
+          }
+          if (streamStep === 2) {
+            controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"Phase 3 readonly review is complete; stay in Phase 3 before Phase 4."}}]}\n\n'));
+            return;
+          }
+          controller.error(new Error("premature close"));
+        }
+      });
+      return new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" }
+      });
+    };
+
+    const env = {
+      LAB_MODEL_GATEWAY_URL: "http://127.0.0.1/v1/chat/completions",
+      LAB_AGENT_MODEL: "mock-openai",
+      LAB_AGENT_NETWORK_MODE: "offline",
+      LAB_MODEL_GATEWAY_PROTOCOL: "openai-chat",
+      LAB_MODEL_GATEWAY_MAX_RETRIES: "0"
+    };
+    const session = await createSession({
+      cwd,
+      mode: "interactive",
+      env
+    });
+
+    const result = await runSessionTurn(session, {
+      prompt: "continue the long task",
+      env,
+      onEvent: (event) => events.push(event)
+    });
+
+    assert.match(result.output, /Gateway error: GATEWAY_(RESPONSE_PARSE_ERROR|STREAM_INTERRUPTED)/);
+    assert.equal(session.messages.length, 2);
+    assert.equal(session.messages[0].content, "continue the long task");
+    assert.equal(session.messages[1].interruptedDraft, true);
+    assert.match(session.messages[1].content[0].text, /Phase 3 readonly review/);
+    assert.equal(events.some((event) => event.type === "assistant_interrupted_draft"), true);
+    assert.equal(events.find((event) => event.type === "gateway_error").draftBytes > 0, true);
+
+    const metadataPath = path.join(cwd, ".lab-agent", "sessions", `${session.id}.json`);
+    const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
+    assert.equal(metadata.status, "gateway_error");
+    assert.equal(metadata.transcript.messages[1].interruptedDraft, true);
+    assert.match(metadata.transcript.messages[1].content[0].text, /Phase 3 readonly review/);
+    assert.equal(metadata.interruptedDraft.textBytes > 0, true);
+    assert.match(metadata.interruptedDraft.reason, /gateway_error:GATEWAY_(RESPONSE_PARSE_ERROR|STREAM_INTERRUPTED)/);
+
+    const resumed = await createSession({
+      cwd,
+      mode: "interactive",
+      env,
+      resume: session.id
+    });
+    assert.match(resumed.messages[1].content[0].text, /Phase 3 readonly review/);
+
+    await runSessionTurn(resumed, {
+      prompt: "continue from the failed phase",
+      env
+    });
+    assert.equal(requests.length, 2);
+    const resumeAssistant = requests[1].messages.find((message) => message.role === "assistant" && String(message.content ?? "").includes("Phase 3 readonly review"));
+    assert.ok(resumeAssistant);
+    assert.equal(resumeAssistant.reasoning_content, "Need to keep the latest phase.");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("session turns interrupt an in-flight shell tool and finish locally", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
   const requests = [];
