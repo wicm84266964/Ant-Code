@@ -15,6 +15,9 @@
 - Automatic context compaction now defaults to the configured context window
   itself instead of a hidden ratio, and the byte fallback budget follows larger
   token windows unless explicitly overridden.
+- Resuming a compacted session no longer expands archived full context when the
+  restored prompt would immediately exceed the configured context budget; Ant
+  Code keeps the compacted summary active instead.
 - Background terminal tasks can now be listed and cancelled by model tools,
   allowing agents to reuse or recycle an existing server/viewer before starting
   a replacement.
@@ -25,5 +28,6 @@
 - `npm test -- tests/unit/dashboard-runtime.test.js tests/unit/dashboard-server.test.js tests/unit/context-window.test.js tests/unit/config.test.js`
 - `npm test -- tests/unit/config.test.js`
 - `npm test -- tests/unit/session.test.js`
+- `node --test --test-name-pattern "createSession keeps compacted context when restored full archive would exceed prompt budget" tests/unit/session.test.js`
 - `npm test -- tests/unit/tools.test.js`
 - `npm test -- tests/unit/agent-profiles-config.test.js tests/unit/context.test.js`

@@ -2229,6 +2229,67 @@ test("createSession can prefer full archive context for TUI resume without expan
   assert.equal(session.resumedFrom.transcriptMessages.length, 50);
 });
 
+test("createSession keeps compacted context when restored full archive would exceed prompt budget", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
+  await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
+    context: {
+      maxMessages: 100,
+      maxBytes: 20000,
+      maxTokens: 5000,
+      keepRecentMessages: 2,
+      summaryBytes: 4096,
+      resumeMaxMessages: 100,
+      resumeMaxTokens: 5000,
+      resumeMaxBytes: 20000
+    }
+  }), "utf8");
+  const store = createSessionStore({ cwd });
+  const archiveMessages = [
+    { role: "user", content: `large archived prompt ${"alpha ".repeat(900)}` },
+    { role: "assistant", content: [{ type: "text", text: `large archived answer ${"beta ".repeat(900)}` }] }
+  ];
+  const compactedContextMessages = [
+    { role: "user", content: "recent compacted prompt" },
+    { role: "assistant", content: [{ type: "text", text: "recent compacted answer" }] }
+  ];
+  const archive = await store.writeTranscriptChunks("budget-limited-resume-session", archiveMessages);
+  await store.writeMetadata({
+    id: "budget-limited-resume-session",
+    prompt: "recent compacted prompt",
+    title: "budget limited resume",
+    status: "completed",
+    model: "example-coding-model",
+    transcript: {
+      version: 2,
+      messages: compactedContextMessages,
+      contextMessages: compactedContextMessages,
+      contextWindow: {
+        summary: "Compacted summary that must remain active after resume.",
+        compactionCount: 1,
+        compactedMessages: 2,
+        lastReason: "automatic_prompt_budget"
+      },
+      archive
+    }
+  });
+
+  const session = await createSession({
+    cwd,
+    mode: "interactive",
+    env: {},
+    resume: "budget-limited-resume-session",
+    resumeFullContext: true
+  });
+
+  assert.deepEqual(session.messages.map((message) => message.role), ["user", "assistant"]);
+  assert.equal(session.messages[0].content, "recent compacted prompt");
+  assert.equal(session.contextWindow.summary, "Compacted summary that must remain active after resume.");
+  assert.equal(session.contextWindow.compactionCount, 1);
+  assert.equal(session.resumedFrom.fullContextRestored, false);
+  assert.equal(session.resumedFrom.fullContextRestoreLimited, true);
+  assert.equal(session.resumedFrom.fullContextRestoreLimitReason, "restored_full_context_over_budget");
+});
+
 test("createSession cleans legacy raw OpenAI stream dumps on resume", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
   const store = createSessionStore({ cwd });
