@@ -1824,6 +1824,12 @@ function updateLiveStatus() {
   const subtasks = active.filter((activity) => activity.toolName === "agent_run");
   els.liveTitle.textContent = liveStatusTitle(primary, subtasks, background);
   els.liveSubtasks.innerHTML = "";
+  if (primary?.rawType === "gateway_retry") {
+    const chip = document.createElement("div");
+    chip.className = "live-chip retry";
+    chip.innerHTML = `<span class="chip-pulse" aria-hidden="true"></span>${escapeHtml(gatewayRetryChipText(primary))}`;
+    els.liveSubtasks.append(chip);
+  }
   for (const task of subtasks.slice(0, 4)) {
     const chip = document.createElement("div");
     chip.className = "live-chip";
@@ -1834,6 +1840,9 @@ function updateLiveStatus() {
 }
 
 function liveStatusTitle(primary, subtasks, background) {
+  if (primary?.rawType === "gateway_retry") {
+    return "网关响应异常，正在自动重试";
+  }
   if (background.length > 0 && (!primary || primary.title === "开始任务")) {
     const counts = backgroundSubagentCounts();
     if (counts.terminalStarting > 0) {
@@ -1858,6 +1867,15 @@ function liveStatusTitle(primary, subtasks, background) {
   return primary?.title === "开始任务" && subtasks.length > 0
     ? "子智能体运行中"
     : primary?.title || state.liveTitle || "正在处理";
+}
+
+function gatewayRetryChipText(activity) {
+  const attempt = Number.isFinite(activity.retryAttempt) && Number.isFinite(activity.retryMaxAttempts)
+    ? `${activity.retryAttempt}/${activity.retryMaxAttempts}`
+    : "";
+  const code = activity.retryCode ? String(activity.retryCode) : "gateway";
+  const delay = Number.isFinite(activity.retryDelayMs) ? `${activity.retryDelayMs}ms` : "";
+  return ["重试", attempt, code, delay].filter(Boolean).join(" · ");
 }
 
 function renderBackgroundSubagentStatus(background) {
@@ -2749,20 +2767,16 @@ function formatContextUsage(context) {
     return "-- / --";
   }
   const used = firstFiniteNumber(
-    context.messageTokens,
-    context.promptMessageTokens,
     context.promptTokens,
+    context.promptMessageTokens,
+    context.messageTokens,
     context.providerPromptTokens
   );
   const limit = firstFiniteNumber(context.maxTokens, context.modelMaxTokens);
   const percent = Number.isFinite(used) && Number.isFinite(limit) && limit > 0
     ? ` · ${Math.min(999, Math.round((used / limit) * 100))}%`
     : "";
-  const promptTokens = firstFiniteNumber(context.promptTokens);
-  const latestInput = Number.isFinite(promptTokens) && Number.isFinite(used) && promptTokens !== used
-    ? ` · 输入 ${formatTokenCount(promptTokens)}`
-    : "";
-  return `${formatTokenCount(used)} / ${formatTokenCount(limit)}${percent}${latestInput}`;
+  return `${formatTokenCount(used)} / ${formatTokenCount(limit)}${percent}`;
 }
 
 function firstFiniteNumber(...values) {

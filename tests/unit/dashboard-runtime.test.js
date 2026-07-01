@@ -1473,6 +1473,11 @@ test("dashboard runtime starts cancellable background terminal tasks without blo
 
 test("dashboard runtime shows starting background terminal tasks before pid is available", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-terminal-starting-"));
+  await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
+    lab: {
+      gatewayUrl: null
+    }
+  }), "utf8");
   const runtime = createDashboardRuntime({ cwd, env: {} });
   await runtime.trustWorkspace();
   const started = await runtime.startTurn({

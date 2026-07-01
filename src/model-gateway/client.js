@@ -9,11 +9,11 @@ import { listConfiguredModels } from "./models.js";
 import { createGatewayRequest, normalizeGatewayResponse } from "./protocol.js";
 import { parseGatewayStream } from "./streaming.js";
 
-const DEFAULT_GATEWAY_MAX_RETRIES = 2;
-const DEFAULT_GATEWAY_TIMEOUT_MS = 180000;
-const DEFAULT_GATEWAY_IDLE_TIMEOUT_MS = 60000;
-const BASE_RETRY_DELAY_MS = 350;
-const MAX_RETRY_DELAY_MS = 1500;
+const DEFAULT_GATEWAY_MAX_RETRIES = 5;
+const DEFAULT_GATEWAY_TIMEOUT_MS = 900000;
+const DEFAULT_GATEWAY_IDLE_TIMEOUT_MS = 300000;
+const BASE_RETRY_DELAY_MS = 200;
+const MAX_RETRY_DELAY_MS = 30000;
 const GATEWAY_TRANSIENT_ERROR_PATTERN = /KVTransferError|WaitingForInput|Decode transfer failed|premature close|stream.*interrupted/i;
 
 /**
@@ -482,6 +482,9 @@ function isRetryableGatewayParseError(error) {
   if (!contentType) {
     return true;
   }
+  if (contentType.includes("text/event-stream") || contentType.includes("application/x-ndjson")) {
+    return true;
+  }
   return /<html|bad gateway|gateway timeout|upstream|temporar|try again|service unavailable/.test(bodyPreview);
 }
 
@@ -512,7 +515,9 @@ function usesGatewayRetryProfile(config) {
  * @param {number} attempt
  */
 function retryDelayMs(attempt) {
-  return Math.min(MAX_RETRY_DELAY_MS, BASE_RETRY_DELAY_MS * (2 ** Math.max(0, attempt - 1)));
+  const rawDelay = BASE_RETRY_DELAY_MS * (2 ** Math.max(0, attempt - 1));
+  const jitter = 0.9 + (Math.random() * 0.2);
+  return Math.min(MAX_RETRY_DELAY_MS, Math.max(0, Math.round(rawDelay * jitter)));
 }
 
 /**

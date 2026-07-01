@@ -23,7 +23,7 @@ test("loads gateway and network mode from environment", async () => {
   assert.equal(config.lab.gatewayHealthUrl, "https://gateway.lab.example/health");
   assert.equal(config.lab.gatewayProtocol, "openai-chat");
   assert.equal(config.lab.gatewayApiKey, "test-key");
-  assert.equal(config.lab.gatewayMaxRetries, 2);
+  assert.equal(config.lab.gatewayMaxRetries, 5);
   assert.equal(config.modelAlias, "lab-default");
   assert.equal(config.networkMode, "lab-only");
   assert.ok(config.allowedHosts.includes("gateway.lab.example"));

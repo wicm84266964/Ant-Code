@@ -58,6 +58,38 @@ test("dashboard maps streaming status to coalesced live activity", () => {
   assert.equal(events[0].coalesceKey, "assistant-stream");
 });
 
+test("dashboard maps gateway retry to visible live activity", () => {
+  const events = mapSessionEventToDashboard({
+    type: "gateway_retry",
+    round: 5,
+    attempt: 1,
+    maxAttempts: 3,
+    delayMs: 200,
+    stage: "parse_body",
+    error: {
+      code: "GATEWAY_RESPONSE_PARSE_ERROR",
+      message: "Gateway response could not be parsed",
+      details: {
+        bodyPreview: "secret token=hidden"
+      }
+    }
+  });
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, "activity");
+  assert.equal(events[0].title, "网关重试中");
+  assert.equal(events[0].status, "running");
+  assert.equal(events[0].source, "gateway");
+  assert.equal(events[0].coalesceKey, "gateway");
+  assert.equal(events[0].retryAttempt, 1);
+  assert.equal(events[0].retryMaxAttempts, 3);
+  assert.equal(events[0].retryDelayMs, 200);
+  assert.equal(events[0].retryStage, "parse_body");
+  assert.equal(events[0].retryCode, "GATEWAY_RESPONSE_PARSE_ERROR");
+  assert.match(events[0].detail, /1\/3/);
+  assert.doesNotMatch(JSON.stringify(events[0]), /secret token/);
+});
+
 test("dashboard maps context compaction to live status and transcript boundary", () => {
   const running = mapSessionEventToDashboard({
     type: "context_compacting",

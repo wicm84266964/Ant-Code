@@ -1,4 +1,5 @@
 import { appendThinkingPreview, limitThinkingPreview } from "./thinking-budget.js";
+import { redactGatewayText } from "./errors.js";
 import { emptyResponse, normalizeContent } from "./protocol.js";
 
 /**
@@ -328,7 +329,13 @@ async function readOpenAIStream(body, onRecord, options = {}) {
   const records = [];
 
   const emitLine = async (line) => {
-    const record = parseStreamingLine(line);
+    let record;
+    try {
+      record = parseStreamingLine(line);
+    } catch (error) {
+      attachOpenAIStreamPreview(error, text, line);
+      throw error;
+    }
     if (!record) {
       return;
     }
@@ -373,6 +380,14 @@ async function readOpenAIStream(body, onRecord, options = {}) {
   }
   await drainLines(true);
   return { text, records };
+}
+
+function attachOpenAIStreamPreview(error, text, line) {
+  if (!error || typeof error !== "object") {
+    return;
+  }
+  const preview = `${String(text ?? "")}\n${String(line ?? "")}`.trim();
+  error.gatewayBodyPreview = redactGatewayText(preview).slice(0, 1000);
 }
 
 function readStreamChunk(reader, options = {}) {

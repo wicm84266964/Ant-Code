@@ -83,10 +83,10 @@ test("gateway health dry run validates config and network policy", async () => {
   assert.equal(report.live, false);
   assert.equal(report.config.gatewayConfigured, true);
   assert.equal(report.config.healthConfigured, true);
-  assert.equal(report.config.gatewayMaxRetries, 2);
+  assert.equal(report.config.gatewayMaxRetries, 5);
   assert.deepEqual(report.hints, []);
   assert.equal(report.checks.some((check) => check.name === "gateway live health"), false);
-  assert.match(formatGatewayHealthReport(report), /fetch retries: 2/);
+  assert.match(formatGatewayHealthReport(report), /fetch retries: 5/);
 });
 
 test("gateway health report includes next steps when configuration is incomplete", async () => {
@@ -597,6 +597,54 @@ test("gateway client retries transient parse errors", async () => {
     const retry = events.find((event) => event.type === "gateway_retry");
     assert.equal(retry.stage, "parse_body");
     assert.equal(retry.error.code, "GATEWAY_RESPONSE_PARSE_ERROR");
+  } finally {
+    await close(server);
+  }
+});
+
+test("gateway client retries malformed event streams", async () => {
+  let calls = 0;
+  const server = await listen(http.createServer((request, response) => {
+    calls += 1;
+    if (calls === 1) {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end("data: {not json}\n\n");
+      return;
+    }
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end([
+      'data: {"id":"retry-sse-ok","model":"test-model","choices":[{"delta":{"content":"recovered"},"finish_reason":"stop"}]}',
+      "",
+      "data: [DONE]",
+      ""
+    ].join("\n"));
+  }), "127.0.0.1");
+  try {
+    const events = [];
+    const gateway = createLabModelGateway({
+      modelAlias: "test-model",
+      networkMode: "offline",
+      allowedHosts: [],
+      lab: {
+        gatewayUrl: `${serverUrl(server)}/v1/chat/completions`,
+        gatewayProtocol: "openai-chat",
+        gatewayMaxRetries: 1
+      }
+    });
+
+    const result = await gateway.sendChat({
+      messages: [{ role: "user", content: "hello" }],
+      stream: true,
+      onEvent: (event) => events.push(event)
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.data.text, "recovered");
+    assert.equal(calls, 2);
+    const retry = events.find((event) => event.type === "gateway_retry");
+    assert.equal(retry.stage, "parse_body");
+    assert.equal(retry.error.code, "GATEWAY_RESPONSE_PARSE_ERROR");
+    assert.equal(retry.error.details.contentType, "text/event-stream");
   } finally {
     await close(server);
   }

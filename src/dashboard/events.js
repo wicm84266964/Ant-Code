@@ -42,6 +42,16 @@ export function mapSessionEventToDashboard(event) {
   if (type === "gateway_request_start") {
     return [activity("gateway-request", "正在请求模型", roundDetail(event), "running", "gateway", event, { coalesceKey: "gateway" })];
   }
+  if (type === "gateway_retry") {
+    return [activity("gateway-retry", "网关重试中", gatewayRetryDetail(event), "running", "gateway", event, {
+      coalesceKey: "gateway",
+      retryAttempt: Number.isFinite(event.attempt) ? event.attempt : null,
+      retryMaxAttempts: Number.isFinite(event.maxAttempts) ? event.maxAttempts : null,
+      retryDelayMs: Number.isFinite(event.delayMs) ? event.delayMs : null,
+      retryStage: event.stage ?? null,
+      retryCode: event.error?.code ?? null
+    })];
+  }
   if (type === "gateway_stream_start") {
     return [activity("assistant-stream", "正在生成回复", "模型已开始返回内容", "running", "gateway", event, { coalesceKey: "assistant-stream" })];
   }
@@ -215,6 +225,17 @@ function roundDetail(event) {
     Number.isFinite(event.toolSchemaCount) ? `${event.toolSchemaCount} 个工具定义` : null
   ].filter(Boolean);
   return parts.join(" · ");
+}
+
+function gatewayRetryDetail(event) {
+  const parts = [
+    Number.isFinite(event.round) ? `round ${event.round}` : null,
+    Number.isFinite(event.attempt) && Number.isFinite(event.maxAttempts) ? `第 ${event.attempt}/${event.maxAttempts} 次` : null,
+    event.error?.code ? String(event.error.code) : null,
+    event.stage ? `阶段 ${event.stage}` : null,
+    Number.isFinite(event.delayMs) ? `${event.delayMs}ms 后重试` : null
+  ].filter(Boolean);
+  return parts.join(" · ") || "网关响应异常，正在自动重试";
 }
 
 function backgroundSubagentStartedDetail(event) {

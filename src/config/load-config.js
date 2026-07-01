@@ -23,6 +23,9 @@ const PROJECT_CONFIG_FILES = Object.freeze([
 ]);
 
 const DEFAULT_CONTEXT_TOKENS = 200000;
+const DEFAULT_GATEWAY_MAX_RETRIES = 5;
+const DEFAULT_GATEWAY_TIMEOUT_MS = 900000;
+const DEFAULT_GATEWAY_IDLE_TIMEOUT_MS = 300000;
 const PACKAGE_ROOT = resolvePackageRoot();
 const BUNDLED_CONFIG_PATH = path.join(PACKAGE_ROOT, "lab-agent.config.json");
 
@@ -134,9 +137,9 @@ const DEFAULT_CONFIG = Object.freeze({
     gatewayHealthUrl: null,
     gatewayProtocol: "lab-agent-gateway",
     gatewayApiKey: null,
-    gatewayMaxRetries: 2,
-    gatewayTimeoutMs: 180000,
-    gatewayIdleTimeoutMs: 60000
+    gatewayMaxRetries: DEFAULT_GATEWAY_MAX_RETRIES,
+    gatewayTimeoutMs: DEFAULT_GATEWAY_TIMEOUT_MS,
+    gatewayIdleTimeoutMs: DEFAULT_GATEWAY_IDLE_TIMEOUT_MS
   }
 });
 
@@ -182,9 +185,9 @@ export async function loadConfig(options = {}) {
     gatewayHealthUrl: hardened.lab?.gatewayHealthUrl ?? null,
     gatewayProtocol: hardened.lab?.gatewayProtocol ?? "lab-agent-gateway",
     gatewayApiKey: hardened.lab?.gatewayApiKey ?? null,
-    gatewayMaxRetries: parseOptionalInteger(env.LAB_MODEL_GATEWAY_MAX_RETRIES, hardened.lab?.gatewayMaxRetries ?? 2),
-    gatewayTimeoutMs: parseOptionalInteger(env.LAB_MODEL_GATEWAY_TIMEOUT_MS, hardened.lab?.gatewayTimeoutMs ?? 180000),
-    gatewayIdleTimeoutMs: parseOptionalInteger(env.LAB_MODEL_GATEWAY_IDLE_TIMEOUT_MS, hardened.lab?.gatewayIdleTimeoutMs ?? 60000),
+    gatewayMaxRetries: parseOptionalInteger(env.LAB_MODEL_GATEWAY_MAX_RETRIES, hardened.lab?.gatewayMaxRetries ?? DEFAULT_GATEWAY_MAX_RETRIES),
+    gatewayTimeoutMs: parseOptionalInteger(env.LAB_MODEL_GATEWAY_TIMEOUT_MS, hardened.lab?.gatewayTimeoutMs ?? DEFAULT_GATEWAY_TIMEOUT_MS),
+    gatewayIdleTimeoutMs: parseOptionalInteger(env.LAB_MODEL_GATEWAY_IDLE_TIMEOUT_MS, hardened.lab?.gatewayIdleTimeoutMs ?? DEFAULT_GATEWAY_IDLE_TIMEOUT_MS),
     activeGatewayProfile: typeof hardened.lab?.activeGatewayProfile === "string" ? hardened.lab.activeGatewayProfile : "",
     gatewayProfiles: Array.isArray(hardened.lab?.gatewayProfiles) ? hardened.lab.gatewayProfiles : [],
     configPath: labConfigPath
