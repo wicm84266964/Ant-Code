@@ -144,13 +144,17 @@ const DEFAULT_CONFIG = Object.freeze({
  * @typedef {typeof DEFAULT_CONFIG & {
  *   lab: { gatewayUrl: string | null; gatewayHealthUrl: string | null; gatewayProtocol: string; gatewayApiKey: string | null; gatewayMaxRetries: number; configPath: string | null };
  *   projectConfigPath: string | null;
+ *   defaultModelAlias: string;
  * }} LabAgentConfig
  */
 
 /**
- * Load config from defaults, project JSON, lab-managed JSON, and environment.
+ * Load config from defaults, bundled JSON, optional global JSON, environment
+ * model/gateway defaults, project JSON, and runtime environment controls.
  *
- * Precedence: defaults < project config < lab config < environment.
+ * Precedence:
+ * defaults < bundled config < LAB_AGENT_CONFIG file < model/gateway env defaults
+ * < project config < runtime env controls.
  *
  * @param {{ cwd?: string; env?: NodeJS.ProcessEnv }} options
  * @returns {Promise<LabAgentConfig>}
@@ -166,17 +170,18 @@ export async function loadConfig(options = {}) {
   const lab = labConfigPath ? await readJsonIfExists(labConfigPath) : null;
 
   const withBundled = mergeConfig(DEFAULT_CONFIG, bundled?.data ?? {});
-  const withProject = mergeConfig(withBundled, project?.data ?? {});
-  const withLab = mergeConfig(withProject, lab?.data ?? {});
-  const withEnv = applyEnvConfig(withLab, env);
+  const withLabDefaults = mergeConfig(withBundled, lab?.data ?? {});
+  const withEnvDefaults = applyEnvDefaultConfig(withLabDefaults, env);
+  const withProject = mergeConfig(withEnvDefaults, project?.data ?? {});
+  const withEnv = applyRuntimeEnvConfig(withProject, env);
   const normalized = normalizeContextConfig(withEnv, env);
   const hardened = applySensitivityPolicy(normalized);
   validateConfig(hardened);
   const finalLab = {
-    gatewayUrl: env.LAB_MODEL_GATEWAY_URL ?? hardened.lab?.gatewayUrl ?? null,
-    gatewayHealthUrl: env.LAB_MODEL_GATEWAY_HEALTH_URL ?? hardened.lab?.gatewayHealthUrl ?? null,
-    gatewayProtocol: env.LAB_MODEL_GATEWAY_PROTOCOL ?? hardened.lab?.gatewayProtocol ?? "lab-agent-gateway",
-    gatewayApiKey: env.LAB_MODEL_GATEWAY_API_KEY ?? hardened.lab?.gatewayApiKey ?? null,
+    gatewayUrl: hardened.lab?.gatewayUrl ?? null,
+    gatewayHealthUrl: hardened.lab?.gatewayHealthUrl ?? null,
+    gatewayProtocol: hardened.lab?.gatewayProtocol ?? "lab-agent-gateway",
+    gatewayApiKey: hardened.lab?.gatewayApiKey ?? null,
     gatewayMaxRetries: parseOptionalInteger(env.LAB_MODEL_GATEWAY_MAX_RETRIES, hardened.lab?.gatewayMaxRetries ?? 2),
     gatewayTimeoutMs: parseOptionalInteger(env.LAB_MODEL_GATEWAY_TIMEOUT_MS, hardened.lab?.gatewayTimeoutMs ?? 180000),
     gatewayIdleTimeoutMs: parseOptionalInteger(env.LAB_MODEL_GATEWAY_IDLE_TIMEOUT_MS, hardened.lab?.gatewayIdleTimeoutMs ?? 60000),
@@ -185,13 +190,19 @@ export async function loadConfig(options = {}) {
     configPath: labConfigPath
   };
   validateLabConfig(finalLab);
+  const configSources = buildConfigSources({ env, project, lab, bundled });
 
   return {
     ...hardened,
-    lab: finalLab,
+    lab: {
+      ...finalLab,
+      sources: configSources.lab
+    },
+    defaultModelAlias: hardened.modelAlias,
     projectConfigPath: project?.path ?? null,
     projectConfigPaths: project?.paths ?? [],
-    bundledConfigPath: bundled ? BUNDLED_CONFIG_PATH : null
+    bundledConfigPath: bundled ? BUNDLED_CONFIG_PATH : null,
+    configSources
   };
 }
 
@@ -289,11 +300,93 @@ function mergeConfig(base, overlay) {
   return result;
 }
 
+function buildConfigSources({ env, project, lab, bundled }) {
+  const source = {
+    modelAlias: configSourceFor("modelAlias", { env, project, lab, bundled }),
+    models: configSourceFor("models", { env, project, lab, bundled }),
+    lab: {
+      gatewayUrl: configSourceFor("lab.gatewayUrl", { env, project, lab, bundled }),
+      gatewayHealthUrl: configSourceFor("lab.gatewayHealthUrl", { env, project, lab, bundled }),
+      gatewayProtocol: configSourceFor("lab.gatewayProtocol", { env, project, lab, bundled }),
+      gatewayApiKey: configSourceFor("lab.gatewayApiKey", { env, project, lab, bundled })
+    }
+  };
+  return source;
+}
+
+function configSourceFor(keyPath, { env, project, lab, bundled }) {
+  const envKey = envKeyForConfigPath(keyPath);
+  if (hasConfigPath(project?.data, keyPath)) {
+    return {
+      type: "project",
+      label: ".lab-agent/config.json",
+      path: project?.path ?? null
+    };
+  }
+  if (envKey && hasNonEmptyEnv(env, envKey)) {
+    return {
+      type: "environment",
+      label: envKey,
+      env: envKey
+    };
+  }
+  if (hasConfigPath(lab?.data, keyPath)) {
+    return {
+      type: "global",
+      label: "LAB_AGENT_CONFIG",
+      path: lab?.path ?? null
+    };
+  }
+  if (hasConfigPath(bundled?.data, keyPath)) {
+    return {
+      type: "bundled",
+      label: "bundled",
+      path: BUNDLED_CONFIG_PATH
+    };
+  }
+  return {
+    type: "default",
+    label: "default"
+  };
+}
+
+function envKeyForConfigPath(keyPath) {
+  return {
+    modelAlias: "LAB_AGENT_MODEL",
+    models: "LAB_AGENT_MODELS",
+    "lab.gatewayUrl": "LAB_MODEL_GATEWAY_URL",
+    "lab.gatewayHealthUrl": "LAB_MODEL_GATEWAY_HEALTH_URL",
+    "lab.gatewayProtocol": "LAB_MODEL_GATEWAY_PROTOCOL",
+    "lab.gatewayApiKey": "LAB_MODEL_GATEWAY_API_KEY"
+  }[keyPath] ?? "";
+}
+
+function hasNonEmptyEnv(env, key) {
+  return env[key] !== undefined && env[key] !== null && String(env[key]).trim() !== "";
+}
+
+function hasConfigPath(config, keyPath) {
+  if (!config || typeof config !== "object") {
+    return false;
+  }
+  let current = config;
+  for (const segment of keyPath.split(".")) {
+    if (!current || typeof current !== "object") {
+      return false;
+    }
+    if (!Object.prototype.hasOwnProperty.call(current, segment)) {
+      return false;
+    }
+    current = current[segment];
+  }
+  return current !== undefined && !(typeof current === "string" && current.trim() === "");
+}
+
 /**
  * @param {Record<string, any>} value
  * @param {NodeJS.ProcessEnv} env
  */
-function applyEnvConfig(value, env) {
+function applyEnvDefaultConfig(value, env) {
   const next = { ...value };
 
   if (env.LAB_AGENT_MODEL) {
@@ -303,6 +396,42 @@ function applyEnvConfig(value, env) {
   if (env.LAB_AGENT_MODELS) {
     next.models = parseModelList(env.LAB_AGENT_MODELS);
   }
+
+  const lab = { ...(next.lab ?? {}) };
+  if (env.LAB_MODEL_GATEWAY_URL) {
+    lab.gatewayUrl = env.LAB_MODEL_GATEWAY_URL;
+  }
+  if (env.LAB_MODEL_GATEWAY_HEALTH_URL) {
+    lab.gatewayHealthUrl = env.LAB_MODEL_GATEWAY_HEALTH_URL;
+  }
+  if (env.LAB_MODEL_GATEWAY_PROTOCOL) {
+    if (!GATEWAY_PROTOCOLS.includes(env.LAB_MODEL_GATEWAY_PROTOCOL)) {
+      throw new Error(`Unsupported LAB_MODEL_GATEWAY_PROTOCOL: ${env.LAB_MODEL_GATEWAY_PROTOCOL}`);
+    }
+    lab.gatewayProtocol = env.LAB_MODEL_GATEWAY_PROTOCOL;
+  }
+  if (env.LAB_MODEL_GATEWAY_API_KEY) {
+    lab.gatewayApiKey = env.LAB_MODEL_GATEWAY_API_KEY;
+  }
+  next.lab = lab;
+
+  const envGatewayHosts = [
+    parseHost(env.LAB_MODEL_GATEWAY_URL),
+    parseHost(env.LAB_MODEL_GATEWAY_HEALTH_URL)
+  ].filter(Boolean);
+  if (envGatewayHosts.length > 0) {
+    next.allowedHosts = Array.from(new Set([...(next.allowedHosts ?? []), ...envGatewayHosts]));
+  }
+
+  return next;
+}
+
+/**
+ * @param {Record<string, any>} value
+ * @param {NodeJS.ProcessEnv} env
+ */
+function applyRuntimeEnvConfig(value, env) {
+  const next = { ...value };
 
   if (env.LAB_AGENT_NETWORK_MODE) {
     if (!NETWORK_MODES.includes(env.LAB_AGENT_NETWORK_MODE)) {
@@ -314,20 +443,6 @@ function applyEnvConfig(value, env) {
   const allowedHosts = parseHostList(env.LAB_AGENT_ALLOWED_HOSTS);
   if (allowedHosts.length > 0) {
     next.allowedHosts = Array.from(new Set([...(next.allowedHosts ?? []), ...allowedHosts]));
-  }
-
-  if (env.LAB_MODEL_GATEWAY_URL) {
-    const host = parseHost(env.LAB_MODEL_GATEWAY_URL);
-    if (host) {
-      next.allowedHosts = Array.from(new Set([...(next.allowedHosts ?? []), host]));
-    }
-  }
-
-  if (env.LAB_MODEL_GATEWAY_HEALTH_URL) {
-    const host = parseHost(env.LAB_MODEL_GATEWAY_HEALTH_URL);
-    if (host) {
-      next.allowedHosts = Array.from(new Set([...(next.allowedHosts ?? []), host]));
-    }
   }
 
   if (env.LAB_AGENT_TRANSCRIPT_ENABLED) {

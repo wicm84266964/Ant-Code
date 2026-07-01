@@ -8,12 +8,13 @@ import { createMockGatewayServer } from "../../scripts/mock-gateway.js";
 import { runPrintTurn } from "../../src/core/session.js";
 
 test("print mode completes one turn through mock gateway", async () => {
+  const cwd = await makeTempWorkspace();
   const server = await listen(createMockGatewayServer(), "127.0.0.1");
   try {
     const url = serverUrl(server);
     const result = await runPrintTurn({
       prompt: "hello",
-      cwd: process.cwd(),
+      cwd,
       env: mockGatewayEnv(url, "mock-model")
     });
 
@@ -72,12 +73,13 @@ test("print mode validates required metadata encryption before model work", asyn
 });
 
 test("print mode accepts streaming mock gateway responses", async () => {
+  const cwd = await makeTempWorkspace();
   const server = await listen(createMockGatewayServer({ stream: true }), "127.0.0.1");
   try {
     const url = serverUrl(server);
     const result = await runPrintTurn({
       prompt: "stream please",
-      cwd: process.cwd(),
+      cwd,
       env: mockGatewayEnv(url, "mock-stream-model")
     });
 
@@ -90,12 +92,14 @@ test("print mode accepts streaming mock gateway responses", async () => {
 });
 
 test("print mode executes read_file tool calls through mock gateway", async () => {
+  const cwd = await makeTempWorkspace();
+  await fs.writeFile(path.join(cwd, "README.md"), "Ant Code temp readme", "utf8");
   const server = await listen(createMockGatewayServer(), "127.0.0.1");
   try {
     const url = serverUrl(server);
     const result = await runPrintTurn({
       prompt: "please read_file README.md",
-      cwd: process.cwd(),
+      cwd,
       env: mockGatewayEnv(url, "mock-tool-model")
     });
 
@@ -107,12 +111,14 @@ test("print mode executes read_file tool calls through mock gateway", async () =
 });
 
 test("print mode executes local tools through an OpenAI-compatible gateway", async () => {
+  const cwd = await makeTempWorkspace();
+  await fs.writeFile(path.join(cwd, "README.md"), "Ant Code temp readme", "utf8");
   const server = await listen(createOpenAICompatibleMockGateway(), "127.0.0.1");
   try {
     const url = serverUrl(server);
     const result = await runPrintTurn({
       prompt: "please read_file README.md",
-      cwd: process.cwd(),
+      cwd,
       env: {
         LAB_MODEL_GATEWAY_URL: `${url}/v1/chat/completions`,
         LAB_MODEL_GATEWAY_PROTOCOL: "openai-chat",
@@ -131,12 +137,15 @@ test("print mode executes local tools through an OpenAI-compatible gateway", asy
 });
 
 test("print mode executes glob tool calls through mock gateway", async () => {
+  const cwd = await makeTempWorkspace();
+  await fs.mkdir(path.join(cwd, "src", "cli"), { recursive: true });
+  await fs.writeFile(path.join(cwd, "src", "cli", "index.js"), "export {};\n", "utf8");
   const server = await listen(createMockGatewayServer(), "127.0.0.1");
   try {
     const url = serverUrl(server);
     const result = await runPrintTurn({
       prompt: "please glob src/cli/*.js",
-      cwd: process.cwd(),
+      cwd,
       env: mockGatewayEnv(url, "mock-tool-model")
     });
 
@@ -148,12 +157,13 @@ test("print mode executes glob tool calls through mock gateway", async () => {
 });
 
 test("print mode executes git_status tool calls through mock gateway", async () => {
+  const cwd = await makeTempWorkspace();
   const server = await listen(createMockGatewayServer(), "127.0.0.1");
   try {
     const url = serverUrl(server);
     const result = await runPrintTurn({
       prompt: "please git_status",
-      cwd: process.cwd(),
+      cwd,
       env: mockGatewayEnv(url, "mock-tool-model")
     });
 

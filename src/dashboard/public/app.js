@@ -2235,6 +2235,7 @@ function gatewayProfileOptionHtml(profile) {
 function modelOptionHtml(model) {
   const tags = modelCapabilityLabels(model);
   const context = Number.isFinite(model.contextTokens) ? `${formatTokenCount(model.contextTokens)} 上下文` : "";
+  const defaultSource = model.default ? sourceBadge(model.sources?.modelAlias) : "";
   const agentDefaults = agentModelTiersSummary(model.agentModelTiers);
   const confirmingDelete = state.deleteConfirmModelId === model.id;
   const deleting = state.deletingModelId === model.id;
@@ -2254,6 +2255,7 @@ function modelOptionHtml(model) {
         <span class="model-option-tags">
           ${tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}
           ${context ? `<span>${escapeHtml(context)}</span>` : ""}
+          ${defaultSource ? `<span>默认：${escapeHtml(defaultSource)}</span>` : ""}
         </span>
         ${agentDefaults ? `<span class="model-option-agent">子智能体 ${escapeHtml(agentDefaults)}</span>` : ""}
       </button>
@@ -2326,6 +2328,9 @@ function renderModelConfigPanel() {
   const editing = state.editingModelId ? currentModelInfo(state.editingModelId) : null;
   const current = editing ?? currentModelInfo(state.sessionStatus?.model) ?? state.models.find((model) => model.current) ?? {};
   const gateway = state.gatewayConfig ?? {};
+  const sourceNote = gatewaySourceNote(gateway);
+  const keySource = sourceLabel(gateway.sources?.apiKey);
+  const gatewayDefaultNote = environmentGatewayDefaultNote(gateway);
   const currentAgentTiers = {
     cheap: current.agentModelTiers?.cheap ?? state.agentModelTiers?.cheap ?? "",
     default: current.agentModelTiers?.default ?? state.agentModelTiers?.default ?? "",
@@ -2337,7 +2342,7 @@ function renderModelConfigPanel() {
     <form class="model-config-card" id="model-config-form">
       <div class="model-config-head">
         <div>
-          <div class="model-config-kicker">本地配置</div>
+          <div class="model-config-kicker">${editing ? "当前项目配置" : "保存到当前项目"}</div>
           <h2 id="model-config-title">${editing ? "编辑模型网关" : "添加模型网关"}</h2>
         </div>
         <button class="icon-button" type="button" data-action="close-model-config" title="关闭">×</button>
@@ -2356,7 +2361,7 @@ function renderModelConfigPanel() {
         </label>
         <label>
           <span>API Key</span>
-          <input name="gatewayApiKey" type="password" autocomplete="new-password" spellcheck="false" placeholder="${gateway.apiKeyConfigured ? "已配置，留空则保留" : "可选"}" />
+          <input name="gatewayApiKey" type="password" autocomplete="new-password" spellcheck="false" placeholder="${gateway.apiKeyConfigured ? `已配置，来自${keySource}，留空则保留` : "可选"}" />
         </label>
         <label>
           <span>健康检查 URL</span>
@@ -2398,7 +2403,11 @@ function renderModelConfigPanel() {
         <label><input name="switchToModel" type="checkbox"${editing && !current.current ? "" : " checked"} /> 保存后切换到这个模型</label>
         <label><input name="applyAgentDefaults" type="checkbox" /> 保存后同步子智能体</label>
       </div>
-      <div class="model-config-note">配置会写入 .lab-agent/config.json；该目录默认不进 Git。Key 不会在这里回显。</div>
+      <div class="model-config-note">
+        <div>${escapeHtml(sourceNote)}</div>
+        ${gatewayDefaultNote ? `<div>${escapeHtml(gatewayDefaultNote)}</div>` : ""}
+        <div>保存后写入 .lab-agent/config.json，作为这个项目的默认配置。Key 不会在这里回显。</div>
+      </div>
       <div class="model-config-actions">
         <button type="button" data-action="close-model-config">取消</button>
         <button type="submit" ${state.modelConfigSaving ? "disabled" : ""}>${state.modelConfigSaving ? "保存中" : "保存并使用"}</button>
@@ -2580,7 +2589,13 @@ function normalizeGatewayConfig(value) {
     gatewayHealthUrl: String(value?.gatewayHealthUrl ?? ""),
     gatewayProtocol: String(value?.gatewayProtocol ?? "openai-chat"),
     apiKeyConfigured: value?.apiKeyConfigured === true,
-    activeProfileId: String(value?.activeProfileId ?? "")
+    activeProfileId: String(value?.activeProfileId ?? ""),
+    sources: {
+      gatewayUrl: normalizeConfigSource(value?.sources?.gatewayUrl),
+      gatewayHealthUrl: normalizeConfigSource(value?.sources?.gatewayHealthUrl),
+      gatewayProtocol: normalizeConfigSource(value?.sources?.gatewayProtocol),
+      apiKey: normalizeConfigSource(value?.sources?.apiKey)
+    }
   };
 }
 
@@ -2604,6 +2619,13 @@ function normalizeGatewayProfiles(value) {
   })).filter((profile) => profile.id) : [];
 }
 
+function normalizeConfigSource(value) {
+  return {
+    type: String(value?.type ?? "default"),
+    label: String(value?.label ?? value?.type ?? "default")
+  };
+}
+
 function normalizeModels(models) {
   return Array.isArray(models) ? models.map((model) => ({
     id: String(model.id ?? ""),
@@ -2613,7 +2635,12 @@ function normalizeModels(models) {
     modalities: Array.isArray(model.modalities) ? model.modalities.map(String) : ["text"],
     contextTokens: Number.isFinite(Number(model.contextTokens)) ? Number(model.contextTokens) : null,
     agentModelTiers: normalizeAgentModelTiers(model.agentModelTiers),
-    current: model.current === true
+    sources: {
+      modelAlias: normalizeConfigSource(model.sources?.modelAlias),
+      models: normalizeConfigSource(model.sources?.models)
+    },
+    current: model.current === true,
+    default: model.default === true
   })).filter((model) => model.id) : [];
 }
 
@@ -2675,8 +2702,46 @@ function agentModelTiersSummary(value) {
 function gatewaySummary() {
   const gateway = state.gatewayConfig ?? {};
   const url = gateway.gatewayUrl || "未配置网关";
-  const key = gateway.apiKeyConfigured ? "Key 已配置" : "未配置 Key";
-  return `${url} · ${key}`;
+  const key = gateway.apiKeyConfigured ? `Key ${sourceBadge(gateway.sources?.apiKey)}` : "未配置 Key";
+  const source = sourceBadge(gateway.sources?.gatewayUrl || gateway.sources?.gatewayProtocol);
+  return `${url} · ${key} · ${source}`;
+}
+
+function gatewaySourceNote(gateway) {
+  const urlSource = sourceLabel(gateway.sources?.gatewayUrl);
+  const protocolSource = sourceLabel(gateway.sources?.gatewayProtocol);
+  const keySource = gateway.apiKeyConfigured ? sourceLabel(gateway.sources?.apiKey) : "未配置";
+  return `当前生效：网关来自${urlSource}，协议来自${protocolSource}，API Key 来自${keySource}。`;
+}
+
+function environmentGatewayDefaultNote(gateway) {
+  const sources = gateway.sources ?? {};
+  const envFields = [];
+  if (sources.gatewayUrl?.type === "environment") envFields.push("网关 URL");
+  if (sources.gatewayProtocol?.type === "environment") envFields.push("协议");
+  if (sources.apiKey?.type === "environment") envFields.push("API Key");
+  if (envFields.length === 0) {
+    return "";
+  }
+  return `全局默认（环境变量）正在提供：${envFields.join("、")}。在这里保存后，当前项目配置会优先生效。`;
+}
+
+function sourceBadge(source) {
+  const type = String(source?.type ?? "");
+  if (type === "project") return "项目";
+  if (type === "environment") return "全局默认（环境变量）";
+  if (type === "global") return "全局配置";
+  if (type === "bundled") return "内置";
+  return "默认";
+}
+
+function sourceLabel(source) {
+  const type = String(source?.type ?? "");
+  if (type === "project") return "当前项目";
+  if (type === "environment") return "全局默认（环境变量）";
+  if (type === "global") return "LAB_AGENT_CONFIG";
+  if (type === "bundled") return "内置配置";
+  return "默认配置";
 }
 
 function formatContextUsage(context) {

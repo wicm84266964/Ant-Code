@@ -6,8 +6,9 @@ import test from "node:test";
 import { loadConfig } from "../../src/config/load-config.js";
 
 test("loads gateway and network mode from environment", async () => {
+  const cwd = await makeTempWorkspace();
   const config = await loadConfig({
-    cwd: process.cwd(),
+    cwd,
     env: {
       LAB_MODEL_GATEWAY_URL: "https://gateway.lab.example/v1/chat",
       LAB_MODEL_GATEWAY_HEALTH_URL: "https://gateway.lab.example/health",
@@ -26,6 +27,9 @@ test("loads gateway and network mode from environment", async () => {
   assert.equal(config.modelAlias, "lab-default");
   assert.equal(config.networkMode, "lab-only");
   assert.ok(config.allowedHosts.includes("gateway.lab.example"));
+  assert.equal(config.configSources.modelAlias.type, "environment");
+  assert.equal(config.configSources.lab.gatewayUrl.type, "environment");
+  assert.equal(config.configSources.lab.gatewayApiKey.type, "environment");
 });
 
 test("loads gateway retry budget from environment and project config", async () => {
@@ -178,8 +182,9 @@ test("loads default hooks config", async () => {
 });
 
 test("loads model choices from environment", async () => {
+  const cwd = await makeTempWorkspace();
   const config = await loadConfig({
-    cwd: process.cwd(),
+    cwd,
     env: {
       LAB_AGENT_MODEL: "local-b",
       LAB_AGENT_MODELS: "local-a,local-b-thinking"
@@ -190,6 +195,44 @@ test("loads model choices from environment", async () => {
   assert.deepEqual(config.models.map((model) => model.id), ["local-a", "local-b-thinking"]);
   assert.equal(config.models[1].thinking, true);
   assert.equal(config.models[1].contextTokens, null);
+  assert.equal(config.configSources.modelAlias.type, "environment");
+  assert.equal(config.configSources.models.type, "environment");
+});
+
+test("project model and gateway config override environment defaults but keep env key fallback", async () => {
+  const cwd = await makeTempWorkspace();
+  await writeJson(cwd, {
+    modelAlias: "project-model",
+    models: [
+      { id: "project-model", label: "Project Model", modalities: ["text"], contextTokens: 128000 }
+    ],
+    lab: {
+      gatewayUrl: "https://project.gateway.example/v1/chat/completions",
+      gatewayProtocol: "openai-chat"
+    }
+  });
+
+  const config = await loadConfig({
+    cwd,
+    env: {
+      LAB_AGENT_MODEL: "env-model",
+      LAB_AGENT_MODELS: "env-model",
+      LAB_MODEL_GATEWAY_URL: "https://env.gateway.example/v1/chat/completions",
+      LAB_MODEL_GATEWAY_PROTOCOL: "lab-agent-gateway",
+      LAB_MODEL_GATEWAY_API_KEY: "env-key"
+    }
+  });
+
+  assert.equal(config.modelAlias, "project-model");
+  assert.deepEqual(config.models.map((model) => model.id), ["project-model"]);
+  assert.equal(config.lab.gatewayUrl, "https://project.gateway.example/v1/chat/completions");
+  assert.equal(config.lab.gatewayProtocol, "openai-chat");
+  assert.equal(config.lab.gatewayApiKey, "env-key");
+  assert.equal(config.configSources.modelAlias.type, "project");
+  assert.equal(config.configSources.models.type, "project");
+  assert.equal(config.configSources.lab.gatewayUrl.type, "project");
+  assert.equal(config.configSources.lab.gatewayProtocol.type, "project");
+  assert.equal(config.configSources.lab.gatewayApiKey.type, "environment");
 });
 
 test("loads model context windows from project config", async () => {

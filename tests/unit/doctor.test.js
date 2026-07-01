@@ -6,10 +6,11 @@ import test from "node:test";
 import { formatDoctorReport, runDoctor } from "../../src/diagnostics/doctor.js";
 
 test("doctor reports deployment readiness checks and next steps", async () => {
-  const cwd = process.cwd();
+  const cwd = await makeTempWorkspace();
+  await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({ lab: { gatewayUrl: null } }), "utf8");
   const labConfig = path.join(await makeTempWorkspace(), "lab-agent.config.json");
   await fs.writeFile(labConfig, JSON.stringify({ lab: { gatewayUrl: null } }), "utf8");
-  const report = await runDoctor({ cwd, env: { LAB_AGENT_CONFIG: labConfig } });
+  const report = await runDoctor({ cwd, packageRoot: process.cwd(), env: { LAB_AGENT_CONFIG: labConfig } });
   const text = formatDoctorReport(report);
 
   assert.equal(report.ok, true);

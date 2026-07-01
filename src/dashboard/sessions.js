@@ -991,10 +991,12 @@ function syncIdleSessionConfig(active, sessionId, config) {
 
 function modelOptions(config) {
   const current = String(config.modelAlias ?? "").trim();
-  return listConfiguredModels(config).map((model) => publicModelOption(model, current));
+  const defaultModel = String(config.defaultModelAlias ?? config.modelAlias ?? "").trim();
+  const sources = config.configSources ?? {};
+  return listConfiguredModels(config).map((model) => publicModelOption(model, current, defaultModel, sources));
 }
 
-function publicModelOption(model, currentModelId = "") {
+function publicModelOption(model, currentModelId = "", defaultModelId = "", sources = {}) {
   return {
     id: model.id,
     label: model.label,
@@ -1003,7 +1005,12 @@ function publicModelOption(model, currentModelId = "") {
     modalities: Array.isArray(model.modalities) && model.modalities.length > 0 ? model.modalities : ["text"],
     contextTokens: Number.isFinite(model.contextTokens) ? model.contextTokens : null,
     agentModelTiers: normalizeAgentModelTiers(model.agentModelTiers),
-    current: model.id === currentModelId
+    sources: {
+      modelAlias: publicConfigSource(sources.modelAlias),
+      models: publicConfigSource(sources.models)
+    },
+    current: model.id === currentModelId,
+    default: model.id === defaultModelId
   };
 }
 
@@ -1019,7 +1026,13 @@ function publicGatewayConfig(config) {
     gatewayHealthUrl: config.lab?.gatewayHealthUrl ?? "",
     gatewayProtocol: config.lab?.gatewayProtocol ?? "lab-agent-gateway",
     apiKeyConfigured: Boolean(config.lab?.gatewayApiKey),
-    activeProfileId: activeGatewayProfileId(config)
+    activeProfileId: activeGatewayProfileId(config),
+    sources: {
+      gatewayUrl: publicConfigSource(config.lab?.sources?.gatewayUrl ?? config.configSources?.lab?.gatewayUrl),
+      gatewayHealthUrl: publicConfigSource(config.lab?.sources?.gatewayHealthUrl ?? config.configSources?.lab?.gatewayHealthUrl),
+      gatewayProtocol: publicConfigSource(config.lab?.sources?.gatewayProtocol ?? config.configSources?.lab?.gatewayProtocol),
+      apiKey: publicConfigSource(config.lab?.sources?.gatewayApiKey ?? config.configSources?.lab?.gatewayApiKey)
+    }
   };
 }
 
@@ -1047,6 +1060,16 @@ function publicVisionAgent(config) {
     enabled: vision.enabled !== false,
     model: String(vision.model ?? "").trim(),
     autoUseWhenMainModelTextOnly: vision.autoUseWhenMainModelTextOnly !== false
+  };
+}
+
+function publicConfigSource(source) {
+  if (!source || typeof source !== "object") {
+    return { type: "default", label: "default" };
+  }
+  return {
+    type: String(source.type ?? "default"),
+    label: String(source.label ?? source.type ?? "default")
   };
 }
 
@@ -1131,34 +1154,7 @@ async function readJsonConfig(filePath) {
 }
 
 async function dashboardConfigEnv(cwd, env) {
-  const localPath = localProjectConfigPath(cwd);
-  try {
-    await fs.access(localPath);
-    return withoutGatewayEnvOverrides(env);
-  } catch (error) {
-    if (error?.code === "ENOENT") {
-      return env;
-    }
-    throw error;
-  }
-}
-
-function withoutGatewayEnvOverrides(env = {}) {
-  const next = { ...env };
-  for (const key of [
-    "LAB_MODEL_GATEWAY_URL",
-    "LAB_MODEL_GATEWAY_HEALTH_URL",
-    "LAB_MODEL_GATEWAY_PROTOCOL",
-    "LAB_MODEL_GATEWAY_API_KEY",
-    "LAB_MODEL_GATEWAY_MAX_RETRIES",
-    "LAB_MODEL_GATEWAY_TIMEOUT_MS",
-    "LAB_MODEL_GATEWAY_IDLE_TIMEOUT_MS",
-    "LAB_AGENT_MODEL",
-    "LAB_AGENT_MODELS"
-  ]) {
-    delete next[key];
-  }
-  return next;
+  return env;
 }
 
 async function writeJsonConfig(filePath, data) {

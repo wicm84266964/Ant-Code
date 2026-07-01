@@ -866,6 +866,11 @@ test("memory slash command reports active project rule and skipped compatibility
 test("agents run slash command invokes readonly subagent", async () => {
   const cwd = await makeTempWorkspace();
   await fs.writeFile(path.join(cwd, "LabAgent.txt"), "LabAgent task marker\n", "utf8");
+  await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
+    lab: {
+      gatewayUrl: null
+    }
+  }), "utf8");
   const output = await runSlashCommand({
     command: parseSlashCommand("/agents run readonly-researcher find LabAgent"),
     cwd,
@@ -1198,9 +1203,10 @@ test("interactive-only session workflow commands stay reserved outside the TUI",
 });
 
 test("model command explains local gateway-owned model selection", async () => {
+  const cwd = await makeTempWorkspace();
   const output = await runSlashCommand({
     command: parseSlashCommand("/model"),
-    cwd: process.cwd(),
+    cwd,
     env: {
       LAB_AGENT_MODEL: "external-model-alias",
       LAB_MODEL_GATEWAY_PROTOCOL: "openai-chat",
@@ -1217,9 +1223,10 @@ test("model command explains local gateway-owned model selection", async () => {
 });
 
 test("model command reports current repo example model context", async () => {
+  const cwd = await makeTempWorkspace();
   const output = await runSlashCommand({
     command: parseSlashCommand("/model"),
-    cwd: process.cwd(),
+    cwd,
     env: {
       LAB_AGENT_MODEL: "example-vision-model",
       LAB_MODEL_GATEWAY_PROTOCOL: "openai-chat",
@@ -1254,9 +1261,10 @@ test("model use command can switch an attached TUI session callback", async () =
 });
 
 test("model use command reports configured options for unknown models", async () => {
+  const cwd = await makeTempWorkspace();
   const output = await runSlashCommand({
     command: parseSlashCommand("/model use missing-model"),
-    cwd: process.cwd(),
+    cwd,
     env: {
       LAB_AGENT_MODELS: "local-a,local-b"
     }

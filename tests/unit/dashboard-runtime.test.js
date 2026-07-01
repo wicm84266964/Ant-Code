@@ -120,6 +120,8 @@ test("dashboard runtime can switch registered model for the current session", as
     assert.equal(switched.ok, true);
     assert.equal(switched.sessionStatus.model, "vision-model");
     assert.equal(switched.models.find((model) => model.id === "vision-model").current, true);
+    assert.equal(switched.models.find((model) => model.id === "vision-model").default, false);
+    assert.equal(switched.models.find((model) => model.id === "code-model").default, true);
 
     const started = await runtime.startTurn({
       prompt: "use selected model",
@@ -383,6 +385,10 @@ test("dashboard model config ignores process gateway env overrides", async () =>
   assert.equal(initial.gatewayConfig.gatewayUrl, "https://env-gateway.example/v1/chat/completions");
   assert.equal(initial.sessionStatus.model, "env-model");
   assert.ok(initial.models.some((model) => model.id === "env-model"));
+  assert.equal(initial.models.find((model) => model.id === "env-model")?.sources.modelAlias.type, "environment");
+  assert.equal(initial.models.find((model) => model.id === "env-model")?.default, true);
+  assert.equal(initial.gatewayConfig.sources.gatewayUrl.type, "environment");
+  assert.equal(initial.gatewayConfig.sources.apiKey.type, "environment");
 
   const saved = await runtime.saveModelConfig({
     gatewayUrl: "https://beta-gateway.example/v1/chat/completions",
@@ -396,12 +402,47 @@ test("dashboard model config ignores process gateway env overrides", async () =>
 
   assert.equal(saved.ok, true);
   assert.equal(saved.gatewayConfig.gatewayUrl, "https://beta-gateway.example/v1/chat/completions");
+  assert.equal(saved.gatewayConfig.sources.gatewayUrl.type, "project");
+  assert.equal(saved.gatewayConfig.sources.apiKey.type, "project");
   assert.deepEqual(saved.models.map((model) => model.id), ["beta-chat"]);
   assert.equal(saved.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("beta-gateway"))?.current, true);
 
   const after = await runtime.status();
   assert.equal(after.gatewayConfig.gatewayUrl, "https://beta-gateway.example/v1/chat/completions");
   assert.deepEqual(after.models.map((model) => model.id), ["beta-chat"]);
+  assert.equal(after.gatewayConfig.sources.gatewayUrl.type, "project");
+  assert.equal(after.gatewayConfig.sources.apiKey.type, "project");
+});
+
+test("dashboard runtime keeps environment key visible as fallback after project model config without local key", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: {
+      LAB_MODEL_GATEWAY_URL: "https://env.gateway.example/v1/chat/completions",
+      LAB_MODEL_GATEWAY_PROTOCOL: "openai-chat",
+      LAB_MODEL_GATEWAY_API_KEY: "env-key",
+      LAB_AGENT_MODEL: "env-model"
+    }
+  });
+
+  const saved = await runtime.saveModelConfig({
+    gatewayUrl: "https://project.gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    modelId: "project-model",
+    label: "Project Model",
+    modalities: ["text"],
+    switchToModel: true
+  });
+
+  assert.equal(saved.ok, true);
+  assert.equal(saved.gatewayConfig.gatewayUrl, "https://project.gateway.example/v1/chat/completions");
+  assert.equal(saved.gatewayConfig.apiKeyConfigured, true);
+  assert.equal(saved.gatewayConfig.sources.gatewayUrl.type, "project");
+  assert.equal(saved.gatewayConfig.sources.apiKey.type, "environment");
+
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.equal(local.lab.gatewayApiKey, undefined);
 });
 
 test("dashboard runtime adds models to the active gateway when the same key is submitted again", async () => {

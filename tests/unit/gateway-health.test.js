@@ -102,11 +102,12 @@ test("gateway health report includes next steps when configuration is incomplete
 });
 
 test("gateway health live check accepts the mock gateway health endpoint", async () => {
+  const cwd = await makeTempWorkspace();
   const server = await listen(createMockGatewayServer(), "127.0.0.1");
   try {
     const url = serverUrl(server);
     const report = await runGatewayHealth({
-      cwd: process.cwd(),
+      cwd,
       live: true,
       env: {
         LAB_MODEL_GATEWAY_URL: `${url}/v1/chat`,
