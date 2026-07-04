@@ -1,5 +1,6 @@
 {
   "appName": "lab-agent",
+  "template": true,
   "modelAlias": "example-coding-model",
   "models": [
     {

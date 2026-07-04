@@ -1,5 +1,7 @@
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_MODEL_OPTIONS, parseModelList } from "../model-gateway/models.js";
 import { recommendedMcpServers } from "../mcp/recommended.js";
@@ -147,6 +149,7 @@ const DEFAULT_CONFIG = Object.freeze({
  * @typedef {typeof DEFAULT_CONFIG & {
  *   lab: { gatewayUrl: string | null; gatewayHealthUrl: string | null; gatewayProtocol: string; gatewayApiKey: string | null; gatewayMaxRetries: number; configPath: string | null };
  *   projectConfigPath: string | null;
+ *   globalConfigPath: string;
  *   defaultModelAlias: string;
  * }} LabAgentConfig
  */
@@ -156,7 +159,7 @@ const DEFAULT_CONFIG = Object.freeze({
  * model/gateway defaults, project JSON, and runtime environment controls.
  *
  * Precedence:
- * defaults < bundled config < LAB_AGENT_CONFIG file < model/gateway env defaults
+ * defaults < bundled config < global config < model/gateway env defaults
  * < project config < runtime env controls.
  *
  * @param {{ cwd?: string; env?: NodeJS.ProcessEnv }} options
@@ -168,13 +171,20 @@ export async function loadConfig(options = {}) {
 
   const projectConfigs = await loadProjectConfigs(cwd);
   const project = mergeProjectConfigs(projectConfigs);
-  const labConfigPath = env.LAB_AGENT_CONFIG ?? null;
+  const explicitLabConfigPath = hasNonEmptyEnv(env, "LAB_AGENT_CONFIG");
+  const labConfigPath = globalConfigPath(env);
+  const labConfigReadPath = explicitLabConfigPath || shouldReadDefaultGlobalConfig(env) ? labConfigPath : null;
   const bundled = await readJsonIfExists(BUNDLED_CONFIG_PATH);
-  const lab = labConfigPath ? await readJsonIfExists(labConfigPath) : null;
+  const rawLab = labConfigReadPath ? await readJsonIfExists(labConfigReadPath) : null;
+  const lab = rawLab ? {
+    ...rawLab,
+    path: labConfigReadPath,
+    label: explicitLabConfigPath ? "LAB_AGENT_CONFIG" : "user global config"
+  } : null;
 
   const withBundled = mergeConfig(DEFAULT_CONFIG, bundled?.data ?? {});
-  const withLabDefaults = mergeConfig(withBundled, lab?.data ?? {});
-  const withEnvDefaults = applyEnvDefaultConfig(withLabDefaults, env);
+  const withGlobalDefaults = mergeConfig(withBundled, lab?.data ?? {});
+  const withEnvDefaults = applyEnvDefaultConfig(withGlobalDefaults, env);
   const withProject = mergeConfig(withEnvDefaults, project?.data ?? {});
   const withEnv = applyRuntimeEnvConfig(withProject, env);
   const normalized = normalizeContextConfig(withEnv, env);
@@ -190,7 +200,7 @@ export async function loadConfig(options = {}) {
     gatewayIdleTimeoutMs: parseOptionalInteger(env.LAB_MODEL_GATEWAY_IDLE_TIMEOUT_MS, hardened.lab?.gatewayIdleTimeoutMs ?? DEFAULT_GATEWAY_IDLE_TIMEOUT_MS),
     activeGatewayProfile: typeof hardened.lab?.activeGatewayProfile === "string" ? hardened.lab.activeGatewayProfile : "",
     gatewayProfiles: Array.isArray(hardened.lab?.gatewayProfiles) ? hardened.lab.gatewayProfiles : [],
-    configPath: labConfigPath
+    configPath: lab ? labConfigReadPath : explicitLabConfigPath ? labConfigPath : null
   };
   validateLabConfig(finalLab);
   const configSources = buildConfigSources({ env, project, lab, bundled });
@@ -205,6 +215,7 @@ export async function loadConfig(options = {}) {
     projectConfigPath: project?.path ?? null,
     projectConfigPaths: project?.paths ?? [],
     bundledConfigPath: bundled ? BUNDLED_CONFIG_PATH : null,
+    globalConfigPath: labConfigPath,
     configSources
   };
 }
@@ -254,6 +265,30 @@ export function localProjectConfigPath(cwd) {
 }
 
 /**
+ * User-level model/gateway defaults edited by Dashboard.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ */
+export function globalConfigPath(env = process.env) {
+  const explicit = String(env.LAB_AGENT_CONFIG ?? "").trim();
+  if (explicit) {
+    return path.resolve(explicit);
+  }
+  if (env.LAB_AGENT_HOME) {
+    return path.join(path.resolve(env.LAB_AGENT_HOME), "lab-agent.config.json");
+  }
+  const home = env.USERPROFILE || env.HOME || os.homedir();
+  return path.join(home, ".ant-code", "lab-agent.config.json");
+}
+
+function shouldReadDefaultGlobalConfig(env) {
+  return env === process.env
+    || hasNonEmptyEnv(env, "LAB_AGENT_HOME")
+    || hasNonEmptyEnv(env, "USERPROFILE")
+    || hasNonEmptyEnv(env, "HOME");
+}
+
+/**
  * @param {string} cwd
  */
 async function loadProjectConfigs(cwd) {
@@ -289,13 +324,183 @@ function mergeProjectConfigs(configs) {
 async function readJsonIfExists(filePath) {
   try {
     const text = await fs.readFile(filePath, "utf8");
-    return { data: JSON.parse(text) };
+    return sanitizeLoadedConfig(JSON.parse(text), filePath);
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
       return null;
     }
     throw error;
   }
+}
+
+/**
+ * @param {unknown} raw
+ * @param {string} filePath
+ */
+function sanitizeLoadedConfig(raw, filePath) {
+  const data = isPlainObject(raw) ? cloneJsonObject(raw) : {};
+  const templateLike = isExampleConfig(data);
+  let ignoredModelGatewayTemplate = templateLike;
+  if (templateLike) {
+    stripModelGatewayConfig(data);
+  } else {
+    ignoredModelGatewayTemplate = stripPlaceholderModelGatewayFields(data);
+  }
+  if (templateLike || ignoredModelGatewayTemplate) {
+    stripPlaceholderAllowedHosts(data);
+  }
+  return {
+    data,
+    ignoredModelGatewayTemplate,
+    path: filePath
+  };
+}
+
+function isExampleConfig(config) {
+  const marked = config?.example === true
+    || config?.template === true
+    || config?.isExample === true
+    || config?.isTemplate === true
+    || config?.metadata?.example === true
+    || config?.metadata?.template === true;
+  return marked && hasTemplatePlaceholderModelGatewayConfig(config);
+}
+
+function hasTemplatePlaceholderModelGatewayConfig(config) {
+  const lab = isPlainObject(config?.lab) ? config.lab : {};
+  return isTemplatePlaceholderConfigValue(config?.modelAlias)
+    || (Array.isArray(config?.models) && config.models.some((model) => isTemplatePlaceholderConfigValue(typeof model === "string" ? model : model?.id)))
+    || isTemplatePlaceholderConfigValue(lab.gatewayUrl)
+    || isTemplatePlaceholderConfigValue(lab.gatewayHealthUrl)
+    || (Array.isArray(lab.gatewayProfiles) && lab.gatewayProfiles.some((profile) =>
+      isTemplatePlaceholderConfigValue(profile?.gatewayUrl)
+      || isTemplatePlaceholderConfigValue(profile?.gatewayHealthUrl)
+      || isTemplatePlaceholderConfigValue(profile?.modelAlias)
+      || (Array.isArray(profile?.models) && profile.models.some((model) => isTemplatePlaceholderConfigValue(typeof model === "string" ? model : model?.id)))
+    ));
+}
+
+function isTemplatePlaceholderConfigValue(value) {
+  const text = String(value ?? "").trim().toLowerCase();
+  return isPlaceholderConfigValue(value)
+    || text.includes("gateway.lab.example");
+}
+
+function isPlaceholderConfigValue(value) {
+  const text = String(value ?? "").trim().toLowerCase();
+  if (!text) {
+    return false;
+  }
+  return text.includes("<")
+    || text.includes(">")
+    || text.includes("your-")
+    || text.includes("your_")
+    || text.includes("replace-me")
+    || text.includes("replace_me")
+    || text.includes("placeholder")
+    || text.includes("example.invalid")
+    || text === "model-id"
+    || text === "demo-model";
+}
+
+function stripPlaceholderModelGatewayFields(config) {
+  let stripped = false;
+  if (isPlaceholderConfigValue(config.modelAlias)) {
+    delete config.modelAlias;
+    stripped = true;
+  }
+  if (Array.isArray(config.models)) {
+    const nextModels = config.models.filter((model) => !isPlaceholderConfigValue(typeof model === "string" ? model : model?.id));
+    if (nextModels.length !== config.models.length) {
+      config.models = nextModels;
+      stripped = true;
+    }
+    if (nextModels.length === 0) {
+      delete config.models;
+    }
+  }
+  if (isPlainObject(config.lab)) {
+    for (const key of ["gatewayUrl", "gatewayHealthUrl", "gatewayApiKey"]) {
+      if (isPlaceholderConfigValue(config.lab[key])) {
+        delete config.lab[key];
+        stripped = true;
+      }
+    }
+    if (stripped && !hasConfigPath(config, "lab.gatewayUrl")) {
+      delete config.lab.gatewayProtocol;
+    }
+    if (Array.isArray(config.lab.gatewayProfiles)) {
+      const profiles = [];
+      for (const profile of config.lab.gatewayProfiles) {
+        if (!isPlainObject(profile)) {
+          continue;
+        }
+        const nextProfile = cloneJsonObject(profile);
+        let profileStripped = false;
+        for (const key of ["gatewayUrl", "gatewayHealthUrl", "modelAlias", "gatewayApiKey"]) {
+          if (isPlaceholderConfigValue(nextProfile[key])) {
+            delete nextProfile[key];
+            profileStripped = true;
+          }
+        }
+        if (Array.isArray(nextProfile.models)) {
+          const nextModels = nextProfile.models.filter((model) => !isPlaceholderConfigValue(typeof model === "string" ? model : model?.id));
+          if (nextModels.length !== nextProfile.models.length) {
+            nextProfile.models = nextModels;
+            profileStripped = true;
+          }
+        }
+        stripped = stripped || profileStripped;
+        if (nextProfile.gatewayUrl || nextProfile.gatewayHealthUrl || nextProfile.modelAlias || (Array.isArray(nextProfile.models) && nextProfile.models.length > 0)) {
+          profiles.push(nextProfile);
+        }
+      }
+      if (profiles.length !== config.lab.gatewayProfiles.length) {
+        stripped = true;
+      }
+      if (profiles.length > 0) {
+        config.lab.gatewayProfiles = profiles;
+      } else {
+        delete config.lab.gatewayProfiles;
+      }
+    }
+  }
+  return stripped;
+}
+
+function stripModelGatewayConfig(config) {
+  delete config.modelAlias;
+  delete config.models;
+  if (isPlainObject(config.lab)) {
+    delete config.lab.gatewayUrl;
+    delete config.lab.gatewayHealthUrl;
+    delete config.lab.gatewayProtocol;
+    delete config.lab.gatewayApiKey;
+    delete config.lab.activeGatewayProfile;
+    delete config.lab.gatewayProfiles;
+  }
+  if (isPlainObject(config.agents)) {
+    delete config.agents.modelTiers;
+    if (isPlainObject(config.agents.vision)) {
+      delete config.agents.vision.model;
+    }
+  }
+}
+
+function stripPlaceholderAllowedHosts(config) {
+  if (!Array.isArray(config.allowedHosts)) {
+    return;
+  }
+  config.allowedHosts = config.allowedHosts.filter((host) => !isPlaceholderAllowedHost(host));
+}
+
+function isPlaceholderAllowedHost(value) {
+  const text = String(value ?? "").trim().toLowerCase();
+  return isPlaceholderConfigValue(value)
+    || text === "gateway.lab.example"
+    || text.endsWith(".lab.example")
+    || text === "example.invalid"
+    || text.endsWith(".example.invalid");
 }
 
 /**
@@ -347,7 +552,7 @@ function configSourceFor(keyPath, { env, project, lab, bundled }) {
   if (hasConfigPath(lab?.data, keyPath)) {
     return {
       type: "global",
-      label: "LAB_AGENT_CONFIG",
+      label: lab?.label ?? "global config",
       path: lab?.path ?? null
     };
   }
@@ -402,6 +607,11 @@ function hasConfigPath(config, keyPath) {
  */
 function applyEnvDefaultConfig(value, env) {
   const next = { ...value };
+  const envControlsModel = hasNonEmptyEnv(env, "LAB_AGENT_MODEL") || hasNonEmptyEnv(env, "LAB_AGENT_MODELS");
+  const envControlsGateway = hasNonEmptyEnv(env, "LAB_MODEL_GATEWAY_URL")
+    || hasNonEmptyEnv(env, "LAB_MODEL_GATEWAY_HEALTH_URL")
+    || hasNonEmptyEnv(env, "LAB_MODEL_GATEWAY_PROTOCOL")
+    || hasNonEmptyEnv(env, "LAB_MODEL_GATEWAY_API_KEY");
 
   if (env.LAB_AGENT_MODEL) {
     next.modelAlias = env.LAB_AGENT_MODEL;
@@ -409,6 +619,8 @@ function applyEnvDefaultConfig(value, env) {
 
   if (env.LAB_AGENT_MODELS) {
     next.models = parseModelList(env.LAB_AGENT_MODELS);
+  } else if (env.LAB_AGENT_MODEL) {
+    next.models = envModelList(next.models, env.LAB_AGENT_MODEL);
   }
 
   const lab = { ...(next.lab ?? {}) };
@@ -427,6 +639,17 @@ function applyEnvDefaultConfig(value, env) {
   if (env.LAB_MODEL_GATEWAY_API_KEY) {
     lab.gatewayApiKey = env.LAB_MODEL_GATEWAY_API_KEY;
   }
+  if (envControlsModel || envControlsGateway) {
+    lab.gatewayProfiles = [
+      envGatewayProfile({
+        modelAlias: next.modelAlias,
+        models: next.models,
+        lab,
+        agents: next.agents
+      })
+    ].filter(Boolean);
+    lab.activeGatewayProfile = lab.gatewayProfiles[0]?.id ?? "";
+  }
   next.lab = lab;
 
   const envGatewayHosts = [
@@ -438,6 +661,46 @@ function applyEnvDefaultConfig(value, env) {
   }
 
   return next;
+}
+
+function envGatewayProfile(config) {
+  const gatewayUrl = String(config.lab?.gatewayUrl ?? "").trim();
+  if (!gatewayUrl) {
+    return null;
+  }
+  const gatewayProtocol = String(config.lab?.gatewayProtocol ?? "lab-agent-gateway").trim();
+  return {
+    id: gatewayProfileIdFromParts(gatewayProtocol, gatewayUrl),
+    label: parseHost(gatewayUrl) || gatewayUrl,
+    gatewayUrl,
+    gatewayHealthUrl: String(config.lab?.gatewayHealthUrl ?? "").trim(),
+    gatewayProtocol,
+    ...(config.lab?.gatewayApiKey ? { gatewayApiKey: config.lab.gatewayApiKey } : {}),
+    modelAlias: String(config.modelAlias ?? "").trim(),
+    models: Array.isArray(config.models) ? config.models : [],
+    ...(isPlainObject(config.agents) ? { agents: cloneJsonObject(config.agents) } : {})
+  };
+}
+
+function envModelList(models, modelAlias) {
+  const id = String(modelAlias ?? "").trim();
+  if (!id) {
+    return Array.isArray(models) ? models : [];
+  }
+  const configured = Array.isArray(models) ? models : [];
+  const matching = configured.filter((model) => String(typeof model === "string" ? model : model?.id ?? "").trim() === id);
+  if (matching.length > 0) {
+    return matching;
+  }
+  return parseModelList(id);
+}
+
+function gatewayProfileIdFromParts(protocol, gatewayUrl) {
+  const raw = `${String(protocol ?? "lab-agent-gateway").trim()}|${String(gatewayUrl ?? "").trim()}`;
+  if (!String(gatewayUrl ?? "").trim()) {
+    return "";
+  }
+  return `gw-${createHash("sha1").update(raw).digest("hex").slice(0, 12)}`;
 }
 
 /**
@@ -991,6 +1254,10 @@ function parseOptionalInteger(value, fallback) {
  */
 function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function cloneJsonObject(value) {
+  return JSON.parse(JSON.stringify(value ?? {}));
 }
 
 function validModelModalities(value) {

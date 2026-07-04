@@ -7,7 +7,7 @@ import { createLabModelGateway } from "../model-gateway/client.js";
 import { listConfiguredModels, normalizeAgentModelTiers, resolveModelSelection } from "../model-gateway/models.js";
 import { resolveWorkspaceTrust, trustWorkspace as saveWorkspaceTrust } from "../permissions/workspace-trust.js";
 import { createSessionStore } from "../storage/session-store.js";
-import { GATEWAY_PROTOCOLS, loadConfig, localProjectConfigPath } from "../config/load-config.js";
+import { GATEWAY_PROTOCOLS, globalConfigPath, loadConfig, localProjectConfigPath } from "../config/load-config.js";
 import { cancelBackgroundAgentTasks } from "../agents/background-registry.js";
 import { cancelBackgroundTerminalTasks, listBackgroundTerminalTasks } from "../agents/background-terminal-registry.js";
 import { createAgentTaskStore } from "../agents/task-store.js";
@@ -143,10 +143,10 @@ export function createDashboardRuntime(options) {
       if (!normalized.ok) {
         return normalized;
       }
-      const localPath = localProjectConfigPath(options.cwd);
-      const local = await readJsonConfig(localPath);
-      const nextLocal = buildLocalModelConfig(local, config, normalized);
-      await writeJsonConfig(localPath, nextLocal);
+      const configPath = modelConfigTargetPath(options.cwd, configEnv, normalized.saveTarget);
+      const targetConfig = await readJsonConfig(configPath);
+      const nextConfig = buildLocalModelConfig(targetConfig, config, normalized);
+      await writeJsonConfig(configPath, nextConfig);
 
       const refreshed = await loadConfig({ cwd: options.cwd, env: await resolveConfigEnv() });
       if (normalized.switchToModel) {
@@ -160,7 +160,8 @@ export function createDashboardRuntime(options) {
       const activeConfig = syncedState?.session.config ?? (state?.session.config ? configForStatusLists(state.session.config, modelConfig) : modelConfig);
       return {
         ok: true,
-        configPath: localPath,
+        configPath,
+        saveTarget: normalized.saveTarget,
         sessionId: syncedState?.session.id,
         sessionStatus: state ? sessionStatusForConfigUpdate(state.session, modelConfig) : sessionStatusFromConfig(modelConfig),
         models: modelOptions(activeConfig),
@@ -1064,6 +1065,8 @@ function publicGatewayConfig(config) {
     gatewayProtocol: config.lab?.gatewayProtocol ?? "lab-agent-gateway",
     apiKeyConfigured: Boolean(config.lab?.gatewayApiKey),
     activeProfileId: activeGatewayProfileId(config),
+    globalConfigPath: config.globalConfigPath ?? "",
+    projectConfigPath: config.projectConfigPath ?? "",
     sources: {
       gatewayUrl: publicConfigSource(config.lab?.sources?.gatewayUrl ?? config.configSources?.lab?.gatewayUrl),
       gatewayHealthUrl: publicConfigSource(config.lab?.sources?.gatewayHealthUrl ?? config.configSources?.lab?.gatewayHealthUrl),
@@ -1111,6 +1114,7 @@ function publicConfigSource(source) {
 }
 
 function normalizeModelConfigInput(input, config) {
+  const saveTarget = normalizeSaveTarget(input.saveTarget ?? input.scope ?? input.target);
   const gatewayUrl = String(input.gatewayUrl ?? "").trim();
   const parsedGatewayUrl = parseConfigUrl(gatewayUrl);
   if (!parsedGatewayUrl) {
@@ -1139,6 +1143,7 @@ function normalizeModelConfigInput(input, config) {
   const visionAgentModel = String(input.visionAgentModel ?? input.visionModel ?? "").trim();
   return {
     ok: true,
+    saveTarget,
     gatewayUrl,
     gatewayHealthUrl,
     gatewayProtocol,
@@ -1158,6 +1163,14 @@ function normalizeModelConfigInput(input, config) {
       ...(contextTokens ? { contextTokens } : {})
     }
   };
+}
+
+function normalizeSaveTarget(value) {
+  const text = String(value ?? "").trim().toLowerCase();
+  if (["global", "user", "default", "defaults"].includes(text)) {
+    return "global";
+  }
+  return "project";
 }
 
 function normalizeModelInputModalities(input) {
@@ -1192,6 +1205,10 @@ async function readJsonConfig(filePath) {
 
 async function dashboardConfigEnv(cwd, env) {
   return env;
+}
+
+function modelConfigTargetPath(cwd, env, saveTarget = "project") {
+  return saveTarget === "global" ? globalConfigPath(env) : localProjectConfigPath(cwd);
 }
 
 async function writeJsonConfig(filePath, data) {

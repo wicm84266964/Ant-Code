@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { loadConfig } from "../../src/config/load-config.js";
+import { globalConfigPath, loadConfig } from "../../src/config/load-config.js";
 
 test("loads gateway and network mode from environment", async () => {
   const cwd = await makeTempWorkspace();
@@ -288,6 +288,188 @@ test("project model and gateway config override environment defaults but keep en
   assert.equal(config.configSources.lab.gatewayUrl.type, "project");
   assert.equal(config.configSources.lab.gatewayProtocol.type, "project");
   assert.equal(config.configSources.lab.gatewayApiKey.type, "environment");
+});
+
+test("loads dashboard global model defaults from user config file", async () => {
+  const cwd = await makeTempWorkspace();
+  const home = await makeTempWorkspace();
+  const globalPath = globalConfigPath({ USERPROFILE: home });
+  await fs.mkdir(path.dirname(globalPath), { recursive: true });
+  await fs.writeFile(globalPath, JSON.stringify({
+    modelAlias: "global-model",
+    models: [
+      { id: "global-model", label: "Global Model", modalities: ["text"], contextTokens: 400000 }
+    ],
+    lab: {
+      gatewayUrl: "https://global.gateway.example/v1/chat/completions",
+      gatewayProtocol: "openai-chat",
+      gatewayApiKey: "global-key"
+    }
+  }), "utf8");
+
+  const config = await loadConfig({ cwd, env: { USERPROFILE: home } });
+
+  assert.equal(config.globalConfigPath, globalPath);
+  assert.equal(config.modelAlias, "global-model");
+  assert.deepEqual(config.models.map((model) => model.id), ["global-model"]);
+  assert.equal(config.lab.gatewayUrl, "https://global.gateway.example/v1/chat/completions");
+  assert.equal(config.lab.gatewayApiKey, "global-key");
+  assert.equal(config.configSources.modelAlias.type, "global");
+  assert.equal(config.configSources.lab.gatewayUrl.type, "global");
+});
+
+test("model gateway environment defaults override global config and hide stale global profiles", async () => {
+  const cwd = await makeTempWorkspace();
+  const home = await makeTempWorkspace();
+  const globalPath = globalConfigPath({ USERPROFILE: home });
+  await fs.mkdir(path.dirname(globalPath), { recursive: true });
+  await fs.writeFile(globalPath, JSON.stringify({
+    modelAlias: "old-global",
+    models: [
+      { id: "old-global", label: "Old Global", modalities: ["text"], contextTokens: 200000 }
+    ],
+    lab: {
+      gatewayUrl: "https://old.gateway.example/v1/chat/completions",
+      gatewayProtocol: "openai-chat",
+      gatewayProfiles: [
+        {
+          id: "gw-old",
+          label: "old",
+          gatewayUrl: "https://old.gateway.example/v1/chat/completions",
+          gatewayProtocol: "openai-chat",
+          modelAlias: "old-global",
+          models: [{ id: "old-global", label: "Old Global", modalities: ["text"] }]
+        },
+        {
+          id: "gw-stale",
+          label: "stale",
+          gatewayUrl: "https://stale.gateway.example/v1/chat/completions",
+          gatewayProtocol: "openai-chat",
+          modelAlias: "stale-global",
+          models: [{ id: "stale-global", label: "Stale Global", modalities: ["text"] }]
+        }
+      ]
+    }
+  }), "utf8");
+
+  const config = await loadConfig({
+    cwd,
+    env: {
+      USERPROFILE: home,
+      LAB_AGENT_MODEL: "env-model",
+      LAB_MODEL_GATEWAY_URL: "http://localhost:8080/v1/chat/completions",
+      LAB_MODEL_GATEWAY_PROTOCOL: "openai-chat",
+      LAB_MODEL_GATEWAY_API_KEY: "env-key"
+    }
+  });
+
+  assert.equal(config.modelAlias, "env-model");
+  assert.deepEqual(config.models.map((model) => model.id), ["env-model"]);
+  assert.equal(config.lab.gatewayUrl, "http://localhost:8080/v1/chat/completions");
+  assert.equal(config.lab.gatewayProtocol, "openai-chat");
+  assert.equal(config.lab.gatewayApiKey, "env-key");
+  assert.equal(config.lab.gatewayProfiles.length, 1);
+  assert.equal(config.lab.gatewayProfiles[0].label, "localhost");
+  assert.equal(config.lab.gatewayProfiles[0].modelAlias, "env-model");
+  assert.deepEqual(config.lab.gatewayProfiles[0].models.map((model) => model.id), ["env-model"]);
+  assert.equal(config.configSources.modelAlias.type, "environment");
+  assert.equal(config.configSources.lab.gatewayUrl.type, "environment");
+});
+
+test("template project model config does not override global defaults", async () => {
+  const cwd = await makeTempWorkspace();
+  const home = await makeTempWorkspace();
+  const globalPath = globalConfigPath({ USERPROFILE: home });
+  await fs.mkdir(path.dirname(globalPath), { recursive: true });
+  await fs.writeFile(globalPath, JSON.stringify({
+    modelAlias: "real-global-model",
+    models: [
+      { id: "real-global-model", label: "Real Global Model", modalities: ["text"], contextTokens: 300000 }
+    ],
+    lab: {
+      gatewayUrl: "https://real.gateway.example/v1/chat/completions",
+      gatewayProtocol: "openai-chat",
+      gatewayApiKey: "real-key"
+    }
+  }), "utf8");
+  await writeJson(cwd, {
+    template: true,
+    modelAlias: "example-coding-model",
+    models: [
+      { id: "example-coding-model", label: "Template Model", contextTokens: 200000 }
+    ],
+    allowedHosts: ["gateway.lab.example", "project.example"],
+    lab: {
+      gatewayUrl: "https://gateway.lab.example/v1/chat",
+      gatewayHealthUrl: "https://gateway.lab.example/health",
+      gatewayProtocol: "lab-agent-gateway"
+    },
+    context: {
+      maxMessages: 100000,
+      maxBytes: 1600000,
+      maxTokens: 400000,
+      keepRecentMessages: 8,
+      tailTurns: 2,
+      preserveRecentTokens: 8000,
+      summaryBytes: 65536
+    }
+  });
+
+  const config = await loadConfig({ cwd, env: { USERPROFILE: home } });
+
+  assert.equal(config.modelAlias, "real-global-model");
+  assert.deepEqual(config.models.map((model) => model.id), ["real-global-model"]);
+  assert.equal(config.lab.gatewayUrl, "https://real.gateway.example/v1/chat/completions");
+  assert.equal(config.lab.gatewayProtocol, "openai-chat");
+  assert.equal(config.lab.gatewayApiKey, "real-key");
+  assert.equal(config.context.maxTokens, 400000);
+  assert.equal(config.configSources.modelAlias.type, "global");
+  assert.equal(config.configSources.lab.gatewayUrl.type, "global");
+  assert.ok(config.allowedHosts.includes("project.example"));
+  assert.equal(config.allowedHosts.includes("gateway.lab.example"), false);
+});
+
+test("placeholder project model fields do not override global defaults", async () => {
+  const cwd = await makeTempWorkspace();
+  const home = await makeTempWorkspace();
+  const globalPath = globalConfigPath({ USERPROFILE: home });
+  await fs.mkdir(path.dirname(globalPath), { recursive: true });
+  await fs.writeFile(globalPath, JSON.stringify({
+    modelAlias: "global-real",
+    models: [
+      { id: "global-real", label: "Global Real", modalities: ["text"], contextTokens: 200000 }
+    ],
+    lab: {
+      gatewayUrl: "https://global-real.example/v1/chat/completions",
+      gatewayProtocol: "openai-chat"
+    }
+  }), "utf8");
+  await writeJson(cwd, {
+    modelAlias: "<model-id>",
+    models: [
+      { id: "<model-id>", label: "Placeholder" }
+    ],
+    lab: {
+      gatewayUrl: "https://gateway.example.invalid/v1/chat",
+      gatewayProtocol: "lab-agent-gateway"
+    },
+    agents: {
+      delegationGuard: {
+        enabled: true,
+        mode: "remind",
+        softThreshold: 2,
+        strongThreshold: 4
+      }
+    }
+  });
+
+  const config = await loadConfig({ cwd, env: { USERPROFILE: home } });
+
+  assert.equal(config.modelAlias, "global-real");
+  assert.deepEqual(config.models.map((model) => model.id), ["global-real"]);
+  assert.equal(config.lab.gatewayUrl, "https://global-real.example/v1/chat/completions");
+  assert.equal(config.lab.gatewayProtocol, "openai-chat");
+  assert.equal(config.agents.delegationGuard.softThreshold, 2);
 });
 
 test("loads model context windows from project config", async () => {

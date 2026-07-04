@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.2.4 - 2026-07-04
+
+### Fixed
+
+- Dashboard model settings can now save a user-level global default at
+  `~/.ant-code/lab-agent.config.json`, while project defaults continue to save
+  under `.lab-agent/config.json`.
+- New workspaces now load the user global gateway/model defaults automatically,
+  so users do not need to reconfigure the same gateway in every project.
+- Project model/gateway settings still override global and environment defaults,
+  while gateway API keys from environment variables remain available as a
+  fallback when the project does not store a key.
+- Environment-provided gateway/model defaults now present a single active
+  gateway profile instead of mixing in stale profiles from older global config
+  files.
+- Template and placeholder project configs no longer override real global
+  model/gateway defaults.
+
+### Validation
+
+- `node --test tests/unit/config.test.js`
+- `node --test tests/unit/dashboard-runtime.test.js`
+
 ## 1.2.3 - 2026-07-01
 
 ### Fixed

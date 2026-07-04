@@ -257,6 +257,80 @@ test("dashboard runtime saves local model gateway config", async () => {
   });
 });
 
+test("dashboard runtime saves model gateway config as user global default", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-"));
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: home } });
+
+  const saved = await runtime.saveModelConfig({
+    saveTarget: "global",
+    gatewayUrl: "https://global.gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "global-key",
+    modelId: "global-model",
+    label: "Global Model",
+    modalities: ["text"],
+    contextTokens: "400000",
+    switchToModel: true
+  });
+
+  assert.equal(saved.ok, true);
+  assert.equal(saved.saveTarget, "global");
+  assert.equal(saved.sessionStatus.model, "global-model");
+  assert.equal(saved.gatewayConfig.gatewayUrl, "https://global.gateway.example/v1/chat/completions");
+  assert.equal(saved.gatewayConfig.sources.gatewayUrl.type, "global");
+  assert.equal(saved.gatewayConfig.globalConfigPath, path.join(home, ".ant-code", "lab-agent.config.json"));
+
+  const global = JSON.parse(await fs.readFile(path.join(home, ".ant-code", "lab-agent.config.json"), "utf8"));
+  assert.equal(global.modelAlias, "global-model");
+  assert.equal(global.lab.gatewayUrl, "https://global.gateway.example/v1/chat/completions");
+  await assert.rejects(fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"), /ENOENT/);
+
+  const otherProject = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-other-"));
+  const otherRuntime = createDashboardRuntime({ cwd: otherProject, env: { USERPROFILE: home } });
+  const status = await otherRuntime.status();
+  assert.equal(status.sessionStatus.model, "global-model");
+  assert.equal(status.gatewayConfig.gatewayUrl, "https://global.gateway.example/v1/chat/completions");
+  assert.equal(status.gatewayConfig.sources.gatewayUrl.type, "global");
+});
+
+test("dashboard project model config overrides user global default", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-"));
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: home } });
+
+  await runtime.saveModelConfig({
+    saveTarget: "global",
+    gatewayUrl: "https://global.gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "global-key",
+    modelId: "global-model",
+    label: "Global Model",
+    modalities: ["text"],
+    switchToModel: true
+  });
+  const savedProject = await runtime.saveModelConfig({
+    saveTarget: "project",
+    gatewayUrl: "https://project.gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "project-key",
+    modelId: "project-model",
+    label: "Project Model",
+    modalities: ["text"],
+    switchToModel: true
+  });
+
+  assert.equal(savedProject.ok, true);
+  assert.equal(savedProject.saveTarget, "project");
+  assert.equal(savedProject.sessionStatus.model, "project-model");
+  assert.equal(savedProject.gatewayConfig.gatewayUrl, "https://project.gateway.example/v1/chat/completions");
+  assert.equal(savedProject.gatewayConfig.sources.gatewayUrl.type, "project");
+
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.equal(local.modelAlias, "project-model");
+  assert.equal(local.lab.gatewayUrl, "https://project.gateway.example/v1/chat/completions");
+});
+
 test("dashboard runtime refreshes idle active session after saving gateway key", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
   const requests = [];
