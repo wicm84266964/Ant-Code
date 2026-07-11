@@ -198,6 +198,30 @@ test("dashboard maps background subagent progress without wake prompt text", () 
   assert.equal(events[0].wakeParent, true);
 });
 
+test("dashboard preserves failed and interrupted background terminal states", () => {
+  const failed = mapSessionEventToDashboard({
+    type: "subagent_group_progress",
+    groupId: "group-failed",
+    status: "failed",
+    completed: true,
+    summary: "1 个子任务失败"
+  });
+  const interrupted = mapSessionEventToDashboard({
+    type: "subagent_group_progress",
+    groupId: "group-interrupted",
+    status: "interrupted",
+    completed: true,
+    summary: "任务已中断"
+  });
+
+  assert.equal(failed[0].title, "子任务组执行失败");
+  assert.equal(failed[0].status, "failed");
+  assert.equal(failed[0].severity, "danger");
+  assert.equal(interrupted[0].title, "子任务组已中断");
+  assert.equal(interrupted[0].status, "interrupted");
+  assert.equal(interrupted[0].severity, "warning");
+});
+
 test("dashboard maps background subagent wakeup to waiting activity", () => {
   const events = mapSessionEventToDashboard({
     type: "subagent_group_wakeup",
@@ -232,6 +256,26 @@ test("dashboard maps tool finish to concise result", () => {
   assert.equal(events[0].title, "写入文件已完成");
   assert.equal(events[0].status, "completed");
   assert.equal(events[0].collapsed, true);
+});
+
+test("dashboard maps turn completion according to its real terminal status", () => {
+  const completed = mapSessionEventToDashboard({ type: "turn_complete", status: "completed" })[0];
+  const blocked = mapSessionEventToDashboard({ type: "turn_complete", status: "tool_limit" })[0];
+  const interrupted = mapSessionEventToDashboard({ type: "turn_complete", status: "interrupted" })[0];
+  const failed = mapSessionEventToDashboard({ type: "turn_complete", status: "gateway_error" })[0];
+
+  assert.deepEqual(
+    [completed.status, blocked.status, interrupted.status, failed.status],
+    ["completed", "blocked", "interrupted", "failed"]
+  );
+  assert.deepEqual(
+    [completed.severity, blocked.severity, interrupted.severity, failed.severity],
+    ["success", "warning", "warning", "danger"]
+  );
+  assert.equal(blocked.title, "任务未完成");
+  assert.equal(interrupted.title, "任务已中断");
+  assert.equal(failed.title, "任务执行失败");
+  assert.equal(failed.terminalStatus, "gateway_error");
 });
 
 test("dashboard carries compact file change counters without diff text", () => {

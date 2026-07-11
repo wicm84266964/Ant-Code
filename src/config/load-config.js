@@ -184,7 +184,9 @@ export async function loadConfig(options = {}) {
 
   const withBundled = mergeConfig(DEFAULT_CONFIG, bundled?.data ?? {});
   const withGlobalDefaults = mergeConfig(withBundled, lab?.data ?? {});
-  const withEnvDefaults = applyEnvDefaultConfig(withGlobalDefaults, env);
+  const withEnvDefaults = applyEnvDefaultConfig(withGlobalDefaults, env, {
+    preserveConfiguredModels: Boolean(bundled && !lab)
+  });
   const withProject = mergeConfig(withEnvDefaults, project?.data ?? {});
   const withEnv = applyRuntimeEnvConfig(withProject, env);
   const normalized = normalizeContextConfig(withEnv, env);
@@ -342,7 +344,11 @@ function sanitizeLoadedConfig(raw, filePath) {
   const templateLike = isExampleConfig(data);
   let ignoredModelGatewayTemplate = templateLike;
   if (templateLike) {
-    stripModelGatewayConfig(data);
+    if (path.resolve(filePath) === path.resolve(BUNDLED_CONFIG_PATH)) {
+      stripBundledTemplateGateway(data);
+    } else {
+      stripModelGatewayConfig(data);
+    }
   } else {
     ignoredModelGatewayTemplate = stripPlaceholderModelGatewayFields(data);
   }
@@ -383,7 +389,8 @@ function hasTemplatePlaceholderModelGatewayConfig(config) {
 function isTemplatePlaceholderConfigValue(value) {
   const text = String(value ?? "").trim().toLowerCase();
   return isPlaceholderConfigValue(value)
-    || text.includes("gateway.lab.example");
+    || text.includes("gateway.lab.example")
+    || text.includes("gateway.example.com");
 }
 
 function isPlaceholderConfigValue(value) {
@@ -487,6 +494,19 @@ function stripModelGatewayConfig(config) {
   }
 }
 
+/** @param {Record<string, any>} config */
+function stripBundledTemplateGateway(config) {
+  if (!isPlainObject(config.lab)) {
+    return;
+  }
+  delete config.lab.gatewayUrl;
+  delete config.lab.gatewayHealthUrl;
+  delete config.lab.gatewayProtocol;
+  delete config.lab.gatewayApiKey;
+  delete config.lab.activeGatewayProfile;
+  delete config.lab.gatewayProfiles;
+}
+
 function stripPlaceholderAllowedHosts(config) {
   if (!Array.isArray(config.allowedHosts)) {
     return;
@@ -499,6 +519,7 @@ function isPlaceholderAllowedHost(value) {
   return isPlaceholderConfigValue(value)
     || text === "gateway.lab.example"
     || text.endsWith(".lab.example")
+    || text === "gateway.example.com"
     || text === "example.invalid"
     || text.endsWith(".example.invalid");
 }
@@ -604,8 +625,9 @@ function hasConfigPath(config, keyPath) {
 /**
  * @param {Record<string, any>} value
  * @param {NodeJS.ProcessEnv} env
+ * @param {{ preserveConfiguredModels?: boolean }} [options]
  */
-function applyEnvDefaultConfig(value, env) {
+function applyEnvDefaultConfig(value, env, options = {}) {
   const next = { ...value };
   const envControlsModel = hasNonEmptyEnv(env, "LAB_AGENT_MODEL") || hasNonEmptyEnv(env, "LAB_AGENT_MODELS");
   const envControlsGateway = hasNonEmptyEnv(env, "LAB_MODEL_GATEWAY_URL")
@@ -620,7 +642,7 @@ function applyEnvDefaultConfig(value, env) {
   if (env.LAB_AGENT_MODELS) {
     next.models = parseModelList(env.LAB_AGENT_MODELS);
   } else if (env.LAB_AGENT_MODEL) {
-    next.models = envModelList(next.models, env.LAB_AGENT_MODEL);
+    next.models = envModelList(next.models, env.LAB_AGENT_MODEL, options.preserveConfiguredModels === true);
   }
 
   const lab = { ...(next.lab ?? {}) };
@@ -682,7 +704,7 @@ function envGatewayProfile(config) {
   };
 }
 
-function envModelList(models, modelAlias) {
+function envModelList(models, modelAlias, preserveConfiguredModels = false) {
   const id = String(modelAlias ?? "").trim();
   if (!id) {
     return Array.isArray(models) ? models : [];
@@ -690,9 +712,10 @@ function envModelList(models, modelAlias) {
   const configured = Array.isArray(models) ? models : [];
   const matching = configured.filter((model) => String(typeof model === "string" ? model : model?.id ?? "").trim() === id);
   if (matching.length > 0) {
-    return matching;
+    return preserveConfiguredModels ? configured : matching;
   }
-  return parseModelList(id);
+  const selected = parseModelList(id);
+  return preserveConfiguredModels ? [...selected, ...configured] : selected;
 }
 
 function gatewayProfileIdFromParts(protocol, gatewayUrl) {
@@ -718,8 +741,16 @@ function applyRuntimeEnvConfig(value, env) {
   }
 
   const allowedHosts = parseHostList(env.LAB_AGENT_ALLOWED_HOSTS);
-  if (allowedHosts.length > 0) {
-    next.allowedHosts = Array.from(new Set([...(next.allowedHosts ?? []), ...allowedHosts]));
+  const runtimeGatewayHosts = [
+    parseHost(env.LAB_MODEL_GATEWAY_URL ?? ""),
+    parseHost(env.LAB_MODEL_GATEWAY_HEALTH_URL ?? "")
+  ].filter(isNonEmptyString);
+  if (allowedHosts.length > 0 || runtimeGatewayHosts.length > 0) {
+    next.allowedHosts = Array.from(new Set([
+      ...(next.allowedHosts ?? []),
+      ...allowedHosts,
+      ...runtimeGatewayHosts
+    ]));
   }
 
   if (env.LAB_AGENT_TRANSCRIPT_ENABLED) {
@@ -791,6 +822,14 @@ function applyRuntimeEnvConfig(value, env) {
   }
 
   return next;
+}
+
+/**
+ * @param {unknown} value
+ * @returns {value is string}
+ */
+function isNonEmptyString(value) {
+  return typeof value === "string" && value.length > 0;
 }
 
 /**

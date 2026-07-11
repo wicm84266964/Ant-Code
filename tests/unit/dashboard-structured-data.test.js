@@ -47,3 +47,46 @@ test("dashboard structured data fails safely", () => {
   assert.match(result.html, /data-error/);
   assert.doesNotMatch(result.html, /<script>/);
 });
+
+test("dashboard structured data defers deep branches until explicitly expanded", () => {
+  const result = renderStructuredData("json", JSON.stringify({
+    first: { second: { third: { fourth: { secret: "not eager" } } } }
+  }));
+
+  assert.equal(result.ok, true);
+  assert.equal(typeof result.expandTreeNode, "function");
+  assert.match(result.html, /data-node-deferred/);
+  assert.doesNotMatch(result.html, /secret/);
+
+  const id = result.html.match(/data-tree-node="([^"]+)"/)?.[1];
+  assert.ok(id);
+  const expanded = result.expandTreeNode(id);
+  assert.match(expanded, /third/);
+  assert.doesNotMatch(expanded, /secret/);
+});
+
+test("dashboard structured data stops cyclic yaml graphs", () => {
+  const cyclic = { value: 1 };
+  cyclic.self = cyclic;
+  const result = renderStructuredData("yaml", "cyclic", {
+    parseYaml: () => cyclic
+  });
+
+  assert.equal(result.ok, true);
+  assert.match(result.html, /data-cycle/);
+});
+
+test("dashboard structured data caps table rows, columns, and copy payload", () => {
+  const headers = Array.from({ length: 70 }, (_, index) => `column-${index}`);
+  const row = headers.map(() => "x".repeat(200));
+  const source = [headers, ...Array.from({ length: 240 }, () => row)]
+    .map((cells) => cells.join(","))
+    .join("\n");
+  const result = renderStructuredData("csv", source);
+
+  assert.equal(result.ok, true);
+  assert.match(result.summary, /240 .* 70/);
+  assert.match(result.html, /200/);
+  assert.match(result.html, /50/);
+  assert.ok(new TextEncoder().encode(result.tsv).byteLength <= 256 * 1024);
+});

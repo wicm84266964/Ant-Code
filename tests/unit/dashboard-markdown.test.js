@@ -99,13 +99,59 @@ test("dashboard markdown keeps unknown bare domains out of local file links", ()
 test("dashboard markdown allows data images only for image syntax", () => {
   const html = renderMarkdown([
     "[bad](data:image/svg+xml;base64,PHN2Zy8+)",
-    "![inline](data:image/png;base64,AAAA)",
+    "![inline](data:image/png;base64,iVBORw0KGgo=)",
     "![](chart.png)"
   ].join("\n"));
 
   assert.doesNotMatch(html, /href="data:image/);
-  assert.match(html, /data-image-src="data:image\/png;base64,AAAA"/);
+  assert.match(html, /data-image-src="data:image\/png;base64,iVBORw0KGgo="/);
   assert.match(html, /aria-label="打开  大图"/);
+});
+
+test("dashboard markdown never auto-loads remote images", () => {
+  const html = renderMarkdown([
+    "![public](https://tracker.example/pixel.png?id=secret)",
+    "![loopback](http://127.0.0.1:9000/private.png)",
+    "![private](http://192.168.1.10/camera.jpg)"
+  ].join("\n"));
+
+  assert.doesNotMatch(html, /<img\b/i);
+  assert.doesNotMatch(html, /data-image-src=/);
+  assert.match(html, /tracker\.example/);
+  assert.match(html, /127\.0\.0\.1:9000/);
+  assert.match(html, /192\.168\.1\.10/);
+  assert.match(html, /href="https:\/\/tracker\.example\/pixel\.png\?id=secret"/);
+  assert.match(html, /rel="noopener noreferrer"/);
+});
+
+test("dashboard markdown accepts only signed, bounded bitmap data images", () => {
+  const oversized = Buffer.alloc(2 * 1024 * 1024 + 1).toString("base64");
+  const html = renderMarkdown([
+    "![svg](data:image/svg+xml;base64,PHN2Zz48c2NyaXB0PmFsZXJ0KDEpPC9zY3JpcHQ+PC9zdmc+)",
+    "![spoofed](data:image/png;base64,PHN2Zz48c2NyaXB0PmFsZXJ0KDEpPC9zY3JpcHQ+PC9zdmc+)",
+    `![large](data:image/png;base64,${oversized})`,
+    "![png](data:image/png;base64,iVBORw0KGgo=)"
+  ].join("\n"));
+
+  assert.doesNotMatch(html, /data:image\/svg\+xml/);
+  assert.doesNotMatch(html, /PHN2Zz48c2NyaXB0/);
+  assert.doesNotMatch(html, new RegExp(oversized.slice(0, 128)));
+  assert.match(html, /data-image-src="data:image\/png;base64,iVBORw0KGgo="/);
+});
+
+test("dashboard markdown auto-loads only workspace raw paths", () => {
+  const html = renderMarkdown([
+    "![raw](/api/files/raw?path=chart.png)",
+    "![api](/api/status)",
+    "![protocol-relative](//tracker.example/pixel.png)",
+    "![file](file:///etc/passwd)",
+    "![malformed](https:tracker.example/pixel.png)"
+  ].join("\n"));
+
+  assert.match(html, /data-image-src="\/api\/files\/raw\?path=chart\.png"/);
+  assert.doesNotMatch(html, /data-image-src="\/api\/status"/);
+  assert.doesNotMatch(html, /tracker\.example/);
+  assert.doesNotMatch(html, /file:\/\//);
 });
 
 test("dashboard markdown rejects unsafe links and highlights diff code", () => {

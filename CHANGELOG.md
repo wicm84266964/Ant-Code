@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- Dashboard is restricted to loopback hosts and now uses process-local session
+  and CSRF credentials, strict cookie settings, exact Host/port and Origin
+  validation, JSON-only mutations, anti-framing headers, and cross-site request
+  rejection.
+- Dashboard turn, image, file, SVG, remote media, and Office preview paths now
+  enforce explicit size, type, canonical-path, signature, extraction, ratio,
+  and worker-time boundaries.
+- New Dashboard tasks default to `plan`; permission state is session-specific,
+  and `fullAccess` requires an explicit risk confirmation.
+
+### Changed
+
+- Dashboard event streams resume from the last sequence with bounded
+  exponential retry, visible stale/offline states, and manual reconnect.
+- Mobile and tablet layouts provide dedicated Sessions, Conversation, and Files
+  views with keyboard and modal focus handling.
+- Transcript history uses cursor pagination and a bounded browser DOM. Idle
+  active-session state is reclaimed without removing persisted history or
+  compatibility with older transcript metadata and chunks.
+- Shutdown reports active, quarantined, queued, background, and pending work;
+  cancelling active work requires an explicit close decision and bounded
+  cleanup.
+
+### Validation
+
+- `npm run check` now covers syntax, forbidden endpoints, dependency and lockfile
+  policy, strict release-script types plus the Dashboard diagnostic ratchet,
+  unit/integration tests, a real Microsoft Edge Dashboard suite, committed asset
+  parity, and `git diff --check`.
+- Windows executable builds verify the committed rich-renderer bundle, KaTeX
+  CSS, and fonts before release output is changed.
+
 ## 1.2.4 - 2026-07-04
 
 ### Fixed

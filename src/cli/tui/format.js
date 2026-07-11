@@ -437,12 +437,13 @@ export function promptLines(mode, busy, inputBuffer, questionBuffer, options = {
       pendingQuestion: options.pendingQuestion,
       showCursor,
       draftColumns,
-      maxPromptLines
+      maxPromptLines,
+      visibleStart: options.questionVisibleStart
     });
   }
   if (busy) {
     const queued = Array.isArray(options.queuedPrompts) ? options.queuedPrompts : [];
-    const draftLines = promptDraftLines("队列>", inputBuffer, options.inputCursor, showCursor, draftColumns, maxPromptLines);
+    const draftLines = promptDraftLines("队列>", inputBuffer, options.inputCursor, showCursor, draftColumns, maxPromptLines, options.inputVisibleStart);
     return [
       ...(inputBuffer
         ? draftLines
@@ -452,10 +453,10 @@ export function promptLines(mode, busy, inputBuffer, questionBuffer, options = {
   }
   const shellMode = String(inputBuffer ?? "").trimStart().startsWith("!");
   const prompt = shellMode ? "Shell>" : ">";
-  const draftLines = promptDraftLines(prompt, inputBuffer, options.inputCursor, showCursor, draftColumns, maxPromptLines);
+  const draftLines = promptDraftLines(prompt, inputBuffer, options.inputCursor, showCursor, draftColumns, maxPromptLines, options.inputVisibleStart);
   const lines = [
     ...draftLines,
-    ...(inputBuffer.includes("\n") ? [{ text: `${inputBuffer.split(/\r?\n/).length} 行草稿；Enter 提交，Ctrl+J 新增一行`, dim: true }] : [])
+    ...(inputBuffer.includes("\n") ? [{ text: `${inputBuffer.split(/\r?\n/).length} 行草稿；Enter 提交，Shift/Alt+Enter 或 Ctrl+J 换行`, dim: true }] : [])
   ];
   return maxPromptLines ? lines.slice(0, maxPromptLines) : lines;
 }
@@ -501,13 +502,13 @@ function questionPromptLines(questionBuffer, questionCursor, options = {}) {
     : null;
   const draftPrompt = prompt.choices.length > 0 ? "自定义>" : "回答>";
   const draftLines = prompt.allowCustom
-    ? promptDraftLines(draftPrompt, questionBuffer, questionCursor, showCursor, options.draftColumns, maxPromptLines)
+    ? promptDraftLines(draftPrompt, questionBuffer, questionCursor, showCursor, options.draftColumns, maxPromptLines, options.visibleStart)
     : [];
   if (prompt.choices.length === 0) {
     const lines = [
       line(`${prompt.header}：${truncate(prompt.question, 96)}`, false, "cyan"),
       ...draftLines,
-      line("Enter 提交；Esc 取消。", true)
+      line("Enter 提交；Shift/Alt+Enter 或 Ctrl+J 换行；Esc 取消。", true)
     ];
     return maxPromptLines ? lines.slice(0, maxPromptLines) : lines;
   }
@@ -1105,14 +1106,10 @@ export function visibleDraftLines(value) {
   return visible.length === 1 && visible[0] === "" ? [] : visible;
 }
 
-function promptDraftLines(prompt, text, cursor, showCursor, draftColumns = null, maxLines = null) {
+function promptDraftLines(prompt, text, cursor, showCursor, draftColumns = null, maxLines = null, visibleStart = null) {
   const value = String(text ?? "");
   const cursorIndex = Number.isFinite(cursor) ? cursor : Array.from(value).length;
   const visibleLines = Number.isFinite(maxLines) ? Math.max(1, Math.floor(Number(maxLines))) : undefined;
-  const compactPaste = compactMultilineDraftLines(prompt, value, showCursor);
-  if (compactPaste) {
-    return visibleLines ? compactPaste.slice(0, visibleLines) : compactPaste;
-  }
   if (value.length === 0) {
     return [{
       text: `${prompt}  `,
@@ -1127,7 +1124,12 @@ function promptDraftLines(prompt, text, cursor, showCursor, draftColumns = null,
   const contentColumns = Number.isFinite(draftColumns) && draftColumns > 0
     ? Math.max(8, Math.floor(draftColumns) - Math.max(promptColumns, continuationColumns))
     : null;
-  const lines = composerSegments(value, cursorIndex, { showCursor, columns: contentColumns, maxLines: visibleLines });
+  const lines = composerSegments(value, cursorIndex, {
+    showCursor,
+    columns: contentColumns,
+    maxLines: visibleLines,
+    visibleStart
+  });
   if (lines.length === 0) {
     return [{
       text: `${prompt}  `,
@@ -1147,28 +1149,6 @@ function promptDraftLines(prompt, text, cursor, showCursor, draftColumns = null,
       ]
     };
   });
-}
-
-function compactMultilineDraftLines(prompt, value, showCursor = true) {
-  const normalized = String(value ?? "");
-  const lines = normalized.split(/\r?\n/);
-  if (lines.length < 4 && normalized.length < 600) {
-    return null;
-  }
-  const nonEmpty = lines.map((item) => item.trim()).filter(Boolean);
-  const preview = nonEmpty[0] ?? lines[0] ?? "";
-  const suffix = lines.length === 1 ? "line" : "lines";
-  const summary = `${prompt} {${lines.length} ${suffix}, ${Buffer.byteLength(normalized, "utf8")} bytes 粘贴文本}`;
-  return [
-    line(`${summary} `, false, "yellow", {
-      segments: [
-        { text: summary },
-        { text: " ", cursor: true, hidden: !showCursor }
-      ]
-    }),
-    line(`  ${truncate(preview || "[空行]", 96)}`, true),
-    line("  Enter 发送；Esc 清空；Ctrl+J 新增一行。", true)
-  ];
 }
 
 export function sliceEntriesForRows(entries, rowBudget, width) {

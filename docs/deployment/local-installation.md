@@ -149,9 +149,75 @@ mode. It reuses the same core session runtime, local permission engine, and
 be inspected from the other. The WebUI keeps tool activity folded by default,
 shows permission approvals above the input box, and provides a right-side file
 preview panel for images, text, Markdown, code, PDF, and first-release
-Office/binary file cards. Stop the local Dashboard service from the sidebar
-"关闭 Dashboard" confirmation action, or press `Ctrl+C` in the terminal that
-launched it.
+Office/binary file cards.
+
+### Browser Authentication And Permissions
+
+Dashboard accepts only `127.0.0.1`, `localhost`, or `::1`. Startup creates
+random process-local session and CSRF credentials. The root-page bootstrap sets
+the session credential in an `HttpOnly; SameSite=Strict` cookie and a separate
+`SameSite=Strict` CSRF cookie, which the Dashboard echoes in a request header.
+API requests must match the exact bound Host and port; Origin and cross-site
+fetch context are also checked. Mutations accept JSON only and require CSRF
+validation. Content Security Policy blocks framing, with `X-Frame-Options:
+DENY` as an additional control.
+
+Do not publish Dashboard through a reverse proxy, expose it to the LAN, or copy
+its cookie values into scripts. Restarting Dashboard creates new credentials.
+
+New tasks default to `plan`. Permission state belongs to one Dashboard session
+and is not inherited by a new task or session. Moving to `fullAccess` requires
+the explicit risk confirmation shown by the interface; use it only on a
+controlled workstation and return to a narrower mode when broad access is no
+longer needed.
+
+### Input And File Boundaries
+
+Dashboard rejects requests or previews outside these limits:
+
+| Input or service | Limit |
+| --- | --- |
+| Generic JSON request body | 1 MiB |
+| Turn request body | 40 MiB |
+| Prompt text | 256 KiB of UTF-8 |
+| Image attachments | 6 images; 8 MiB each; 24 MiB total |
+| Dashboard Office preview | 10 MiB |
+| Raw file response | 20 MiB |
+
+Image uploads accept PNG, JPEG, GIF, and WebP only. The server verifies
+canonical base64, decoded size, and the file signature rather than trusting the
+declared MIME type.
+
+File access is restricted by canonical `realpath` checks across symlink and
+junction boundaries. Remote images in Markdown are not loaded automatically;
+they remain text or external links. SVG is download-only and is never embedded
+as same-origin active content. Office parsing runs in a bounded worker with at
+most 1,000 archive entries, 16 MiB per extracted entry, 64 MiB total extracted
+data, a 200:1 compression ratio, and a 3-second timeout.
+
+### Navigation, Reconnection, And Lifecycle
+
+Mobile and tablet layouts expose three mutually exclusive views: Sessions,
+Conversation, and Files. Keyboard navigation supports arrow keys plus Home and
+End in radio groups; modal dialogs trap focus, close with Escape, and restore
+focus to the control that opened them.
+
+The event stream resumes from the last event sequence after a disconnect and
+uses bounded exponential retries. Stale and offline states remain visible, and
+the connection-status control can start a manual reconnect. Transcript history
+uses cursor pages of 100 messages by default and no more than 200 per request;
+the browser keeps at most 300 transcript nodes mounted.
+
+Dashboard keeps at most 50 active runtime sessions by default, reclaims eligible
+idle state after 30 minutes, and sweeps once per minute. Running, queued, or
+otherwise non-reclaimable work is not evicted, and persisted sessions remain
+available. Older transcript metadata and chunks remain readable.
+
+Stop the service from the sidebar "关闭 Dashboard" confirmation action or press
+`Ctrl+C` in the launching terminal. Before closing, Dashboard reports active
+turns, quarantined turns, queued work, background tasks, and pending
+interactions. Active work requires an explicit cancel-and-close choice; the
+server then waits for bounded cleanup instead of silently abandoning work.
 
 ## Configure Model And Gateway
 
@@ -391,6 +457,24 @@ Expected result:
 - Doctor shows no unexpected errors.
 - Slash commands work without model gateway access.
 - The configured gateway, model aliases, and network mode match the intended environment.
+
+`npm run verify:release` includes `npm run check`. That gate verifies syntax,
+forbidden endpoints, dependency policy and lockfile parity, the type diagnostic
+ratchet, unit/integration tests, the real Microsoft Edge Dashboard suite,
+committed Dashboard asset consistency, and `git diff --check`. Windows
+executable builds run the Dashboard asset check before creating release output.
+
+## Dashboard Rollback
+
+Roll back the executable, Dashboard assets, runtime source, and documentation as
+one complete release. Do not mix assets from one release with a server from
+another, and do not restore compatibility by disabling session authentication,
+CSRF, Host/Origin checks, or workspace file boundaries.
+
+Preserve `.lab-agent/sessions` and any configured local state during rollback;
+back them up before replacing an installation. Older transcript metadata and
+chunks remain readable, so a rollback should not require deleting session
+history.
 
 ## Troubleshooting
 

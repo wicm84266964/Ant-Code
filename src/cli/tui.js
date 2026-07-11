@@ -24,16 +24,19 @@ import { getAntCodeVersion } from "../version.js";
 import {
   clampDraftCursor,
   createDraft,
-  cursorVisualPosition,
   cursorToEnd,
   deleteBackward,
   deleteForward,
   deleteToEnd,
   deleteToStart,
   deleteWordBackward,
+  deleteWordForward,
+  displayWidth,
   insertText,
   moveCursor,
-  moveCursorVertical
+  moveCursorLineBoundary,
+  moveCursorVertical,
+  stabilizeDraftViewport
 } from "./tui/input-editor.js";
 import {
   CompactSideSummary,
@@ -88,12 +91,8 @@ import {
 import {
   hasMouseSequence,
   mouseClickEvents,
-  mouseWheelEvents,
+  rawDraftEditOperations,
   rawScrollEvents,
-  rawBackspacePresses,
-  rawCtrlCPresses,
-  rawDeletePresses,
-  rawCtrlOPresses,
   rawShiftTabPresses,
   resolveCtrlCExit,
   resolveEscInterrupt,
@@ -204,7 +203,9 @@ export async function runTui(options) {
       initialTrusted: trust.trusted,
       initialWindowsConsoleInputMode
     }), {
-      exitOnCtrlC: false
+      exitOnCtrlC: false,
+      incrementalRendering: true,
+      maxFps: 60
     });
     await instance.waitUntilExit();
   } finally {
@@ -389,21 +390,13 @@ function TuiApp(props) {
   const agentTaskEntriesRef = useRef(new Map());
   const sessionRef = useRef(props.session);
   const stateRef = useRef({});
-  const inputDraftRef = useRef({ text: "", cursor: 0 });
-  const questionDraftRef = useRef({ text: "", cursor: 0 });
-  const lastRawWheelRef = useRef({ text: "", at: 0 });
+  const inputDraftRef = useRef({ text: "", cursor: 0, visibleStart: 0 });
+  const questionDraftRef = useRef({ text: "", cursor: 0, visibleStart: 0 });
   const rawScrollInputTailRef = useRef("");
-  const lastRawPageScrollRef = useRef({ direction: 0, at: 0 });
-  const lastRawCtrlCAtRef = useRef(0);
-  const lastRawBackspaceAtRef = useRef(0);
-  const lastRawDeleteAtRef = useRef(0);
-  const lastRawShiftTabAtRef = useRef(0);
+  const claimedInkInputRef = useRef(false);
   const rawShiftTabInputTailRef = useRef("");
-  const lastRawMouseClickRef = useRef({ text: "", at: 0 });
   const lastTranscriptClickRef = useRef({ entryId: null, at: 0 });
-  const lastRawCtrlOAtRef = useRef(0);
-  const lastRawPasteAtRef = useRef(0);
-  const bracketedPasteRef = useRef({ active: false, buffer: "" });
+  const bracketedPasteRef = useRef({ active: false, buffer: "", prefix: "" });
   const lastActivityAtRef = useRef(Date.now());
   const idleSilentRef = useRef(false);
   const exitConfirmUntilRef = useRef(0);
@@ -429,38 +422,62 @@ function TuiApp(props) {
   }, []);
 
   const replaceInputDraft = useCallback((text, cursor = null) => {
-    const next = clampDraftCursor(createDraft(text, cursor === null ? cursorToEnd(text) : cursor));
+    const next = stabilizeDraftViewport({
+      ...clampDraftCursor(createDraft(text, cursor === null ? cursorToEnd(text) : cursor)),
+      visibleStart: 0
+    }, {
+      columns: composerContentColumns(stateRef.current),
+      maxLines: 3
+    });
     inputDraftRef.current = next;
     stateRef.current.inputBuffer = next.text;
     stateRef.current.inputCursor = next.cursor;
+    stateRef.current.inputVisibleStart = next.visibleStart;
     setInputBuffer(next.text);
     setInputCursor(next.cursor);
     return next;
   }, []);
 
   const replaceQuestionDraft = useCallback((text, cursor = null) => {
-    const next = clampDraftCursor(createDraft(text, cursor === null ? cursorToEnd(text) : cursor));
+    const next = stabilizeDraftViewport({
+      ...clampDraftCursor(createDraft(text, cursor === null ? cursorToEnd(text) : cursor)),
+      visibleStart: 0
+    }, {
+      columns: composerContentColumns({ ...stateRef.current, mode: "question" }),
+      maxLines: 10
+    });
     questionDraftRef.current = next;
     stateRef.current.questionBuffer = next.text;
     stateRef.current.questionCursor = next.cursor;
+    stateRef.current.questionVisibleStart = next.visibleStart;
     setQuestionBuffer(next.text);
     setQuestionCursor(next.cursor);
     return next;
   }, []);
 
   const updateInputDraft = useCallback((updater) => {
-    const next = updateDraftRef(inputDraftRef, updater);
+    const next = stabilizeDraftViewport(updateDraftRef(inputDraftRef, updater), {
+      columns: composerContentColumns(stateRef.current),
+      maxLines: 3
+    });
+    inputDraftRef.current = next;
     stateRef.current.inputBuffer = next.text;
     stateRef.current.inputCursor = next.cursor;
+    stateRef.current.inputVisibleStart = next.visibleStart;
     setInputBuffer(next.text);
     setInputCursor(next.cursor);
     return next;
   }, []);
 
   const updateQuestionDraft = useCallback((updater) => {
-    const next = updateDraftRef(questionDraftRef, updater);
+    const next = stabilizeDraftViewport(updateDraftRef(questionDraftRef, updater), {
+      columns: composerContentColumns({ ...stateRef.current, mode: "question" }),
+      maxLines: 10
+    });
+    questionDraftRef.current = next;
     stateRef.current.questionBuffer = next.text;
     stateRef.current.questionCursor = next.cursor;
+    stateRef.current.questionVisibleStart = next.visibleStart;
     setQuestionBuffer(next.text);
     setQuestionCursor(next.cursor);
     return next;
@@ -662,15 +679,6 @@ function TuiApp(props) {
     return true;
   }, [updateInputDraft, updateQuestionDraft]);
 
-  const consumeRecentRawPageScroll = useCallback((direction) => {
-    const last = lastRawPageScrollRef.current;
-    if (last.direction === direction && Date.now() - last.at < 80) {
-      lastRawPageScrollRef.current = { direction: 0, at: 0 };
-      return true;
-    }
-    return false;
-  }, []);
-
   useEffect(() => {
     applyPermissionMode(sessionRef.current, permissionMode);
   }, [permissionMode]);
@@ -795,14 +803,16 @@ function TuiApp(props) {
   }, [fileMention?.fragment, fileMention?.start, props.cwd, recentFiles]);
 
   useEffect(() => {
-    inputDraftRef.current = clampDraftCursor(createDraft(inputBuffer, inputCursor));
-    questionDraftRef.current = clampDraftCursor(createDraft(questionBuffer, questionCursor));
+    inputDraftRef.current = clampDraftCursor({ ...inputDraftRef.current, text: inputBuffer, cursor: inputCursor });
+    questionDraftRef.current = clampDraftCursor({ ...questionDraftRef.current, text: questionBuffer, cursor: questionCursor });
     stateRef.current = {
       entries,
       inputBuffer,
       inputCursor,
+      inputVisibleStart: inputDraftRef.current.visibleStart ?? 0,
       questionBuffer,
       questionCursor,
+      questionVisibleStart: questionDraftRef.current.visibleStart ?? 0,
       busy,
       mode,
       stream,
@@ -913,23 +923,6 @@ function TuiApp(props) {
     }, Math.max(1, interruptConfirmUntil - Date.now()));
     return () => clearTimeout(timer);
   }, [interruptConfirmUntil, setInterruptConfirmUntilValue]);
-
-  useEffect(() => {
-    if (!startupConfirmed || !trusted || mode === "approval" || modelPickerOpen || commandPanel || slashPalette || fileMention) {
-      return;
-    }
-    positionTerminalCursorForComposer(stdout, {
-      size: terminalSize,
-      promptRegion: frameForState(stateRef.current).regions.prompt,
-      mode,
-      busy,
-      inputBuffer,
-      inputCursor,
-      questionBuffer,
-      questionCursor,
-      pendingQuestion
-    });
-  }, [stdout, terminalSize, startupConfirmed, trusted, mode, busy, inputBuffer, inputCursor, questionBuffer, questionCursor, pendingQuestion, modelPickerOpen, commandPanel, slashPalette, fileMention]);
 
   const addEntry = useCallback((kind, title, body, metadata = undefined) => {
     setEntries((current) => {
@@ -1586,6 +1579,45 @@ function TuiApp(props) {
     return true;
   }, [openMessageExcerpt, props.env]);
 
+  const applyRawDraftOperations = useCallback((operations, current = stateRef.current) => {
+    const actionable = operations.filter((operation) => operation.type !== "ignore");
+    if (actionable.length === 0) {
+      return true;
+    }
+    const updater = (draft) => actionable.reduce((next, operation) => {
+      if (operation.type === "insert") {
+        const text = sanitizeComposerText(operation.text);
+        return text ? insertText(next, text) : next;
+      }
+      if (operation.type === "backward-word") {
+        return deleteWordBackward(next);
+      }
+      if (operation.type === "forward-word") {
+        return deleteWordForward(next);
+      }
+      return operation.type === "forward" ? deleteForward(next) : deleteBackward(next);
+    }, draft);
+    if (current.mode === "question" && current.pendingQuestion) {
+      updateQuestionDraft(updater);
+      return true;
+    }
+    if (
+      current.mode !== "input"
+      || !current.startupConfirmed
+      || !current.trusted
+      || current.pendingApproval
+      || current.modelPickerOpen
+      || current.commandPanel
+    ) {
+      return false;
+    }
+    updateInputDraft(updater);
+    setSlashPaletteDismissed(false);
+    setFileMentionDismissed(false);
+    setHistoryIndex(null);
+    return true;
+  }, [updateInputDraft, updateQuestionDraft]);
+
   useEffect(() => {
     const onRawInput = (chunk) => {
       const chunkText = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk ?? "");
@@ -1594,15 +1626,36 @@ function TuiApp(props) {
       const current = stateRef.current;
       const pasted = readBracketedPaste(chunkText, bracketedPasteRef.current);
       if (pasted !== null) {
-        lastRawPasteAtRef.current = Date.now();
+        claimedInkInputRef.current = true;
         insertPastedText(pasted, current);
         return;
+      }
+      const draftOperations = rawDraftEditOperations(chunkText);
+      if (draftOperations) {
+        const draftActive = (current.mode === "question" && current.pendingQuestion)
+          || (current.mode === "input"
+            && current.startupConfirmed
+            && current.trusted
+            && !current.pendingApproval
+            && !current.modelPickerOpen
+            && !current.commandPanel);
+        if (draftActive) {
+          claimedInkInputRef.current = true;
+          applyRawDraftOperations(draftOperations, current);
+          return;
+        }
+        const forwardOnly = draftOperations.length === 1
+          && (draftOperations[0].type === "forward" || draftOperations[0].type === "forward-word");
+        if (!forwardOnly) {
+          claimedInkInputRef.current = true;
+          return;
+        }
       }
       const shiftTabText = `${rawShiftTabInputTailRef.current}${chunkText}`;
       rawShiftTabInputTailRef.current = trailingRawShiftTabInput(shiftTabText);
       const shiftTabs = rawShiftTabPresses(shiftTabText);
       if (shiftTabs > 0) {
-        lastRawShiftTabAtRef.current = Date.now();
+        claimedInkInputRef.current = true;
         rawShiftTabInputTailRef.current = "";
         for (let index = 0; index < shiftTabs; index += 1) {
           cyclePermissionMode(stateRef.current, "raw-shift-tab");
@@ -1611,12 +1664,7 @@ function TuiApp(props) {
       }
       const clickEvent = mouseClickEvents(chunkText).find((event) => event.kind === "press");
       if (clickEvent) {
-        lastRawMouseClickRef.current = {
-          text: chunkText,
-          x: clickEvent.x,
-          y: clickEvent.y,
-          at: Date.now()
-        };
+        claimedInkInputRef.current = true;
         const frame = frameForState(current);
         const target = resolveScrollTarget(clickEvent, frame, {
           activeOverlay: Boolean(activeOverlayKind(current)),
@@ -1637,24 +1685,22 @@ function TuiApp(props) {
       if (events.length === 0 && pageDirections.length === 0) {
         return;
       }
-      const now = Date.now();
-      lastRawWheelRef.current = { text, chunkText, at: now };
+      claimedInkInputRef.current = true;
       if (!isNativeScrollbackMode(stateRef.current)) {
         for (const event of events) {
           applyMouseWheelScroll(event, stateRef.current);
         }
       }
       for (const direction of pageDirections) {
-        lastRawPageScrollRef.current = { direction, at: now };
         applyVisibleScroll(direction, stateRef.current, 10);
       }
     };
-    input.on?.("data", onRawInput);
+    inputEvents?.on?.("input", onRawInput);
     return () => {
-      input.off?.("data", onRawInput);
-      input.removeListener?.("data", onRawInput);
+      inputEvents?.off?.("input", onRawInput);
+      inputEvents?.removeListener?.("input", onRawInput);
     };
-  }, [applyMouseWheelScroll, applyVisibleScroll, cyclePermissionMode, insertPastedText, markUserActivity, props.env, selectTranscriptEntryAtMouse]);
+  }, [applyMouseWheelScroll, applyRawDraftOperations, applyVisibleScroll, cyclePermissionMode, inputEvents, insertPastedText, markUserActivity, props.env, selectTranscriptEntryAtMouse]);
 
   const askApproval = useCallback((request) => {
     const approvalKey = approvalKeyFor(request);
@@ -2812,92 +2858,6 @@ function TuiApp(props) {
     return true;
   }, [addEntry, setStreamOffset, setTranscriptOffset, stdout]);
 
-  const handleForwardDelete = useCallback((current = stateRef.current) => {
-    if (!current.startupConfirmed || !current.trusted) {
-      return false;
-    }
-    if (current.mode === "question" && current.pendingQuestion) {
-      updateQuestionDraft(deleteForward);
-      return true;
-    }
-    if (
-      current.mode !== "input"
-      || current.pendingApproval
-      || current.modelPickerOpen
-      || current.commandPanel
-    ) {
-      return false;
-    }
-    updateInputDraft(deleteForward);
-    setSlashPaletteDismissed(false);
-    setFileMentionDismissed(false);
-    setHistoryIndex(null);
-    return true;
-  }, [updateInputDraft, updateQuestionDraft]);
-
-  const handleBackwardDelete = useCallback((current = stateRef.current) => {
-    if (!current.startupConfirmed || !current.trusted) {
-      return false;
-    }
-    if (current.mode === "question" && current.pendingQuestion) {
-      updateQuestionDraft(deleteBackward);
-      return true;
-    }
-    if (
-      current.mode !== "input"
-      || current.pendingApproval
-      || current.modelPickerOpen
-      || current.commandPanel
-    ) {
-      return false;
-    }
-    updateInputDraft(deleteBackward);
-    setSlashPaletteDismissed(false);
-    setFileMentionDismissed(false);
-    setHistoryIndex(null);
-    return true;
-  }, [updateInputDraft, updateQuestionDraft]);
-
-  const handleRawDeletionInput = useCallback((text) => {
-    const backspacePresses = rawBackspacePresses(text);
-    const deletePresses = rawDeletePresses(text);
-    if (backspacePresses === 0 && deletePresses === 0) {
-      return false;
-    }
-
-    const now = Date.now();
-    if (
-      backspacePresses > 0
-      && now - lastRawBackspaceAtRef.current < 25
-      && deletePresses === 0
-    ) {
-      return true;
-    }
-    if (
-      deletePresses > 0
-      && now - lastRawDeleteAtRef.current < 25
-      && backspacePresses === 0
-    ) {
-      return true;
-    }
-
-    let handled = false;
-    for (let index = 0; index < backspacePresses; index += 1) {
-      handled = handleBackwardDelete(stateRef.current) || handled;
-    }
-    for (let index = 0; index < deletePresses; index += 1) {
-      handled = handleForwardDelete(stateRef.current) || handled;
-    }
-
-    if (backspacePresses > 0) {
-      lastRawBackspaceAtRef.current = now;
-    }
-    if (deletePresses > 0 && handled) {
-      lastRawDeleteAtRef.current = now;
-    }
-    return backspacePresses > 0 || handled;
-  }, [handleBackwardDelete, handleForwardDelete]);
-
   useEffect(() => {
     const onSigint = () => {
       handleCtrlCExit(stateRef.current);
@@ -2909,95 +2869,18 @@ function TuiApp(props) {
     };
   }, [handleCtrlCExit]);
 
-  useEffect(() => {
-    const onRawCtrlC = (chunk) => {
-      const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk ?? "");
-      const presses = rawCtrlCPresses(text);
-      if (presses > 0) {
-        lastRawCtrlCAtRef.current = Date.now();
-      }
-      for (let index = 0; index < presses; index += 1) {
-        handleCtrlCExit(stateRef.current);
-      }
-    };
-    input.on?.("data", onRawCtrlC);
-    return () => {
-      input.off?.("data", onRawCtrlC);
-      input.removeListener?.("data", onRawCtrlC);
-    };
-  }, [handleCtrlCExit]);
-
-  useEffect(() => {
-    const onRawDeletion = (chunk) => {
-      const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk ?? "");
-      handleRawDeletionInput(text);
-    };
-    input.on?.("data", onRawDeletion);
-    return () => {
-      input.off?.("data", onRawDeletion);
-      input.removeListener?.("data", onRawDeletion);
-    };
-  }, [handleRawDeletionInput]);
-
-  useEffect(() => {
-    const onInkInput = (text) => {
-      const value = String(text ?? "");
-      markUserActivity("ink-input");
-      debugRawInput(props.env, value, "ink");
-      handleRawDeletionInput(value);
-    };
-    inputEvents?.on?.("input", onInkInput);
-    return () => {
-      inputEvents?.off?.("input", onInkInput);
-      inputEvents?.removeListener?.("input", onInkInput);
-    };
-  }, [handleRawDeletionInput, inputEvents, markUserActivity, props.env]);
-
-  useEffect(() => {
-    const onRawCtrlO = (chunk) => {
-      const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk ?? "");
-      const presses = rawCtrlOPresses(text);
-      if (presses === 0) {
-        return;
-      }
-      lastRawCtrlOAtRef.current = Date.now();
-      for (let index = 0; index < presses; index += 1) {
-        toggleTranscriptDetail();
-      }
-    };
-    input.on?.("data", onRawCtrlO);
-    return () => {
-      input.off?.("data", onRawCtrlO);
-      input.removeListener?.("data", onRawCtrlO);
-    };
-  }, [toggleTranscriptDetail]);
-
   useInput((inputValue, key) => {
-    markUserActivity("key");
     const current = stateRef.current;
-    if (Date.now() - lastRawCtrlCAtRef.current < 100) {
+    if (claimedInkInputRef.current) {
+      claimedInkInputRef.current = false;
       return;
     }
-    if (Date.now() - lastRawCtrlOAtRef.current < 100) {
+    if (isInkKeyRelease(key)) {
       return;
     }
-    if (Date.now() - lastRawPasteAtRef.current < 120) {
-      return;
-    }
-    if (Date.now() - lastRawBackspaceAtRef.current < 25) {
-      return;
-    }
-    if (Date.now() - lastRawDeleteAtRef.current < 25) {
-      return;
-    }
-    if (Date.now() - lastRawShiftTabAtRef.current < 100) {
-      return;
-    }
-    if (handleRawDeletionInput(inputValue)) {
-      return;
-    }
+    markUserActivity("key");
     if (!current.startupConfirmed) {
-      if (key.ctrl && key.name === "c") {
+      if (isCtrlKey(inputValue, key, "c")) {
         handleCtrlCExit(current);
         return;
       }
@@ -3011,7 +2894,7 @@ function TuiApp(props) {
       return;
     }
     if (!current.trusted) {
-      if (key.ctrl && key.name === "c") {
+      if (isCtrlKey(inputValue, key, "c")) {
         handleCtrlCExit(current);
         return;
       }
@@ -3024,36 +2907,14 @@ function TuiApp(props) {
       }
       return;
     }
-    const clickEvent = mouseClickEvents(inputValue).find((event) => event.kind === "press");
-    if (clickEvent) {
-      const lastRawMouseClick = lastRawMouseClickRef.current;
-      if (lastRawMouseClick.x === clickEvent.x
-        && lastRawMouseClick.y === clickEvent.y
-        && Date.now() - lastRawMouseClick.at < 80) {
-        return;
-      }
-      const frame = frameForState(current);
-      const target = resolveScrollTarget(clickEvent, frame, {
-        activeOverlay: Boolean(activeOverlayKind(current)),
-        defaultTarget: "transcript"
-      });
-      const subtarget = target === "transcript" ? transcriptSubtargetForMouse(clickEvent, current, frame) : target;
-      debugTuiInput(props.env, `mouse_click x=${clickEvent.x} y=${clickEvent.y} target=${target} subtarget=${subtarget} overlay=${activeOverlayKind(current) ?? "none"}`);
-      if (target === "transcript" && subtarget === "transcript") {
-        if (selectTranscriptEntryAtMouse(clickEvent, current)) {
-          return;
-        }
-      }
-      clearTransientEntrySelection();
-      if (hasMouseSequence(inputValue)) {
-        return;
-      }
+    if (hasMouseSequence(inputValue)) {
+      return;
     }
-    if (key.ctrl && key.name === "c") {
+    if (isCtrlKey(inputValue, key, "c")) {
       handleCtrlCExit(current);
       return;
     }
-    if (key.escape || (key.ctrl && key.name === "g")) {
+    if (key.escape || isCtrlKey(inputValue, key, "g")) {
       if (closeTopPopover(current, key.escape ? "Closed with Esc." : "Closed with Ctrl+G.")) {
         return;
       }
@@ -3065,31 +2926,13 @@ function TuiApp(props) {
         }
         return;
       }
-      if (key.ctrl && key.name === "g") {
+      if (isCtrlKey(inputValue, key, "g")) {
         return;
       }
     }
     setExitConfirmUntilValue(0);
     setInterruptConfirmUntilValue(0);
-    const wheelEvent = mouseWheelEvents(inputValue)[0];
-    if (wheelEvent?.direction) {
-      if (isNativeScrollbackMode(current)) {
-        return;
-      }
-      const lastRawWheel = lastRawWheelRef.current;
-      if (
-        (lastRawWheel.text === String(inputValue ?? "") || lastRawWheel.chunkText === String(inputValue ?? ""))
-        && Date.now() - lastRawWheel.at < 80
-      ) {
-        return;
-      }
-      applyMouseWheelScroll(wheelEvent, current);
-      return;
-    }
-    if (hasMouseSequence(inputValue)) {
-      return;
-    }
-    if ((key.ctrl && key.name === "o") || rawCtrlOPresses(inputValue) > 0) {
+    if (isCtrlKey(inputValue, key, "o")) {
       toggleTranscriptDetail();
       return;
     }
@@ -3124,7 +2967,7 @@ function TuiApp(props) {
           }
           return;
         }
-        if (key.delete || key.name === "delete" || lowerInput === "d") {
+        if (key.delete || lowerInput === "d") {
           const result = removeQueuedPrompt(queuedPromptsRef.current, current.queuePanelIndex);
           setQueueState(result.prompts, result.index);
           if (result.removed) {
@@ -3286,30 +3129,24 @@ function TuiApp(props) {
         return;
       }
       if (key.pageUp) {
-        if (consumeRecentRawPageScroll(1)) {
-          return;
-        }
         setCommandPanelOffset((value) => Math.max(0, value - 8));
         return;
       }
       if (key.pageDown) {
-        if (consumeRecentRawPageScroll(-1)) {
-          return;
-        }
         setCommandPanelOffset((value) => Math.min(maxCommandPanelOffset(current.commandPanel, current.terminalSize, current), value + 8));
         return;
       }
-      if (key.ctrl && key.name === "f") {
+      if (isCtrlKey(inputValue, key, "f")) {
         setCommandPanelOffset((value) => Math.min(maxCommandPanelOffset(current.commandPanel, current.terminalSize, current), value + 8));
         return;
       }
-      if (key.ctrl && key.name === "b") {
+      if (isCtrlKey(inputValue, key, "b")) {
         setCommandPanelOffset((value) => Math.max(0, value - 8));
         return;
       }
       return;
     }
-    if (key.ctrl && key.name === "l") {
+    if (isCtrlKey(inputValue, key, "l")) {
       setEntries([]);
       setTranscriptOffset(0);
       setStreamOffset(0);
@@ -3320,16 +3157,10 @@ function TuiApp(props) {
       && !current.fileMention
       && !current.slashPalette;
     if (canScrollConversation && key.pageUp) {
-      if (consumeRecentRawPageScroll(1)) {
-        return;
-      }
       applyVisibleScroll(1, current, 10);
       return;
     }
     if (canScrollConversation && key.pageDown) {
-      if (consumeRecentRawPageScroll(-1)) {
-        return;
-      }
       applyVisibleScroll(-1, current, 10);
       return;
     }
@@ -3369,26 +3200,26 @@ function TuiApp(props) {
       setActivity((value) => ({ ...value, status: `侧栏：${next}` }));
       return;
     }
-    if (key.ctrl && key.name === "a" && current.inputBuffer) {
+    if (isCtrlKey(inputValue, key, "a") && current.inputBuffer) {
       updateInputDraft((draft) => moveCursor(draft, "start"));
       return;
     }
-    if (key.ctrl && key.name === "e" && current.inputBuffer) {
+    if (isCtrlKey(inputValue, key, "e") && current.inputBuffer) {
       updateInputDraft((draft) => moveCursor(draft, "end"));
       return;
     }
-    if (key.ctrl && key.name === "k" && current.inputBuffer) {
+    if (isCtrlKey(inputValue, key, "k") && current.inputBuffer) {
       updateInputDraft(deleteToEnd);
       return;
     }
-    if (key.ctrl && key.name === "w" && current.inputBuffer) {
+    if (isCtrlKey(inputValue, key, "w") && current.inputBuffer) {
       updateInputDraft(deleteWordBackward);
       setSlashPaletteDismissed(false);
       setFileMentionDismissed(false);
       setHistoryIndex(null);
       return;
     }
-    if (key.ctrl && key.name === "u") {
+    if (isCtrlKey(inputValue, key, "u")) {
       updateInputDraft(deleteToStart);
       replaceQuestionDraft("");
       setHistoryIndex(null);
@@ -3445,7 +3276,16 @@ function TuiApp(props) {
       }
       return;
     }
-    if (key.ctrl && key.name === "j") {
+    const trailingSubmitText = splitTrailingSubmitInput(inputValue, key);
+    if (trailingSubmitText !== null) {
+      const next = updateInputDraft((draft) => insertText(draft, trailingSubmitText));
+      setSlashPaletteDismissed(false);
+      setFileMentionDismissed(false);
+      setHistoryIndex(null);
+      void submitInput(next.text);
+      return;
+    }
+    if (isCtrlKey(inputValue, key, "j")) {
       updateInputDraft((draft) => insertText(draft, "\n"));
       setSlashPaletteDismissed(false);
       setFileMentionDismissed(false);
@@ -3453,7 +3293,13 @@ function TuiApp(props) {
       return;
     }
     if (looksLikePastedText(inputValue) && insertPastedText(inputValue, current)) {
-      lastRawPasteAtRef.current = Date.now();
+      return;
+    }
+    if (key.return && (key.shift || key.meta)) {
+      updateInputDraft((draft) => insertText(draft, "\n"));
+      setSlashPaletteDismissed(false);
+      setFileMentionDismissed(false);
+      setHistoryIndex(null);
       return;
     }
     if (current.fileMention) {
@@ -3507,12 +3353,12 @@ function TuiApp(props) {
       void submitInput();
       return;
     }
-    if (key.home || key.name === "home") {
-      updateInputDraft((draft) => moveCursor(draft, "start"));
+    if (key.home) {
+      updateInputDraft((draft) => moveCursorLineBoundary(draft, "start", { columns: composerContentColumns(current) }));
       return;
     }
-    if (key.end || key.name === "end") {
-      updateInputDraft((draft) => moveCursor(draft, "end"));
+    if (key.end) {
+      updateInputDraft((draft) => moveCursorLineBoundary(draft, "end", { columns: composerContentColumns(current) }));
       return;
     }
     if (key.leftArrow) {
@@ -3530,7 +3376,7 @@ function TuiApp(props) {
       setHistoryIndex(null);
       return;
     }
-    if (key.delete || key.name === "delete") {
+    if (key.delete) {
       updateInputDraft(deleteForward);
       setSlashPaletteDismissed(false);
       setFileMentionDismissed(false);
@@ -3557,8 +3403,9 @@ function TuiApp(props) {
       setFileMentionDismissed(false);
       return;
     }
-    if (!key.ctrl && !key.meta && inputValue) {
-      updateInputDraft((draft) => insertText(draft, inputValue));
+    const inputText = sanitizeComposerText(inputValue);
+    if (!key.ctrl && !key.meta && inputText) {
+      updateInputDraft((draft) => insertText(draft, inputText));
       setSlashPaletteDismissed(false);
       setFileMentionDismissed(false);
       setHistoryIndex(null);
@@ -3590,8 +3437,10 @@ function TuiApp(props) {
     busy,
     inputBuffer,
     inputCursor,
+    inputVisibleStart: inputDraftRef.current.visibleStart ?? 0,
     questionBuffer,
     questionCursor,
+    questionVisibleStart: questionDraftRef.current.visibleStart ?? 0,
     pendingQuestion,
     queuedPrompts,
     pendingApproval,
@@ -3703,7 +3552,23 @@ function TuiApp(props) {
     h(ExitConfirmNotice, { active: exitConfirmActive, busy, theme }),
     h(InterruptConfirmNotice, { active: interruptConfirmActive, theme }),
     h(QueuedPromptLine, { queuedPrompts, theme }),
-    h(PromptBox, { mode, busy, inputBuffer, inputCursor, questionBuffer, questionCursor, queuedPrompts, pendingApproval, pendingQuestion, pulse, width, height: layout.promptRows, theme }),
+    h(PromptBox, {
+      mode,
+      busy,
+      inputBuffer,
+      inputCursor,
+      inputVisibleStart: inputDraftRef.current.visibleStart ?? 0,
+      questionBuffer,
+      questionCursor,
+      questionVisibleStart: questionDraftRef.current.visibleStart ?? 0,
+      queuedPrompts,
+      pendingApproval,
+      pendingQuestion,
+      pulse,
+      width,
+      height: layout.promptRows,
+      theme
+    }),
     h(PermissionFooter, { session: sessionRef.current, width, theme }),
     h(FooterBar, { sideView, wide, detailMode, thinkingVisible })
   );
@@ -4339,20 +4204,38 @@ function handleQuestionInput(inputValue, key, current, handlers) {
     }
     return;
   }
-  if (key.ctrl && key.name === "a") {
+  if (isCtrlKey(inputValue, key, "a")) {
     updateQuestionDraft((draft) => moveCursor(draft, "start"));
     return;
   }
-  if (key.ctrl && key.name === "e") {
+  if (isCtrlKey(inputValue, key, "e")) {
     updateQuestionDraft((draft) => moveCursor(draft, "end"));
     return;
   }
-  if (key.ctrl && key.name === "k") {
+  if (isCtrlKey(inputValue, key, "k")) {
     updateQuestionDraft(deleteToEnd);
     return;
   }
-  if (key.ctrl && key.name === "u") {
+  if (isCtrlKey(inputValue, key, "u")) {
     updateQuestionDraft(deleteToStart);
+    return;
+  }
+  const trailingSubmitText = splitTrailingSubmitInput(inputValue, key);
+  if (trailingSubmitText !== null) {
+    const next = updateQuestionDraft((draft) => insertText(draft, trailingSubmitText));
+    handleQuestionInput("", { return: true }, {
+      ...current,
+      questionBuffer: next.text,
+      questionCursor: next.cursor
+    }, handlers);
+    return;
+  }
+  if (isCtrlKey(inputValue, key, "j")) {
+    updateQuestionDraft((draft) => insertText(draft, "\n"));
+    return;
+  }
+  if (key.return && (key.shift || key.meta)) {
+    updateQuestionDraft((draft) => insertText(draft, "\n"));
     return;
   }
   if (key.return) {
@@ -4400,24 +4283,29 @@ function handleQuestionInput(inputValue, key, current, handlers) {
     updateQuestionDraft((draft) => moveCursor(draft, key.meta ? "word-right" : "right"));
     return;
   }
-  if (key.home || key.name === "home") {
-    updateQuestionDraft((draft) => moveCursor(draft, "start"));
+  if (key.home) {
+    updateQuestionDraft((draft) => moveCursorLineBoundary(draft, "start", {
+      columns: composerContentColumns({ ...current, mode: "question" })
+    }));
     return;
   }
-  if (key.end || key.name === "end") {
-    updateQuestionDraft((draft) => moveCursor(draft, "end"));
+  if (key.end) {
+    updateQuestionDraft((draft) => moveCursorLineBoundary(draft, "end", {
+      columns: composerContentColumns({ ...current, mode: "question" })
+    }));
     return;
   }
   if (key.backspace) {
     updateQuestionDraft(deleteBackward);
     return;
   }
-  if (key.delete || key.name === "delete") {
+  if (key.delete) {
     updateQuestionDraft(deleteForward);
     return;
   }
-  if (!key.ctrl && !key.meta && inputValue) {
-    updateQuestionDraft((draft) => insertText(draft, inputValue));
+  const inputText = sanitizeComposerText(inputValue);
+  if (!key.ctrl && !key.meta && inputText) {
+    updateQuestionDraft((draft) => insertText(draft, inputText));
   }
 }
 
@@ -4441,7 +4329,7 @@ function nextFilter(value, filters, direction = 1) {
 }
 
 function updateDraftRef(ref, updater) {
-  const draft = clampDraftCursor(createDraft(ref.current?.text ?? "", ref.current?.cursor ?? 0));
+  const draft = clampDraftCursor(ref.current ?? createDraft(""));
   const next = clampDraftCursor(updater(draft));
   ref.current = next;
   return next;
@@ -4458,7 +4346,7 @@ function composerContentColumns(current = {}) {
         ? "Shell>"
         : ">";
   const draftColumns = Math.max(8, width - 4);
-  const promptColumns = prompt.length + 1;
+  const promptColumns = displayWidth(prompt) + 1;
   return Math.max(8, draftColumns - Math.max(promptColumns, 2));
 }
 
@@ -4479,8 +4367,10 @@ function commandPanelVisibleRowsForSize(size, current = {}) {
     busy: Boolean(current.busy),
     inputBuffer: current.inputBuffer ?? "",
     inputCursor: current.inputCursor ?? 0,
+    inputVisibleStart: current.inputVisibleStart ?? 0,
     questionBuffer: current.questionBuffer ?? "",
     questionCursor: current.questionCursor ?? 0,
+    questionVisibleStart: current.questionVisibleStart ?? 0,
     pendingQuestion: current.pendingQuestion ?? null,
     queuedPrompts: current.queuedPrompts ?? [],
     pendingApproval: current.pendingApproval ?? null,
@@ -4542,7 +4432,9 @@ function estimatePromptBoxRows(options, height) {
       pendingApproval: options.pendingApproval ?? null,
       pendingQuestion: options.pendingQuestion ?? null,
       inputCursor: options.inputCursor ?? 0,
+      inputVisibleStart: options.inputVisibleStart ?? 0,
       questionCursor: options.questionCursor ?? 0,
+      questionVisibleStart: options.questionVisibleStart ?? 0,
       showCursor: true,
       draftColumns: Math.max(8, Number(options.width) - 4),
       maxPromptLines: promptContentRowsForMode(options.mode)
@@ -4626,8 +4518,10 @@ function frameForState(current = {}) {
     busy: Boolean(current.busy),
     inputBuffer: current.inputBuffer ?? "",
     inputCursor: current.inputCursor ?? 0,
+    inputVisibleStart: current.inputVisibleStart ?? 0,
     questionBuffer: current.questionBuffer ?? "",
     questionCursor: current.questionCursor ?? 0,
+    questionVisibleStart: current.questionVisibleStart ?? 0,
     pendingQuestion: current.pendingQuestion ?? null,
     queuedPrompts: current.queuedPrompts ?? [],
     pendingApproval: current.pendingApproval ?? null,
@@ -4851,43 +4745,79 @@ function clearTerminalForFullRedraw(stream) {
   stream?.write?.("\u001b[3J\u001b[2J\u001b[H");
 }
 
-function readBracketedPaste(chunkText, state) {
+export function readBracketedPaste(chunkText, state) {
   const start = "\u001b[200~";
   const end = "\u001b[201~";
   const text = String(chunkText ?? "");
   if (!state.active) {
-    const startIndex = text.indexOf(start);
+    const combined = `${state.prefix ?? ""}${text}`;
+    state.prefix = "";
+    const startIndex = combined.indexOf(start);
     if (startIndex === -1) {
+      const prefix = trailingMarkerPrefix(combined, start);
+      if (prefix) {
+        state.prefix = prefix;
+        return "";
+      }
       return null;
     }
     state.active = true;
-    state.buffer = "";
-    const rest = text.slice(startIndex + start.length);
+    state.buffer = combined.slice(0, startIndex);
+    const rest = combined.slice(startIndex + start.length);
     const endIndex = rest.indexOf(end);
     if (endIndex === -1) {
       state.buffer += rest;
       return "";
     }
-    const pasted = rest.slice(0, endIndex);
+    const pasted = `${state.buffer}${rest.slice(0, endIndex)}${rest.slice(endIndex + end.length)}`;
     state.active = false;
     state.buffer = "";
     return pasted;
   }
 
-  const endIndex = text.indexOf(end);
+  const combined = `${state.buffer}${text}`;
+  const endIndex = combined.indexOf(end);
   if (endIndex === -1) {
-    state.buffer += text;
+    state.buffer = combined;
     return "";
   }
-  const pasted = `${state.buffer}${text.slice(0, endIndex)}`;
+  const pasted = `${combined.slice(0, endIndex)}${combined.slice(endIndex + end.length)}`;
   state.active = false;
   state.buffer = "";
   return pasted;
 }
 
+function trailingMarkerPrefix(value, marker) {
+  const text = String(value ?? "");
+  for (let length = Math.min(text.length, marker.length - 1); length >= 3; length -= 1) {
+    if (text.endsWith(marker.slice(0, length))) {
+      return marker.slice(0, length);
+    }
+  }
+  return "";
+}
+
 function looksLikePastedText(value) {
   const text = String(value ?? "");
   return text.length > 1 && /[\r\n]/.test(text);
+}
+
+export function isCtrlKey(inputValue, key, name) {
+  return Boolean(key?.ctrl)
+    && String(inputValue ?? "").toLowerCase() === String(name ?? "").toLowerCase();
+}
+
+export function isInkKeyRelease(key) {
+  return key?.eventType === "release";
+}
+
+export function splitTrailingSubmitInput(inputValue, key = {}) {
+  const value = String(inputValue ?? "");
+  if (key.return || key.ctrl || key.meta || value.length < 2 || !value.endsWith("\r") || value.endsWith("\r\n")) {
+    return null;
+  }
+  const text = value.slice(0, -1);
+  return /[\u0000-\u001F\u007F]/.test(text) ? null : text;
 }
 
 function sanitizeComposerText(value) {
@@ -5155,32 +5085,4 @@ namespace LabAgentTui {
 "@
 Add-Type -TypeDefinition $definition -ErrorAction Stop
 `;
-}
-
-function positionTerminalCursorForComposer(stream, options) {
-  const size = options.size ?? { columns: 80, rows: 24 };
-  const promptRegion = options.promptRegion ?? null;
-  const prompt = options.mode === "question"
-    ? (normalizeQuestionPrompt(options.pendingQuestion).choices.length > 0 ? "自定义>" : "回答>")
-    : options.busy
-      ? "队列>"
-      : String(options.inputBuffer ?? "").trimStart().startsWith("!")
-        ? "Shell>"
-        : ">";
-  const text = options.mode === "question" ? options.questionBuffer : options.inputBuffer;
-  const cursor = options.mode === "question" ? options.questionCursor : options.inputCursor;
-  const promptColumn = 3 + prompt.length + 1;
-  const position = cursorVisualPosition(text, cursor, { columns: composerContentColumns(options), maxLines: 5 });
-  const promptContentTop = promptRegion
-    ? promptRegion.top + 1
-    : size.rows - 2;
-  const promptContentBottom = promptRegion
-    ? promptRegion.bottom - 1
-    : size.rows - 1;
-  const row = Math.min(
-    Math.max(1, promptContentTop + position.lineIndex),
-    Math.max(1, promptContentBottom)
-  );
-  const column = Math.min(Math.max(1, promptColumn + position.column), Math.max(1, size.columns - 1));
-  stream?.write?.(`\u001b[?25h\u001b[${row};${column}H`);
 }

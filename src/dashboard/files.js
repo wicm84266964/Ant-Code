@@ -1,12 +1,12 @@
 import fs from "node:fs/promises";
-import { statSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import path from "node:path";
-import { parseDocumentBuffer } from "../tools/document-tools.js";
+import { parseDocumentBufferAsync } from "../tools/document-tools.js";
 
 const DATA_EXTENSIONS = new Set([".json", ".csv", ".tsv", ".yaml", ".yml"]);
 const TEXT_EXTENSIONS = new Set([".txt", ".log", ".json", ".csv", ".tsv", ".md", ".markdown", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".css", ".html", ".xml", ".yaml", ".yml", ".py", ".ps1", ".cmd", ".sh", ".java", ".c", ".cpp", ".h", ".hpp", ".cs", ".go", ".rs", ".php", ".rb", ".sql", ".toml", ".ini"]);
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
-const PREVIEWABLE_IMAGE_EXTENSIONS = new Set([...IMAGE_EXTENSIONS, ".svg"]);
+const PREVIEWABLE_IMAGE_EXTENSIONS = IMAGE_EXTENSIONS;
 const OFFICE_EXTENSIONS = new Set([".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"]);
 const PREVIEWABLE_OFFICE_EXTENSIONS = new Set([".docx", ".xlsx", ".pptx"]);
 const MAX_TEXT_BYTES = 512 * 1024;
@@ -22,42 +22,56 @@ const MAX_TABLE_TEXT_BYTES = 1024 * 1024;
  * @param {string} requestedPath
  */
 export async function previewFile(cwd, requestedPath) {
-  const resolved = resolveWorkspaceFile(cwd, requestedPath);
-  if (!resolved.ok) {
-    return resolved;
+  const opened = await openWorkspaceFile(cwd, requestedPath);
+  if (!opened.ok) {
+    return opened;
   }
-  const stat = await fs.stat(resolved.path).catch(() => null);
-  if (!stat || !stat.isFile()) {
-    return { ok: false, status: 404, error: "文件不存在或不是普通文件" };
-  }
-  const ext = path.extname(resolved.path).toLowerCase();
-  const base = baseFile(resolved.path, cwd, stat);
-  if (PREVIEWABLE_IMAGE_EXTENSIONS.has(ext)) {
-    return { ok: true, file: { ...base, kind: "image", rawUrl: rawUrl(base.relativePath) } };
-  }
-  if (ext === ".pdf") {
-    return { ok: true, file: { ...base, kind: "pdf", rawUrl: rawUrl(base.relativePath) } };
-  }
-  if (PREVIEWABLE_OFFICE_EXTENSIONS.has(ext)) {
-    return previewOfficeFile(resolved.path, base, stat, ext);
-  }
-  if (OFFICE_EXTENSIONS.has(ext)) {
-    return { ok: true, file: { ...base, kind: "office", rawUrl: rawUrl(base.relativePath), message: "第一版提供文件卡片和打开入口，在线预览后续增强。" } };
-  }
-  if ((ext === ".csv" || ext === ".tsv") && stat.size <= MAX_TABLE_TEXT_BYTES) {
-    return previewDelimitedFile(resolved.path, base, ext);
-  }
-  if (TEXT_EXTENSIONS.has(ext) || stat.size <= MAX_TEXT_BYTES) {
-    if (stat.size > MAX_TEXT_BYTES) {
-      return { ok: true, file: { ...base, kind: "text", truncated: true, content: await readTextHead(resolved.path) } };
+  try {
+    const ext = path.extname(opened.path).toLowerCase();
+    const base = baseFile(opened.path, opened.root, opened.stat);
+    if (PREVIEWABLE_IMAGE_EXTENSIONS.has(ext)) {
+      return { ok: true, file: { ...base, kind: "image", rawUrl: rawUrl(base.relativePath), embeddable: true } };
     }
-    return { ok: true, file: { ...base, kind: fileKindForTextExtension(ext), content: await fs.readFile(resolved.path, "utf8") } };
+    if (ext === ".svg") {
+      return {
+        ok: true,
+        file: {
+          ...base,
+          kind: "download",
+          rawUrl: rawUrl(base.relativePath),
+          downloadOnly: true,
+          embeddable: false,
+          message: "SVG contains active content and is available only as a download."
+        }
+      };
+    }
+    if (ext === ".pdf") {
+      return { ok: true, file: { ...base, kind: "pdf", rawUrl: rawUrl(base.relativePath), embeddable: true } };
+    }
+    if (PREVIEWABLE_OFFICE_EXTENSIONS.has(ext)) {
+      const buffer = opened.stat.size > MAX_OFFICE_BYTES ? null : await opened.handle.readFile();
+      return previewOfficeFile(buffer, base, opened.stat, ext);
+    }
+    if (OFFICE_EXTENSIONS.has(ext)) {
+      return { ok: true, file: { ...base, kind: "office", rawUrl: rawUrl(base.relativePath), message: "第一版提供文件卡片和打开入口，在线预览后续增强。" } };
+    }
+    if ((ext === ".csv" || ext === ".tsv") && opened.stat.size <= MAX_TABLE_TEXT_BYTES) {
+      return previewDelimitedFile(await opened.handle.readFile(), base, ext);
+    }
+    if (TEXT_EXTENSIONS.has(ext) || opened.stat.size <= MAX_TEXT_BYTES) {
+      if (opened.stat.size > MAX_TEXT_BYTES) {
+        return { ok: true, file: { ...base, kind: "text", truncated: true, content: await readTextHead(opened.handle) } };
+      }
+      return { ok: true, file: { ...base, kind: fileKindForTextExtension(ext), content: (await opened.handle.readFile()).toString("utf8") } };
+    }
+    return { ok: true, file: { ...base, kind: "binary", rawUrl: rawUrl(base.relativePath), downloadOnly: true, embeddable: false, message: "二进制文件不在网页中直接预览。" } };
+  } finally {
+    await opened.handle.close();
   }
-  return { ok: true, file: { ...base, kind: "binary", rawUrl: rawUrl(base.relativePath), message: "二进制文件不在网页中直接预览。" } };
 }
 
-async function previewDelimitedFile(filePath, base, ext) {
-  const content = await fs.readFile(filePath, "utf8");
+function previewDelimitedFile(buffer, base, ext) {
+  const content = buffer.toString("utf8");
   const table = parseDelimitedTable(content, ext === ".tsv" ? "\t" : ",");
   return {
     ok: true,
@@ -72,7 +86,7 @@ async function previewDelimitedFile(filePath, base, ext) {
   };
 }
 
-async function previewOfficeFile(filePath, base, stat, ext) {
+async function previewOfficeFile(buffer, base, stat, ext) {
   const raw = {
     ...base,
     kind: "office",
@@ -88,7 +102,10 @@ async function previewOfficeFile(filePath, base, stat, ext) {
     };
   }
   try {
-    const parsed = parseDocumentBuffer(await fs.readFile(filePath), ext);
+    if (!buffer) {
+      throw Object.assign(new Error("Office preview buffer is unavailable"), { code: "OFFICE_PARSE_FAILED" });
+    }
+    const parsed = await parseDocumentBufferAsync(buffer, ext);
     if (!parsed.supported || !String(parsed.content ?? "").trim()) {
       return {
         ok: true,
@@ -112,11 +129,12 @@ async function previewOfficeFile(filePath, base, stat, ext) {
         notes: parsed.notes ?? []
       }
     };
-  } catch {
+  } catch (error) {
     return {
       ok: true,
       file: {
         ...raw,
+        parseErrorCode: String(error?.code ?? "OFFICE_PARSE_FAILED"),
         message: "文件解析失败，右侧栏保留打开入口。"
       }
     };
@@ -219,23 +237,27 @@ function maxColumnCount(rows) {
  * @param {string} requestedPath
  */
 export async function readRawFile(cwd, requestedPath) {
-  const resolved = resolveWorkspaceFile(cwd, requestedPath);
-  if (!resolved.ok) {
-    return resolved;
+  const opened = await openWorkspaceFile(cwd, requestedPath);
+  if (!opened.ok) {
+    return opened;
   }
-  const stat = await fs.stat(resolved.path).catch(() => null);
-  if (!stat || !stat.isFile()) {
-    return { ok: false, status: 404, error: "文件不存在或不是普通文件" };
+  try {
+    if (opened.stat.size > MAX_RAW_BYTES) {
+      return { ok: false, status: 413, error: "文件过大，已阻止内嵌预览" };
+    }
+    const downloadOnly = !isEmbeddableRawPath(opened.path);
+    return {
+      ok: true,
+      path: opened.path,
+      contentType: contentTypeForPath(opened.path),
+      contentDisposition: downloadOnly ? "attachment" : "inline",
+      downloadName: path.basename(opened.path),
+      downloadOnly,
+      bytes: await opened.handle.readFile()
+    };
+  } finally {
+    await opened.handle.close();
   }
-  if (stat.size > MAX_RAW_BYTES) {
-    return { ok: false, status: 413, error: "文件过大，已阻止内嵌预览" };
-  }
-  return {
-    ok: true,
-    path: resolved.path,
-    contentType: contentTypeForPath(resolved.path),
-    bytes: await fs.readFile(resolved.path)
-  };
 }
 
 /**
@@ -272,7 +294,58 @@ export function resolveWorkspaceFile(cwd, requestedPath) {
   if (!isInside(root, resolved)) {
     return { ok: false, status: 403, error: "第一版只允许预览当前工作区内文件" };
   }
-  return { ok: true, path: resolved };
+  let realRoot;
+  let realTarget;
+  try {
+    realRoot = realpathSync(root);
+    realTarget = realpathSync(resolved);
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") {
+      return { ok: false, status: 404, error: "文件不存在或不是普通文件" };
+    }
+    return { ok: false, status: 400, error: "无法解析文件真实路径" };
+  }
+  if (!isInside(realRoot, realTarget)) {
+    return { ok: false, status: 403, error: "文件真实路径位于工作区外" };
+  }
+  return { ok: true, path: realTarget, root: realRoot };
+}
+
+async function openWorkspaceFile(cwd, requestedPath) {
+  const resolved = resolveWorkspaceFile(cwd, requestedPath);
+  if (!resolved.ok) {
+    return resolved;
+  }
+  const handle = await fs.open(resolved.path, "r").catch(() => null);
+  if (!handle) {
+    return { ok: false, status: 404, error: "文件不存在或无法读取" };
+  }
+  try {
+    const [stat, currentRealPath] = await Promise.all([
+      handle.stat(),
+      fs.realpath(resolved.path)
+    ]);
+    if (!stat.isFile() || !isInside(resolved.root, currentRealPath)) {
+      await handle.close();
+      return { ok: false, status: stat.isFile() ? 403 : 404, error: "文件真实路径不在允许范围内" };
+    }
+    const currentStat = await fs.stat(currentRealPath);
+    if (!sameOpenedFile(stat, currentStat)) {
+      await handle.close();
+      return { ok: false, status: 409, error: "文件在安全检查期间发生变化，请重试" };
+    }
+    return { ok: true, path: currentRealPath, root: resolved.root, stat, handle };
+  } catch {
+    await handle.close();
+    return { ok: false, status: 404, error: "文件不存在或无法读取" };
+  }
+}
+
+function sameOpenedFile(opened, current) {
+  if (Number(opened.dev) !== 0 || Number(opened.ino) !== 0 || Number(current.dev) !== 0 || Number(current.ino) !== 0) {
+    return opened.dev === current.dev && opened.ino === current.ino;
+  }
+  return opened.size === current.size && opened.mtimeMs === current.mtimeMs;
 }
 
 /**
@@ -300,15 +373,10 @@ function baseFile(filePath, cwd, stat) {
   };
 }
 
-async function readTextHead(filePath) {
-  const handle = await fs.open(filePath, "r");
-  try {
-    const buffer = Buffer.alloc(MAX_TEXT_BYTES);
-    const read = await handle.read(buffer, 0, MAX_TEXT_BYTES, 0);
-    return buffer.subarray(0, read.bytesRead).toString("utf8");
-  } finally {
-    await handle.close();
-  }
+async function readTextHead(handle) {
+  const buffer = Buffer.alloc(MAX_TEXT_BYTES);
+  const read = await handle.read(buffer, 0, MAX_TEXT_BYTES, 0);
+  return buffer.subarray(0, read.bytesRead).toString("utf8");
 }
 
 function rawUrl(relativePath) {
@@ -321,9 +389,13 @@ function contentTypeForPath(filePath) {
   if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
   if (ext === ".gif") return "image/gif";
   if (ext === ".webp") return "image/webp";
-  if (ext === ".svg") return "image/svg+xml";
   if (ext === ".pdf") return "application/pdf";
   return "application/octet-stream";
+}
+
+function isEmbeddableRawPath(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  return PREVIEWABLE_IMAGE_EXTENSIONS.has(ext) || ext === ".pdf";
 }
 
 function kindForPath(filePath) {
@@ -357,15 +429,15 @@ function addFile(items, cwd, target, meta = {}) {
   if (!value) {
     return;
   }
-  const resolved = path.isAbsolute(value) ? value : path.resolve(cwd, value);
-  if (!isInside(cwd, resolved)) {
+  const resolved = resolveWorkspaceFile(cwd, value);
+  if (!resolved.ok) {
     return;
   }
-  if (!fileExists(resolved)) {
+  if (!fileExists(resolved.path)) {
     return;
   }
   items.push({
-    ...fileSummary(cwd, path.relative(cwd, resolved)),
+    ...fileSummary(resolved.root, resolved.path),
     ...meta
   });
 }

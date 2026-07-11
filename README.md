@@ -178,6 +178,17 @@ The Dashboard binds to `127.0.0.1`, defaults to port `7410`, and rejects
 non-loopback hosts. It reuses the same local runtime, permission engine, task
 store, and `.lab-agent/sessions` session store as the TUI.
 
+Each Dashboard process creates fresh session and CSRF credentials. API requests
+must use the exact bound host and port, and state-changing requests also require
+same-origin JSON plus CSRF validation. The Dashboard is a local workstation
+interface, not a LAN or public sharing service.
+
+New Dashboard tasks start in `plan` mode. Permission changes apply only to the
+current session, and selecting `fullAccess` requires an explicit risk
+confirmation. On smaller screens, use the Sessions, Conversation, and Files
+views; connection status reports stale or offline event streams and supports a
+manual reconnect without discarding the persisted session.
+
 Common Dashboard options:
 
 ```powershell
@@ -190,6 +201,7 @@ ant-code dashboard --project .
 
 ```sh
 npm run doctor
+npm run check
 npm run check:syntax
 npm run check:dependencies
 npm test
@@ -197,6 +209,10 @@ npm run mock-gateway -- --port 8787
 node src/cli/index.js --version
 node src/cli/index.js -p "/status"
 ```
+
+`npm run check` is the release gate for syntax, forbidden endpoints, dependency
+and lockfile policy, types, unit/integration tests, real Microsoft Edge browser
+coverage, committed Dashboard assets, and whitespace errors.
 
 ## Security Boundary
 

@@ -24,9 +24,16 @@ const SEVERITY_BY_STATUS = Object.freeze({
   running: "info",
   completed: "success",
   blocked: "warning",
+  interrupted: "warning",
   failed: "danger",
   waiting: "warning"
 });
+
+const BLOCKED_TURN_STATUSES = new Set(["gateway_not_configured", "tool_limit", "vision_unavailable"]);
+const INTERRUPTED_TURN_STATUSES = new Set(["interrupted", "cancelled"]);
+const FAILED_BACKGROUND_STATUSES = new Set(["failed", "error", "lost"]);
+const BLOCKED_BACKGROUND_STATUSES = new Set(["blocked", "partial"]);
+const INTERRUPTED_BACKGROUND_STATUSES = new Set(["interrupted", "cancelled"]);
 
 /**
  * @param {Record<string, any>} event
@@ -118,9 +125,10 @@ export function mapSessionEventToDashboard(event) {
     })];
   }
   if (type === "subagent_group_progress") {
+    const status = backgroundProgressStatus(event);
     return [backgroundSubagentActivity(event, {
-      title: event.completed ? "子任务组已完成" : "子任务组仍在运行",
-      status: event.completed ? "completed" : "running",
+      title: backgroundProgressTitle(status),
+      status,
       detail: String(event.summary ?? ""),
       completed: event.completed === true
     })];
@@ -143,13 +151,17 @@ export function mapSessionEventToDashboard(event) {
     }];
   }
   if (type === "turn_complete") {
-    return [activity("turn-complete", "任务已完成", `状态：${event.status ?? "completed"}`, "completed", "session", event, { coalesceKey: "turn" })];
+    const completion = turnCompletionView(event.status);
+    return [activity("turn-complete", completion.title, completion.detail, completion.status, "session", event, {
+      coalesceKey: "turn",
+      terminalStatus: completion.terminalStatus
+    })];
   }
   if (type === "gateway_error" || type === "gateway_not_configured") {
     return [activity("gateway-error", "模型请求失败", event.error?.message ?? "网关未配置或请求失败", "failed", "gateway", event)];
   }
   if (type === "turn_interrupted") {
-    return [activity("turn-interrupted", "任务已中断", event.reason ?? "用户中断", "failed", "session", event)];
+    return [activity("turn-interrupted", "任务已中断", event.reason ?? "用户中断", "interrupted", "session", event)];
   }
   if (type === "context_compacting") {
     return [activity("context-compacting", "正在压缩上下文", contextCompactionStartDetail(event), "running", "session", event, { coalesceKey: "context-compaction" })];
@@ -174,6 +186,45 @@ export function mapSessionEventToDashboard(event) {
     ];
   }
   return [];
+}
+
+function turnCompletionView(value) {
+  const terminalStatus = String(value ?? "completed").trim().toLowerCase() || "completed";
+  if (terminalStatus === "completed") {
+    return { title: "任务已完成", detail: "状态：completed", status: "completed", terminalStatus };
+  }
+  if (INTERRUPTED_TURN_STATUSES.has(terminalStatus)) {
+    return { title: "任务已中断", detail: `状态：${terminalStatus}`, status: "interrupted", terminalStatus };
+  }
+  if (BLOCKED_TURN_STATUSES.has(terminalStatus)) {
+    return { title: "任务未完成", detail: `状态：${terminalStatus}`, status: "blocked", terminalStatus };
+  }
+  return { title: "任务执行失败", detail: `状态：${terminalStatus}`, status: "failed", terminalStatus };
+}
+
+function backgroundProgressStatus(event) {
+  if (event?.completed !== true) {
+    return "running";
+  }
+  const status = String(event.status ?? "completed").trim().toLowerCase();
+  if (FAILED_BACKGROUND_STATUSES.has(status)) {
+    return "failed";
+  }
+  if (BLOCKED_BACKGROUND_STATUSES.has(status)) {
+    return "blocked";
+  }
+  if (INTERRUPTED_BACKGROUND_STATUSES.has(status)) {
+    return "interrupted";
+  }
+  return "completed";
+}
+
+function backgroundProgressTitle(status) {
+  if (status === "running") return "子任务组仍在运行";
+  if (status === "completed") return "子任务组已完成";
+  if (status === "interrupted") return "子任务组已中断";
+  if (status === "blocked") return "子任务组未全部完成";
+  return "子任务组执行失败";
 }
 
 /**

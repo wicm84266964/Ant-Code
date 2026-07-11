@@ -77,6 +77,30 @@ For image or screenshot work:
   profile is used at runtime; Ant Code does not mix providers or keys inside one
   task.
 
+## Dashboard Daily Use
+
+Dashboard is available only on the local workstation. It accepts loopback
+addresses (`127.0.0.1`, `localhost`, or `::1`) and is not a LAN-sharing service.
+Each launch creates new browser session and CSRF credentials; leave these in the
+browser cookies and do not reuse their values in scripts.
+
+New tasks start in `plan` mode. Permission changes are scoped to the current
+session and do not carry into a new task or session. `fullAccess` requires a
+risk confirmation and should be reserved for controlled local work.
+
+On mobile and tablet layouts, switch between Sessions, Conversation, and Files.
+If the event stream becomes stale or offline, Dashboard retries from the last
+event sequence; use the connection-status control to reconnect manually when
+automatic retries stop. Persisted conversation history remains available.
+
+When closing Dashboard, review the reported active or quarantined turns, queued
+work, background tasks, and pending interactions. If work is still active,
+choose cancel-and-close explicitly and allow the bounded cleanup to finish.
+
+Remote Markdown images are not fetched automatically. Workspace file previews
+remain inside canonical path boundaries, SVG files are download-only, Office
+previews are limited to 10 MiB, and raw file responses are limited to 20 MiB.
+
 ## Dashboard Background Subagents
 
 Dashboard shows background subagent groups in the live-status strip above the
@@ -138,3 +162,9 @@ $env:LAB_AGENT_NETWORK_MODE = "offline"
 ```
 
 Ant Code can still run local slash commands such as `/status`, `/map`, `/sessions cleanup`, and `/doctor` without gateway access.
+
+For a Dashboard release rollback, replace the executable/runtime, committed
+Dashboard assets, and documentation together. Preserve or back up local session
+data first; older transcript metadata remains readable. Never work around a
+version mismatch by disabling Dashboard authentication, CSRF, Host/Origin
+checks, or workspace file boundaries.

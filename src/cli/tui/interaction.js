@@ -214,6 +214,9 @@ export function pageScrollDirections(inputValue) {
   const directions = [];
 
   for (const match of value.matchAll(/\u001b?\[(5|6)(?:;[\d:]+)?~/g)) {
+    if (isTerminalKeyRelease(match[0])) {
+      continue;
+    }
     directions.push(match[1] === "5" ? 1 : -1);
   }
 
@@ -239,13 +242,81 @@ export function rawShiftTabPresses(inputValue) {
 }
 
 export function rawBackspacePresses(inputValue) {
-  const value = String(inputValue ?? "");
-  return Array.from(value.matchAll(/[\x08\x7f]/g)).length
-    + Array.from(value.matchAll(/\u001b\[(?:8|127)(?:;[\d:]+)?u/g)).length;
+  return (rawDraftEditOperations(inputValue) ?? [])
+    .filter((operation) => operation.type === "backward" || operation.type === "backward-word")
+    .length;
 }
 
 export function rawDeletePresses(inputValue) {
-  return Array.from(String(inputValue ?? "").matchAll(/\u001b\[3(?:;[\d:]+)?~/g)).length;
+  return (rawDraftEditOperations(inputValue) ?? [])
+    .filter((operation) => operation.type === "forward" || operation.type === "forward-word")
+    .length;
+}
+
+export function rawDeletionEvents(inputValue) {
+  const operations = rawDraftEditOperations(inputValue);
+  if (!operations) {
+    return null;
+  }
+  return operations
+    .filter((operation) => operation.type !== "insert")
+    .map((operation) => operation.type);
+}
+
+export function rawDraftEditOperations(inputValue) {
+  const value = String(inputValue ?? "");
+  const operations = [];
+  const pattern = /\u001b[\x08\x7f]|[\x08\x7f]|\u001b\[(?:8|127)(?:;[\d:]+)?u|\u001b\[3(?:;[\d:]+)?~/g;
+  let consumed = 0;
+  for (const match of value.matchAll(pattern)) {
+    const text = value.slice(consumed, match.index);
+    if (text) {
+      if (!isSafeRawDraftText(text)) {
+        return null;
+      }
+      operations.push({ type: "insert", text });
+    }
+    operations.push({ type: rawDeletionOperation(match[0]) });
+    consumed = match.index + match[0].length;
+  }
+  if (operations.length === 0) {
+    return null;
+  }
+  const trailingText = value.slice(consumed);
+  if (trailingText) {
+    if (!isSafeRawDraftText(trailingText)) {
+      return null;
+    }
+    operations.push({ type: "insert", text: trailingText });
+  }
+  return operations;
+}
+
+function rawDeletionOperation(sequence) {
+  if (isTerminalKeyRelease(sequence)) {
+    return "ignore";
+  }
+  const backward = !sequence.endsWith("~");
+  const word = /^\u001b[\x08\x7f]$/.test(sequence) || hasWordModifier(sequence);
+  return `${backward ? "backward" : "forward"}${word ? "-word" : ""}`;
+}
+
+function hasWordModifier(sequence) {
+  const match = /^\u001b\[(?:8|127|3);(\d+)/.exec(sequence);
+  if (!match) {
+    return false;
+  }
+  const modifiers = Math.max(0, Number(match[1]) - 1);
+  return (modifiers & (2 | 4 | 32)) !== 0;
+}
+
+function isTerminalKeyRelease(sequence) {
+  return /^\u001b\[\d+;\d+:3(?:;[\d:]+)?u$/.test(sequence)
+    || /^\u001b\[\d+;\d+:3[A-Za-z~]$/.test(sequence);
+}
+
+function isSafeRawDraftText(value) {
+  return !/[\u001b\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(String(value ?? ""));
 }
 
 export function shouldUseScrollbackMode(rows, options = {}) {

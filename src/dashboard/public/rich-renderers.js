@@ -82,6 +82,7 @@ async function hydrateData(root) {
     output.innerHTML = result.ok
       ? `<div class="data-summary">${escapeHtml(result.summary)}</div>${result.html}${result.tsv ? `<button type="button" class="data-copy" data-copy-tsv="${escapeAttribute(result.tsv)}">复制为 TSV</button>` : ""}`
       : result.html;
+    bindDeferredTree(output, result.expandTreeNode);
     frame.dataset.rendered = "true";
     output.querySelectorAll(".data-copy").forEach((button) => {
       button.addEventListener("click", async () => {
@@ -96,6 +97,26 @@ async function hydrateData(root) {
       });
     });
   }
+}
+
+function bindDeferredTree(root, expandTreeNode) {
+  if (typeof expandTreeNode !== "function") {
+    return;
+  }
+  root.addEventListener("toggle", (event) => {
+    const node = event.target;
+    if (!node?.open || !node.classList?.contains("data-node-deferred")) {
+      return;
+    }
+    const placeholder = node.querySelector(":scope > .data-tree-placeholder");
+    if (!placeholder) {
+      return;
+    }
+    placeholder.innerHTML = expandTreeNode(node.dataset.treeNode);
+    placeholder.classList.remove("data-tree-placeholder");
+    node.classList.remove("data-node-deferred");
+    delete node.dataset.treeNode;
+  }, true);
 }
 
 async function hydrateMermaid(root) {

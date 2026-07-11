@@ -13,6 +13,7 @@ tmp/
 .env.*
 !.env.example
 *.local
+lab-agent.config.json.*
 
 # Logs and transcripts
 *.log

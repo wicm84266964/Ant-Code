@@ -1,3 +1,11 @@
+const GRAPHEME_SEGMENTER = typeof Intl?.Segmenter === "function"
+  ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+  : null;
+const GRAPHEME_CACHE_LIMIT = 4;
+const graphemeCache = new Map();
+const GRAPHEME_WIDTH_CACHE_LIMIT = 512;
+const graphemeWidthCache = new Map();
+
 export function createDraft(text = "", cursor = null) {
   const chars = toChars(text);
   const resolvedCursor = cursor === null ? chars.length : clampCursor(cursor, chars.length);
@@ -9,39 +17,41 @@ export function insertText(draft, value) {
   const insert = toChars(value);
   const cursor = clampCursor(draft?.cursor, chars.length);
   chars.splice(cursor, 0, ...insert);
-  return { text: chars.join(""), cursor: cursor + insert.length };
+  return editedDraft(draft, chars.join(""), cursor + insert.length, chars);
 }
 
 export function deleteBackward(draft) {
   const chars = toChars(draft?.text);
   const cursor = clampCursor(draft?.cursor, chars.length);
   if (cursor === 0) {
-    return { text: chars.join(""), cursor };
+    return editedDraft(draft, chars.join(""), cursor, chars);
   }
   chars.splice(cursor - 1, 1);
-  return { text: chars.join(""), cursor: cursor - 1 };
+  return editedDraft(draft, chars.join(""), cursor - 1, chars);
 }
 
 export function deleteForward(draft) {
   const chars = toChars(draft?.text);
   const cursor = clampCursor(draft?.cursor, chars.length);
   if (cursor >= chars.length) {
-    return { text: chars.join(""), cursor };
+    return editedDraft(draft, chars.join(""), cursor, chars);
   }
   chars.splice(cursor, 1);
-  return { text: chars.join(""), cursor };
+  return editedDraft(draft, chars.join(""), cursor, chars);
 }
 
 export function deleteToStart(draft) {
   const chars = toChars(draft?.text);
   const cursor = clampCursor(draft?.cursor, chars.length);
-  return { text: chars.slice(cursor).join(""), cursor: 0 };
+  const nextChars = chars.slice(cursor);
+  return editedDraft(draft, nextChars.join(""), 0, nextChars);
 }
 
 export function deleteToEnd(draft) {
   const chars = toChars(draft?.text);
   const cursor = clampCursor(draft?.cursor, chars.length);
-  return { text: chars.slice(0, cursor).join(""), cursor };
+  const nextChars = chars.slice(0, cursor);
+  return editedDraft(draft, nextChars.join(""), cursor, nextChars);
 }
 
 export function deleteWordBackward(draft) {
@@ -49,31 +59,50 @@ export function deleteWordBackward(draft) {
   const cursor = clampCursor(draft?.cursor, chars.length);
   const start = previousWordBoundary(chars, cursor);
   chars.splice(start, cursor - start);
-  return { text: chars.join(""), cursor: start };
+  return editedDraft(draft, chars.join(""), start, chars);
+}
+
+export function deleteWordForward(draft) {
+  const chars = toChars(draft?.text);
+  const cursor = clampCursor(draft?.cursor, chars.length);
+  const end = nextWordBoundary(chars, cursor);
+  chars.splice(cursor, end - cursor);
+  return editedDraft(draft, chars.join(""), cursor, chars);
 }
 
 export function moveCursor(draft, direction) {
   const chars = toChars(draft?.text);
   const cursor = clampCursor(draft?.cursor, chars.length);
   if (direction === "start") {
-    return { text: chars.join(""), cursor: 0 };
+    return movedDraft(draft, chars.join(""), 0, chars);
   }
   if (direction === "end") {
-    return { text: chars.join(""), cursor: chars.length };
+    return movedDraft(draft, chars.join(""), chars.length, chars);
   }
   if (direction === "left") {
-    return { text: chars.join(""), cursor: Math.max(0, cursor - 1) };
+    return movedDraft(draft, chars.join(""), Math.max(0, cursor - 1), chars);
   }
   if (direction === "right") {
-    return { text: chars.join(""), cursor: Math.min(chars.length, cursor + 1) };
+    return movedDraft(draft, chars.join(""), Math.min(chars.length, cursor + 1), chars);
   }
   if (direction === "word-left") {
-    return { text: chars.join(""), cursor: previousWordBoundary(chars, cursor) };
+    return movedDraft(draft, chars.join(""), previousWordBoundary(chars, cursor), chars);
   }
   if (direction === "word-right") {
-    return { text: chars.join(""), cursor: nextWordBoundary(chars, cursor) };
+    return movedDraft(draft, chars.join(""), nextWordBoundary(chars, cursor), chars);
   }
-  return { text: chars.join(""), cursor };
+  return movedDraft(draft, chars.join(""), cursor, chars);
+}
+
+export function moveCursorLineBoundary(draft, direction, options = {}) {
+  const chars = toChars(draft?.text);
+  const text = chars.join("");
+  const cursor = clampCursor(draft?.cursor, chars.length);
+  const lines = wrapDraftLines(splitDraftLines(text), options.columns);
+  const lineIndex = lines.findIndex((line, index) => lineContainsCursor(lines, index, cursor));
+  const line = lines[lineIndex === -1 ? lines.length - 1 : lineIndex];
+  const nextCursor = direction === "end" ? line?.end ?? chars.length : line?.start ?? 0;
+  return movedDraft(draft, text, nextCursor, chars);
 }
 
 export function moveCursorVertical(draft, direction, options = {}) {
@@ -93,8 +122,13 @@ export function moveCursorVertical(draft, direction, options = {}) {
   }
   const currentLine = lines[resolvedIndex];
   const targetLine = lines[targetIndex];
-  const preferredColumn = displayWidth(chars.slice(currentLine.start, cursor).join(""));
-  return { text, cursor: cursorAtVisualColumn(chars, targetLine, preferredColumn) };
+  const preferredColumn = Number.isFinite(draft?.preferredColumn)
+    ? Number(draft.preferredColumn)
+    : displayWidth(chars.slice(currentLine.start, cursor).join(""));
+  return {
+    ...movedDraft(draft, text, cursorAtVisualColumn(chars, targetLine, preferredColumn), chars),
+    preferredColumn
+  };
 }
 
 export function cursorVisualPosition(text, cursor, options = {}) {
@@ -107,8 +141,7 @@ export function cursorVisualPosition(text, cursor, options = {}) {
   }
   const cursorLineIndex = lines.findIndex((line, index) => lineContainsCursor(lines, index, resolvedCursor));
   const resolvedLineIndex = cursorLineIndex === -1 ? lines.length - 1 : cursorLineIndex;
-  let visibleStart = Math.max(0, resolvedLineIndex - Math.floor(maxLines / 2));
-  visibleStart = Math.min(visibleStart, Math.max(0, lines.length - maxLines));
+  const visibleStart = stableVisibleStart(lines.length, resolvedLineIndex, maxLines, options.visibleStart);
   const line = lines[resolvedLineIndex] ?? lines[lines.length - 1];
   return {
     lineIndex: Math.max(0, resolvedLineIndex - visibleStart),
@@ -124,7 +157,17 @@ export function cursorToEnd(text) {
 
 export function clampDraftCursor(draft) {
   const chars = toChars(draft?.text);
-  return { text: chars.join(""), cursor: clampCursor(draft?.cursor, chars.length) };
+  return withDraftMetadata(draft, { text: chars.join(""), cursor: clampCursor(draft?.cursor, chars.length) }, true);
+}
+
+export function stabilizeDraftViewport(draft, options = {}) {
+  const next = clampDraftCursor(draft);
+  const position = cursorVisualPosition(next.text, next.cursor, {
+    columns: options.columns,
+    maxLines: options.maxLines,
+    visibleStart: next.visibleStart
+  });
+  return { ...next, visibleStart: position.visibleStart };
 }
 
 export function splitDraftLines(text) {
@@ -145,22 +188,21 @@ export function splitDraftLines(text) {
   return lines;
 }
 
-export function visibleDraftLineEntries(text, cursor, maxLines = 5, columns = null) {
+export function visibleDraftLineEntries(text, cursor, maxLines = 5, columns = null, visibleStart = null) {
   const lines = wrapDraftLines(splitDraftLines(text), columns);
   if (lines.length === 1 && lines[0].text === "") {
     return [];
   }
   const cursorLine = lines.findIndex((line, index) => lineContainsCursor(lines, index, cursor));
   const resolvedLine = cursorLine === -1 ? lines.length - 1 : cursorLine;
-  let start = Math.max(0, resolvedLine - Math.floor(maxLines / 2));
-  start = Math.min(start, Math.max(0, lines.length - maxLines));
+  const start = stableVisibleStart(lines.length, resolvedLine, maxLines, visibleStart);
   return lines.slice(start, start + maxLines);
 }
 
 export function composerSegments(text, cursor, options = {}) {
   const chars = toChars(text);
   const resolvedCursor = clampCursor(cursor, chars.length);
-  const lineEntries = visibleDraftLineEntries(text, resolvedCursor, options.maxLines ?? 5, options.columns);
+  const lineEntries = visibleDraftLineEntries(text, resolvedCursor, options.maxLines ?? 5, options.columns, options.visibleStart);
   const showCursor = options.showCursor !== false;
   return lineEntries.map((line, index) => {
     if (!lineContainsCursor(lineEntries, index, resolvedCursor)) {
@@ -187,7 +229,7 @@ export function composerSegments(text, cursor, options = {}) {
 }
 
 export function displayWidth(value) {
-  return toChars(value).reduce((sum, char) => sum + charWidth(char), 0);
+  return toChars(value).reduce((sum, char) => sum + graphemeWidth(char, sum), 0);
 }
 
 export function cursorColumn(text, cursor) {
@@ -203,7 +245,33 @@ export function cursorColumn(text, cursor) {
 }
 
 function toChars(value) {
-  return Array.from(String(value ?? ""));
+  const text = String(value ?? "");
+  if (!text) {
+    return [];
+  }
+  const cached = graphemeCache.get(text);
+  if (cached) {
+    graphemeCache.delete(text);
+    graphemeCache.set(text, cached);
+    return cached.slice();
+  }
+  const chars = GRAPHEME_SEGMENTER
+    ? Array.from(GRAPHEME_SEGMENTER.segment(text), (entry) => entry.segment)
+    : Array.from(text);
+  rememberGraphemes(text, chars);
+  return chars.slice();
+}
+
+function rememberGraphemes(text, chars) {
+  graphemeCache.delete(text);
+  graphemeCache.set(text, chars.slice());
+  while (graphemeCache.size > GRAPHEME_CACHE_LIMIT) {
+    const oldest = graphemeCache.keys().next().value;
+    if (oldest === undefined) {
+      break;
+    }
+    graphemeCache.delete(oldest);
+  }
 }
 
 function clampCursor(value, length) {
@@ -227,7 +295,7 @@ function wrapDraftLines(lines, columns) {
     let rowStartOffset = 0;
     let rowWidth = 0;
     for (let offset = 0; offset < chars.length; offset += 1) {
-      const width = Math.max(1, charWidth(chars[offset]));
+      const width = Math.max(1, graphemeWidth(chars[offset], rowWidth));
       if (rowWidth > 0 && rowWidth + width > maxColumns) {
         wrapped.push(lineSlice(line, chars, rowStartOffset, offset));
         rowStartOffset = offset;
@@ -267,7 +335,7 @@ function cursorAtVisualColumn(chars, line, column) {
   const targetColumn = Math.max(0, Number.isFinite(column) ? Number(column) : 0);
   let width = 0;
   for (let index = line.start; index < line.end; index += 1) {
-    const charWidthValue = Math.max(1, charWidth(chars[index]));
+    const charWidthValue = Math.max(1, graphemeWidth(chars[index], width));
     if (targetColumn <= width + Math.floor(charWidthValue / 2)) {
       return index;
     }
@@ -305,12 +373,48 @@ function isWhitespace(char) {
   return /\s/u.test(char ?? "");
 }
 
-function charWidth(char) {
-  if (!char) {
+function graphemeWidth(grapheme, column = 0) {
+  if (!grapheme) {
     return 0;
   }
-  if (char === "\n" || char === "\r" || char === "\t") {
-    return char === "\t" ? 4 : 0;
+  if (grapheme === "\n" || grapheme === "\r") {
+    return 0;
+  }
+  if (grapheme === "\t") {
+    return 4 - (Math.max(0, Number(column) || 0) % 4);
+  }
+  const cached = graphemeWidthCache.get(grapheme);
+  if (cached !== undefined) {
+    return cached;
+  }
+  let width;
+  if (/\p{Emoji_Presentation}/u.test(grapheme) || /\uFE0F|\u200D/u.test(grapheme) || isRegionalIndicatorPair(grapheme)) {
+    width = 2;
+  } else {
+    width = 0;
+    for (const char of Array.from(grapheme)) {
+      width += codePointWidth(char);
+    }
+  }
+  rememberGraphemeWidth(grapheme, width);
+  return width;
+}
+
+function rememberGraphemeWidth(grapheme, width) {
+  graphemeWidthCache.delete(grapheme);
+  graphemeWidthCache.set(grapheme, width);
+  while (graphemeWidthCache.size > GRAPHEME_WIDTH_CACHE_LIMIT) {
+    const oldest = graphemeWidthCache.keys().next().value;
+    if (oldest === undefined) {
+      break;
+    }
+    graphemeWidthCache.delete(oldest);
+  }
+}
+
+function codePointWidth(char) {
+  if (/\p{Mark}/u.test(char) || char === "\u200D" || char === "\uFE0E" || char === "\uFE0F") {
+    return 0;
   }
   const code = char.codePointAt(0);
   if (code === undefined) {
@@ -323,6 +427,52 @@ function charWidth(char) {
     return 0;
   }
   return isWideCodePoint(code) ? 2 : 1;
+}
+
+function isRegionalIndicatorPair(value) {
+  const chars = Array.from(value);
+  return chars.length === 2 && chars.every((char) => {
+    const code = char.codePointAt(0) ?? 0;
+    return code >= 0x1f1e6 && code <= 0x1f1ff;
+  });
+}
+
+function stableVisibleStart(lineCount, cursorLine, maxLines, requestedStart) {
+  const maximum = Math.max(0, lineCount - maxLines);
+  let start = Number.isFinite(requestedStart)
+    ? Math.min(maximum, Math.max(0, Math.floor(Number(requestedStart))))
+    : Math.min(maximum, Math.max(0, cursorLine - maxLines + 1));
+  if (cursorLine < start) {
+    start = cursorLine;
+  } else if (cursorLine >= start + maxLines) {
+    start = cursorLine - maxLines + 1;
+  }
+  return Math.min(maximum, Math.max(0, start));
+}
+
+function editedDraft(draft, text, cursor, chars = null) {
+  if (chars) {
+    rememberGraphemes(text, chars);
+  }
+  return withDraftMetadata(draft, { text, cursor }, false);
+}
+
+function movedDraft(draft, text, cursor, chars = null) {
+  if (chars) {
+    rememberGraphemes(text, chars);
+  }
+  return withDraftMetadata(draft, { text, cursor }, false);
+}
+
+function withDraftMetadata(draft, next, preservePreferredColumn) {
+  const result = { ...next };
+  if (Number.isFinite(draft?.visibleStart)) {
+    result.visibleStart = Math.max(0, Math.floor(Number(draft.visibleStart)));
+  }
+  if (preservePreferredColumn && Number.isFinite(draft?.preferredColumn)) {
+    result.preferredColumn = Math.max(0, Number(draft.preferredColumn));
+  }
+  return result;
 }
 
 function isWideCodePoint(code) {

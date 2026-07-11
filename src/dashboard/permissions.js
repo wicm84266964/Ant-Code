@@ -77,7 +77,7 @@ export function permissionModeDescription(mode) {
  */
 export function buildApprovalPreview(request = {}) {
   const toolName = request.toolName ?? "unknown";
-  const input = request.input ?? {};
+  const input = sanitizeSensitiveValue(request.input ?? {});
   if (toolName === "write_file") {
     return [
       `path: ${input.path ?? "unknown"}`,
@@ -118,4 +118,67 @@ export function buildApprovalPreview(request = {}) {
 function truncate(value, max) {
   const text = String(value ?? "");
   return text.length <= max ? text : `${text.slice(0, Math.max(0, max - 3))}...`;
+}
+
+const TOKEN_QUERY = /([?&](?:access[_-]?token|api[_-]?key|token|secret|password|authorization|credential)=)[^&#\s]*/gi;
+const ASSIGNED_SECRET = /\b((?:access[_-]?token|api[_-]?key|token|secret|password|passwd|authorization|credential)\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi;
+const AUTHORIZATION_VALUE = /\b(Bearer|Basic)\s+[A-Za-z0-9._~+\/-]+=*/gi;
+const KNOWN_TOKEN = /\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{6,})\b/g;
+
+export function sanitizeSensitiveValue(value, options = {}) {
+  const seen = new WeakSet();
+  const maxDepth = positiveLimit(options.maxDepth, 8);
+  const maxEntries = positiveLimit(options.maxEntries, 80);
+  const maxString = positiveLimit(options.maxString, 500);
+
+  function visit(current, depth, key = "") {
+    if (isSensitiveKey(key)) {
+      return "[redacted]";
+    }
+    if (typeof current === "string") {
+      return truncate(redactTokenLikeText(current), maxString);
+    }
+    if (current === null || typeof current !== "object") {
+      return current;
+    }
+    if (seen.has(current)) {
+      return "[circular]";
+    }
+    if (depth >= maxDepth) {
+      return "[truncated]";
+    }
+    seen.add(current);
+    if (Array.isArray(current)) {
+      const output = current.slice(0, maxEntries).map((item) => visit(item, depth + 1));
+      if (current.length > maxEntries) output.push(`[${current.length - maxEntries} more]`);
+      return output;
+    }
+    const output = {};
+    const entries = Object.entries(current);
+    for (const [childKey, childValue] of entries.slice(0, maxEntries)) {
+      output[childKey] = visit(childValue, depth + 1, childKey);
+    }
+    if (entries.length > maxEntries) output.__truncated__ = `${entries.length - maxEntries} more fields`;
+    return output;
+  }
+
+  return visit(value, 0);
+}
+
+function redactTokenLikeText(value) {
+  return String(value ?? "")
+    .replace(TOKEN_QUERY, "$1[redacted]")
+    .replace(AUTHORIZATION_VALUE, "$1 [redacted]")
+    .replace(ASSIGNED_SECRET, "$1[redacted]")
+    .replace(KNOWN_TOKEN, "[redacted]");
+}
+
+function isSensitiveKey(value) {
+  const key = String(value ?? "").replace(/[_-]/g, "").toLowerCase();
+  return /^(?:token|apikey|secret|password|passwd|authorization|credential|cookie|privatekey|accesskey|accesstoken|refreshtoken|sessiontoken|csrftoken|authtoken)$/.test(key);
+}
+
+function positiveLimit(value, fallback) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : fallback;
 }

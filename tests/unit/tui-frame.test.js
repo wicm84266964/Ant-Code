@@ -5,7 +5,11 @@ import {
   applyStreamDeltaBuffer,
   createStreamDeltaBuffer,
   createSynchronousDraftMirror,
+  isCtrlKey,
+  isInkKeyRelease,
   limitTranscriptEntries,
+  readBracketedPaste,
+  splitTrailingSubmitInput,
   resolveStreamDeltaActivityStatus,
   resolveIdleSilentAfterMs,
   resolveTuiLayoutRows,
@@ -221,6 +225,37 @@ test("synchronous draft mirror preserves rapid chunked text input", () => {
 
   const oldSnapshotResult = insertText(staleSnapshot, "后半段继续进入输入栏。");
   assert.equal(oldSnapshotResult.text, "后半段继续进入输入栏。");
+});
+
+test("bracketed paste parser owns split markers without duplicating adjacent text", () => {
+  const state = { active: false, buffer: "", prefix: "" };
+
+  assert.equal(readBracketedPaste("\u001b", state), null);
+  assert.equal(readBracketedPaste("\u001b[A", state), null);
+  assert.equal(readBracketedPaste("\u001b[20", state), "");
+  assert.equal(readBracketedPaste("0~hello\n", state), "");
+  assert.equal(readBracketedPaste("world\u001b[20", state), "");
+  assert.equal(readBracketedPaste("1~!", state), "hello\nworld!");
+  assert.deepEqual(state, { active: false, buffer: "", prefix: "" });
+});
+
+test("Ink control shortcuts use the emitted input value instead of a missing key name", () => {
+  assert.equal(isCtrlKey("a", { ctrl: true }, "a"), true);
+  assert.equal(isCtrlKey("A", { ctrl: true }, "a"), true);
+  assert.equal(isCtrlKey("a", { ctrl: false }, "a"), false);
+});
+
+test("Ink key releases never repeat editor actions", () => {
+  assert.equal(isInkKeyRelease({ eventType: "release" }), true);
+  assert.equal(isInkKeyRelease({ eventType: "repeat" }), false);
+  assert.equal(isInkKeyRelease({}), false);
+});
+
+test("coalesced printable text and Return still submit instead of inserting a newline", () => {
+  assert.equal(splitTrailingSubmitInput("hello\r", {}), "hello");
+  assert.equal(splitTrailingSubmitInput("hello\r\n", {}), null);
+  assert.equal(splitTrailingSubmitInput("\r", { return: true }), null);
+  assert.equal(splitTrailingSubmitInput("hello\r", { meta: true }), null);
 });
 
 test("prompt layout falls back safely when width is missing", () => {

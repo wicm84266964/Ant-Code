@@ -643,11 +643,27 @@ test("loads bundled config when no project or lab config is present", async () =
   assert.equal(config.agents.delegationGuard.enabled, true);
   assert.equal(config.agents.backgroundWakeup.enabled, true);
   assert.equal(config.agents.reviewGate.enabled, true);
+  assert.equal(config.lab.gatewayUrl, null);
+  assert.equal(config.lab.gatewayHealthUrl, null);
+  assert.equal(config.allowedHosts.includes("gateway.example.com"), false);
   assert.deepEqual(config.agents.vision, {
     enabled: false,
     model: "example-vision-model",
     autoUseWhenMainModelTextOnly: true
   });
+});
+
+test("environment model selection preserves the bundled model catalog", async () => {
+  const cwd = await makeTempWorkspace();
+  const config = await loadConfig({ cwd, env: { LAB_AGENT_MODEL: "external-model-alias" } });
+
+  assert.equal(config.modelAlias, "external-model-alias");
+  assert.deepEqual(config.models.map((model) => model.id), [
+    "external-model-alias",
+    "example-coding-model",
+    "example-vision-model"
+  ]);
+  assert.equal(config.lab.gatewayUrl, null);
 });
 
 test("project config overlays bundled example defaults without resetting model window", async () => {

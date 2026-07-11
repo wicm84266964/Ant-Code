@@ -10,6 +10,8 @@ import {
   pageScrollDirections,
   rawScrollEvents,
   rawBackspacePresses,
+  rawDraftEditOperations,
+  rawDeletionEvents,
   rawCtrlCPresses,
   rawDeletePresses,
   rawCtrlOPresses,
@@ -116,6 +118,7 @@ test("mouse click parser returns primary button press coordinates", () => {
 test("raw terminal fallback recognizes page scroll and Ctrl+C sequences", () => {
   assert.deepEqual(pageScrollDirections("\u001b[5~\u001b[6~"), [1, -1]);
   assert.deepEqual(pageScrollDirections("[5;1:1~\u001b[6;5~"), [1, -1]);
+  assert.deepEqual(pageScrollDirections("\u001b[5;1:3~\u001b[6;1:2~"), [-1]);
   assert.equal(rawCtrlCPresses("\x03"), 1);
   assert.equal(rawCtrlCPresses("a\x03b\x03"), 2);
   assert.equal(rawCtrlOPresses("\x0f"), 1);
@@ -131,6 +134,23 @@ test("raw terminal fallback recognizes page scroll and Ctrl+C sequences", () => 
   assert.equal(rawDeletePresses("\u001b[3~"), 1);
   assert.equal(rawDeletePresses("\u001b[3;1:1~"), 1);
   assert.equal(rawDeletePresses("a\u001b[3;5~b\u001b[3~"), 2);
+  assert.deepEqual(rawDeletionEvents("\x08"), ["backward"]);
+  assert.deepEqual(rawDeletionEvents("\x7f"), ["backward"]);
+  assert.deepEqual(rawDeletionEvents("\u001b[127;1u"), ["backward"]);
+  assert.deepEqual(rawDeletionEvents("\u001b[3~"), ["forward"]);
+  assert.deepEqual(rawDeletionEvents("\x7f\u001b[3;1:1~"), ["backward", "forward"]);
+  assert.deepEqual(rawDeletionEvents("a\x7f"), ["backward"]);
+  assert.deepEqual(rawDeletionEvents("\u001b\x7f"), ["backward-word"]);
+  assert.deepEqual(rawDeletionEvents("\u001b[127;5u"), ["backward-word"]);
+  assert.deepEqual(rawDeletionEvents("\u001b[3;3~"), ["forward-word"]);
+  assert.deepEqual(rawDeletionEvents("\u001b[127;1:3u"), ["ignore"]);
+  assert.deepEqual(rawDeletionEvents("\u001b[3;1:3~"), ["ignore"]);
+  assert.deepEqual(rawDraftEditOperations("ab\x7fc"), [
+    { type: "insert", text: "ab" },
+    { type: "backward" },
+    { type: "insert", text: "c" }
+  ]);
+  assert.equal(rawDraftEditOperations("\u001b[A\x7f"), null);
 });
 
 test("native scrollback mode is disabled when the TUI owns scroll layout", () => {
