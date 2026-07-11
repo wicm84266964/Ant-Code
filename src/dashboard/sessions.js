@@ -1,22 +1,23 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { createSession, runSessionTurn } from "../core/session.js";
+import { createSession, persistSessionSnapshot, runSessionTurn } from "../core/session.js";
 import { clearSessionContext, compactSessionContextWithModel, createContextWindow, summarizeContextWindow } from "../core/context-window.js";
 import { createLabModelGateway } from "../model-gateway/client.js";
 import { listConfiguredModels, normalizeAgentModelTiers, resolveModelSelection } from "../model-gateway/models.js";
 import { resolveWorkspaceTrust, trustWorkspace as saveWorkspaceTrust } from "../permissions/workspace-trust.js";
 import { createSessionStore } from "../storage/session-store.js";
 import { GATEWAY_PROTOCOLS, globalConfigPath, loadConfig, localProjectConfigPath } from "../config/load-config.js";
-import { cancelBackgroundAgentTasks } from "../agents/background-registry.js";
+import { cancelBackgroundAgentTasks, listBackgroundAgentTasks } from "../agents/background-registry.js";
 import { cancelBackgroundTerminalTasks, listBackgroundTerminalTasks } from "../agents/background-terminal-registry.js";
 import { createAgentTaskStore } from "../agents/task-store.js";
 import { createAgentTaskGroupStore, summarizeGroupStatus } from "../agents/task-group-store.js";
 import { cloneWorkflowState } from "../tools/workflow-tools.js";
 import { mapSessionEventToDashboard, permissionRequestToActivity } from "./events.js";
-import { applyPermissionMode, approvalKeyFor, buildApprovalPreview, normalizePermissionMode, permissionModeSummary } from "./permissions.js";
+import { applyPermissionMode, approvalKeyFor, buildApprovalPreview, normalizePermissionMode, permissionModeSummary, sanitizeSensitiveValue } from "./permissions.js";
 import { collectSessionFiles } from "./files.js";
 import { getAntCodeVersion } from "../version.js";
+import { mutateJsonConfig } from "./config-store.js";
 
 const MAX_EVENTS = 500;
 const MAX_QUEUE = 20;
@@ -26,24 +27,90 @@ const BACKGROUND_SNAPSHOT_INTERVAL_MS = 15_000;
 const BACKGROUND_STALE_PROGRESS_MS = 10 * 60 * 1000;
 const BACKGROUND_DEAD_HEARTBEAT_MS = 5 * 60 * 1000;
 const DEFAULT_INTERRUPT_FORCE_SETTLE_MS = 5_000;
+const DEFAULT_LIFECYCLE_WAIT_MS = 5_000;
+const MAX_LIFECYCLE_WAIT_MS = 30_000;
+const TURN_REQUEST_TTL_MS = 5 * 60 * 1000;
+const MAX_TURN_REQUESTS = 1_000;
+const MAX_PROMPT_BYTES = 256 * 1024;
+const MAX_TURN_IMAGES = 6;
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_TOTAL_IMAGE_BYTES = 24 * 1024 * 1024;
+export const DASHBOARD_ACTIVE_SESSION_DEFAULTS = Object.freeze({
+  max: 50,
+  idleTtlMs: 30 * 60 * 1000,
+  sweepIntervalMs: 60 * 1000
+});
+const ALLOWED_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const VISIBLE_TRANSCRIPT_ROLES = new Set(["user", "assistant"]);
 const TERMINAL_TASK_STATUSES = new Set(["completed", "failed", "partial", "blocked", "cancelled", "interrupted"]);
 const TERMINAL_GROUP_STATUSES = new Set(["completed", "failed", "partial", "blocked", "cancelled", "interrupted"]);
+
+class ActiveSessionMap extends Map {
+  get(key) {
+    const state = super.get(key);
+    if (state) {
+      state.lastAccessedAt = Date.now();
+      state.accessVersion = Number(state.accessVersion ?? 0) + 1;
+    }
+    return state;
+  }
+
+  peek(key) {
+    return super.get(key);
+  }
+
+  set(key, state) {
+    state.lastAccessedAt = Date.now();
+    state.accessVersion = Number(state.accessVersion ?? 0) + 1;
+    return super.set(key, state);
+  }
+}
+
+class ActiveSessionCapacityError extends Error {
+  constructor() {
+    super("No reclaimable Dashboard active session capacity is available");
+    this.name = "ActiveSessionCapacityError";
+  }
+}
 
 /**
  * @param {{ cwd: string; env?: NodeJS.ProcessEnv }} options
  */
 export function createDashboardRuntime(options) {
-  const active = new Map();
+  const runtimeEnv = options.env ?? process.env;
+  const active = new ActiveSessionMap();
+  const sessionMutationLocks = new Map();
+  const activeCapacityLocks = new Map();
+  const turnRequests = new Map();
+  const activePolicy = dashboardActiveSessionPolicy(runtimeEnv);
   let processTrusted = false;
   let selectedModelId = "";
-  const runtimeEnv = options.env ?? process.env;
+  let shuttingDown = false;
+  let activeSweepPromise = null;
   const resolveConfigEnv = () => dashboardConfigEnv(options.cwd, runtimeEnv);
+  const activeSweepTimer = setInterval(() => {
+    if (activeSweepPromise || shuttingDown) {
+      return;
+    }
+    activeSweepPromise = reclaimActiveSessions(active, {
+      cwd: options.cwd,
+      env: runtimeEnv,
+      sessionMutationLocks,
+      policy: activePolicy,
+      ttlOnly: true
+    }).catch(() => {
+      // Maintenance retries on the next sweep; runtime requests remain authoritative.
+    }).finally(() => {
+      activeSweepPromise = null;
+    });
+  }, activePolicy.sweepIntervalMs);
+  activeSweepTimer.unref?.();
 
   return {
     cwd: options.cwd,
     env: runtimeEnv,
     active,
+    activePolicy: { ...activePolicy },
     async status() {
       const configEnv = await resolveConfigEnv();
       const config = await loadConfig({ cwd: options.cwd, env: configEnv });
@@ -89,16 +156,21 @@ export function createDashboardRuntime(options) {
           gatewayProfiles: publicGatewayProfiles(state.session.config)
         };
       }
-      selectedModelId = selection.model.id;
       let refreshed = config;
       if (input.applyAgentDefaults === true && Object.keys(selection.model.agentModelTiers ?? {}).length > 0) {
         const localPath = localProjectConfigPath(options.cwd);
-        const local = await readJsonConfig(localPath);
-        await writeJsonConfig(localPath, buildLocalAgentModelTiersConfig(local, config, selection.model.agentModelTiers));
+        const mutation = await mutateDashboardConfig(localPath, (local) => (
+          buildLocalAgentModelTiersConfig(local, config, selection.model.agentModelTiers)
+        ));
+        if (!mutation.ok) {
+          return mutation;
+        }
         refreshed = await loadConfig({ cwd: options.cwd, env: await resolveConfigEnv() });
       }
+      selectedModelId = selection.model.id;
       if (state) {
         applySessionModel(state.session, selection.model.id);
+        state.persisted = false;
         state.session.config = {
           ...state.session.config,
           agents: {
@@ -138,15 +210,23 @@ export function createDashboardRuntime(options) {
     },
     async saveModelConfig(input = {}) {
       const configEnv = await resolveConfigEnv();
-      const config = await loadConfig({ cwd: options.cwd, env: configEnv });
-      const normalized = normalizeModelConfigInput(input, config);
+      let config = await loadConfig({ cwd: options.cwd, env: configEnv });
+      let normalized = normalizeModelConfigInput(input, config);
       if (!normalized.ok) {
         return normalized;
       }
       const configPath = modelConfigTargetPath(options.cwd, configEnv, normalized.saveTarget);
-      const targetConfig = await readJsonConfig(configPath);
-      const nextConfig = buildLocalModelConfig(targetConfig, config, normalized);
-      await writeJsonConfig(configPath, nextConfig);
+      const mutation = await mutateDashboardConfig(configPath, async (targetConfig) => {
+        config = await loadConfig({ cwd: options.cwd, env: await resolveConfigEnv() });
+        normalized = normalizeModelConfigInput(input, config);
+        if (!normalized.ok) {
+          throw dashboardConfigResultError(normalized);
+        }
+        return buildLocalModelConfig(targetConfig, config, normalized);
+      });
+      if (!mutation.ok) {
+        return mutation;
+      }
 
       const refreshed = await loadConfig({ cwd: options.cwd, env: await resolveConfigEnv() });
       if (normalized.switchToModel) {
@@ -161,6 +241,7 @@ export function createDashboardRuntime(options) {
       return {
         ok: true,
         configPath,
+        configRevision: mutation.revision,
         saveTarget: normalized.saveTarget,
         sessionId: syncedState?.session.id,
         sessionStatus: state ? sessionStatusForConfigUpdate(state.session, modelConfig) : sessionStatusFromConfig(modelConfig),
@@ -202,8 +283,7 @@ export function createDashboardRuntime(options) {
         };
       }
       const localPath = localProjectConfigPath(options.cwd);
-      const local = await readJsonConfig(localPath);
-      const nextLocal = buildLocalDeleteModelConfig(local, config, modelId);
+      let nextLocal = buildLocalDeleteModelConfig(await readJsonConfig(localPath), config, modelId);
       if (!nextLocal.ok) {
         return {
           ok: false,
@@ -216,13 +296,24 @@ export function createDashboardRuntime(options) {
           gatewayProfiles: publicGatewayProfiles(config)
         };
       }
-      await writeJsonConfig(localPath, nextLocal.config);
+      const mutation = await mutateDashboardConfig(localPath, async (local) => {
+        const latestConfig = await loadConfig({ cwd: options.cwd, env: await resolveConfigEnv() });
+        nextLocal = buildLocalDeleteModelConfig(local, latestConfig, modelId);
+        if (!nextLocal.ok) {
+          throw dashboardConfigResultError(nextLocal);
+        }
+        return nextLocal.config;
+      });
+      if (!mutation.ok) {
+        return mutation;
+      }
       const refreshed = await loadConfig({ cwd: options.cwd, env: await resolveConfigEnv() });
       if (selectedModelId === modelId || !listConfiguredModels(refreshed).some((model) => model.id === selectedModelId)) {
         selectedModelId = String(refreshed.modelAlias ?? "").trim();
       }
       if (state) {
         applySessionConfig(state.session, refreshed);
+        state.persisted = false;
         appendDashboardEvent(state, {
           type: "model_deleted",
           id: eventId("model-delete"),
@@ -238,6 +329,7 @@ export function createDashboardRuntime(options) {
         deletedModel: modelId,
         clearedGateway: nextLocal.clearedGateway === true,
         configPath: localPath,
+        configRevision: mutation.revision,
         sessionId: state?.session.id,
         sessionStatus: state ? sessionStatusSummary(state.session) : sessionStatusFromConfig(modelConfig),
         models: modelOptions(activeConfig),
@@ -269,8 +361,7 @@ export function createDashboardRuntime(options) {
       }
       const config = await loadConfig({ cwd: options.cwd, env: configEnv });
       const localPath = localProjectConfigPath(options.cwd);
-      const local = await readJsonConfig(localPath);
-      const nextLocal = buildGatewayProfileSwitchConfig(local, config, profileId);
+      let nextLocal = buildGatewayProfileSwitchConfig(await readJsonConfig(localPath), config, profileId);
       if (!nextLocal.ok) {
         return {
           ok: false,
@@ -283,11 +374,22 @@ export function createDashboardRuntime(options) {
           gatewayProfiles: publicGatewayProfiles(config)
         };
       }
-      await writeJsonConfig(localPath, nextLocal.config);
+      const mutation = await mutateDashboardConfig(localPath, async (local) => {
+        const latestConfig = await loadConfig({ cwd: options.cwd, env: await resolveConfigEnv() });
+        nextLocal = buildGatewayProfileSwitchConfig(local, latestConfig, profileId);
+        if (!nextLocal.ok) {
+          throw dashboardConfigResultError(nextLocal);
+        }
+        return nextLocal.config;
+      });
+      if (!mutation.ok) {
+        return mutation;
+      }
       const refreshed = await loadConfig({ cwd: options.cwd, env: await resolveConfigEnv() });
       selectedModelId = String(refreshed.modelAlias ?? "").trim();
       if (state) {
         applySessionConfig(state.session, refreshed);
+        state.persisted = false;
         appendDashboardEvent(state, {
           type: "gateway_profile_switched",
           id: eventId("gateway-profile"),
@@ -300,6 +402,7 @@ export function createDashboardRuntime(options) {
       const activeConfig = state?.session.config ?? modelConfig;
       return {
         ok: true,
+        configRevision: mutation.revision,
         sessionId: state?.session.id,
         sessionStatus: state ? sessionStatusSummary(state.session) : sessionStatusFromConfig(modelConfig),
         models: modelOptions(activeConfig),
@@ -364,11 +467,16 @@ export function createDashboardRuntime(options) {
       }
       const metadata = result.ok ? result.metadata ?? {} : {};
       const session = activeState?.session ?? {};
-      const storedTranscript = result.ok ? await readStoredTranscriptMessages(store, metadata) : [];
-      const transcript = activeState
-        ? mergeTranscriptMessages(storedTranscript, stableActiveTranscriptMessages(activeState))
-        : storedTranscript;
-      const transcriptPage = createTranscriptPage(transcript);
+      const storedPage = result.ok
+        ? await readStoredTranscriptPage(store, metadata)
+        : createTranscriptPageResult([]);
+      if (!storedPage.ok) {
+        return transcriptPageReadError(storedPage);
+      }
+      const transcriptPage = activeState
+        ? mergeActiveTranscriptPage(storedPage, activeState)
+        : storedPage;
+      const transcript = transcriptPage.messages;
       const finalText = activeState?.finalOutput || assistantTranscriptText(transcript);
       const snapshotState = activeState ?? createSnapshotReadState(metadata, options.cwd);
       const backgroundSnapshot = snapshotState ? await buildBackgroundSubagentSnapshot(snapshotState) : null;
@@ -388,7 +496,7 @@ export function createDashboardRuntime(options) {
           eventCursor: activeState ? activeReplayCursor(activeState) : null,
           sessionStatus: activeState ? sessionStatusSummary(activeState.session) : sessionStatusFromMetadata(metadata),
           permission: permissionModeSummary(activeState?.session ?? metadata),
-          transcript: transcriptPage.messages,
+          transcript,
           transcriptPage: transcriptPage.summary,
           files: collectSessionFiles({
             cwd: session.cwd ?? metadata.cwd ?? options.cwd,
@@ -415,14 +523,15 @@ export function createDashboardRuntime(options) {
         return { ok: false, status: 404, error: result.error?.message ?? "会话不存在" };
       }
       const metadata = result.ok ? result.metadata ?? {} : {};
-      const storedTranscript = result.ok ? await readStoredTranscriptMessages(store, metadata) : [];
-      const transcript = activeState
-        ? mergeTranscriptMessages(storedTranscript, stableActiveTranscriptMessages(activeState))
-        : storedTranscript;
-      const page = createTranscriptPage(transcript, {
-        before: input.before,
-        limit: input.limit
-      });
+      const storedPage = result.ok
+        ? await readStoredTranscriptPage(store, metadata, { before: input.before, limit: input.limit })
+        : createTranscriptPageResult([], { before: input.before, limit: input.limit });
+      if (!storedPage.ok) {
+        return transcriptPageReadError(storedPage);
+      }
+      const page = activeState && !hasTranscriptCursor(input.before)
+        ? mergeActiveTranscriptPage(storedPage, activeState, { limit: input.limit })
+        : storedPage;
       return {
         ok: true,
         sessionId: activeState?.session.id ?? metadata.id ?? sessionId,
@@ -431,103 +540,69 @@ export function createDashboardRuntime(options) {
       };
     },
     async deleteSession(input = {}) {
-      const configEnv = await resolveConfigEnv();
-      const sessionId = String(input.sessionId ?? input.id ?? "").trim();
-      if (!sessionId) {
-        return { ok: false, status: 400, error: "请选择要删除的会话" };
-      }
-      const activeState = active.get(sessionId);
-      if (activeState?.running) {
-        return { ok: false, status: 409, error: "会话正在运行，结束或中断后再删除" };
-      }
-      if (activeState) {
-        stopBackgroundSnapshotPolling(activeState);
-        active.delete(sessionId);
-      }
-      const config = await loadConfig({ cwd: options.cwd, env: configEnv });
-      const store = createSessionStore({ cwd: options.cwd, transcript: config.transcript, env: runtimeEnv });
-      const result = await store.deleteSession(sessionId);
-      if (!result.ok && activeState) {
-        return { ok: true, sessionId, activeDeleted: true, persistedDeleted: false };
-      }
-      if (!result.ok) {
-        return { ok: false, status: 404, error: result.error?.message ?? "会话不存在" };
-      }
-      return { ok: true, sessionId: result.id, deleted: result.deleted, activeDeleted: Boolean(activeState), persistedDeleted: true };
-    },
-    async startTurn(input) {
-      const configEnv = await resolveConfigEnv();
-      const prompt = String(input.prompt ?? "").trim();
-      const attachments = normalizeTurnAttachments(input.attachments);
-      if (!prompt && attachments.length === 0) {
-        return { ok: false, status: 400, error: "请输入任务需求" };
-      }
-      const trust = await resolveDashboardTrust({ cwd: options.cwd, env: configEnv, processTrusted });
-      if (!trust.trusted) {
-        return { ok: false, status: 403, error: "请先确认工作区信任", trust };
-      }
-      const mode = normalizePermissionMode(input.permissionMode);
-      const currentConfig = await loadConfig({ cwd: options.cwd, env: configEnv });
-      const state = await ensureTurnState(active, {
+      return deleteDashboardSession({
+        active,
+        sessionMutationLocks,
+        activeCapacityLocks,
+        activePolicy,
         cwd: options.cwd,
-        env: configEnv,
-        sessionId: input.sessionId,
-        mode,
-        modelId: selectedModelId,
-        config: currentConfig
-      });
-      state.hooksTrusted = trust.trusted;
-      const eventCursor = state.eventSequence;
-
-      if (state.running) {
-        const item = enqueuePrompt(state, prompt, mode, "prompt", attachments);
-        appendDashboardEvent(state, {
-          type: "prompt_queued",
-          id: eventId("prompt-queued"),
-          item: publicQueueItem(item),
-          queue: queueSnapshot(state),
-          queueLength: state.queuedPrompts.length,
-          at: new Date().toISOString()
-        });
-        appendQueueUpdated(state);
-        return {
-          ok: true,
-          queued: true,
-          sessionId: state.session.id,
-          eventCursor,
-          queue: queueSnapshot(state),
-          queueLength: state.queuedPrompts.length,
-          permission: permissionModeSummary(state.session),
-          sessionStatus: sessionStatusSummary(state.session)
-        };
+        runtimeEnv,
+        resolveConfigEnv
+      }, input);
+    },
+    async startTurn(input = {}) {
+      if (shuttingDown) {
+        return { ok: false, status: 503, code: "DASHBOARD_SHUTTING_DOWN", error: "Dashboard 正在关闭，不能再提交新任务" };
       }
-
-      const item = createQueueItem(prompt, mode, "prompt", "", attachments);
-      beginPrompt(state, item, configEnv);
-      return {
-        ok: true,
-        sessionId: state.session.id,
-        eventCursor,
-        running: true,
-        queue: queueSnapshot(state),
-        current: publicQueueItem(item),
-        permission: permissionModeSummary(state.session),
-        sessionStatus: sessionStatusSummary(state.session)
-      };
+      return withIdempotentTurnRequest(turnRequests, input, () => startDashboardTurn({
+        active,
+        sessionMutationLocks,
+        activeCapacityLocks,
+        activePolicy,
+        cwd: options.cwd,
+        runtimeEnv,
+        resolveConfigEnv,
+        processTrusted,
+        selectedModelId,
+        runTurn: options.runTurn ?? runSessionTurn
+      }, input));
     },
     interruptTurn(sessionId, reason = "user") {
-      const state = active.get(sessionId);
+      const normalized = normalizeMutationSessionId(sessionId);
+      if (!normalized.ok) {
+        return normalized;
+      }
+      if (sessionMutationLocks.has(normalized.sessionId)) {
+        return sessionMutationBusyResult(normalized.sessionId);
+      }
+      const state = active.get(normalized.sessionId);
       if (!state) {
         return { ok: false, status: 404, error: "会话不存在" };
       }
       if (!state.running) {
         return { ok: false, status: 409, error: "当前没有正在运行的任务" };
       }
+      if (state.quarantinedTurnId) {
+        return quarantinedSessionResult(state);
+      }
       requestTurnInterrupt(state, reason);
-      return { ok: true, sessionId: state.session.id, queue: queueSnapshot(state), sessionStatus: sessionStatusSummary(state.session) };
+      return {
+        ok: true,
+        sessionId: state.session.id,
+        interrupting: true,
+        queue: queueSnapshot(state),
+        sessionStatus: sessionStatusSummary(state.session)
+      };
     },
     cancelQueuedTurn(input = {}) {
-      const state = active.get(input.sessionId);
+      const normalized = normalizeMutationSessionId(input.sessionId);
+      if (!normalized.ok) {
+        return normalized;
+      }
+      if (sessionMutationLocks.has(normalized.sessionId)) {
+        return sessionMutationBusyResult(normalized.sessionId);
+      }
+      const state = active.get(normalized.sessionId);
       if (!state) {
         return { ok: false, status: 404, error: "会话不存在" };
       }
@@ -579,34 +654,57 @@ export function createDashboardRuntime(options) {
       if (groupId && !groupResult?.ok) {
         return { ok: false, status: 404, error: "子智能体任务组不存在或已结束" };
       }
+      if (groupResult?.ok && groupResult.group.parentSessionId !== state.session.id) {
+        return { ok: false, status: 403, code: "BACKGROUND_TASK_OWNERSHIP_MISMATCH", error: "子智能体任务组不属于该会话" };
+      }
       const targetTaskIds = groupResult?.ok
         ? (taskId ? groupResult.group.taskIds.filter((id) => id === taskId) : groupResult.group.taskIds)
         : [taskId];
       if (targetTaskIds.length === 0) {
         return { ok: false, status: 404, error: "子智能体任务不存在或不属于该任务组" };
       }
+      const targetTasks = [];
+      for (const id of targetTaskIds) {
+        const read = await taskStore.readTask(id);
+        if (!read.ok) {
+          return { ok: false, status: 404, error: "子智能体任务不存在" };
+        }
+        if (
+          read.task.parentSessionId !== state.session.id
+          || (groupId && read.task.groupId !== groupId)
+        ) {
+          return { ok: false, status: 403, code: "BACKGROUND_TASK_OWNERSHIP_MISMATCH", error: "子智能体任务不属于该会话或任务组" };
+        }
+        targetTasks.push(read.task);
+      }
       const aborted = cancelBackgroundAgentTasks({
         parentSessionId: state.session.id,
         groupId: groupId || null,
         taskId: taskId || null
       });
+      const abortedTaskIds = new Set(aborted.filter((task) => task.aborted === true).map((task) => task.taskId));
+      const cancellableTargets = targetTasks.filter((task) => !TERMINAL_TASK_STATUSES.has(String(task.status)));
+      if (cancellableTargets.length > 0 && !cancellableTargets.some((task) => abortedTaskIds.has(task.id))) {
+        return {
+          ok: false,
+          status: 409,
+          code: "BACKGROUND_CONTROLLER_NOT_FOUND",
+          error: "未找到可确认中止的后台子智能体 controller，任务状态未被修改"
+        };
+      }
       const now = new Date().toISOString();
       const updatedTasks = [];
-      for (const id of targetTaskIds) {
-        const read = await taskStore.readTask(id);
-        if (!read.ok || TERMINAL_TASK_STATUSES.has(String(read.task.status))) {
+      for (const task of targetTasks) {
+        if (TERMINAL_TASK_STATUSES.has(String(task.status)) || !abortedTaskIds.has(task.id)) {
           continue;
         }
-        const abortedInProcess = aborted.some((task) => task.taskId === id);
-        const updated = await taskStore.updateTask(id, {
+        const updated = await taskStore.updateTask(task.id, {
           status: "interrupted",
           cancelRequestedAt: now,
           finishedAt: now,
           heartbeatAt: now,
           progressAt: now,
-          latestProgress: abortedInProcess
-            ? "Dashboard 已请求回收后台子智能体；当前进程 controller 已中止。"
-            : "Dashboard 已标记后台子智能体为已回收；未找到当前进程 controller。"
+          latestProgress: "Dashboard 已请求回收后台子智能体；当前进程 controller 已中止。"
         });
         if (updated.ok) {
           updatedTasks.push(updated.task);
@@ -636,7 +734,7 @@ export function createDashboardRuntime(options) {
         id: eventId("background-subagent-cancelled"),
         groupId: groupId || null,
         taskId: taskId || null,
-        abortedTaskIds: aborted.map((task) => task.taskId),
+        abortedTaskIds: [...abortedTaskIds],
         updatedTaskIds: updatedTasks.map((task) => task.id),
         sessionStatus: sessionStatusSummary(state.session),
         at: now
@@ -647,7 +745,7 @@ export function createDashboardRuntime(options) {
         sessionId: state.session.id,
         groupId: groupId || group?.id || null,
         taskId: taskId || null,
-        abortedTaskIds: aborted.map((task) => task.taskId),
+        abortedTaskIds: [...abortedTaskIds],
         updatedTaskIds: updatedTasks.map((task) => task.id),
         sessionStatus: sessionStatusSummary(state.session)
       };
@@ -662,11 +760,36 @@ export function createDashboardRuntime(options) {
       if (!taskId) {
         return { ok: false, status: 400, error: "请选择要回收的后台终端任务" };
       }
+      const owned = listBackgroundTerminalTasks({
+        parentSessionId: state.session.id,
+        cwd: state.session.cwd,
+        taskId
+      }).filter((task) => (
+        (task.status === "starting" || task.status === "running")
+        && task.cwd
+        && path.resolve(task.cwd) === path.resolve(state.session.cwd)
+      ));
+      if (owned.length === 0) {
+        return {
+          ok: false,
+          status: 404,
+          code: "BACKGROUND_TERMINAL_NOT_ACTIVE",
+          error: "后台终端任务不存在、不属于该会话或已结束"
+        };
+      }
       const cancelled = cancelBackgroundTerminalTasks({
         parentSessionId: state.session.id,
         cwd: state.session.cwd,
         taskId
       });
+      if (cancelled.length === 0) {
+        return {
+          ok: false,
+          status: 404,
+          code: "BACKGROUND_TERMINAL_NOT_ACTIVE",
+          error: "后台终端任务不存在、不属于该会话或已结束"
+        };
+      }
       appendDashboardEvent(state, {
         type: "background_terminal_cancelled",
         id: eventId("background-terminal-cancelled"),
@@ -685,12 +808,22 @@ export function createDashboardRuntime(options) {
       };
     },
     guideTurn(input) {
-      const state = active.get(input.sessionId);
+      const normalized = normalizeMutationSessionId(input.sessionId);
+      if (!normalized.ok) {
+        return normalized;
+      }
+      if (sessionMutationLocks.has(normalized.sessionId)) {
+        return sessionMutationBusyResult(normalized.sessionId);
+      }
+      const state = active.get(normalized.sessionId);
       if (!state) {
         return { ok: false, status: 404, error: "会话不存在" };
       }
       if (!state.running) {
         return { ok: false, status: 409, error: "当前没有正在运行的任务" };
+      }
+      if (state.quarantinedTurnId) {
+        return quarantinedSessionResult(state);
       }
       const queueItemId = String(input.queueItemId ?? "").trim();
       const queueItemIndex = queueItemId
@@ -703,6 +836,9 @@ export function createDashboardRuntime(options) {
       const guidance = String(queuedItem?.guidance ?? input.guidance ?? input.prompt ?? "").trim();
       if (!guidance) {
         return { ok: false, status: 400, error: "请输入引导内容" };
+      }
+      if (!queuedItem && !queueHasCapacity(state)) {
+        return queueFullResult(state);
       }
       if (queuedItem) {
         state.queuedPrompts.splice(queueItemIndex, 1);
@@ -722,7 +858,6 @@ export function createDashboardRuntime(options) {
       const mode = normalizePermissionMode(input.permissionMode ?? state.currentPermissionMode);
       const item = createQueueItem(buildGuidePrompt(guidance, state.currentPrompt), mode, "guide", guidance);
       state.queuedPrompts.unshift(item);
-      state.queuedPrompts = state.queuedPrompts.slice(0, MAX_QUEUE);
       appendDashboardEvent(state, {
         type: "guide_queued",
         id: eventId("guide"),
@@ -744,74 +879,28 @@ export function createDashboardRuntime(options) {
       };
     },
     async clearContext(input = {}) {
-      const configEnv = await resolveConfigEnv();
-      const trust = await resolveDashboardTrust({ cwd: options.cwd, env: configEnv, processTrusted });
-      if (!trust.trusted) {
-        return { ok: false, status: 403, error: "请先确认工作区信任", trust };
-      }
-      if (!input.sessionId) {
-        return { ok: false, status: 400, error: "当前没有可清空上下文的会话" };
-      }
-      const mode = normalizePermissionMode(input.permissionMode);
-      const state = await ensureTurnState(active, {
+      return mutateDashboardContext({
+        active,
+        sessionMutationLocks,
+        activeCapacityLocks,
+        activePolicy,
         cwd: options.cwd,
-        env: configEnv,
-        sessionId: input.sessionId,
-        mode
-      });
-      if (state.running) {
-        return { ok: false, status: 409, error: "任务运行中，结束或中断后再清空上下文" };
-      }
-      const before = summarizeContextWindow(state.session);
-      const after = clearSessionContext(state.session);
-      appendDashboardEvent(state, {
-        type: "context_cleared",
-        id: eventId("context-clear"),
-        before,
-        after,
-        sessionStatus: sessionStatusSummary(state.session),
-        at: new Date().toISOString()
-      });
-      return { ok: true, sessionId: state.session.id, before, after, sessionStatus: sessionStatusSummary(state.session) };
+        runtimeEnv,
+        resolveConfigEnv,
+        processTrusted
+      }, input, "clear");
     },
     async compactContext(input = {}) {
-      const configEnv = await resolveConfigEnv();
-      const trust = await resolveDashboardTrust({ cwd: options.cwd, env: configEnv, processTrusted });
-      if (!trust.trusted) {
-        return { ok: false, status: 403, error: "请先确认工作区信任", trust };
-      }
-      if (!input.sessionId) {
-        return { ok: false, status: 400, error: "当前没有可压缩上下文的会话" };
-      }
-      const mode = normalizePermissionMode(input.permissionMode);
-      const state = await ensureTurnState(active, {
+      return mutateDashboardContext({
+        active,
+        sessionMutationLocks,
+        activeCapacityLocks,
+        activePolicy,
         cwd: options.cwd,
-        env: configEnv,
-        sessionId: input.sessionId,
-        mode
-      });
-      if (state.running) {
-        return { ok: false, status: 409, error: "任务运行中，结束或中断后再压缩上下文" };
-      }
-      const before = summarizeContextWindow(state.session);
-      const result = await compactSessionContextWithModel(state.session, {
-        force: true,
-        reason: "manual",
-        gateway: createLabModelGateway(state.session.config),
-        env: configEnv,
-        hooksTrusted: trust.trusted
-      });
-      const after = summarizeContextWindow(state.session);
-      appendDashboardEvent(state, {
-        type: "context_compacted",
-        id: eventId("context-compact"),
-        ...result,
-        before,
-        after,
-        sessionStatus: sessionStatusSummary(state.session),
-        at: new Date().toISOString()
-      });
-      return { ok: true, sessionId: state.session.id, result, before, after, sessionStatus: sessionStatusSummary(state.session) };
+        runtimeEnv,
+        resolveConfigEnv,
+        processTrusted
+      }, input, "compact");
     },
     subscribe(sessionId, send, options = {}) {
       const state = active.get(sessionId);
@@ -819,6 +908,9 @@ export function createDashboardRuntime(options) {
         return null;
       }
       state.listeners.add(send);
+      if (typeof options.onDispose === "function") {
+        state.listenerDisposers.set(send, options.onDispose);
+      }
       const afterSequence = nonNegativeInteger(options.afterSequence);
       for (const event of state.events) {
         if (nonNegativeInteger(event.sequence) > afterSequence) {
@@ -827,6 +919,7 @@ export function createDashboardRuntime(options) {
       }
       return () => {
         state.listeners.delete(send);
+        state.listenerDisposers.delete(send);
       };
     },
     listActiveEvents(sessionId) {
@@ -840,7 +933,7 @@ export function createDashboardRuntime(options) {
       }
       const activeState = active.get(id);
       if (activeState?.session?.cwd) {
-        return { ok: true, cwd: activeState.session.cwd };
+        return boundedSessionCwd(options.cwd, activeState.session.cwd);
       }
       const config = await loadConfig({ cwd: options.cwd, env: configEnv });
       const store = createSessionStore({ cwd: options.cwd, transcript: config.transcript, env: runtimeEnv });
@@ -848,7 +941,10 @@ export function createDashboardRuntime(options) {
       if (!result.ok) {
         return { ok: false, status: 404, error: "会话不存在" };
       }
-      return { ok: true, cwd: result.metadata?.cwd ?? options.cwd };
+      if (String(result.metadata?.id ?? "") !== id) {
+        return { ok: false, status: 400, code: "EXACT_SESSION_ID_REQUIRED", error: "文件接口只接受完整会话 ID" };
+      }
+      return boundedSessionCwd(options.cwd, result.metadata?.cwd ?? options.cwd);
     },
     resolveApproval(approvalId, action) {
       for (const state of active.values()) {
@@ -897,6 +993,89 @@ export function createDashboardRuntime(options) {
       }
       return { ok: false, status: 404, error: "需求核对请求不存在或已处理" };
     },
+    async lifecycleStatus() {
+      return {
+        ok: true,
+        activity: await dashboardRuntimeActivity(active, options.cwd)
+      };
+    },
+    async sweepIdleSessions() {
+      const evicted = await reclaimActiveSessions(active, {
+        cwd: options.cwd,
+        env: runtimeEnv,
+        sessionMutationLocks,
+        policy: activePolicy,
+        ttlOnly: true
+      });
+      return { ok: true, evicted, activeSessions: active.size };
+    },
+    async shutdown(input = {}) {
+      if (shuttingDown) {
+        return { ok: false, status: 409, code: "SHUTDOWN_IN_PROGRESS", error: "Dashboard 已在关闭" };
+      }
+      const initial = await dashboardRuntimeActivity(active, options.cwd);
+      const cancelActive = input.cancel === true || input.cancelActive === true || input.force === true;
+      const cancelBackground = input.cancel === true || input.cancelBackground === true || input.force === true;
+      if (initial.total > 0 && !cancelActive && !cancelBackground) {
+        return {
+          ok: false,
+          status: 409,
+          code: "ACTIVE_WORK_REQUIRES_DECISION",
+          error: "仍有活动任务，请明确选择取消并关闭或返回",
+          activity: initial
+        };
+      }
+      shuttingDown = true;
+      try {
+        if (cancelActive) {
+          for (const state of active.values()) {
+            cancelAllQueuedTurns(state, "shutdown");
+            if (state.running) {
+              requestTurnInterrupt(state, "shutdown");
+            } else {
+              cancelPendingInteractions(state, "shutdown");
+            }
+          }
+        }
+        if (cancelBackground) {
+          cancelWorkspaceBackgroundTerminals(options.cwd);
+          for (const state of active.values()) {
+            await cancelSessionBackgroundWork(state);
+          }
+        }
+        const timeoutMs = lifecycleWaitMs(input.timeoutMs, runtimeEnv);
+        const settled = await waitForRuntimeActivity(active, timeoutMs, options.cwd);
+        if (settled.total > 0 && input.force !== true) {
+          shuttingDown = false;
+          return {
+            ok: false,
+            status: 409,
+            code: "SHUTDOWN_TIMEOUT",
+            error: "活动任务未在清理时限内结束",
+            activity: settled,
+            timeoutMs
+          };
+        }
+        clearInterval(activeSweepTimer);
+        await activeSweepPromise;
+        for (const state of active.values()) {
+          disposeTurnState(state, "shutdown");
+        }
+        active.clear();
+        turnRequests.clear();
+        return {
+          ok: true,
+          forced: settled.total > 0,
+          cancelled: cancelActive || cancelBackground,
+          activity: settled,
+          initialActivity: initial,
+          timeoutMs
+        };
+      } catch (error) {
+        shuttingDown = false;
+        throw error;
+      }
+    },
     sessionFiles(sessionId) {
       const state = active.get(sessionId);
       if (!state) {
@@ -907,34 +1086,1048 @@ export function createDashboardRuntime(options) {
   };
 }
 
+function dashboardActiveSessionPolicy(env = process.env) {
+  return {
+    max: boundedPolicyInteger(
+      env?.ANT_CODE_DASHBOARD_ACTIVE_SESSION_MAX,
+      DASHBOARD_ACTIVE_SESSION_DEFAULTS.max,
+      1,
+      1000
+    ),
+    idleTtlMs: boundedPolicyInteger(
+      env?.ANT_CODE_DASHBOARD_ACTIVE_IDLE_TTL_MS,
+      DASHBOARD_ACTIVE_SESSION_DEFAULTS.idleTtlMs,
+      10,
+      24 * 60 * 60 * 1000
+    ),
+    sweepIntervalMs: boundedPolicyInteger(
+      env?.ANT_CODE_DASHBOARD_ACTIVE_SWEEP_MS,
+      DASHBOARD_ACTIVE_SESSION_DEFAULTS.sweepIntervalMs,
+      10,
+      60 * 60 * 1000
+    )
+  };
+}
+
+function boundedPolicyInteger(value, fallback, min, max) {
+  const number = Number(value);
+  if (!Number.isInteger(number)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, number));
+}
+
+async function reclaimActiveSessions(active, options) {
+  const policy = options.policy ?? DASHBOARD_ACTIVE_SESSION_DEFAULTS;
+  const candidates = [...active.values()]
+    .filter((state) => basicReclaimableState(state, policy, options.ttlOnly === true))
+    .sort((left, right) => Number(left.lastAccessedAt ?? 0) - Number(right.lastAccessedAt ?? 0));
+  const evicted = [];
+  for (const candidate of candidates) {
+    if (options.ttlOnly !== true && active.size <= Number(options.targetSize ?? policy.max - 1)) {
+      break;
+    }
+    const sessionId = candidate.session.id;
+    const observedAccess = candidate.lastAccessedAt;
+    const observedVersion = candidate.accessVersion;
+    await withKeyedMutation(options.sessionMutationLocks, sessionId, async () => {
+      const state = active.peek(sessionId);
+      if (
+        state !== candidate
+        || state.lastAccessedAt !== observedAccess
+        || state.accessVersion !== observedVersion
+        || !basicReclaimableState(state, policy, options.ttlOnly === true)
+        || !state.persisted
+      ) {
+        return;
+      }
+      if (!await isSessionStatePersisted(state, options.env)) {
+        state.persisted = false;
+        return;
+      }
+      const snapshot = await buildBackgroundSubagentSnapshot(state);
+      if (snapshot.groups.length > 0) {
+        return;
+      }
+      if (
+        state.lastAccessedAt !== observedAccess
+        || state.accessVersion !== observedVersion
+        || !basicReclaimableState(state, policy, options.ttlOnly === true)
+        || listBackgroundAgentTasks({ parentSessionId: sessionId }).length > 0
+        || listBackgroundTerminalTasks({ parentSessionId: sessionId, cwd: state.session.cwd })
+          .some((task) => task.status === "starting" || task.status === "running")
+      ) {
+        return;
+      }
+      disposeTurnState(state, options.ttlOnly === true ? "active-idle-ttl" : "active-lru-capacity");
+      if (active.peek(sessionId) === state) {
+        active.delete(sessionId);
+        evicted.push(sessionId);
+      }
+    });
+  }
+  return evicted;
+}
+
+function basicReclaimableState(state, policy, requireExpired) {
+  if (
+    !state
+    || state.disposed
+    || state.running
+    || state.interrupting
+    || state.quarantinedTurnId
+    || state.controller
+    || state.forceSettleTimer
+    || state.backgroundSnapshotTimer
+    || state.queuedPrompts.length > 0
+    || state.listeners.size > 0
+    || state.pendingApprovals.size > 0
+    || state.pendingQuestions.size > 0
+  ) {
+    return false;
+  }
+  return !requireExpired || Date.now() - Number(state.lastAccessedAt ?? 0) >= policy.idleTtlMs;
+}
+
+async function isSessionStatePersisted(state, env) {
+  if (!state?.session?.id || !state.session.cwd) {
+    return false;
+  }
+  const store = createSessionStore({
+    cwd: state.session.cwd,
+    transcript: state.session.config?.transcript,
+    env
+  });
+  const result = await store.readMetadataExact(state.session.id);
+  return result.ok && String(result.metadata?.id ?? "") === state.session.id;
+}
+
+function activeSessionCapacityResult(active, policy) {
+  return {
+    ok: false,
+    status: 503,
+    code: "ACTIVE_SESSION_CAPACITY_REACHED",
+    error: "活动会话已达到上限，且没有可安全回收的空闲会话",
+    activeSessions: active.size,
+    maxActiveSessions: policy?.max ?? DASHBOARD_ACTIVE_SESSION_DEFAULTS.max
+  };
+}
+
+async function withIdempotentTurnRequest(records, input, create) {
+  const requestId = normalizeTurnRequestId(input.requestId);
+  if (!requestId.ok) {
+    return requestId;
+  }
+  if (!requestId.value) {
+    return create();
+  }
+
+  pruneTurnRequests(records);
+  const fingerprint = turnRequestFingerprint(input);
+  const existing = records.get(requestId.value);
+  if (existing) {
+    if (existing.fingerprint !== fingerprint) {
+      return {
+        ok: false,
+        status: 409,
+        code: "REQUEST_ID_CONFLICT",
+        error: "同一 requestId 不能用于不同的任务提交",
+        requestId: requestId.value
+      };
+    }
+    return existing.promise;
+  }
+  if (records.size >= MAX_TURN_REQUESTS) {
+    return {
+      ok: false,
+      status: 503,
+      code: "IDEMPOTENCY_CAPACITY_REACHED",
+      error: "任务提交去重记录已达到容量上限，请稍后重试",
+      requestId: requestId.value
+    };
+  }
+
+  const record = {
+    fingerprint,
+    expiresAt: Date.now() + TURN_REQUEST_TTL_MS,
+    settled: false,
+    promise: null
+  };
+  record.promise = Promise.resolve()
+    .then(create)
+    .then((result) => ({ ...result, requestId: requestId.value }));
+  records.set(requestId.value, record);
+  try {
+    return await record.promise;
+  } finally {
+    record.settled = true;
+  }
+}
+
+function validateTurnSubmission(input = {}) {
+  const rawPrompt = String(input.prompt ?? "");
+  if (Buffer.byteLength(rawPrompt, "utf8") > MAX_PROMPT_BYTES) {
+    return {
+      ok: false,
+      status: 413,
+      code: "PROMPT_TOO_LARGE",
+      error: "任务内容不能超过 256 KiB"
+    };
+  }
+  const prompt = rawPrompt.trim();
+  const source = input.attachments ?? [];
+  if (!Array.isArray(source)) {
+    return { ok: false, status: 400, code: "INVALID_ATTACHMENTS", error: "attachments 必须是数组" };
+  }
+  if (source.length > MAX_TURN_IMAGES) {
+    return { ok: false, status: 400, code: "TOO_MANY_IMAGES", error: "每次任务最多上传 6 张图片" };
+  }
+  const attachments = [];
+  let totalBytes = 0;
+  for (const item of source) {
+    if (!item || typeof item !== "object" || item.type !== "image") {
+      return { ok: false, status: 400, code: "INVALID_IMAGE", error: "附件只允许图片" };
+    }
+    const mimeType = String(item.mimeType ?? item.mime_type ?? "").trim().toLowerCase();
+    if (!ALLOWED_IMAGE_MIME_TYPES.has(mimeType)) {
+      return { ok: false, status: 400, code: "UNSUPPORTED_IMAGE_TYPE", error: "图片只支持 PNG、JPEG、GIF 或 WebP" };
+    }
+    const data = String(item.data ?? "");
+    if (!isCanonicalBase64(data)) {
+      return { ok: false, status: 400, code: "INVALID_IMAGE_BASE64", error: "图片内容不是有效的 base64" };
+    }
+    const decoded = Buffer.from(data, "base64");
+    if (decoded.length > MAX_IMAGE_BYTES) {
+      return { ok: false, status: 413, code: "IMAGE_TOO_LARGE", error: "单张图片不能超过 8 MiB" };
+    }
+    totalBytes += decoded.length;
+    if (totalBytes > MAX_TOTAL_IMAGE_BYTES) {
+      return { ok: false, status: 413, code: "IMAGES_TOO_LARGE", error: "图片总量不能超过 24 MiB" };
+    }
+    if (!matchesImageSignature(decoded, mimeType)) {
+      return { ok: false, status: 400, code: "IMAGE_SIGNATURE_MISMATCH", error: "图片内容与声明的 MIME 类型不匹配" };
+    }
+    attachments.push({
+      type: "image",
+      data,
+      mimeType,
+      name: String(item.name ?? "image").trim().slice(0, 160) || "image",
+      size: decoded.length
+    });
+  }
+  return { ok: true, prompt, attachments };
+}
+
+function isCanonicalBase64(value) {
+  if (!value || value.length % 4 !== 0 || /\s/.test(value)) {
+    return false;
+  }
+  if (/[^A-Za-z0-9+/=]/.test(value)) {
+    return false;
+  }
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  const firstPadding = value.indexOf("=");
+  if (firstPadding >= 0 && firstPadding !== value.length - padding) {
+    return false;
+  }
+  try {
+    return Buffer.from(value, "base64").toString("base64") === value;
+  } catch {
+    return false;
+  }
+}
+
+function matchesImageSignature(buffer, mimeType) {
+  if (mimeType === "image/png") {
+    return buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  }
+  if (mimeType === "image/jpeg") {
+    return buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+  }
+  if (mimeType === "image/gif") {
+    const signature = buffer.subarray(0, 6).toString("ascii");
+    return signature === "GIF87a" || signature === "GIF89a";
+  }
+  if (mimeType === "image/webp") {
+    return buffer.length >= 12
+      && buffer.subarray(0, 4).toString("ascii") === "RIFF"
+      && buffer.subarray(8, 12).toString("ascii") === "WEBP";
+  }
+  return false;
+}
+
+function normalizeTurnRequestId(value) {
+  if (value === undefined || value === null || value === "") {
+    return { ok: true, value: "" };
+  }
+  const requestId = String(value).trim();
+  if (!requestId || requestId.length > 200 || !/^[A-Za-z0-9._:-]+$/.test(requestId)) {
+    return {
+      ok: false,
+      status: 400,
+      code: "INVALID_REQUEST_ID",
+      error: "requestId 必须是 1 到 200 位的字母、数字或 . _ : -"
+    };
+  }
+  return { ok: true, value: requestId };
+}
+
+function turnRequestFingerprint(input = {}) {
+  const hash = createHash("sha256");
+  updateFingerprintField(hash, "sessionId", String(input.sessionId ?? "").trim());
+  updateFingerprintField(hash, "prompt", String(input.prompt ?? ""));
+  updateFingerprintField(hash, "permissionMode", String(input.permissionMode ?? ""));
+  const attachments = Array.isArray(input.attachments) ? input.attachments : [];
+  updateFingerprintField(hash, "attachmentCount", String(attachments.length));
+  for (let index = 0; index < attachments.length; index += 1) {
+    const attachment = attachments[index] && typeof attachments[index] === "object" ? attachments[index] : {};
+    updateFingerprintField(hash, `${index}:type`, String(attachment.type ?? ""));
+    updateFingerprintField(hash, `${index}:name`, String(attachment.name ?? ""));
+    updateFingerprintField(hash, `${index}:mimeType`, String(attachment.mimeType ?? attachment.mime_type ?? ""));
+    updateFingerprintField(hash, `${index}:size`, String(attachment.size ?? ""));
+    updateFingerprintField(hash, `${index}:data`, String(attachment.data ?? ""));
+  }
+  return hash.digest("hex");
+}
+
+function updateFingerprintField(hash, name, value) {
+  const text = String(value);
+  hash.update(name);
+  hash.update("\0");
+  hash.update(String(Buffer.byteLength(text, "utf8")));
+  hash.update("\0");
+  hash.update(text);
+  hash.update("\0");
+}
+
+function pruneTurnRequests(records) {
+  const now = Date.now();
+  for (const [requestId, record] of records) {
+    if (record.settled && record.expiresAt <= now) {
+      records.delete(requestId);
+    }
+  }
+}
+
+async function startDashboardTurn(context, input) {
+  const validated = validateTurnSubmission(input);
+  if (!validated.ok) {
+    return validated;
+  }
+  const { prompt, attachments } = validated;
+  if (!prompt && attachments.length === 0) {
+    return { ok: false, status: 400, error: "请输入任务需求" };
+  }
+  const normalized = input.sessionId ? normalizeMutationSessionId(input.sessionId) : { ok: true, sessionId: "" };
+  if (!normalized.ok) {
+    return normalized;
+  }
+  const configEnv = await context.resolveConfigEnv();
+  const trust = await resolveDashboardTrust({ cwd: context.cwd, env: configEnv, processTrusted: context.processTrusted });
+  if (!trust.trusted) {
+    return { ok: false, status: 403, error: "请先确认工作区信任", trust };
+  }
+  const mode = normalizePermissionMode(input.permissionMode);
+  const currentConfig = await loadConfig({ cwd: context.cwd, env: configEnv });
+  const run = async () => {
+    if (normalized.sessionId) {
+      const exact = await requireExactSessionId(context.active, {
+        cwd: context.cwd,
+        env: context.runtimeEnv,
+        config: currentConfig,
+        sessionId: normalized.sessionId
+      });
+      if (!exact.ok) {
+        return exact;
+      }
+    }
+    let state;
+    try {
+      state = await ensureTurnState(context.active, {
+        cwd: context.cwd,
+        env: configEnv,
+        sessionId: normalized.sessionId,
+        mode,
+        modelId: context.selectedModelId,
+        config: currentConfig,
+        runTurn: context.runTurn,
+        sessionMutationLocks: context.sessionMutationLocks,
+        activeCapacityLocks: context.activeCapacityLocks,
+        activePolicy: context.activePolicy
+      });
+    } catch (error) {
+      if (error instanceof ActiveSessionCapacityError) {
+        return activeSessionCapacityResult(context.active, context.activePolicy);
+      }
+      throw error;
+    }
+    if (state.disposed) {
+      return { ok: false, status: 410, code: "SESSION_DISPOSED", error: "会话已被删除" };
+    }
+    if (state.quarantinedTurnId) {
+      return quarantinedSessionResult(state);
+    }
+    if (!state.running && state.queuedPrompts.length > 0) {
+      return {
+        ok: false,
+        status: 409,
+        code: "QUEUED_TURNS_REQUIRE_RESOLUTION",
+        error: "隔离任务留下的排队消息尚未处理，请先取消排队消息后再提交",
+        sessionId: state.session.id,
+        queue: queueSnapshot(state)
+      };
+    }
+    state.hooksTrusted = trust.trusted;
+    const eventCursor = state.eventSequence;
+
+    if (state.running) {
+      const queuedAttachmentBytes = state.queuedPrompts.reduce((total, queued) => (
+        total + queued.attachments.reduce((sum, attachment) => sum + nonNegativeInteger(attachment.size), 0)
+      ), 0);
+      const newAttachmentBytes = attachments.reduce((total, attachment) => total + attachment.size, 0);
+      if (state.currentAttachmentBytes + queuedAttachmentBytes + newAttachmentBytes > MAX_TOTAL_IMAGE_BYTES) {
+        return {
+          ok: false,
+          status: 413,
+          code: "QUEUE_ATTACHMENT_BUDGET_EXCEEDED",
+          error: "排队消息中的图片总量不能超过 24 MiB",
+          sessionId: state.session.id,
+          queue: queueSnapshot(state)
+        };
+      }
+      const item = enqueuePrompt(state, prompt, mode, "prompt", attachments);
+      if (!item) {
+        return queueFullResult(state);
+      }
+      appendDashboardEvent(state, {
+        type: "prompt_queued",
+        id: eventId("prompt-queued"),
+        item: publicQueueItem(item),
+        queue: queueSnapshot(state),
+        queueLength: state.queuedPrompts.length,
+        at: new Date().toISOString()
+      });
+      appendQueueUpdated(state);
+      return {
+        ok: true,
+        queued: true,
+        sessionId: state.session.id,
+        eventCursor,
+        queue: queueSnapshot(state),
+        queueLength: state.queuedPrompts.length,
+        permission: permissionModeSummary(state.session),
+        sessionStatus: sessionStatusSummary(state.session)
+      };
+    }
+
+    const item = createQueueItem(prompt, mode, "prompt", "", attachments);
+    beginPrompt(state, item, configEnv);
+    return {
+      ok: true,
+      sessionId: state.session.id,
+      eventCursor,
+      running: true,
+      queue: queueSnapshot(state),
+      current: publicQueueItem(item),
+      permission: permissionModeSummary(state.session),
+      sessionStatus: sessionStatusSummary(state.session)
+    };
+  };
+  return normalized.sessionId
+    ? withKeyedMutation(context.sessionMutationLocks, normalized.sessionId, run)
+    : run();
+}
+
+async function mutateDashboardContext(context, input, operation) {
+  const normalized = normalizeMutationSessionId(input.sessionId);
+  if (!normalized.ok) {
+    return normalized;
+  }
+  const configEnv = await context.resolveConfigEnv();
+  const trust = await resolveDashboardTrust({ cwd: context.cwd, env: configEnv, processTrusted: context.processTrusted });
+  if (!trust.trusted) {
+    return { ok: false, status: 403, error: "请先确认工作区信任", trust };
+  }
+  const config = await loadConfig({ cwd: context.cwd, env: configEnv });
+  return withKeyedMutation(context.sessionMutationLocks, normalized.sessionId, async () => {
+    const exact = await requireExactSessionId(context.active, {
+      cwd: context.cwd,
+      env: context.runtimeEnv,
+      config,
+      sessionId: normalized.sessionId
+    });
+    if (!exact.ok) {
+      return exact;
+    }
+    const mode = normalizePermissionMode(input.permissionMode);
+    let state;
+    try {
+      state = await ensureTurnState(context.active, {
+        cwd: context.cwd,
+        env: configEnv,
+        sessionId: normalized.sessionId,
+        mode,
+        config,
+        sessionMutationLocks: context.sessionMutationLocks,
+        activeCapacityLocks: context.activeCapacityLocks,
+        activePolicy: context.activePolicy
+      });
+    } catch (error) {
+      if (error instanceof ActiveSessionCapacityError) {
+        return activeSessionCapacityResult(context.active, context.activePolicy);
+      }
+      throw error;
+    }
+    if (state.running || state.quarantinedTurnId) {
+      return {
+        ok: false,
+        status: 409,
+        code: state.quarantinedTurnId ? "SESSION_QUARANTINED" : "SESSION_RUNNING",
+        error: operation === "compact" ? "任务运行中，结束或中断后再压缩上下文" : "任务运行中，结束或中断后再清空上下文"
+      };
+    }
+    const before = summarizeContextWindow(state.session);
+    const contextSnapshot = captureDashboardContextState(state.session);
+    if (operation === "clear") {
+      const after = clearSessionContext(state.session);
+      state.persisted = false;
+      const persistence = await persistDashboardContextMutation(state, configEnv, contextSnapshot);
+      if (!persistence.ok) {
+        return persistence;
+      }
+      appendDashboardEvent(state, {
+        type: "context_cleared",
+        id: eventId("context-clear"),
+        before,
+        after,
+        sessionStatus: sessionStatusSummary(state.session),
+        at: new Date().toISOString()
+      });
+      return { ok: true, sessionId: state.session.id, before, after, sessionStatus: sessionStatusSummary(state.session) };
+    }
+    const result = await compactSessionContextWithModel(state.session, {
+      force: true,
+      reason: "manual",
+      gateway: createLabModelGateway(state.session.config),
+      env: configEnv,
+      hooksTrusted: trust.trusted
+    });
+    state.persisted = false;
+    const persistence = await persistDashboardContextMutation(state, configEnv, contextSnapshot);
+    if (!persistence.ok) {
+      return persistence;
+    }
+    const after = summarizeContextWindow(state.session);
+    appendDashboardEvent(state, {
+      type: "context_compacted",
+      id: eventId("context-compact"),
+      ...result,
+      before,
+      after,
+      sessionStatus: sessionStatusSummary(state.session),
+      at: new Date().toISOString()
+    });
+    return { ok: true, sessionId: state.session.id, result, before, after, sessionStatus: sessionStatusSummary(state.session) };
+  });
+}
+
+function captureDashboardContextState(session) {
+  return {
+    messages: cloneDashboardStateValue(session.messages),
+    contextWindow: cloneDashboardStateValue(session.contextWindow),
+    transcriptArchive: cloneDashboardStateValue(session.transcriptArchive),
+    modelContextArchive: cloneDashboardStateValue(session.modelContextArchive)
+  };
+}
+
+async function persistDashboardContextMutation(state, env, snapshot) {
+  try {
+    await persistSessionSnapshot(state.session, { env });
+    state.persisted = true;
+    return { ok: true };
+  } catch (error) {
+    state.session.messages = snapshot.messages;
+    state.session.contextWindow = snapshot.contextWindow;
+    state.session.transcriptArchive = snapshot.transcriptArchive;
+    state.session.modelContextArchive = snapshot.modelContextArchive;
+    state.persisted = false;
+    return {
+      ok: false,
+      status: 500,
+      code: "CONTEXT_PERSIST_FAILED",
+      error: "上下文状态未能安全保存，操作已回退，请重试"
+    };
+  }
+}
+
+function cloneDashboardStateValue(value) {
+  return value === undefined ? undefined : structuredClone(value);
+}
+
+async function deleteDashboardSession(context, input) {
+  const normalized = normalizeMutationSessionId(input.sessionId ?? input.id);
+  if (!normalized.ok) {
+    return normalized;
+  }
+  const configEnv = await context.resolveConfigEnv();
+  const config = await loadConfig({ cwd: context.cwd, env: configEnv });
+  return withKeyedMutation(context.sessionMutationLocks, normalized.sessionId, async () => {
+    const exact = await requireExactSessionId(context.active, {
+      cwd: context.cwd,
+      env: context.runtimeEnv,
+      config,
+      sessionId: normalized.sessionId
+    });
+    if (!exact.ok) {
+      return exact;
+    }
+    const state = context.active.get(normalized.sessionId) ?? null;
+    const initialActivity = state ? await dashboardSessionActivity(state) : emptyRuntimeActivity();
+    const cancelActive = input.cancelActive === true;
+    const cancelBackground = input.cancelBackground === true;
+    if (initialActivity.total > 0 && !cancelActive && !cancelBackground) {
+      return {
+        ok: false,
+        status: 409,
+        code: "SESSION_HAS_ACTIVE_WORK",
+        error: "会话仍有主任务、排队消息、后台任务或待处理交互，不能直接删除",
+        sessionId: normalized.sessionId,
+        activity: initialActivity
+      };
+    }
+    if (state && cancelActive) {
+      cancelAllQueuedTurns(state, "session-delete");
+      if (state.running) {
+        requestTurnInterrupt(state, "session-delete");
+      } else {
+        cancelPendingInteractions(state, "session-delete");
+      }
+    }
+    if (state && cancelBackground) {
+      await cancelSessionBackgroundWork(state);
+    }
+    if (state && (cancelActive || cancelBackground)) {
+      const timeoutMs = lifecycleWaitMs(input.timeoutMs, context.runtimeEnv);
+      const remaining = await waitForSessionActivity(state, timeoutMs);
+      if (remaining.total > 0) {
+        return {
+          ok: false,
+          status: 409,
+          code: "SESSION_CANCEL_TIMEOUT",
+          error: "会话活动任务未在清理时限内结束，未执行删除",
+          sessionId: normalized.sessionId,
+          activity: remaining,
+          timeoutMs
+        };
+      }
+    }
+
+    const store = createSessionStore({ cwd: context.cwd, transcript: config.transcript, env: context.runtimeEnv });
+    const result = await store.deleteSession(normalized.sessionId);
+    if (!result.ok && !state) {
+      return { ok: false, status: 404, error: result.error?.message ?? "会话不存在" };
+    }
+    if (state) {
+      disposeTurnState(state, "session-delete");
+      if (context.active.get(normalized.sessionId) === state) {
+        context.active.delete(normalized.sessionId);
+      }
+    }
+    return {
+      ok: true,
+      sessionId: result.ok ? result.id : normalized.sessionId,
+      deleted: result.ok ? result.deleted : [],
+      activeDeleted: Boolean(state),
+      persistedDeleted: result.ok
+    };
+  });
+}
+
+function normalizeMutationSessionId(value) {
+  const sessionId = String(value ?? "").trim();
+  if (!sessionId) {
+    return { ok: false, status: 400, code: "SESSION_ID_REQUIRED", error: "请选择完整的会话 ID" };
+  }
+  if (sessionId.toLowerCase() === "latest") {
+    return { ok: false, status: 400, code: "EXACT_SESSION_ID_REQUIRED", error: "修改操作只接受完整会话 ID" };
+  }
+  return { ok: true, sessionId };
+}
+
+async function boundedSessionCwd(workspaceCwd, candidateCwd) {
+  try {
+    const [workspaceReal, candidateReal] = await Promise.all([
+      fs.realpath(workspaceCwd),
+      fs.realpath(candidateCwd)
+    ]);
+    if (!isPathInside(workspaceReal, candidateReal)) {
+      return {
+        ok: false,
+        status: 403,
+        code: "SESSION_CWD_OUTSIDE_WORKSPACE",
+        error: "会话工作目录不在 Dashboard 工作区内"
+      };
+    }
+    return { ok: true, cwd: candidateReal };
+  } catch {
+    return { ok: false, status: 404, code: "SESSION_CWD_NOT_FOUND", error: "会话工作目录不存在" };
+  }
+}
+
+function isPathInside(root, candidate) {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
+async function requireExactSessionId(active, options) {
+  if (active.has(options.sessionId)) {
+    return { ok: true, sessionId: options.sessionId };
+  }
+  const store = createSessionStore({ cwd: options.cwd, transcript: options.config.transcript, env: options.env });
+  const result = await store.readMetadata(options.sessionId);
+  if (!result.ok) {
+    return { ok: false, status: 404, code: "SESSION_NOT_FOUND", error: result.error?.message ?? "会话不存在" };
+  }
+  const resolvedId = String(result.metadata?.id ?? "").trim();
+  if (!resolvedId || resolvedId !== options.sessionId) {
+    return {
+      ok: false,
+      status: 400,
+      code: "EXACT_SESSION_ID_REQUIRED",
+      error: "修改操作不接受 latest 或会话 ID 前缀，请使用完整会话 ID"
+    };
+  }
+  return { ok: true, sessionId: resolvedId };
+}
+
+async function withKeyedMutation(locks, key, fn) {
+  const previous = locks.get(key) ?? Promise.resolve();
+  let release;
+  const current = new Promise((resolve) => {
+    release = resolve;
+  });
+  locks.set(key, current);
+  await previous.catch(() => {});
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (locks.get(key) === current) {
+      locks.delete(key);
+    }
+  }
+}
+
+function sessionMutationBusyResult(sessionId) {
+  return {
+    ok: false,
+    status: 409,
+    code: "SESSION_MUTATION_IN_PROGRESS",
+    error: "该会话正在执行另一项修改，请稍后重试",
+    sessionId
+  };
+}
+
+function quarantinedSessionResult(state) {
+  return {
+    ok: false,
+    status: 409,
+    code: "SESSION_QUARANTINED",
+    error: "旧任务未能及时停止，会话已隔离；底层执行真正结束前不能继续运行",
+    sessionId: state.session.id,
+    turnId: state.quarantinedTurnId,
+    queue: queueSnapshot(state)
+  };
+}
+
+async function dashboardRuntimeActivity(active, cwd = process.cwd()) {
+  const result = emptyRuntimeActivity();
+  const activeSessionIds = new Set();
+  for (const state of active.values()) {
+    activeSessionIds.add(state.session.id);
+    const activity = await dashboardSessionActivity(state);
+    result.activeTurns += activity.activeTurns;
+    result.quarantinedTurns += activity.quarantinedTurns;
+    result.queuedTurns += activity.queuedTurns;
+    result.backgroundTasks += activity.backgroundTasks;
+    result.pendingInteractions += activity.pendingInteractions;
+  }
+  const workspace = path.resolve(cwd);
+  const orphanTerminals = listBackgroundTerminalTasks({ cwd })
+    .filter((task) => task.status === "starting" || task.status === "running")
+    .filter((task) => task.cwd && path.resolve(task.cwd) === workspace)
+    .filter((task) => !task.parentSessionId || !activeSessionIds.has(task.parentSessionId));
+  result.backgroundTasks += orphanTerminals.length;
+  result.sessions = active.size;
+  result.total = activityTotal(result);
+  return result;
+}
+
+async function dashboardSessionActivity(state) {
+  const snapshot = await buildBackgroundSubagentSnapshot(state);
+  const activeTurns = state.running ? 1 : 0;
+  const visibleBackgroundTasks = snapshot.groups.reduce((total, group) => (
+    total + Math.max(1, nonNegativeInteger(group.runningCount))
+  ), 0);
+  const registeredAgents = listBackgroundAgentTasks({ parentSessionId: state.session.id }).length;
+  const registeredTerminals = listBackgroundTerminalTasks({ parentSessionId: state.session.id, cwd: state.session.cwd })
+    .filter((task) => task.status === "starting" || task.status === "running")
+    .filter((task) => !task.cwd || path.resolve(task.cwd) === path.resolve(state.session.cwd))
+    .length;
+  const result = {
+    sessions: 1,
+    activeTurns,
+    quarantinedTurns: state.quarantinedTurnId ? 1 : 0,
+    queuedTurns: state.queuedPrompts.length,
+    backgroundTasks: Math.max(visibleBackgroundTasks, registeredAgents + registeredTerminals),
+    pendingInteractions: state.pendingApprovals.size + state.pendingQuestions.size,
+    total: 0
+  };
+  result.total = activityTotal(result);
+  return result;
+}
+
+function emptyRuntimeActivity() {
+  return {
+    sessions: 0,
+    activeTurns: 0,
+    quarantinedTurns: 0,
+    queuedTurns: 0,
+    backgroundTasks: 0,
+    pendingInteractions: 0,
+    total: 0
+  };
+}
+
+function activityTotal(activity) {
+  return activity.activeTurns + activity.queuedTurns + activity.backgroundTasks + activity.pendingInteractions;
+}
+
+async function cancelSessionBackgroundWork(state) {
+  const aborted = cancelBackgroundAgentTasks({ parentSessionId: state.session.id });
+  for (const task of listBackgroundTerminalTasks({ parentSessionId: state.session.id, cwd: state.session.cwd })) {
+    if (
+      (task.status === "starting" || task.status === "running")
+      && task.cwd
+      && path.resolve(task.cwd) === path.resolve(state.session.cwd)
+    ) {
+      cancelBackgroundTerminalTasks({
+        parentSessionId: state.session.id,
+        cwd: state.session.cwd,
+        taskId: task.taskId
+      });
+    }
+  }
+  const abortedIds = new Set(aborted.filter((task) => task.aborted === true).map((task) => task.taskId));
+  const taskStore = createAgentTaskStore({ cwd: state.session.cwd });
+  const groupStore = createAgentTaskGroupStore({ cwd: state.session.cwd });
+  const tasks = await taskStore.listTasks({ parentSessionId: state.session.id });
+  const now = new Date().toISOString();
+  for (const task of tasks) {
+    if (!abortedIds.has(task.id) || TERMINAL_TASK_STATUSES.has(String(task.status))) {
+      continue;
+    }
+    await taskStore.updateTask(task.id, {
+      status: "interrupted",
+      cancelRequestedAt: now,
+      finishedAt: now,
+      heartbeatAt: now,
+      progressAt: now,
+      latestProgress: "Dashboard 已取消会话，后台子任务 controller 已中止。"
+    });
+  }
+  const groups = await groupStore.listGroups({ parentSessionId: state.session.id });
+  for (const group of groups) {
+    const groupTasks = await readDashboardGroupTasks(taskStore, group.taskIds);
+    const summary = summarizeGroupStatus(groupTasks, { waitFor: group.waitFor });
+    await groupStore.updateGroup(group.id, {
+      status: summary.completed ? summary.status : group.status,
+      summary: summary.summary,
+      latestProgress: summary.summary,
+      wakePromptConsumedAt: group.wakePromptQueuedAt && !group.wakePromptConsumedAt ? now : group.wakePromptConsumedAt,
+      metadata: {
+        ...(group.metadata ?? {}),
+        cancelledFromDashboardAt: now
+      }
+    });
+  }
+  await appendBackgroundSubagentSnapshot(state);
+}
+
+function cancelWorkspaceBackgroundTerminals(cwd) {
+  const workspace = path.resolve(cwd);
+  for (const task of listBackgroundTerminalTasks({ cwd })) {
+    if (
+      (task.status === "starting" || task.status === "running")
+      && task.cwd
+      && path.resolve(task.cwd) === workspace
+    ) {
+      cancelBackgroundTerminalTasks({
+        parentSessionId: task.parentSessionId,
+        cwd,
+        taskId: task.taskId
+      });
+    }
+  }
+}
+
+function cancelAllQueuedTurns(state, reason) {
+  if (state.queuedPrompts.length === 0) {
+    return [];
+  }
+  const removed = state.queuedPrompts.splice(0).map(publicQueueItem);
+  appendDashboardEvent(state, {
+    type: "queue_cleared",
+    id: eventId("queue-cleared"),
+    reason,
+    items: removed,
+    queue: [],
+    queueLength: 0,
+    running: state.running,
+    at: new Date().toISOString()
+  });
+  appendQueueUpdated(state);
+  return removed;
+}
+
+async function waitForRuntimeActivity(active, timeoutMs, cwd) {
+  const deadline = Date.now() + timeoutMs;
+  let activity = await dashboardRuntimeActivity(active, cwd);
+  while (activity.total > 0 && Date.now() < deadline) {
+    await waitForLifecycleTick(deadline);
+    activity = await dashboardRuntimeActivity(active, cwd);
+  }
+  return activity;
+}
+
+async function waitForSessionActivity(state, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let activity = await dashboardSessionActivity(state);
+  while (activity.total > 0 && Date.now() < deadline) {
+    await waitForLifecycleTick(deadline);
+    activity = await dashboardSessionActivity(state);
+  }
+  return activity;
+}
+
+function waitForLifecycleTick(deadline) {
+  return new Promise((resolve) => {
+    const delay = Math.max(1, Math.min(25, deadline - Date.now()));
+    setTimeout(resolve, delay);
+  });
+}
+
+function lifecycleWaitMs(value, env = process.env) {
+  const configured = Number(value ?? env?.ANT_CODE_DASHBOARD_LIFECYCLE_WAIT_MS ?? DEFAULT_LIFECYCLE_WAIT_MS);
+  if (!Number.isFinite(configured)) {
+    return DEFAULT_LIFECYCLE_WAIT_MS;
+  }
+  return Math.max(50, Math.min(MAX_LIFECYCLE_WAIT_MS, Math.trunc(configured)));
+}
+
+function disposeTurnState(state, reason) {
+  if (state.disposed) {
+    return;
+  }
+  clearForceSettleTimer(state);
+  stopBackgroundSnapshotPolling(state);
+  const canReleaseSessionMemory = !state.controller;
+  if (state.controller && !state.controller.signal.aborted) {
+    state.controller.abort(reason);
+  }
+  cancelPendingInteractions(state, reason);
+  state.queuedPrompts.length = 0;
+  state.currentAttachmentBytes = 0;
+  for (const dispose of state.listenerDisposers.values()) {
+    try {
+      dispose(reason);
+    } catch {
+      // Listener disposal is best-effort; state references are still removed below.
+    }
+  }
+  state.listenerDisposers.clear();
+  state.disposed = true;
+  state.controller = null;
+  state.running = false;
+  state.interrupting = false;
+  state.quarantinedTurnId = "";
+  state.currentPrompt = "";
+  state.currentTurnId = "";
+  state.turnEnv = null;
+  state.finalOutput = "";
+  state.events.length = 0;
+  state.listeners.clear();
+  if (canReleaseSessionMemory) {
+    state.session.messages = [];
+    state.session.transcriptMessages = [];
+    if (state.session.transcriptArchive) {
+      state.session.transcriptArchive.pendingMessages = [];
+    }
+    if (state.session.modelContextArchive) {
+      state.session.modelContextArchive.pendingMessages = [];
+    }
+    state.session.workflow = null;
+    state.session.context = null;
+    state.session.contextWindow = null;
+    state.session.workspaceDiagnostic = null;
+    state.session.usage = null;
+    state.session.lastProviderUsage = null;
+  }
+}
+
 async function ensureTurnState(active, options) {
   let state = options.sessionId ? active.get(options.sessionId) : null;
   if (state) {
+    if (options.runTurn) {
+      state.runTurn = options.runTurn;
+    }
     if (!state.running && options.config) {
       applySessionConfig(state.session, configForExistingSession(state.session, options.config));
     }
-    applyPermissionMode(state.session, options.mode);
+    if (!state.running) {
+      applyPermissionMode(state.session, options.mode);
+    }
     return state;
   }
-  const session = await createSession({
-    cwd: options.cwd,
-    mode: "interactive",
-    clientSurface: "dashboard",
-    env: options.env,
-    resume: options.sessionId || null,
-    resumeFullContext: Boolean(options.sessionId),
-    readonly: false,
-    allowWrite: options.mode === "workspace",
-    allowCommand: options.mode === "workspace",
-    fullAccess: options.mode === "fullAccess"
+  return withKeyedMutation(options.activeCapacityLocks, "active-capacity", async () => {
+    state = options.sessionId ? active.get(options.sessionId) : null;
+    if (state) {
+      return state;
+    }
+    const policy = options.activePolicy ?? DASHBOARD_ACTIVE_SESSION_DEFAULTS;
+    if (active.size >= policy.max) {
+      await reclaimActiveSessions(active, {
+        cwd: options.cwd,
+        env: options.env,
+        sessionMutationLocks: options.sessionMutationLocks,
+        policy,
+        ttlOnly: false,
+        targetSize: policy.max - 1
+      });
+    }
+    if (active.size >= policy.max) {
+      throw new ActiveSessionCapacityError();
+    }
+    const session = await createSession({
+      cwd: options.cwd,
+      mode: "interactive",
+      clientSurface: "dashboard",
+      env: options.env,
+      resume: options.sessionId || null,
+      resumeFullContext: Boolean(options.sessionId),
+      readonly: false,
+      allowWrite: options.mode === "workspace",
+      allowCommand: options.mode === "workspace",
+      fullAccess: options.mode === "fullAccess"
+    });
+    if (options.modelId) {
+      applySessionModel(session, options.modelId);
+    }
+    applyPermissionMode(session, options.mode);
+    state = createTurnState(session, options.runTurn, { persisted: Boolean(options.sessionId) });
+    active.set(session.id, state);
+    return state;
   });
-  if (options.modelId) {
-    applySessionModel(session, options.modelId);
-  }
-  applyPermissionMode(session, options.mode);
-  state = createTurnState(session);
-  active.set(session.id, state);
-  return state;
 }
 
 function applySessionModel(session, modelId) {
@@ -1018,6 +2211,7 @@ function syncIdleSessionConfig(active, sessionId, config) {
     return null;
   }
   applySessionConfig(state.session, config);
+  state.persisted = false;
   appendDashboardEvent(state, {
     type: "session_config_updated",
     id: eventId("session-config"),
@@ -1203,17 +2397,37 @@ async function readJsonConfig(filePath) {
   }
 }
 
+async function mutateDashboardConfig(filePath, update) {
+  try {
+    return { ok: true, ...await mutateJsonConfig(filePath, update) };
+  } catch (error) {
+    if (error?.dashboardResult) {
+      return error.dashboardResult;
+    }
+    if (error?.code === "CONFIG_REVISION_CONFLICT" || error?.code === "CONFIG_LOCK_TIMEOUT") {
+      return {
+        ok: false,
+        status: 409,
+        code: error.code,
+        error: "配置已被其他进程修改，请刷新后重试"
+      };
+    }
+    throw error;
+  }
+}
+
+function dashboardConfigResultError(result) {
+  const error = new Error(result?.error ?? "配置更新失败");
+  error.dashboardResult = result;
+  return error;
+}
+
 async function dashboardConfigEnv(cwd, env) {
   return env;
 }
 
 function modelConfigTargetPath(cwd, env, saveTarget = "project") {
   return saveTarget === "global" ? globalConfigPath(env) : localProjectConfigPath(cwd);
-}
-
-async function writeJsonConfig(filePath, data) {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
 }
 
 function buildLocalModelConfig(local, config, normalized) {
@@ -1802,21 +3016,31 @@ function clonePlainObject(value) {
   return JSON.parse(JSON.stringify(value ?? {}));
 }
 
-function createTurnState(session) {
+function createTurnState(session, runTurn = runSessionTurn, options = {}) {
   return {
     session,
+    runTurn,
+    persisted: options.persisted === true,
+    lastAccessedAt: Date.now(),
+    accessVersion: 0,
     status: "idle",
     running: false,
+    interrupting: false,
+    quarantinedTurnId: "",
+    forceSettleTimer: null,
+    disposed: false,
     controller: null,
     currentPrompt: "",
     currentTurnId: "",
+    currentAttachmentBytes: 0,
     currentTranscriptStart: 0,
-    currentPermissionMode: "plan",
+    currentPermissionMode: permissionModeSummary(session).mode,
     turnChangeStats: emptyChangeStats(),
     queuedPrompts: [],
     events: [],
     eventSequence: 0,
     listeners: new Set(),
+    listenerDisposers: new Map(),
     sessionApprovals: new Set(),
     pendingApprovals: new Map(),
     pendingQuestions: new Map(),
@@ -1883,39 +3107,114 @@ function stableActiveTranscriptMessages(state) {
   return messages.slice(0, Math.min(start, messages.length));
 }
 
-async function readStoredTranscriptMessages(store, metadata) {
+async function readStoredTranscriptPage(store, metadata, options = {}) {
   const fallback = Array.isArray(metadata?.transcript?.messages) ? metadata.transcript.messages : [];
   const archive = metadata?.transcript?.archive;
   if (!archive || !Array.isArray(archive.chunks) || archive.chunks.length === 0) {
-    return fallback;
+    return createTranscriptPageResult(fallback, options);
   }
-  const messages = [];
-  for (const chunk of archive.chunks.slice().sort((a, b) => nonNegativeInteger(a?.index) - nonNegativeInteger(b?.index))) {
-    const result = await store.readTranscriptChunk(archive, chunk.index);
-    if (!result.ok) {
-      return fallback;
-    }
-    messages.push(...(result.messages ?? []));
+  const result = await store.readTranscriptPage(archive, {
+    before: options.before,
+    limit: options.limit,
+    visibleRoles: VISIBLE_TRANSCRIPT_ROLES
+  });
+  if (!result.ok) {
+    return result;
   }
-  return messages.length > 0 ? messages : fallback;
+  return result;
 }
 
-function mergeTranscriptMessages(baseMessages, tailMessages) {
+function createTranscriptPageResult(messages, options = {}) {
+  return { ok: true, positions: [], chunksRead: 0, ...createTranscriptPage(messages, options) };
+}
+
+function transcriptPageReadError(result) {
+  return {
+    ok: false,
+    status: 500,
+    code: result.error?.code ?? "TRANSCRIPT_PAGE_READ_ERROR",
+    error: result.error?.message ?? "读取会话记录分页失败"
+  };
+}
+
+function mergeActiveTranscriptPage(storedPage, state, options = {}) {
+  const activeTail = stableActiveTranscriptMessages(state)
+    .filter((message) => VISIBLE_TRANSCRIPT_ROLES.has(String(message?.role ?? "")));
+  const overlap = transcriptOverlapSize(storedPage.messages, activeTail);
+  const storedEntries = storedPage.messages.map((message, index) => ({
+    message,
+    position: nonNegativeInteger(storedPage.positions?.[index] ?? (storedPage.summary.start + index))
+  }));
+  const appended = activeTail.slice(overlap);
+  const pendingEntries = activePendingTranscriptEntries(state, nonNegativeInteger(storedPage.summary.end));
+  const positionedPending = pendingEntries.slice(-appended.length);
+  const pendingMatches = positionedPending.length === appended.length
+    && sameTranscriptSlice(positionedPending.map((entry) => entry.message), appended);
+  const appendedEntries = appended.map((message, index) => ({
+    message,
+    position: pendingMatches
+      ? positionedPending[index].position
+      : nonNegativeInteger(storedPage.summary.end) + index
+  }));
+  const mergedEntries = storedEntries.concat(appendedEntries);
+  const limit = clampTranscriptPageLimit(options.limit);
+  const selected = mergedEntries.slice(-limit);
+  const messages = selected.map((entry) => entry.message);
+  const start = selected[0]?.position ?? 0;
+  const pendingVisible = Array.isArray(state.session.transcriptArchive?.pendingMessages)
+    ? state.session.transcriptArchive.pendingMessages.filter((message) => VISIBLE_TRANSCRIPT_ROLES.has(String(message?.role ?? ""))).length
+    : 0;
+  const archiveVisible = Number(state.session.transcriptArchive?.totalVisibleMessages);
+  const total = Math.max(
+    nonNegativeInteger(storedPage.summary.total),
+    Number.isInteger(archiveVisible) && archiveVisible >= 0 ? archiveVisible + pendingVisible : 0,
+    activeTail.length
+  );
+  return {
+    ok: true,
+    messages,
+    positions: [],
+    chunksRead: storedPage.chunksRead ?? 0,
+    summary: {
+      cursor: messages.length > 0 && start > 0 ? String(start) : null,
+      nextCursor: messages.length > 0 && start > 0 ? String(start) : null,
+      hasMore: messages.length > 0 && start > 0,
+      total,
+      returned: messages.length,
+      start,
+      end: Math.max(nonNegativeInteger(storedPage.summary.end), pendingEntries.at(-1)?.position + 1 || 0)
+    }
+  };
+}
+
+function activePendingTranscriptEntries(state, archiveEnd) {
+  const pending = Array.isArray(state.session.transcriptArchive?.pendingMessages)
+    ? state.session.transcriptArchive.pendingMessages
+    : [];
+  const entries = [];
+  for (let index = 0; index < pending.length; index += 1) {
+    const message = pending[index];
+    if (VISIBLE_TRANSCRIPT_ROLES.has(String(message?.role ?? ""))) {
+      entries.push({ message, position: archiveEnd + index });
+    }
+  }
+  return entries;
+}
+
+function transcriptOverlapSize(baseMessages, tailMessages) {
   const base = Array.isArray(baseMessages) ? baseMessages : [];
   const tail = Array.isArray(tailMessages) ? tailMessages : [];
-  if (base.length === 0) {
-    return tail;
-  }
-  if (tail.length === 0) {
-    return base;
-  }
   const maxOverlap = Math.min(base.length, tail.length);
   for (let size = maxOverlap; size > 0; size -= 1) {
     if (sameTranscriptSlice(base.slice(base.length - size), tail.slice(0, size))) {
-      return base.concat(tail.slice(size));
+      return size;
     }
   }
-  return base.concat(tail);
+  return 0;
+}
+
+function hasTranscriptCursor(value) {
+  return value !== undefined && value !== null && value !== "";
 }
 
 function sameTranscriptSlice(left, right) {
@@ -2007,6 +3306,12 @@ function latestEventTime(state) {
 }
 
 function activeDashboardStatus(state) {
+  if (state.quarantinedTurnId) {
+    return "quarantined";
+  }
+  if (state.interrupting) {
+    return "interrupting";
+  }
   if (state.running) {
     return state.queuedPrompts.some((item) => item.kind === "guide") ? "引导中" : "running";
   }
@@ -2032,11 +3337,17 @@ function messageContentText(content) {
 }
 
 function beginPrompt(state, item, env) {
+  if (state.disposed || state.running || state.quarantinedTurnId) {
+    return false;
+  }
   applyPermissionMode(state.session, item.permissionMode);
+  state.persisted = false;
   state.running = true;
+  state.interrupting = false;
   state.status = "running";
   state.currentPrompt = item.prompt;
   state.currentTurnId = eventId("turn");
+  state.currentAttachmentBytes = item.attachments.reduce((total, attachment) => total + nonNegativeInteger(attachment.size), 0);
   state.currentTranscriptStart = activeTranscriptMessages(state).length;
   state.currentPermissionMode = item.permissionMode;
   state.turnChangeStats = emptyChangeStats();
@@ -2049,6 +3360,7 @@ function beginPrompt(state, item, env) {
     turnId: state.currentTurnId,
     queue: queueSnapshot(state),
     current: publicQueueItem(item),
+    permission: permissionModeSummary(state.session),
     sessionStatus: sessionStatusSummary(state.session),
     changeStats: { ...state.turnChangeStats },
     at: new Date().toISOString()
@@ -2063,16 +3375,17 @@ function beginPrompt(state, item, env) {
     at: new Date().toISOString()
   });
   runTurnInBackground(state, item, env);
+  return true;
 }
 
 function runTurnInBackground(state, item, env) {
   const controller = state.controller;
   const turnId = state.currentTurnId;
   const eventStartIndex = state.events.length;
-  state.forceSettleTimer = null;
+  let turnCompleteStatus = "";
   queueMicrotask(async () => {
     try {
-      const result = await runSessionTurn(state.session, {
+      const result = await state.runTurn(state.session, {
         prompt: item.prompt,
         displayPrompt: displayPromptForQueueItem(item),
         attachments: item.attachments,
@@ -2087,6 +3400,9 @@ function runTurnInBackground(state, item, env) {
           const backgroundEvent = isBackgroundLifecycleEvent(event);
           if (!currentTurn && !backgroundEvent) {
             return;
+          }
+          if (currentTurn && event.type === "turn_complete") {
+            turnCompleteStatus = String(event.status ?? "").trim();
           }
           for (const mapped of mapSessionEventToDashboard(event)) {
             mapped.turnId = turnId;
@@ -2123,7 +3439,8 @@ function runTurnInBackground(state, item, env) {
       }
       state.finalOutput = result.output ?? "";
       const turnEvents = state.events.slice(eventStartIndex);
-      if (!result.interrupted && !turnEvents.some((event) => event.type === "assistant_final")) {
+      const terminalStatus = dashboardTurnStatus(turnCompleteStatus, result);
+      if (terminalStatus === "completed" && !turnEvents.some((event) => event.type === "assistant_final")) {
         appendDashboardEvent(state, {
           type: "assistant_final",
           id: eventId("assistant-final"),
@@ -2141,7 +3458,7 @@ function runTurnInBackground(state, item, env) {
         changeStats: { ...state.turnChangeStats },
         at: new Date().toISOString()
       });
-      state.status = result.interrupted ? "interrupted" : "completed";
+      state.status = terminalStatus;
     } catch (error) {
       if (!isCurrentTurn(state, controller, turnId)) {
         return;
@@ -2154,19 +3471,29 @@ function runTurnInBackground(state, item, env) {
       });
       state.status = "failed";
     } finally {
-      if (state.forceSettledTurnId === turnId || state.controller !== controller || state.currentTurnId !== turnId) {
+      if (!ownsTurn(state, controller, turnId)) {
         return;
       }
+      const wasQuarantined = state.quarantinedTurnId === turnId;
       clearForceSettleTimer(state);
       state.controller = null;
       state.running = false;
-      await appendBackgroundSubagentSnapshot(state);
+      state.interrupting = false;
+      state.quarantinedTurnId = "";
+      if (wasQuarantined) {
+        state.status = "interrupted";
+      }
+      state.persisted = !state.disposed && await isSessionStatePersisted(state, env);
+      if (!state.disposed) {
+        await appendBackgroundSubagentSnapshot(state);
+      }
       state.currentPrompt = "";
-      const next = state.queuedPrompts.shift();
+      state.currentAttachmentBytes = 0;
+      const next = wasQuarantined || state.disposed ? null : state.queuedPrompts.shift();
       if (next) {
         appendQueueUpdated(state);
         beginPrompt(state, next, env);
-      } else {
+      } else if (!state.disposed) {
         appendDashboardEvent(state, {
           type: "run_state",
           id: eventId("run-state"),
@@ -2175,19 +3502,38 @@ function runTurnInBackground(state, item, env) {
           queue: queueSnapshot(state),
           sessionStatus: sessionStatusSummary(state.session),
           changeStats: { ...state.turnChangeStats },
+          quarantined: false,
+          quarantineReleased: wasQuarantined,
           at: new Date().toISOString()
         });
         state.currentTurnId = "";
         state.currentTranscriptStart = activeTranscriptMessages(state).length;
         state.turnEnv = null;
-        state.forceSettledTurnId = "";
       }
     }
   });
 }
 
 function isCurrentTurn(state, controller, turnId) {
-  return state.controller === controller && state.currentTurnId === turnId && state.forceSettledTurnId !== turnId;
+  return ownsTurn(state, controller, turnId) && state.quarantinedTurnId !== turnId && !state.disposed;
+}
+
+function ownsTurn(state, controller, turnId) {
+  return state.controller === controller && state.currentTurnId === turnId;
+}
+
+function dashboardTurnStatus(turnCompleteStatus, result) {
+  const status = String(turnCompleteStatus ?? "").trim().toLowerCase();
+  if (status === "cancelled") {
+    return "cancelled";
+  }
+  if (result?.interrupted === true || status === "interrupted") {
+    return "interrupted";
+  }
+  if (["gateway_not_configured", "tool_limit", "vision_unavailable", "blocked"].includes(status)) {
+    return "blocked";
+  }
+  return status === "completed" ? "completed" : "failed";
 }
 
 function isBackgroundLifecycleEvent(event) {
@@ -2196,11 +3542,17 @@ function isBackgroundLifecycleEvent(event) {
 }
 
 function requestTurnInterrupt(state, reason) {
+  if (state.disposed || !state.running) {
+    return false;
+  }
+  state.interrupting = true;
+  state.status = "interrupting";
   appendDashboardEvent(state, {
     type: "turn_interrupt_requested",
     id: eventId("interrupt"),
     reason,
     queue: queueSnapshot(state),
+    interrupting: true,
     at: new Date().toISOString()
   });
   cancelPendingInteractions(state, reason);
@@ -2208,6 +3560,7 @@ function requestTurnInterrupt(state, reason) {
     state.controller.abort(reason);
   }
   scheduleForceSettleInterruptedTurn(state, reason);
+  return true;
 }
 
 function scheduleForceSettleInterruptedTurn(state, reason) {
@@ -2243,33 +3596,32 @@ function clearForceSettleTimer(state) {
 
 function forceSettleInterruptedTurn(state, reason, turnId) {
   state.forceSettleTimer = null;
-  state.forceSettledTurnId = turnId;
-  state.running = false;
-  state.status = "interrupted";
+  if (!state.running || state.currentTurnId !== turnId || state.disposed) {
+    return;
+  }
+  state.quarantinedTurnId = turnId;
+  state.interrupting = false;
+  state.status = "quarantined";
   if (state.controller && !state.controller.signal.aborted) {
     state.controller.abort(reason);
   }
-  state.controller = null;
   cancelPendingInteractions(state, reason);
   appendDashboardEvent(state, {
     type: "error",
     id: eventId("error"),
-    message: "任务已中断，但底层请求未及时返回；Dashboard 已强制释放当前会话状态。",
+    message: "中断请求已发出，但底层执行未及时结束；会话已隔离，不会启动排队任务。",
     turnId,
     interrupted: true,
+    quarantined: true,
     at: new Date().toISOString()
   });
   void appendBackgroundSubagentSnapshot(state);
-  const next = state.queuedPrompts.shift();
-  if (next) {
-    appendQueueUpdated(state);
-    beginPrompt(state, next, state.turnEnv ?? process.env);
-    return;
-  }
   appendDashboardEvent(state, {
     type: "run_state",
     id: eventId("run-state"),
-    running: false,
+    running: true,
+    interrupting: false,
+    quarantined: true,
     turnId,
     queue: queueSnapshot(state),
     sessionStatus: sessionStatusSummary(state.session),
@@ -2277,10 +3629,6 @@ function forceSettleInterruptedTurn(state, reason, turnId) {
     forced: true,
     at: new Date().toISOString()
   });
-  state.currentPrompt = "";
-  state.currentTurnId = "";
-  state.currentTranscriptStart = activeTranscriptMessages(state).length;
-  state.turnEnv = null;
 }
 
 function cancelPendingInteractions(state, reason) {
@@ -2461,10 +3809,30 @@ function nonNegativeInteger(value) {
 }
 
 function enqueuePrompt(state, prompt, permissionMode, kind, attachments = []) {
+  if (!queueHasCapacity(state)) {
+    return null;
+  }
   const item = createQueueItem(prompt, permissionMode, kind, "", attachments);
   state.queuedPrompts.push(item);
-  state.queuedPrompts = state.queuedPrompts.slice(0, MAX_QUEUE);
   return item;
+}
+
+function queueHasCapacity(state) {
+  return state.queuedPrompts.length < MAX_QUEUE;
+}
+
+function queueFullResult(state) {
+  return {
+    ok: false,
+    status: 429,
+    code: "QUEUE_FULL",
+    error: `任务队列已满（最多 ${MAX_QUEUE} 条），请等待或取消排队任务后重试`,
+    sessionId: state.session.id,
+    queue: queueSnapshot(state),
+    queueLength: state.queuedPrompts.length,
+    permission: permissionModeSummary(state.session),
+    sessionStatus: sessionStatusSummary(state.session)
+  };
 }
 
 function createQueueItem(prompt, permissionMode = "plan", kind = "prompt", guidance = "", attachments = []) {
@@ -2494,13 +3862,29 @@ function createWakeQueueItem(event, permissionMode = "plan") {
 }
 
 async function queueBackgroundWakePrompt(state, event, env) {
+  if (state.disposed || state.quarantinedTurnId) {
+    return { ok: false, status: 409, code: "SESSION_UNAVAILABLE" };
+  }
   const item = createWakeQueueItem(event, state.currentPermissionMode);
   if (!item) {
     return;
   }
   if (state.running) {
+    if (!queueHasCapacity(state)) {
+      appendDashboardEvent(state, {
+        type: "wakeup_queue_full",
+        id: eventId("wakeup-queue-full"),
+        code: "QUEUE_FULL",
+        groupId: item.groupId,
+        queue: queueSnapshot(state),
+        queueLength: state.queuedPrompts.length,
+        running: true,
+        at: new Date().toISOString()
+      });
+      await appendBackgroundSubagentSnapshot(state);
+      return { ok: false, ...queueFullResult(state) };
+    }
     state.queuedPrompts.push(item);
-    state.queuedPrompts = state.queuedPrompts.slice(0, MAX_QUEUE);
     appendDashboardEvent(state, {
       type: "wakeup_queued",
       id: eventId("wakeup"),
@@ -2510,21 +3894,25 @@ async function queueBackgroundWakePrompt(state, event, env) {
       running: true,
       at: new Date().toISOString()
     });
+    appendQueueUpdated(state);
     await markWakePromptConsumed(state, event);
     await appendBackgroundSubagentSnapshot(state);
+    return { ok: true, queued: true, item };
   } else {
+    beginPrompt(state, item, env);
     appendDashboardEvent(state, {
       type: "wakeup_queued",
       id: eventId("wakeup"),
       groupId: item.groupId,
       queue: queueSnapshot(state),
       queueLength: state.queuedPrompts.length,
-      running: false,
+      running: true,
+      started: true,
       at: new Date().toISOString()
     });
     await markWakePromptConsumed(state, event);
     await appendBackgroundSubagentSnapshot(state);
-    beginPrompt(state, item, env);
+    return { ok: true, started: true, item };
   }
 }
 
@@ -2543,6 +3931,9 @@ async function markWakePromptConsumed(state, event) {
 }
 
 async function appendBackgroundSubagentSnapshot(state) {
+  if (state.disposed) {
+    return;
+  }
   const snapshot = await buildBackgroundSubagentSnapshot(state);
   if (!snapshot.hasRecords && snapshot.groups.length === 0) {
     appendDashboardEvent(state, {
@@ -2745,7 +4136,7 @@ function updateBackgroundSnapshotPolling(state, groups = []) {
 }
 
 function startBackgroundSnapshotPolling(state) {
-  if (state.backgroundSnapshotTimer) {
+  if (state.backgroundSnapshotTimer || state.disposed) {
     return;
   }
   state.backgroundSnapshotTimer = setInterval(() => {
@@ -2891,12 +4282,15 @@ function isStopGuidance(guidance) {
 }
 
 function appendDashboardEvent(state, event) {
+  if (state.disposed) {
+    return;
+  }
   state.eventSequence += 1;
   const normalized = {
     at: new Date().toISOString(),
+    ...event,
     id: event.id ?? eventId(event.type ?? "event"),
-    sequence: state.eventSequence,
-    ...event
+    sequence: state.eventSequence
   };
   if ((normalized.status === "running" || normalized.status === "waiting") && normalized.coalesceKey) {
     const existingIndex = state.events.findIndex((item) =>
@@ -2905,7 +4299,8 @@ function appendDashboardEvent(state, event) {
       && (item.status === "running" || item.status === "waiting")
     );
     if (existingIndex >= 0) {
-      state.events[existingIndex] = normalized;
+      state.events.splice(existingIndex, 1);
+      state.events.push(normalized);
       for (const listener of state.listeners) {
         listener(normalized);
       }
@@ -2941,17 +4336,7 @@ async function resolveDashboardTrust(options) {
 }
 
 function sanitizeApprovalInput(input) {
-  const sanitized = {};
-  for (const [key, value] of Object.entries(input)) {
-    if (/token|api[_-]?key|secret|password|authorization|credential/i.test(key)) {
-      sanitized[key] = "[redacted]";
-    } else if (typeof value === "string") {
-      sanitized[key] = value.length > 500 ? `${value.slice(0, 497)}...` : value;
-    } else {
-      sanitized[key] = value;
-    }
-  }
-  return sanitized;
+  return sanitizeSensitiveValue(input, { maxStringLength: 500 });
 }
 
 function normalizeQuestionRequest(request, id) {

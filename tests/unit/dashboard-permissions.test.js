@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyPermissionMode, approvalKeyFor, permissionModeSummary } from "../../src/dashboard/permissions.js";
+import { applyPermissionMode, approvalKeyFor, buildApprovalPreview, permissionModeSummary, sanitizeSensitiveValue } from "../../src/dashboard/permissions.js";
 
 test("dashboard permission modes map to session flags", () => {
   const session = {};
@@ -108,4 +108,44 @@ test("dashboard permission summary uses user-facing labels", () => {
 
   assert.equal(summary.mode, "fullAccess");
   assert.equal(summary.label, "完全访问");
+});
+
+test("dashboard recursively redacts nested credentials and token-like strings", () => {
+  const sanitized = sanitizeSensitiveValue({
+    apiKey: "top-secret-key",
+    nested: {
+      headers: { Authorization: "Bearer bearer-secret-value" },
+      args: [
+        "https://example.test/run?access_token=query-secret&mode=check",
+        { password: "nested-password" }
+      ]
+    }
+  });
+  const text = JSON.stringify(sanitized);
+
+  assert.doesNotMatch(text, /top-secret-key|bearer-secret-value|query-secret|nested-password/);
+  assert.match(text, /example\.test/);
+  assert.match(text, /\[redacted\]/);
+});
+
+test("dashboard approval previews preserve structure while masking command and MCP secrets", () => {
+  const command = buildApprovalPreview({
+    toolName: "powershell",
+    input: {
+      command: "curl -H \"Authorization: Bearer command-secret-token\" https://api.example.test/items?api_key=url-secret"
+    }
+  }).join("\n");
+  const mcp = buildApprovalPreview({
+    toolName: "mcp_call",
+    input: {
+      server: "example",
+      tool: "fetch",
+      arguments: { nested: { credential: "mcp-secret" }, path: "reports/summary.md" }
+    }
+  }).join("\n");
+
+  assert.doesNotMatch(command, /command-secret-token|url-secret/);
+  assert.match(command, /curl/);
+  assert.doesNotMatch(mcp, /mcp-secret/);
+  assert.match(mcp, /reports\/summary\.md/);
 });

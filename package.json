@@ -31,13 +31,20 @@
     "scripts/audit-common.js",
     "scripts/build-dashboard-assets.js",
     "scripts/build-windows-exe.js",
+    "scripts/check-dashboard-assets.js",
     "scripts/check-syntax.js",
+    "scripts/check-types.js",
+    "scripts/dashboard-assets.js",
+    "scripts/dashboard-type-baseline.json",
     "scripts/dependency-audit-common.js",
     "scripts/generate-dependency-sbom.js",
     "scripts/generate-endpoint-manifest.js",
     "scripts/generate-license-summary.js",
     "scripts/github-mcp-server.js",
+    "scripts/lockfile-consistency.js",
     "scripts/mock-gateway.js",
+    "scripts/run-tests.js",
+    "scripts/type-ratchet.js",
     "scripts/verify-dependency-policy.js",
     "scripts/verify-forbidden-endpoints.js",
     "scripts/verify-gateway-compat.js",
@@ -47,18 +54,24 @@
     "src/",
     "npm-shrinkwrap.json",
     "package-lock.json",
-    "tsconfig.json"
+    "tsconfig.json",
+    "tsconfig.dashboard.json",
+    "tsconfig.release-gates.json"
   ],
   "scripts": {
     "start": "node src/cli/index.js",
     "doctor": "node src/cli/index.js doctor",
     "mock-gateway": "node scripts/mock-gateway.js",
     "verify:install": "node scripts/verify-install.js",
-    "check": "npm run check:syntax && npm run check:forbidden && npm run check:dependencies && npm test",
+    "check": "npm run check:syntax && npm run check:forbidden && npm run check:dependencies && npm run check:types && npm test && npm run test:dashboard:browser && npm run check:dashboard-assets && npm run check:diff",
     "check:syntax": "node scripts/check-syntax.js",
     "check:forbidden": "node scripts/verify-forbidden-endpoints.js",
     "check:release-seal": "node scripts/verify-release-seal.js",
     "check:dependencies": "node scripts/verify-dependency-policy.js",
+    "check:types": "node scripts/check-types.js",
+    "check:dashboard-assets": "node scripts/check-dashboard-assets.js",
+    "check:diff": "git diff --check",
+    "test:dashboard:browser": "node --test tests/browser/dashboard-browser.test.js",
     "verify:gateway": "node scripts/verify-gateway-compat.js",
     "verify:readiness": "node scripts/verify-readiness-docs.js",
     "audit:endpoints": "node scripts/generate-endpoint-manifest.js",
@@ -68,7 +81,7 @@
     "build:dashboard-assets": "node scripts/build-dashboard-assets.js",
     "build:exe": "node scripts/build-windows-exe.js",
     "verify:release": "npm run check && npm run verify:install && npm run verify:gateway && npm run verify:readiness && npm run check:release-seal && npm run audit",
-    "test": "node --test"
+    "test": "node scripts/run-tests.js"
   },
   "engines": {
     "node": ">=20"
@@ -83,7 +96,10 @@
     "yaml": "^2.9.0"
   },
   "devDependencies": {
+    "@types/node": "20.19.43",
+    "axe-core": "4.12.1",
     "esbuild": "^0.28.0",
+    "playwright-core": "1.61.1",
     "postject": "^1.0.0-alpha.6"
   }
 }

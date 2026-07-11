@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { build } from "esbuild";
+import { verifyDashboardAssets } from "./dashboard-assets.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = path.join(ROOT, "dist");
@@ -34,6 +35,12 @@ const RESOURCE_PATHS = [
   "docs/deployment/quickstart.md",
   "docs/security/data-boundary.md"
 ];
+
+const dashboardAssets = await verifyDashboardAssets({
+  root: ROOT,
+  dependencyRoot: process.env.ANT_CODE_DASHBOARD_ASSET_DEPENDENCY_ROOT
+});
+console.log(`Dashboard asset preflight passed (${dashboardAssets.fileCount} files).`);
 
 await fs.rm(RELEASE, { recursive: true, force: true });
 await fs.rm(BUILD, { recursive: true, force: true });

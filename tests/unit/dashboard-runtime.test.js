@@ -65,6 +65,199 @@ test("dashboard runtime force-releases a turn when an interrupted gateway reques
   }
 });
 
+test("dashboard runtime deduplicates concurrent turn request ids", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-idempotent-"));
+  const gate = deferred();
+  let calls = 0;
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: {},
+    runTurn: async (_session, options) => {
+      calls += 1;
+      await gate.promise;
+      await options.onEvent({ type: "turn_complete", status: "completed" });
+      return { output: "deduplicated" };
+    }
+  });
+  await runtime.trustWorkspace();
+
+  const input = {
+    requestId: "turn-request-same",
+    prompt: "run once",
+    permissionMode: "plan"
+  };
+  const [first, duplicate] = await Promise.all([
+    runtime.startTurn(input),
+    runtime.startTurn({ ...input })
+  ]);
+
+  assert.deepEqual(duplicate, first);
+  assert.equal(first.requestId, input.requestId);
+  assert.equal(runtime.active.size, 1);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 1);
+
+  const conflict = await runtime.startTurn({ ...input, prompt: "different payload" });
+  assert.equal(conflict.ok, false);
+  assert.equal(conflict.status, 409);
+  assert.equal(conflict.code, "REQUEST_ID_CONFLICT");
+
+  gate.resolve();
+  await waitForEvent(runtime, first.sessionId, (event) => event.type === "run_state" && event.running === false);
+});
+
+test("dashboard runtime quarantines an interrupt that does not settle and never overlaps the next turn", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-quarantine-"));
+  const gate = deferred();
+  let calls = 0;
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: { ANT_CODE_INTERRUPT_FORCE_SETTLE_MS: "50" },
+    runTurn: async (_session, options) => {
+      calls += 1;
+      await gate.promise;
+      await options.onEvent({ type: "assistant_stream_delta", delta: "late output" });
+      await options.onEvent({ type: "turn_complete", status: "completed" });
+      return { output: "late output" };
+    }
+  });
+  await runtime.trustWorkspace();
+
+  const first = await runtime.startTurn({ prompt: "ignore abort", permissionMode: "plan" });
+  const second = await runtime.startTurn({
+    sessionId: first.sessionId,
+    prompt: "must not overlap",
+    permissionMode: "plan"
+  });
+  assert.equal(second.queued, true);
+  assert.equal(runtime.interruptTurn(first.sessionId, "test").ok, true);
+
+  const quarantinedEvents = await waitForEvent(runtime, first.sessionId, (event) => (
+    event.type === "run_state" && event.quarantined === true
+  ));
+  const state = runtime.active.get(first.sessionId);
+  assert.equal(state.running, true);
+  assert.equal(state.status, "quarantined");
+  assert.equal(state.queuedPrompts.length, 1);
+  assert.equal(calls, 1);
+  assert.equal(quarantinedEvents.some((event) => event.type === "error" && event.quarantined === true), true);
+
+  const rejected = await runtime.startTurn({
+    sessionId: first.sessionId,
+    prompt: "still must not overlap",
+    permissionMode: "plan"
+  });
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.code, "SESSION_QUARANTINED");
+  assert.equal(calls, 1);
+
+  gate.resolve();
+  const settledEvents = await waitForEvent(runtime, first.sessionId, (event) => event.type === "run_state" && event.quarantineReleased === true);
+  assert.equal(runtime.active.get(first.sessionId).running, false);
+  assert.equal(runtime.active.get(first.sessionId).queuedPrompts.length, 1);
+  assert.equal(calls, 1);
+  assert.equal(settledEvents.some((event) => event.type === "assistant_draft" && /late output/.test(event.text ?? "")), false);
+
+  runtime.cancelQueuedTurn({ sessionId: first.sessionId, queueItemId: second.queue[0].id });
+  assert.equal((await runtime.deleteSession({ sessionId: first.sessionId })).ok, true);
+});
+
+test("dashboard runtime rejects malformed and oversized turn attachments before creating a session", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-images-"));
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+  const attachment = (data, mimeType = "image/png", size = 1) => ({
+    type: "image",
+    name: "image.bin",
+    mimeType,
+    size,
+    data
+  });
+
+  const invalidBase64 = await runtime.startTurn({ prompt: "bad", attachments: [attachment("%%%=")] });
+  assert.equal(invalidBase64.status, 400);
+  assert.equal(invalidBase64.code, "INVALID_IMAGE_BASE64");
+
+  const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const mismatch = await runtime.startTurn({
+    prompt: "bad mime",
+    attachments: [attachment(pngSignature.toString("base64"), "image/jpeg")]
+  });
+  assert.equal(mismatch.status, 400);
+  assert.equal(mismatch.code, "IMAGE_SIGNATURE_MISMATCH");
+
+  const oversized = Buffer.alloc(8 * 1024 * 1024 + 1);
+  pngSignature.copy(oversized);
+  const singleTooLarge = await runtime.startTurn({
+    prompt: "too large",
+    attachments: [attachment(oversized.toString("base64"), "image/png", 1)]
+  });
+  assert.equal(singleTooLarge.status, 413);
+  assert.equal(singleTooLarge.code, "IMAGE_TOO_LARGE");
+
+  const totalImages = Array.from({ length: 4 }, (_, index) => {
+    const bytes = Buffer.alloc(6 * 1024 * 1024 + 1, index);
+    pngSignature.copy(bytes);
+    return attachment(bytes.toString("base64"), "image/png", 1);
+  });
+  const totalTooLarge = await runtime.startTurn({ prompt: "too many bytes", attachments: totalImages });
+  assert.equal(totalTooLarge.status, 413);
+  assert.equal(totalTooLarge.code, "IMAGES_TOO_LARGE");
+
+  const promptTooLarge = await runtime.startTurn({ prompt: "x".repeat(256 * 1024 + 1) });
+  assert.equal(promptTooLarge.status, 413);
+  assert.equal(promptTooLarge.code, "PROMPT_TOO_LARGE");
+  assert.equal(runtime.active.size, 0);
+});
+
+test("dashboard runtime includes the active turn in the queued attachment budget", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-image-budget-"));
+  const gate = deferred();
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: {},
+    runTurn: async (_session, options) => {
+      await gate.promise;
+      await options.onEvent({ type: "turn_complete", status: "completed" });
+      return { output: "done" };
+    }
+  });
+  await runtime.trustWorkspace();
+  const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const fullImage = () => {
+    const bytes = Buffer.alloc(8 * 1024 * 1024);
+    pngSignature.copy(bytes);
+    return { type: "image", name: "full.png", mimeType: "image/png", size: 1, data: bytes.toString("base64") };
+  };
+  const started = await runtime.startTurn({
+    prompt: "hold image budget",
+    attachments: [fullImage(), fullImage(), fullImage()],
+    permissionMode: "plan"
+  });
+  assert.equal(started.ok, true);
+  assert.equal(runtime.active.get(started.sessionId).currentAttachmentBytes, 24 * 1024 * 1024);
+
+  const overflow = await runtime.startTurn({
+    sessionId: started.sessionId,
+    prompt: "queue one more",
+    attachments: [{
+      type: "image",
+      name: "tiny.png",
+      mimeType: "image/png",
+      size: 0,
+      data: pngSignature.toString("base64")
+    }],
+    permissionMode: "plan"
+  });
+  assert.equal(overflow.ok, false);
+  assert.equal(overflow.status, 413);
+  assert.equal(overflow.code, "QUEUE_ATTACHMENT_BUDGET_EXCEEDED");
+  assert.equal(runtime.active.get(started.sessionId).queuedPrompts.length, 0);
+
+  gate.resolve();
+  await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+  assert.equal(runtime.active.get(started.sessionId).currentAttachmentBytes, 0);
+});
+
 test("dashboard runtime exposes model and context status", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
   const server = await listen(createGateway("status answer"), "127.0.0.1", 0);
@@ -605,6 +798,29 @@ test("dashboard runtime adds models to the active gateway when the same key is s
   assert.equal(local.lab.gatewayApiKey, "beta-key");
 });
 
+test("dashboard runtime preserves concurrent model config updates through atomic mutations", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-config-"));
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+
+  const results = await Promise.all(Array.from({ length: 8 }, (_, index) => runtime.saveModelConfig({
+    gatewayUrl: "https://concurrent-gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "concurrent-key",
+    modelId: `concurrent-model-${index}`,
+    label: `Concurrent Model ${index}`,
+    modalities: ["text"],
+    switchToModel: false
+  })));
+
+  assert.equal(results.every((result) => result.ok), true);
+  assert.equal(new Set(results.map((result) => result.configRevision)).size, 8);
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  const savedModels = new Set(local.models.map((model) => model.id));
+  for (let index = 0; index < 8; index += 1) {
+    assert.equal(savedModels.has(`concurrent-model-${index}`), true);
+  }
+});
+
 test("dashboard runtime deletes a registered model from the active gateway", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
   const runtime = createDashboardRuntime({ cwd, env: {} });
@@ -668,15 +884,15 @@ test("dashboard runtime clears the active gateway when deleting its final model"
   assert.equal(deleted.ok, true);
   assert.equal(deleted.deletedModel, "beta-chat");
   assert.equal(deleted.clearedGateway, true);
-  assert.equal(deleted.gatewayConfig.gatewayUrl, "https://gateway.example.com/v1/chat/completions");
+  assert.equal(deleted.gatewayConfig.gatewayUrl, "");
   assert.equal(deleted.gatewayConfig.apiKeyConfigured, false);
   assert.deepEqual(deleted.models.map((model) => model.id), ["example-coding-model", "example-vision-model"]);
-  assert.equal(deleted.sessionStatus.model, "example-coding-model");
+  assert.equal(deleted.sessionStatus.model, "");
 
   const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
-  assert.equal(local.modelAlias, "example-coding-model");
-  assert.deepEqual(local.models.map((model) => model.id), ["example-coding-model", "example-vision-model"]);
-  assert.equal(local.lab.gatewayUrl, "https://gateway.example.com/v1/chat/completions");
+  assert.equal(local.modelAlias, "");
+  assert.deepEqual(local.models, []);
+  assert.equal(local.lab.gatewayUrl, null);
   assert.equal(local.lab.gatewayApiKey, undefined);
   assert.equal(local.lab.gatewayProfiles.some((profile) => profile.gatewayUrl.includes("beta-gateway")), false);
 });
@@ -882,7 +1098,7 @@ test("dashboard runtime sends image attachments while persisting only metadata",
         name: "tiny.png",
         mimeType: "image/png",
         size: 5,
-        data: "aGVsbG8="
+        data: "iVBORw0KGgo="
       }],
       permissionMode: "plan"
     });
@@ -894,11 +1110,11 @@ test("dashboard runtime sends image attachments while persisting only metadata",
     assert.equal(userEvent?.attachments?.[0]?.data, undefined);
 
     const userMessage = requests[0]?.messages?.find((message) => message.role === "user");
-    assert.equal(userMessage.content.some((block) => block.type === "image" && block.data === "aGVsbG8="), true);
+    assert.equal(userMessage.content.some((block) => block.type === "image" && block.data === "iVBORw0KGgo="), true);
 
     const metadata = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "sessions", `${started.sessionId}.json`), "utf8"));
     const persisted = JSON.stringify(metadata);
-    assert.equal(persisted.includes("aGVsbG8="), false);
+    assert.equal(persisted.includes("iVBORw0KGgo="), false);
     assert.equal(metadata.transcript.messages[0].content.some((block) => block.type === "image" && block.redacted === true), true);
     assert.equal(metadata.transcript.contextMessages[0].content.some((block) => block.name === "tiny.png" && block.data === undefined), true);
   } finally {
@@ -942,6 +1158,93 @@ test("dashboard runtime queues concurrent turns in same session", async () => {
   }
 });
 
+test("dashboard runtime rejects ordinary and guide prompts when the queue is full", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createHangingStreamGateway(), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: mockGatewayEnv(server, {
+      ANT_CODE_INTERRUPT_FORCE_SETTLE_MS: "50",
+      LAB_MODEL_GATEWAY_TIMEOUT_MS: "600000"
+    })
+  });
+  await runtime.trustWorkspace();
+
+  try {
+    const started = await runtime.startTurn({ prompt: "keep running", permissionMode: "plan" });
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "activity" && event.rawType === "gateway_request_start");
+
+    for (let index = 0; index < 20; index += 1) {
+      const queued = await runtime.startTurn({
+        prompt: `queued ${index + 1}`,
+        sessionId: started.sessionId,
+        permissionMode: "plan"
+      });
+      assert.equal(queued.ok, true);
+      assert.equal(queued.queued, true);
+    }
+
+    const before = runtime.active.get(started.sessionId).queuedPrompts.map((item) => item.id);
+    const overflow = await runtime.startTurn({
+      prompt: "ordinary overflow",
+      sessionId: started.sessionId,
+      permissionMode: "plan"
+    });
+    assert.equal(overflow.ok, false);
+    assert.equal(overflow.status, 429);
+    assert.equal(overflow.code, "QUEUE_FULL");
+    assert.equal(overflow.queueLength, 20);
+
+    const guideOverflow = runtime.guideTurn({
+      sessionId: started.sessionId,
+      guidance: "guide overflow",
+      permissionMode: "workspace"
+    });
+    assert.equal(guideOverflow.ok, false);
+    assert.equal(guideOverflow.status, 429);
+    assert.equal(guideOverflow.code, "QUEUE_FULL");
+    assert.deepEqual(runtime.active.get(started.sessionId).queuedPrompts.map((item) => item.id), before);
+    assert.equal(runtime.listActiveEvents(started.sessionId).some((event) => event.type === "guide_queued"), false);
+
+    for (const queueItemId of before) {
+      assert.equal(runtime.cancelQueuedTurn({ sessionId: started.sessionId, queueItemId }).ok, true);
+    }
+    runtime.interruptTurn(started.sessionId, "test-cleanup");
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime keeps queued permissions isolated until that turn begins", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createDelayedGateway(["first answer", "second answer"], 80), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+  await runtime.trustWorkspace();
+
+  try {
+    const first = await runtime.startTurn({ prompt: "first", permissionMode: "plan" });
+    const second = await runtime.startTurn({
+      prompt: "second",
+      sessionId: first.sessionId,
+      permissionMode: "fullAccess"
+    });
+
+    assert.equal(second.queued, true);
+    assert.equal(second.queue[0].permissionMode, "fullAccess");
+    assert.equal(runtime.active.get(first.sessionId).session.permissionMode, "plan");
+    assert.equal((await runtime.readSession(first.sessionId)).session.permission.mode, "plan");
+
+    await waitForEvent(runtime, first.sessionId, () =>
+      runtime.listActiveEvents(first.sessionId).filter((event) => event.type === "files_updated").length >= 2
+    );
+    assert.equal(runtime.active.get(first.sessionId).session.permissionMode, "fullAccess");
+    assert.equal((await runtime.readSession(first.sessionId)).session.permission.mode, "fullAccess");
+  } finally {
+    await close(server);
+  }
+});
+
 test("dashboard runtime coalesces repeated live status events", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
   const server = await listen(createGateway("status answer", {
@@ -962,6 +1265,47 @@ test("dashboard runtime coalesces repeated live status events", async () => {
     const events = runtime.listActiveEvents(result.sessionId);
     assert.equal(events.filter((event) => event.type === "activity" && event.coalesceKey === "thinking").length, 1);
     assert.equal(events.filter((event) => event.type === "activity" && event.coalesceKey === "assistant-stream").length, 1);
+    assert.deepEqual(events.map((event) => event.sequence), events.map((event) => event.sequence).toSorted((a, b) => a - b));
+    assert.equal(new Set(events.map((event) => event.sequence)).size, events.length);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime reports gateway terminal failures instead of completed", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createFailingGateway(), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+  await runtime.trustWorkspace();
+
+  try {
+    const started = await runtime.startTurn({ prompt: "fail this turn", permissionMode: "plan" });
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+
+    assert.equal(runtime.active.get(started.sessionId).status, "failed");
+    const records = await runtime.listSessionRecords();
+    assert.equal(records.find((record) => record.id === started.sessionId)?.status, "failed");
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime reports tool-limit terminal outcomes instead of completed", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  await fs.writeFile(path.join(cwd, "notes.txt"), "tool loop fixture\n", "utf8");
+  const server = await listen(createRepeatedReadGateway(), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: mockGatewayEnv(server, { LAB_AGENT_MAX_TOOL_ROUNDS: "2" })
+  });
+  await runtime.trustWorkspace();
+
+  try {
+    const started = await runtime.startTurn({ prompt: "loop until the tool limit", permissionMode: "workspace" });
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+
+    assert.equal(runtime.active.get(started.sessionId).status, "blocked");
+    assert.equal(runtime.listActiveEvents(started.sessionId).some((event) => event.terminalStatus === "tool_limit"), true);
   } finally {
     await close(server);
   }
@@ -1403,6 +1747,70 @@ test("dashboard runtime consumes background subagent wake prompts", async () => 
   }
 });
 
+test("dashboard runtime keeps a background wake prompt unconsumed when the queue is full", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const firstParentGate = deferred();
+  const finishParentGate = deferred();
+  const requests = [];
+  const server = await listen(
+    createQueueFullBackgroundWakeGateway(requests, firstParentGate.promise, finishParentGate.promise),
+    "127.0.0.1",
+    0
+  );
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: mockGatewayEnv(server, { ANT_CODE_INTERRUPT_FORCE_SETTLE_MS: "50" })
+  });
+  await runtime.trustWorkspace();
+
+  try {
+    const started = await runtime.startTurn({
+      prompt: "delegate while queue is full",
+      permissionMode: "workspace"
+    });
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "activity" && event.rawType === "gateway_request_start");
+    for (let index = 0; index < 20; index += 1) {
+      const queued = await runtime.startTurn({
+        prompt: `waiting ${index + 1}`,
+        sessionId: started.sessionId,
+        permissionMode: "workspace"
+      });
+      assert.equal(queued.ok, true);
+    }
+
+    firstParentGate.resolve();
+    const events = await waitForEvent(runtime, started.sessionId, (event) => event.type === "wakeup_queue_full");
+    assert.equal(events.some((event) => event.type === "wakeup_queued"), false);
+    assert.equal(runtime.active.get(started.sessionId).queuedPrompts.length, 20);
+
+    const groupPath = path.join(cwd, ".lab-agent", "task-groups", "group-dashboard-queue-full.json");
+    const group = JSON.parse(await fs.readFile(groupPath, "utf8"));
+    assert.ok(group.wakePromptQueuedAt);
+    assert.equal(group.wakePromptConsumedAt, null);
+
+    for (const item of [...runtime.active.get(started.sessionId).queuedPrompts]) {
+      runtime.cancelQueuedTurn({ sessionId: started.sessionId, queueItemId: item.id });
+    }
+    finishParentGate.resolve();
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+  } finally {
+    firstParentGate.resolve();
+    finishParentGate.resolve();
+    if ([...runtime.active.values()].some((state) => state.running)) {
+      for (const state of runtime.active.values()) {
+        if (state.running) runtime.interruptTurn(state.session.id, "test-cleanup");
+      }
+    }
+    await runtime.shutdown({
+      cancelActive: true,
+      cancelBackground: true,
+      force: true,
+      timeoutMs: 200
+    });
+    await close(server);
+  }
+});
+
 test("dashboard runtime keeps still-running background siblings visible after wake prompt is consumed", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
   const requests = [];
@@ -1450,7 +1858,7 @@ test("dashboard runtime keeps still-running background siblings visible after wa
   }
 });
 
-test("dashboard runtime reports stale background subagents and can mark them recovered", async () => {
+test("dashboard runtime reports stale background subagents without claiming an absent controller was cancelled", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
   const server = await listen(createGateway("snapshot refresh"), "127.0.0.1", 0);
   const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
@@ -1509,14 +1917,13 @@ test("dashboard runtime reports stale background subagents and can mark them rec
       sessionId: started.sessionId,
       groupId: "group-lost-bg"
     });
-    assert.equal(cancelled.ok, true);
-    assert.deepEqual(cancelled.updatedTaskIds, ["task-lost-bg"]);
+    assert.equal(cancelled.ok, false);
+    assert.equal(cancelled.status, 409);
+    assert.equal(cancelled.code, "BACKGROUND_CONTROLLER_NOT_FOUND");
     const readTask = await taskStore.readTask("task-lost-bg");
     assert.equal(readTask.ok, true);
-    assert.equal(readTask.task.status, "interrupted");
-    assert.ok(readTask.task.cancelRequestedAt);
-    const afterCancel = runtime.listActiveEvents(started.sessionId).filter((event) => event.type === "background_subagent_snapshot").at(-1);
-    assert.deepEqual(afterCancel.groups, []);
+    assert.equal(readTask.task.status, "running");
+    assert.equal(readTask.task.cancelRequestedAt, null);
   } finally {
     await close(server);
   }
@@ -1840,6 +2247,12 @@ test("dashboard runtime clears and compacts context after confirmation routes ca
     const cleared = await runtime.clearContext({ sessionId: started.sessionId, permissionMode: "workspace" });
     assert.equal(cleared.ok, true);
     assert.equal(cleared.after.messages, 0);
+    const store = createSessionStore({ cwd, env: mockGatewayEnv(server) });
+    const clearedMetadata = await store.readMetadataExact(started.sessionId);
+    assert.equal(clearedMetadata.ok, true);
+    assert.equal(clearedMetadata.metadata.context.messages, 0);
+    assert.deepEqual(clearedMetadata.metadata.transcript.contextMessages, []);
+    assert.equal(runtime.active.get(started.sessionId).persisted, true);
 
     runtime.active.get(started.sessionId).session.messages = [
       { role: "user", content: "older context" },
@@ -1851,12 +2264,444 @@ test("dashboard runtime clears and compacts context after confirmation routes ca
     assert.equal(compacted.ok, true);
     assert.equal(["local", "agent:compaction", "none"].includes(compacted.result.strategy), true);
     assert.equal(runtime.listActiveEvents(started.sessionId).some((event) => event.type === "context_compacted"), true);
+    const compactedMetadata = await store.readMetadataExact(started.sessionId);
+    assert.equal(compactedMetadata.ok, true);
+    assert.equal(compactedMetadata.metadata.context.messages, compacted.after.messages);
+    assert.equal(compactedMetadata.metadata.transcript.contextMessages.length, compacted.after.messages);
+    assert.equal(typeof compactedMetadata.metadata.transcript.contextWindow.summary, "string");
+    assert.equal(runtime.active.get(started.sessionId).persisted, true);
   } finally {
     await close(server);
   }
 });
 
-async function waitForEvent(runtime, sessionId, predicate) {
+test("dashboard runtime rolls back a context mutation when immediate persistence fails", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-context-rollback-"));
+  const server = await listen(createGateway("context rollback answer"), "127.0.0.1", 0);
+  const env = mockGatewayEnv(server);
+  const runtime = createDashboardRuntime({ cwd, env });
+  await runtime.trustWorkspace();
+
+  try {
+    const started = await runtime.startTurn({
+      prompt: "context must survive a failed save",
+      permissionMode: "workspace"
+    });
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "files_updated");
+    const state = runtime.active.get(started.sessionId);
+    const before = structuredClone(state.session.messages);
+    const store = createSessionStore({ cwd, env });
+    await store.deleteSession(started.sessionId);
+
+    const cleared = await runtime.clearContext({ sessionId: started.sessionId, permissionMode: "workspace" });
+
+    assert.equal(cleared.ok, false);
+    assert.equal(cleared.code, "CONTEXT_PERSIST_FAILED");
+    assert.deepEqual(state.session.messages, before);
+    assert.equal(state.persisted, false);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime serializes concurrent cold resumes and rejects selector aliases", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-resume-lock-"));
+  const store = createSessionStore({ cwd });
+  await store.writeMetadata({
+    id: "dashboard-exact-session-id",
+    prompt: "saved prompt",
+    title: "saved prompt",
+    status: "completed",
+    transcript: { messages: [] }
+  });
+  const gate = deferred();
+  let calls = 0;
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: {},
+    runTurn: async (_session, options) => {
+      calls += 1;
+      await gate.promise;
+      await options.onEvent({ type: "turn_complete", status: "completed" });
+      return { output: "resumed" };
+    }
+  });
+  await runtime.trustWorkspace();
+
+  const [first, second] = await Promise.all([
+    runtime.startTurn({ sessionId: "dashboard-exact-session-id", prompt: "first", permissionMode: "plan" }),
+    runtime.startTurn({ sessionId: "dashboard-exact-session-id", prompt: "second", permissionMode: "plan" })
+  ]);
+  assert.equal(first.ok, true);
+  assert.equal(second.ok, true);
+  assert.equal([first, second].filter((result) => result.queued === true).length, 1);
+  assert.equal(runtime.active.size, 1);
+  assert.equal(runtime.active.get("dashboard-exact-session-id").queuedPrompts.length, 1);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 1);
+
+  const prefix = await runtime.startTurn({ sessionId: "dashboard-exact", prompt: "prefix", permissionMode: "plan" });
+  assert.equal(prefix.ok, false);
+  assert.equal(prefix.code, "EXACT_SESSION_ID_REQUIRED");
+  const latest = await runtime.clearContext({ sessionId: "latest", permissionMode: "plan" });
+  assert.equal(latest.ok, false);
+  assert.equal(latest.code, "EXACT_SESSION_ID_REQUIRED");
+
+  runtime.cancelQueuedTurn({
+    sessionId: "dashboard-exact-session-id",
+    queueItemId: runtime.active.get("dashboard-exact-session-id").queuedPrompts[0].id
+  });
+  gate.resolve();
+  await waitForEvent(runtime, "dashboard-exact-session-id", (event) => event.type === "run_state" && event.running === false);
+});
+
+test("dashboard runtime blocks background deletion unless cancellation is explicit", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-delete-background-"));
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: {},
+    runTurn: async (_session, options) => {
+      await options.onEvent({ type: "turn_complete", status: "completed" });
+      return { output: "done" };
+    }
+  });
+  await runtime.trustWorkspace();
+  const started = await runtime.startTurn({ prompt: "seed", permissionMode: "plan" });
+  await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+  const unregister = registerBackgroundTerminalTask({
+    taskId: "delete-owned-terminal",
+    parentSessionId: started.sessionId,
+    title: "owned terminal",
+    command: "pending",
+    cwd,
+    status: "starting"
+  });
+
+  try {
+    const blocked = await runtime.deleteSession({ sessionId: started.sessionId });
+    assert.equal(blocked.ok, false);
+    assert.equal(blocked.status, 409);
+    assert.equal(blocked.code, "SESSION_HAS_ACTIVE_WORK");
+    assert.equal(blocked.activity.backgroundTasks, 1);
+    assert.equal(runtime.active.has(started.sessionId), true);
+
+    const deleted = await runtime.deleteSession({
+      sessionId: started.sessionId,
+      cancelBackground: true,
+      timeoutMs: 250
+    });
+    assert.equal(deleted.ok, true);
+    assert.equal(runtime.active.has(started.sessionId), false);
+  } finally {
+    unregister();
+  }
+});
+
+test("dashboard runtime shutdown reports activity and requires bounded cancel or force semantics", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-shutdown-"));
+  const gate = deferred();
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: { ANT_CODE_INTERRUPT_FORCE_SETTLE_MS: "50" },
+    runTurn: async () => {
+      await gate.promise;
+      return { output: "late" };
+    }
+  });
+  await runtime.trustWorkspace();
+  const started = await runtime.startTurn({ prompt: "stay active", permissionMode: "plan" });
+  const state = runtime.active.peek(started.sessionId);
+  let disposedReason = "";
+  runtime.subscribe(started.sessionId, () => {}, {
+    onDispose: (reason) => {
+      disposedReason = reason;
+    }
+  });
+
+  const undecided = await runtime.shutdown({});
+  assert.equal(undecided.ok, false);
+  assert.equal(undecided.code, "ACTIVE_WORK_REQUIRES_DECISION");
+  assert.equal(undecided.activity.activeTurns, 1);
+
+  const timedOut = await runtime.shutdown({ cancel: true, timeoutMs: 75 });
+  assert.equal(timedOut.ok, false);
+  assert.equal(timedOut.code, "SHUTDOWN_TIMEOUT");
+  assert.equal(timedOut.activity.quarantinedTurns, 1);
+  assert.equal(runtime.active.has(started.sessionId), true);
+
+  const forced = await runtime.shutdown({ force: true, timeoutMs: 75 });
+  assert.equal(forced.ok, true);
+  assert.equal(forced.forced, true);
+  assert.equal(runtime.active.size, 0);
+  assert.equal(disposedReason, "shutdown");
+  assert.equal(state.controller, null);
+  assert.equal(state.listeners.size, 0);
+  assert.equal(state.events.length, 0);
+  gate.resolve();
+});
+
+test("dashboard runtime refuses metadata cwd outside the dashboard workspace", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-cwd-root-"));
+  const child = path.join(cwd, "child");
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-cwd-outside-"));
+  await fs.mkdir(child);
+  const store = createSessionStore({ cwd });
+  await store.writeMetadata({ id: "inside-cwd", cwd: child, status: "completed" });
+  await store.writeMetadata({ id: "outside-cwd", cwd: outside, status: "completed" });
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+
+  const inside = await runtime.sessionCwd("inside-cwd");
+  assert.equal(inside.ok, true);
+  assert.equal(inside.cwd, await fs.realpath(child));
+  const escaped = await runtime.sessionCwd("outside-cwd");
+  assert.equal(escaped.ok, false);
+  assert.equal(escaped.status, 403);
+  assert.equal(escaped.code, "SESSION_CWD_OUTSIDE_WORKSPACE");
+});
+
+test("dashboard transcript endpoints page a 10k archive without materializing full history", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-large-page-"));
+  const store = createSessionStore({ cwd });
+  const messages = Array.from({ length: 10_000 }, (_, index) => ({
+    role: index % 2 === 0 ? "user" : "assistant",
+    content: `message ${index + 1}`
+  }));
+  const archive = await store.writeTranscriptChunks("dashboard-large-page", messages);
+  await store.writeMetadata({
+    id: "dashboard-large-page",
+    cwd,
+    title: "large page",
+    status: "completed",
+    transcript: { archive, messages: messages.slice(-50) }
+  });
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+
+  const opened = await runtime.readSession("dashboard-large-page");
+  assert.equal(opened.ok, true);
+  assert.equal(opened.session.transcript.length, 100);
+  assert.equal(opened.session.transcript[0].content, "message 9901");
+  assert.equal(opened.session.transcript.at(-1).content, "message 10000");
+  assert.equal(opened.session.transcriptPage.cursor, "9900");
+  assert.equal(opened.session.transcriptPage.total, 10_000);
+
+  const previous = await runtime.readTranscriptPage({
+    sessionId: "dashboard-large-page",
+    before: opened.session.transcriptPage.cursor,
+    limit: 100
+  });
+  assert.equal(previous.ok, true);
+  assert.equal(previous.transcript[0].content, "message 9801");
+  assert.equal(previous.transcript.at(-1).content, "message 9900");
+  assert.equal(previous.transcriptPage.cursor, "9800");
+
+  await fs.writeFile(path.join(store.root, archive.chunks.at(-1).file), "{corrupt", "utf8");
+  const corrupt = await runtime.readSession("dashboard-large-page");
+  assert.equal(corrupt.ok, false);
+  assert.equal(corrupt.status, 500);
+  assert.equal(corrupt.code, "TRANSCRIPT_CHUNK_INVALID");
+  await runtime.shutdown({ force: true, timeoutMs: 50 });
+});
+
+test("dashboard active transcript paging preserves cursor positions with duplicate messages and pending tail", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-active-page-"));
+  const store = createSessionStore({ cwd });
+  const messages = Array.from({ length: 150 }, (_, index) => ({ role: "user", content: `message ${index + 1}` }));
+  messages[60] = { ...messages[50] };
+  const archive = await store.writeTranscriptChunks("active-page-session", messages);
+  await store.writeMetadata({
+    id: "active-page-session",
+    cwd,
+    status: "completed",
+    transcript: { archive, messages: messages.slice(-50) }
+  });
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: {},
+    runTurn: async (_session, options) => {
+      await options.onEvent({ type: "turn_complete", status: "completed" });
+      return { output: "unchanged" };
+    }
+  });
+  await runtime.trustWorkspace();
+  const resumed = await runtime.startTurn({
+    sessionId: "active-page-session",
+    prompt: "activate",
+    permissionMode: "plan"
+  });
+  await waitForEvent(runtime, resumed.sessionId, (event) => event.type === "run_state" && event.running === false);
+  const state = runtime.active.peek(resumed.sessionId);
+  const pending = Array.from({ length: 10 }, (_, index) => ({ role: "assistant", content: `pending ${index + 1}` }));
+  state.session.transcriptMessages.push(...pending);
+  state.session.transcriptArchive.pendingMessages.push(...pending);
+
+  const first = await runtime.readSession(resumed.sessionId);
+  assert.equal(first.ok, true);
+  assert.equal(first.session.transcript.length, 100);
+  assert.equal(first.session.transcript[0].content, "message 51");
+  assert.equal(first.session.transcript.at(-1).content, "pending 10");
+  assert.equal(first.session.transcriptPage.cursor, "60");
+  assert.equal(first.session.transcriptPage.total, 160);
+
+  const previous = await runtime.readTranscriptPage({
+    sessionId: resumed.sessionId,
+    before: first.session.transcriptPage.cursor,
+    limit: 100
+  });
+  assert.equal(previous.ok, true);
+  assert.equal(previous.transcript.length, 60);
+  assert.equal(previous.transcript[0].content, "message 1");
+  assert.equal(previous.transcript.at(-1).content, "message 60");
+  assert.equal(previous.transcriptPage.hasMore, false);
+  await runtime.shutdown({ force: true, timeoutMs: 50 });
+});
+
+test("dashboard active capacity evicts the least recently used persisted state and can reopen it", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-lru-"));
+  const store = createSessionStore({ cwd });
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: { ANT_CODE_DASHBOARD_ACTIVE_SESSION_MAX: "3" },
+    runTurn: async (session, options) => {
+      await store.writeMetadata({
+        id: session.id,
+        cwd,
+        title: session.title ?? session.id,
+        status: "completed",
+        transcript: { messages: [] }
+      });
+      await options.onEvent({ type: "turn_complete", status: "completed" });
+      return { output: "persisted" };
+    }
+  });
+  await runtime.trustWorkspace();
+  const started = [];
+  for (let index = 0; index < 3; index += 1) {
+    const result = await runtime.startTurn({ prompt: `session ${index + 1}`, permissionMode: "plan" });
+    started.push(result);
+    await waitForEvent(runtime, result.sessionId, (event) => event.type === "run_state" && event.running === false);
+  }
+  const [first, second, third] = started.map((result) => runtime.active.peek(result.sessionId));
+  first.lastAccessedAt = 1;
+  second.lastAccessedAt = 2;
+  third.lastAccessedAt = 3;
+  await runtime.readSession(started[0].sessionId);
+
+  const fourth = await runtime.startTurn({ prompt: "session 4", permissionMode: "plan" });
+  await waitForEvent(runtime, fourth.sessionId, (event) => event.type === "run_state" && event.running === false);
+  assert.equal(runtime.active.size, 3);
+  assert.equal(runtime.active.has(started[0].sessionId), true);
+  assert.equal(runtime.active.has(started[1].sessionId), false);
+  assert.equal(second.disposed, true);
+  assert.equal(second.controller, null);
+  assert.equal(second.listeners.size, 0);
+  assert.equal(second.events.length, 0);
+  assert.deepEqual(second.session.messages, []);
+
+  const reopened = await runtime.startTurn({
+    sessionId: started[1].sessionId,
+    prompt: "reopen evicted",
+    permissionMode: "plan"
+  });
+  assert.equal(reopened.ok, true);
+  assert.equal(reopened.sessionId, started[1].sessionId);
+  await waitForEvent(runtime, reopened.sessionId, (event) => event.type === "run_state" && event.running === false);
+  assert.equal(runtime.active.size, 3);
+  assert.equal(runtime.active.has(started[1].sessionId), true);
+  await runtime.shutdown({ force: true, timeoutMs: 50 });
+});
+
+test("dashboard idle TTL waits for listeners, pending interactions, background work, and controllers", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-ttl-"));
+  const store = createSessionStore({ cwd });
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: {
+      ANT_CODE_DASHBOARD_ACTIVE_SESSION_MAX: "10",
+      ANT_CODE_DASHBOARD_ACTIVE_IDLE_TTL_MS: "30",
+      ANT_CODE_DASHBOARD_ACTIVE_SWEEP_MS: "60000"
+    },
+    runTurn: async (session, options) => {
+      await store.writeMetadata({ id: session.id, cwd, status: "completed", transcript: { messages: [] } });
+      await options.onEvent({ type: "turn_complete", status: "completed" });
+      return { output: "persisted" };
+    }
+  });
+  await runtime.trustWorkspace();
+  const started = await runtime.startTurn({ prompt: "ttl state", permissionMode: "plan" });
+  await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+  const state = runtime.active.peek(started.sessionId);
+  const unsubscribe = runtime.subscribe(started.sessionId, () => {});
+  state.lastAccessedAt = Date.now() - 100;
+  await runtime.sweepIdleSessions();
+  assert.equal(runtime.active.has(started.sessionId), true);
+
+  unsubscribe();
+  state.pendingApprovals.set("pending-test", { resolve: () => {}, approvalKey: "test" });
+  state.lastAccessedAt = Date.now() - 100;
+  await runtime.sweepIdleSessions();
+  assert.equal(runtime.active.has(started.sessionId), true);
+  state.pendingApprovals.clear();
+
+  const unregister = registerBackgroundTerminalTask({
+    taskId: "ttl-terminal",
+    parentSessionId: started.sessionId,
+    cwd,
+    title: "ttl terminal",
+    command: "pending",
+    status: "starting"
+  });
+  state.lastAccessedAt = Date.now() - 100;
+  await runtime.sweepIdleSessions();
+  assert.equal(runtime.active.has(started.sessionId), true);
+  unregister();
+
+  state.controller = new AbortController();
+  state.lastAccessedAt = Date.now() - 100;
+  await runtime.sweepIdleSessions();
+  assert.equal(runtime.active.has(started.sessionId), true);
+  state.controller = null;
+  state.lastAccessedAt = Date.now() - 100;
+  const swept = await runtime.sweepIdleSessions();
+  assert.deepEqual(swept.evicted, [started.sessionId]);
+  assert.equal(runtime.active.has(started.sessionId), false);
+  assert.equal(state.disposed, true);
+  assert.equal(state.listeners.size, 0);
+  assert.equal(state.controller, null);
+  assert.deepEqual(state.session.messages, []);
+  await runtime.shutdown({ force: true, timeoutMs: 50 });
+});
+
+test("dashboard active capacity never evicts an unpersisted idle state", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-unpersisted-"));
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: {
+      ANT_CODE_DASHBOARD_ACTIVE_SESSION_MAX: "1",
+      ANT_CODE_DASHBOARD_ACTIVE_IDLE_TTL_MS: "20",
+      ANT_CODE_DASHBOARD_ACTIVE_SWEEP_MS: "60000"
+    },
+    runTurn: async (_session, options) => {
+      await options.onEvent({ type: "turn_complete", status: "completed" });
+      return { output: "not persisted" };
+    }
+  });
+  await runtime.trustWorkspace();
+  const first = await runtime.startTurn({ prompt: "keep me", permissionMode: "plan" });
+  await waitForEvent(runtime, first.sessionId, (event) => event.type === "run_state" && event.running === false);
+  runtime.active.peek(first.sessionId).lastAccessedAt = Date.now() - 100;
+  await runtime.sweepIdleSessions();
+  assert.equal(runtime.active.has(first.sessionId), true);
+  assert.equal(runtime.active.peek(first.sessionId).persisted, false);
+
+  const rejected = await runtime.startTurn({ prompt: "no capacity", permissionMode: "plan" });
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.status, 503);
+  assert.equal(rejected.code, "ACTIVE_SESSION_CAPACITY_REACHED");
+  assert.equal(runtime.active.size, 1);
+  await runtime.shutdown({ force: true, timeoutMs: 50 });
+});
+
+async function waitForEvent(runtime, sessionId, predicate, timeoutMs = 5000) {
   const existing = runtime.listActiveEvents(sessionId);
   if (existing.some(predicate)) {
     return existing;
@@ -1865,7 +2710,7 @@ async function waitForEvent(runtime, sessionId, predicate) {
     const timeout = setTimeout(() => {
       unsubscribe?.();
       reject(new Error("Timed out waiting for dashboard event"));
-    }, 5000);
+    }, timeoutMs);
     let unsubscribe;
     unsubscribe = runtime.subscribe(sessionId, (event) => {
       if (predicate(event)) {
@@ -2026,6 +2871,38 @@ function createDelayedGateway(texts, delayMs) {
   });
 }
 
+function createFailingGateway() {
+  return http.createServer(async (req, res) => {
+    for await (const _ of req) {
+      // Drain request body.
+    }
+    res.writeHead(500, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "mock gateway failure" }));
+  });
+}
+
+function createRepeatedReadGateway() {
+  let calls = 0;
+  return http.createServer(async (req, res) => {
+    for await (const _ of req) {
+      // Drain request body.
+    }
+    calls += 1;
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      id: `dashboard-tool-limit-${calls}`,
+      model: "mock-model",
+      content: [],
+      toolCalls: [{
+        id: `dashboard-read-${calls}`,
+        name: "read_file",
+        input: { path: "notes.txt", maxBytes: 1024 }
+      }],
+      stopReason: "tool_calls"
+    }));
+  });
+}
+
 function createHangingStreamGateway() {
   return http.createServer(async (req, res) => {
     for await (const _ of req) {
@@ -2093,6 +2970,72 @@ function createBackgroundWakeGateway(requests) {
       stopReason: "stop"
     }));
   });
+}
+
+function createQueueFullBackgroundWakeGateway(requests, firstParentGate, finishParentGate) {
+  return http.createServer(async (req, res) => {
+    let raw = "";
+    for await (const chunk of req) {
+      raw += Buffer.from(chunk).toString("utf8");
+    }
+    const body = JSON.parse(raw || "{}");
+    requests.push(body);
+    const sessionId = String(body.metadata?.sessionId ?? body.sessionId ?? "");
+    if (sessionId.startsWith("agent-explorer-")) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        id: "dashboard-queue-full-child-final",
+        model: "mock-model",
+        content: [{ type: "text", text: "queue full child done" }],
+        toolCalls: [],
+        stopReason: "stop"
+      }));
+      return;
+    }
+
+    const parentCalls = requests.filter((item) => !String(item.sessionId ?? "").startsWith("agent-explorer-")).length;
+    if (parentCalls === 1) {
+      await firstParentGate;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        id: "dashboard-queue-full-agent-run",
+        model: "mock-model",
+        content: [],
+        toolCalls: [{
+          id: "delegate-dashboard-queue-full",
+          name: "agent_run",
+          input: {
+            profile: "explorer",
+            query: "finish while parent queue is full",
+            background: true,
+            groupId: "group-dashboard-queue-full",
+            waitForGroup: "all",
+            wakeParent: true
+          }
+        }],
+        stopReason: "tool_calls"
+      }));
+      return;
+    }
+
+    await finishParentGate;
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      id: "dashboard-queue-full-parent-final",
+      model: "mock-model",
+      content: [{ type: "text", text: "parent finished without consuming overflow wake" }],
+      toolCalls: [],
+      stopReason: "stop"
+    }));
+  });
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
 }
 
 function createBackgroundAnyWakeGateway(requests) {

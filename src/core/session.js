@@ -1959,6 +1959,50 @@ async function persistSessionMetadata(store, metadata, output, status, session, 
   });
 }
 
+/**
+ * Persist an already-created session after a Dashboard-only context mutation.
+ * This intentionally does not emit session.end hooks or change terminal status.
+ *
+ * @param {Awaited<ReturnType<typeof createSession>>} session
+ * @param {{ env?: NodeJS.ProcessEnv }} [options]
+ */
+export async function persistSessionSnapshot(session, options = {}) {
+  const store = createSessionStore({
+    cwd: session.cwd,
+    transcript: session.config?.transcript,
+    env: options.env ?? process.env
+  });
+  const current = await store.readMetadataExact(session.id);
+  if (!current.ok) {
+    const error = new Error(current.error?.message ?? "Session metadata is not available for persistence");
+    error.code = current.error?.code ?? "SESSION_METADATA_NOT_FOUND";
+    throw error;
+  }
+
+  const metadata = { ...current.metadata };
+  metadata.model = session.model;
+  metadata.permissionMode = session.permissionMode;
+  metadata.fullAccess = session.fullAccess;
+  metadata.readonly = session.readonly;
+  metadata.allowWrite = session.allowWrite;
+  metadata.allowCommand = session.allowCommand;
+  metadata.context = summarizeContextWindow(session);
+  metadata.workflow = summarizeWorkflow(session.workflow);
+  const transcriptArchive = await persistTranscriptArchive(store, session);
+  const modelArchive = await persistModelContextArchive(store, session);
+  metadata.transcript = {
+    ...(metadata.transcript ?? {}),
+    version: 2,
+    messages: persistableTranscriptMessages(transcriptMessagesForPersistence(session)),
+    contextMessages: persistableContextMessages(limitResumeContextMessages(session.messages, session.config.context)),
+    contextWindow: persistableContextWindow(session.contextWindow),
+    archive: persistableTranscriptArchive(transcriptArchive),
+    modelArchive: persistableTranscriptArchive(modelArchive)
+  };
+  const metadataPath = await store.writeMetadata(metadata);
+  return { ok: true, metadataPath, metadata };
+}
+
 function persistableMessages(messages) {
   return persistableMessagesWithOptions(messages);
 }
@@ -2109,10 +2153,16 @@ function normalizeTranscriptArchiveState(archive = {}) {
     ? archive.chunks.map(normalizeTranscriptArchiveChunk).filter(Boolean)
     : [];
   const totalFromChunks = chunks.reduce((sum, chunk) => sum + chunk.messages, 0);
+  const visibleFromChunks = chunks.reduce((sum, chunk) => sum + (chunk.visibleMessages ?? 0), 0);
+  const chunksHaveVisibleCounts = chunks.every((chunk) => chunk.visibleMessages !== null);
   return {
     version: 1,
     chunkSize,
     totalMessages: nonNegativeInteger(archive?.totalMessages, totalFromChunks),
+    totalVisibleMessages: nonNegativeInteger(
+      archive?.totalVisibleMessages,
+      chunks.length === 0 ? 0 : chunksHaveVisibleCounts ? visibleFromChunks : null
+    ),
     chunks,
     pendingMessages: Array.isArray(archive?.pendingMessages) ? archive.pendingMessages.filter(Boolean) : []
   };
@@ -2131,6 +2181,7 @@ function normalizeTranscriptArchiveChunk(chunk) {
     index,
     file,
     messages: nonNegativeInteger(chunk.messages, 0),
+    visibleMessages: nonNegativeInteger(chunk.visibleMessages, null),
     bytes: nonNegativeInteger(chunk.bytes, 0),
     encrypted: chunk.encrypted === true || file.endsWith(".json.enc")
   };
@@ -2142,6 +2193,7 @@ function persistableTranscriptArchive(archive = {}) {
     version: normalized.version,
     chunkSize: normalized.chunkSize,
     totalMessages: normalized.totalMessages,
+    totalVisibleMessages: normalized.totalVisibleMessages,
     chunks: normalized.chunks
   };
 }
@@ -2440,9 +2492,12 @@ async function restoreArchivedContextMessages(store, archive = {}, context = {})
   const messages = [];
   for (const chunk of chunks) {
     const result = await store.readTranscriptChunk(normalized, chunk.index);
-    if (result.ok && Array.isArray(result.messages)) {
-      messages.push(...result.messages);
+    if (!result.ok) {
+      const error = new Error(result.error?.message ?? `Unable to read transcript chunk '${chunk.index}'`);
+      error.code = result.error?.code ?? "TRANSCRIPT_CHUNK_READ_ERROR";
+      throw error;
     }
+    messages.push(...(Array.isArray(result.messages) ? result.messages : []));
   }
   return repairDanglingToolCallMessages(restorePersistedMessages(limitResumeContextMessages(messages, context)));
 }

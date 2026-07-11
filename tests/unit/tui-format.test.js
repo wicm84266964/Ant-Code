@@ -332,15 +332,16 @@ test("question prompt renders selectable choices and custom answer guidance", ()
   assert.match(text, /Esc 取消/);
 });
 
-test("prompt and transcript compact large pasted text", () => {
+test("prompt keeps a real editable window while transcript compacts large pasted text", () => {
   const pasted = Array.from({ length: 12 }, (_, index) => `line ${index + 1}`).join("\n");
   const prompt = promptLines("input", false, pasted, "", { inputCursor: pasted.length });
   const transcript = transcriptBlockLines({ kind: "user", title: "user", body: pasted }, "compact");
   const promptText = prompt.map((item) => item.text).join("\n");
   const transcriptText = transcript.map((item) => item.text).join("\n");
 
-  assert.match(promptText, /\{12 lines, .*粘贴文本\}/);
-  assert.match(promptText, /Enter 发送/);
+  assert.doesNotMatch(promptText, /粘贴文本/);
+  assert.match(promptText, /line 12/);
+  assert.match(promptText, /12 行草稿/);
   assert.equal(prompt.some((item) => item.segments?.some((segment) => segment.cursor)), true);
   assert.match(transcriptText, /\{12 lines, .*粘贴文本\}/);
   assert.match(transcriptText, /Ctrl\+O/);

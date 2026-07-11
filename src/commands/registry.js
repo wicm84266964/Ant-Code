@@ -48,7 +48,7 @@ export const SLASH_COMMANDS = Object.freeze([
 
 export const KEYBINDINGS = Object.freeze([
   keybinding("submit", "输入区", "Enter", "提交提示，或选择当前面板项。"),
-  keybinding("newline", "输入区", "Ctrl+J", "在输入草稿中插入换行。"),
+  keybinding("newline", "输入区", "Shift/Alt+Enter、Ctrl+J", "在输入草稿中插入换行。"),
   keybinding("clear-draft", "输入区", "Ctrl+U", "清空当前草稿。"),
   keybinding("prompt-history", "输入区", "Ctrl+↑/Ctrl+↓", "召回上一条/下一条已提交提示。", "输入区聚焦且没有弹层。"),
   keybinding("slash", "发现", "/", "打开斜杠命令面板。"),

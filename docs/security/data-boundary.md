@@ -78,6 +78,39 @@ The local client owns:
 - Local transcript policy.
 - Secret scrubbing before request construction.
 
+## Dashboard Browser Boundary
+
+Dashboard is a loopback-only browser surface, not a network-sharing feature. It
+accepts `127.0.0.1`, `localhost`, or `::1` and rejects other bind hosts. Every
+process generates fresh session and CSRF credentials. Root-page bootstrap places
+the session credential in an `HttpOnly; SameSite=Strict` cookie and a separate
+`SameSite=Strict` CSRF cookie that must be echoed in a request header.
+
+All API calls are checked against the exact bound Host and port. Supplied Origin
+and cross-site fetch context must be acceptable; state-changing requests must be
+JSON and pass CSRF validation. Dashboard cannot be framed because its Content
+Security Policy includes `frame-ancestors 'none'` and responses also send
+`X-Frame-Options: DENY`. Credential values must not be logged, documented, or
+used to imply support for LAN or public access.
+
+Browser-visible file access stays within the approved workspace after canonical
+`realpath` validation, including symlink and junction targets. Remote Markdown
+images are not fetched automatically and remain text or external links. SVG is
+download-only rather than embedded as same-origin active content. Office preview
+input is capped at 10 MiB and parsed in a worker limited to 1,000 entries, 16 MiB
+per entry, 64 MiB total extraction, a 200:1 compression ratio, and 3 seconds.
+Raw file responses are capped at 20 MiB.
+
+Turn input is bounded to a 40 MiB JSON body and a 256 KiB UTF-8 prompt. Image
+input is limited to six PNG, JPEG, GIF, or WebP files, at most 8 MiB each and 24
+MiB total; canonical base64 and content signatures are verified. Other JSON
+request bodies are capped at 1 MiB.
+
+Dashboard transcript pages default to 100 messages and are capped at 200, while
+the browser mounts no more than 300 transcript nodes. Active runtime state is
+bounded separately from durable history: only reclaimable idle state is evicted,
+and persisted sessions plus older transcript metadata/chunks remain available.
+
 ## Local Transcript Policy
 
 Default:
