@@ -576,13 +576,24 @@ export function commandPanelViewport(panel, offset = 0, visibleRows = 12) {
   };
 }
 
-export function PromptBox({ mode, busy, inputBuffer, inputCursor, questionBuffer, questionCursor, queuedPrompts, pendingApproval, pendingQuestion, pulse = 0, width, height, theme = DEFAULT_TUI_THEME }) {
+export function PromptBox({ mode, busy, inputBuffer, inputCursor, inputVisibleStart, questionBuffer, questionCursor, questionVisibleStart, queuedPrompts, pendingApproval, pendingQuestion, pulse = 0, width, height, theme = DEFAULT_TUI_THEME }) {
   const colorToken = promptColor(mode, busy);
   const color = themedPromptColor(theme, colorToken);
   const showCursor = Math.floor(pulse / 2) % 2 === 0;
   const draftColumns = Math.max(8, Number(width) - 4);
   const maxPromptLines = Math.max(1, Number(height) - 2);
-  const lines = promptLines(mode, busy, inputBuffer, questionBuffer, { queuedPrompts, pendingApproval, pendingQuestion, inputCursor, questionCursor, showCursor, draftColumns, maxPromptLines });
+  const lines = promptLines(mode, busy, inputBuffer, questionBuffer, {
+    queuedPrompts,
+    pendingApproval,
+    pendingQuestion,
+    inputCursor,
+    inputVisibleStart,
+    questionCursor,
+    questionVisibleStart,
+    showCursor,
+    draftColumns,
+    maxPromptLines
+  });
   return h(Box, { flexDirection: "column", width, height, flexShrink: 0, borderStyle: "round", borderColor: color, paddingX: 1 },
     ...lines.map((item, index) => h(Text, {
       key: index,

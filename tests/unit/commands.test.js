@@ -41,7 +41,7 @@ test("status slash command reports local session settings", async () => {
   const output = await runSlashCommand({
     command: parseSlashCommand("/status --json"),
     cwd: process.cwd(),
-    env: {},
+    env: { LAB_AGENT_NETWORK_MODE: "lab-only" },
     readonly: true,
     allowWrite: false,
     allowCommand: false
@@ -1244,9 +1244,10 @@ test("model command reports current repo example model context", async () => {
 
 test("model use command can switch an attached TUI session callback", async () => {
   let selected = null;
+  const cwd = await makeTempWorkspace();
   const output = await runSlashCommand({
     command: parseSlashCommand("/model use example-vision-model"),
-    cwd: process.cwd(),
+    cwd,
     env: {
       LAB_AGENT_MODEL: "example-vision-model"
     },

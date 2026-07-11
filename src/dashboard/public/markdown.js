@@ -1,4 +1,5 @@
 let renderInstanceCounter = 0;
+const MAX_INLINE_DATA_IMAGE_BYTES = 2 * 1024 * 1024;
 const LOCAL_FILE_EXTENSIONS = new Set([
   "png", "jpg", "jpeg", "gif", "webp", "svg",
   "pdf",
@@ -461,7 +462,7 @@ function renderLink(label, href, context) {
   if (isLocalWorkspaceUrl(resolvedHref)) {
     return `<button type="button" class="file-link" data-file="${escapeAttribute(resolvedHref)}" title="${escapeAttribute(resolvedHref)}">${renderInlineText(label)}</button>`;
   }
-  return `<a href="${escapeAttribute(resolvedHref)}" target="_blank" rel="noreferrer">${renderInlineText(label)}</a>`;
+  return `<a href="${escapeAttribute(resolvedHref)}" target="_blank" rel="noopener noreferrer">${renderInlineText(label)}</a>`;
 }
 
 function renderImage(alt, src, context) {
@@ -470,8 +471,16 @@ function renderImage(alt, src, context) {
     return renderInlineText(alt);
   }
   const resolvedSrc = resolveRelativeUrl(safeSrc, context?.basePath);
+  if (resolvedSrc.startsWith("/") && !resolvedSrc.startsWith("/api/files/raw?")) {
+    return renderInlineText(alt);
+  }
   if (context?.lightweight) {
     return `<span class="md-draft-media">${renderInlineText(alt || "图片")} · ${escapeHtml(resolvedSrc)}</span>`;
+  }
+  if (/^https?:\/\//i.test(resolvedSrc)) {
+    const host = remoteImageHost(resolvedSrc);
+    const label = alt || "远程图片";
+    return `<span class="md-draft-media md-remote-media"><span>${renderInlineText(label)} · ${escapeHtml(host)}</span> <a href="${escapeAttribute(resolvedSrc)}" target="_blank" rel="noopener noreferrer">${escapeHtml(resolvedSrc)}</a></span>`;
   }
   const escapedAlt = escapeAttribute(alt);
   return `<button type="button" class="md-image-button" data-image-src="${escapeAttribute(resolvedSrc)}" data-image-alt="${escapedAlt}" aria-label="打开 ${escapedAlt} 大图"><img src="${escapeAttribute(resolvedSrc)}" alt="${escapedAlt}"></button>`;
@@ -479,13 +488,69 @@ function renderImage(alt, src, context) {
 
 function safeUrl(value, options = {}) {
   const text = String(value ?? "").trim();
-  if (options.allowDataImage && /^data:image\//i.test(text)) {
-    return text;
+  if (options.allowDataImage && /^data:/i.test(text)) {
+    return safeDataImageUrl(text);
   }
-  if (/^(https?:|\/|\.\/|\.\.\/)/i.test(text) || isLikelyLocalFileUrl(text)) {
+  if (/^https?:\/\//i.test(text)) {
+    try {
+      const url = new URL(text);
+      return url.protocol === "http:" || url.protocol === "https:" ? text : "";
+    } catch {
+      return "";
+    }
+  }
+  if (/^(\/|\.\/|\.\.\/)/i.test(text) || isLikelyLocalFileUrl(text)) {
     return text;
   }
   return "";
+}
+
+function safeDataImageUrl(value) {
+  const match = String(value ?? "").match(/^data:image\/(png|jpeg|gif|webp);base64,([a-z0-9+/]+={0,2})$/i);
+  if (!match || match[2].length % 4 !== 0) {
+    return "";
+  }
+  const padding = match[2].endsWith("==") ? 2 : match[2].endsWith("=") ? 1 : 0;
+  const decodedBytes = (match[2].length / 4) * 3 - padding;
+  if (decodedBytes <= 0 || decodedBytes > MAX_INLINE_DATA_IMAGE_BYTES) {
+    return "";
+  }
+  let prefix;
+  try {
+    prefix = atob(match[2].slice(0, 32));
+  } catch {
+    return "";
+  }
+  const bytes = Array.from(prefix, (char) => char.charCodeAt(0));
+  if (!matchesBitmapSignature(match[1].toLowerCase(), bytes)) {
+    return "";
+  }
+  return String(value);
+}
+
+function matchesBitmapSignature(kind, bytes) {
+  if (kind === "png") {
+    return startsWithBytes(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  }
+  if (kind === "jpeg") {
+    return startsWithBytes(bytes, [0xff, 0xd8, 0xff]);
+  }
+  if (kind === "gif") {
+    return startsWithBytes(bytes, [0x47, 0x49, 0x46, 0x38, 0x37, 0x61]) || startsWithBytes(bytes, [0x47, 0x49, 0x46, 0x38, 0x39, 0x61]);
+  }
+  return startsWithBytes(bytes, [0x52, 0x49, 0x46, 0x46]) && startsWithBytes(bytes.slice(8), [0x57, 0x45, 0x42, 0x50]);
+}
+
+function startsWithBytes(value, expected) {
+  return expected.every((byte, index) => value[index] === byte);
+}
+
+function remoteImageHost(value) {
+  try {
+    return new URL(value).host || "remote";
+  } catch {
+    return "remote";
+  }
 }
 
 function isLikelyLocalFileUrl(value) {

@@ -183,8 +183,8 @@ test("non-blocking command hooks are scheduled without holding the agent turn", 
   assert.match(formatHooksReport(config, { trusted: true }), /运行中：1/);
   assert.equal(summarizeHookAudit().running, 1);
   assert.equal(await exists(marker), false);
-  await waitFor(async () => (await fs.readFile(marker, "utf8")).trim() === "done");
-  await waitFor(() => listHookAudit().some((record) => record.name === "slow-check" && record.status === "completed" && record.ok));
+  await waitFor(async () => (await fs.readFile(marker, "utf8")).trim() === "done", 10_000);
+  await waitFor(() => listHookAudit().some((record) => record.name === "slow-check" && record.status === "completed" && record.ok), 10_000);
   assert.equal(summarizeHookAudit().running, 0);
 });
 

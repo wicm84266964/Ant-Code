@@ -1501,6 +1501,20 @@ test("document_intake extracts markdown from local HTML documents", async () => 
   assert.match(result.content, /Alpha beta/);
 });
 
+test("document_intake rejects oversized Office archives before parsing", async () => {
+  const cwd = await makeTempWorkspace();
+  const target = path.join(cwd, "oversized.docx");
+  const handle = await fs.open(target, "w");
+  await handle.truncate(20 * 1024 * 1024 + 1);
+  await handle.close();
+
+  const result = await documentIntakeTool({ cwd, path: "oversized.docx" });
+
+  assert.equal(result.supported, false);
+  assert.equal(result.maxBytes, 20 * 1024 * 1024);
+  assert.equal(result.error.code, "DOCUMENT_TOO_LARGE");
+});
+
 test("full access document_intake can read outside the workspace", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-full-access-doc-"));
   const cwd = path.join(root, "workspace");

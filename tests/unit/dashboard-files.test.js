@@ -3,8 +3,9 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { collectSessionFiles, previewFile, resolveWorkspaceFile } from "../../src/dashboard/files.js";
-import { createDocxBuffer, createXlsxBuffer } from "../fixtures/office-fixtures.js";
+import { collectSessionFiles, previewFile, readRawFile, resolveWorkspaceFile } from "../../src/dashboard/files.js";
+import { parseDocumentBufferAsync } from "../../src/tools/document-tools.js";
+import { createDocxBuffer, createOfficeZip, createXlsxBuffer } from "../fixtures/office-fixtures.js";
 
 test("dashboard file preview blocks paths outside workspace", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-files-"));
@@ -14,6 +15,73 @@ test("dashboard file preview blocks paths outside workspace", async () => {
 
   assert.equal(resolved.ok, false);
   assert.equal(resolved.status, 403);
+});
+
+test("dashboard file preview blocks symlink and junction escapes", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-files-link-"));
+  const cwd = path.join(root, "workspace");
+  const outside = path.join(root, "outside");
+  await fs.mkdir(cwd);
+  await fs.mkdir(outside);
+  await fs.writeFile(path.join(outside, "secret.txt"), "secret", "utf8");
+  try {
+    await fs.symlink(outside, path.join(cwd, "escape"), process.platform === "win32" ? "junction" : "dir");
+  } catch (error) {
+    if (error?.code === "EPERM" || error?.code === "EACCES") {
+      t.skip(`directory links are unavailable: ${error.code}`);
+      return;
+    }
+    throw error;
+  }
+
+  const preview = await previewFile(cwd, path.join("escape", "secret.txt"));
+  const raw = await readRawFile(cwd, path.join("escape", "secret.txt"));
+
+  assert.equal(preview.ok, false);
+  assert.equal(preview.status, 403);
+  assert.equal(raw.ok, false);
+  assert.equal(raw.status, 403);
+});
+
+test("dashboard file preview accepts a session cwd that resolves to the workspace", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-files-session-link-"));
+  const cwd = path.join(root, "workspace");
+  const sessionCwd = path.join(root, "session-workspace");
+  await fs.mkdir(cwd);
+  await fs.writeFile(path.join(cwd, "report.md"), "# Session report", "utf8");
+  try {
+    await fs.symlink(cwd, sessionCwd, process.platform === "win32" ? "junction" : "dir");
+  } catch (error) {
+    if (error?.code === "EPERM" || error?.code === "EACCES") {
+      t.skip(`directory links are unavailable: ${error.code}`);
+      return;
+    }
+    throw error;
+  }
+
+  const result = await previewFile(sessionCwd, "report.md");
+
+  assert.equal(result.ok, true);
+  assert.equal(result.file.kind, "markdown");
+  assert.equal(result.file.relativePath, "report.md");
+});
+
+test("dashboard serves SVG only with download metadata and a binary MIME", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-files-svg-"));
+  await fs.writeFile(path.join(cwd, "active.svg"), "<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>", "utf8");
+
+  const preview = await previewFile(cwd, "active.svg");
+  const raw = await readRawFile(cwd, "active.svg");
+
+  assert.equal(preview.ok, true);
+  assert.equal(preview.file.kind, "download");
+  assert.equal(preview.file.downloadOnly, true);
+  assert.equal(preview.file.embeddable, false);
+  assert.equal(raw.ok, true);
+  assert.equal(raw.contentType, "application/octet-stream");
+  assert.equal(raw.contentDisposition, "attachment");
+  assert.equal(raw.downloadOnly, true);
+  assert.equal(raw.downloadName, "active.svg");
 });
 
 test("dashboard previews markdown as text content", async () => {
@@ -80,6 +148,39 @@ test("dashboard previews xlsx as compact extracted cells", async () => {
   assert.match(result.file.content, /Sheet 1/);
   assert.match(result.file.content, /A1: 姓名/);
   assert.match(result.file.content, /B2: 98/);
+});
+
+test("dashboard Office preview rejects archives over the entry budget", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-files-office-entries-"));
+  const entries = Object.fromEntries(Array.from({ length: 1001 }, (_, index) => [`unused/${index}.xml`, ""]));
+  await fs.writeFile(path.join(cwd, "many.docx"), createOfficeZip(entries));
+
+  const result = await previewFile(cwd, "many.docx");
+
+  assert.equal(result.ok, true);
+  assert.equal(result.file.kind, "office");
+  assert.equal(result.file.parseErrorCode, "ZIP_ENTRY_LIMIT");
+});
+
+test("dashboard Office preview rejects high-ratio and damaged archives", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-files-office-budget-"));
+  await fs.writeFile(path.join(cwd, "ratio.docx"), createOfficeZip({
+    "word/document.xml": "A".repeat(1024 * 1024)
+  }));
+  await fs.writeFile(path.join(cwd, "damaged.docx"), Buffer.from("not a ZIP archive"));
+
+  const ratio = await previewFile(cwd, "ratio.docx");
+  const damaged = await previewFile(cwd, "damaged.docx");
+
+  assert.equal(ratio.file.parseErrorCode, "ZIP_COMPRESSION_RATIO_LIMIT");
+  assert.equal(damaged.file.parseErrorCode, "ZIP_EOCD_NOT_FOUND");
+});
+
+test("dashboard Office parser worker can be terminated on timeout", async () => {
+  await assert.rejects(
+    parseDocumentBufferAsync(createDocxBuffer("timeout"), ".docx", { timeoutMs: 1 }),
+    (error) => error?.code === "OFFICE_PARSE_TIMEOUT"
+  );
 });
 
 test("dashboard previews csv as lightweight table data", async () => {

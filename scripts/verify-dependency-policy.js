@@ -2,6 +2,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { collectDeclaredDependencies, readPackageJson } from "./dependency-audit-common.js";
+import { collectLockfileConsistencyFailures } from "./lockfile-consistency.js";
 import { ROOT } from "./audit-common.js";
 
 const pkg = await readPackageJson();
@@ -23,7 +24,9 @@ for (const dependency of dependencies) {
 }
 
 await verifyLockfileDependencyBoundaries(dependencies.length);
-await verifyShrinkwrapMatchesLockfile(dependencies.length);
+failures.push(...await collectLockfileConsistencyFailures(ROOT, {
+  required: dependencies.length > 0
+}));
 
 if (failures.length > 0) {
   console.error("Dependency policy check failed:");
@@ -33,23 +36,6 @@ if (failures.length > 0) {
   process.exitCode = 1;
 } else {
   console.log(`Dependency policy check passed for ${dependencies.length} external dependencies.`);
-}
-
-async function verifyShrinkwrapMatchesLockfile(declaredDependencyCount) {
-  if (declaredDependencyCount === 0) {
-    return;
-  }
-  const lockPath = path.join(ROOT, "package-lock.json");
-  const shrinkwrapPath = path.join(ROOT, "npm-shrinkwrap.json");
-  const lockText = await fs.readFile(lockPath, "utf8").catch(() => null);
-  const shrinkwrapText = await fs.readFile(shrinkwrapPath, "utf8").catch(() => null);
-  if (shrinkwrapText === null) {
-    failures.push("npm-shrinkwrap.json is required so packaged releases keep the reviewed dependency graph");
-    return;
-  }
-  if (lockText !== shrinkwrapText) {
-    failures.push("npm-shrinkwrap.json must match package-lock.json exactly");
-  }
 }
 
 /**
