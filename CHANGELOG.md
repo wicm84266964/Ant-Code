@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Windows Dashboard file previews now compare only file identity fields that
+  are available from both the open handle and path stat. This keeps the
+  symlink/junction boundary check while avoiding false 409 responses when
+  Windows reports a non-zero device only for the open handle.
+- Dashboard browser coverage now waits for both the resize separator state and
+  the rendered file-panel geometry, removing a race that could report 480px
+  while the persisted 600px layout was still settling.
+
+### Validation
+
+- `npm run check`: 841 unit/integration tests and 11 Microsoft Edge Dashboard
+  tests pass on Windows with Node.js 22.
+
 ## 1.3.0 - 2026-07-11
 
 ### Security

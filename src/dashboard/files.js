@@ -342,8 +342,20 @@ async function openWorkspaceFile(cwd, requestedPath) {
 }
 
 function sameOpenedFile(opened, current) {
-  if (Number(opened.dev) !== 0 || Number(opened.ino) !== 0 || Number(current.dev) !== 0 || Number(current.ino) !== 0) {
-    return opened.dev === current.dev && opened.ino === current.ino;
+  const openedDev = Number(opened.dev);
+  const currentDev = Number(current.dev);
+  const openedIno = Number(opened.ino);
+  const currentIno = Number(current.ino);
+  const hasComparableDev = openedDev !== 0 && currentDev !== 0;
+  const hasComparableIno = openedIno !== 0 && currentIno !== 0;
+  if (hasComparableDev && opened.dev !== current.dev) {
+    return false;
+  }
+  if (hasComparableIno && opened.ino !== current.ino) {
+    return false;
+  }
+  if (hasComparableDev || hasComparableIno) {
+    return true;
   }
   return opened.size === current.size && opened.mtimeMs === current.mtimeMs;
 }

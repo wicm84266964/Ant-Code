@@ -151,31 +151,38 @@ test("desktop file preview width is adjustable, bounded, and persisted", async (
     await page.mouse.down();
     await page.mouse.move(handleBounds.x - 116, handleBounds.y + 120, { steps: 6 });
     await page.mouse.up();
+    await waitForPreviewWidth(page, 480);
     const draggedWidth = (await preview.boundingBox()).width;
     assert.ok(Math.abs(draggedWidth - 480) <= 2, `unexpected dragged width ${draggedWidth}`);
 
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => document.querySelectorAll("#thread-list .thread-item").length === 2);
-    assert.ok(Math.abs((await preview.boundingBox()).width - draggedWidth) <= 2);
+    await waitForPreviewWidth(page, draggedWidth);
+    const reloadedWidth = (await preview.boundingBox()).width;
+    const storedWidth = await page.evaluate(() => window.localStorage.getItem("ant-code-dashboard-preview-width"));
+    assert.ok(
+      Math.abs(reloadedWidth - draggedWidth) <= 2,
+      `preview width was not persisted: dragged=${draggedWidth}, reloaded=${reloadedWidth}, stored=${storedWidth}`
+    );
 
     await handle.focus();
     await page.keyboard.press("End");
-    await page.waitForFunction(() => document.querySelector("#preview-resize-handle")?.getAttribute("aria-valuenow") === "600");
+    await waitForPreviewWidth(page, 600);
     const maximumWidth = (await preview.boundingBox()).width;
     assert.ok(Math.abs(maximumWidth - 600) <= 1, `expected maximum width 600, got ${maximumWidth}`);
     assert.ok((await workspace.boundingBox()).width >= 520);
     await page.keyboard.press("ArrowRight");
-    await page.waitForFunction(() => document.querySelector("#preview-resize-handle")?.getAttribute("aria-valuenow") === "584");
+    await waitForPreviewWidth(page, 584);
     assert.ok(Math.abs((await preview.boundingBox()).width - 584) <= 1);
 
     await page.setViewportSize({ width: 1024, height: 900 });
     assert.equal(await handle.isVisible(), false);
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.waitForFunction(() => document.querySelector("#preview-resize-handle")?.getAttribute("aria-valuenow") === "584");
+    await waitForPreviewWidth(page, 584);
     assert.ok(Math.abs((await preview.boundingBox()).width - 584) <= 1);
 
     await handle.dblclick();
-    await page.waitForFunction(() => document.querySelector("#preview-resize-handle")?.getAttribute("aria-valuenow") === "360");
+    await waitForPreviewWidth(page, 360);
     assert.ok(Math.abs((await preview.boundingBox()).width - 360) <= 1);
     await page.locator("#collapse-preview").click();
     assert.equal(await handle.isVisible(), false);
@@ -600,6 +607,16 @@ async function assertNoPageOverflow(page, label) {
   }));
   assert.ok(dimensions.scrollWidth <= dimensions.clientWidth + 1, `${label}: document overflow ${JSON.stringify(dimensions)}`);
   assert.ok(dimensions.bodyScrollWidth <= dimensions.clientWidth + 1, `${label}: body overflow ${JSON.stringify(dimensions)}`);
+}
+
+async function waitForPreviewWidth(page, expectedWidth) {
+  await page.waitForFunction((width) => {
+    const panel = document.querySelector("#file-panel");
+    const separator = document.querySelector("#preview-resize-handle");
+    return panel && separator
+      && Number(separator.getAttribute("aria-valuenow")) === width
+      && Math.abs(panel.getBoundingClientRect().width - width) <= 2;
+  }, expectedWidth);
 }
 
 function resolveDependency(name) {
