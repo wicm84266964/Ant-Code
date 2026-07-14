@@ -34,6 +34,9 @@ docs/branding/
 docs/phase-1/
 docs/provenance/
 docs/specs/
+docs/design/dashboard-hardening-requirements.md
+docs/design/dashboard-hardening-execution-checklist.md
+docs/deployment/verify-deepening-acceptance-*.md
 docs/deployment/lab-gateway-rollout-checklist.md
 docs/deployment/pre-launch-security-config.md
 docs/deployment/rc-acceptance-summary.md
