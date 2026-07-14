@@ -1,0 +1,68 @@
+name: Create release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version tag, for example v1.4.0
+        required: true
+        type: string
+      prerelease:
+        description: Mark this as a prerelease
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  checks: read
+
+jobs:
+  release:
+    name: create tagged release
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate version and existing tags
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Version must look like v1.2.3 or v1.2.3-rc.1" >&2
+            exit 1
+          fi
+          if gh release view "$VERSION" >/dev/null 2>&1 || git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
+            echo "Tag or release $VERSION already exists; published versions are immutable." >&2
+            exit 1
+          fi
+
+      - name: Require successful checks on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          checks="$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?per_page=100")"
+          echo "$checks" | jq -r '.check_runs | sort_by(.name, .started_at) | group_by(.name)[] | last | select(.name != "create tagged release") | [.name, .status, (.conclusion // "")] | @tsv'
+          count="$(echo "$checks" | jq '[.check_runs | sort_by(.name, .started_at) | group_by(.name)[] | last | select(.name != "create tagged release")] | length')"
+          bad="$(echo "$checks" | jq '[.check_runs | sort_by(.name, .started_at) | group_by(.name)[] | last | select(.name != "create tagged release") | select(.status != "completed" or .conclusion != "success")] | length')"
+          if [[ "$count" -eq 0 || "$bad" -ne 0 ]]; then
+            echo "All CI checks for $GITHUB_SHA must be completed successfully before release." >&2
+            exit 1
+          fi
+
+      - name: Create immutable tag and GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          args=("$VERSION" --target "$GITHUB_SHA" --title "$VERSION" --generate-notes)
+          if [[ "$PRERELEASE" == "true" ]]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${args[@]}"
