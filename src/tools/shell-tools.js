@@ -243,8 +243,9 @@ function startPosixBackgroundShell(input) {
   }
   child.unref?.();
   child.on("close", (exitCode, signal) => {
+    const stoppedExternally = ["SIGTERM", "SIGINT", "SIGHUP"].includes(signal);
     updateBackgroundTerminalTask(input.taskId, {
-      status: exitCode === 0 ? "completed" : "failed",
+      status: exitCode === 0 || stoppedExternally ? "completed" : "failed",
       exitCode,
       signal
     });
