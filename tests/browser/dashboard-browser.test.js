@@ -8,7 +8,11 @@ import test, { after, before } from "node:test";
 import { createDashboardServer } from "../../src/dashboard/server.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-const EDGE_PATH = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
+const BROWSER_PATH = process.env.ANT_CODE_BROWSER_EXECUTABLE ?? {
+  win32: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+  linux: "/usr/bin/google-chrome",
+  darwin: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+}[process.platform];
 const require = createRequire(import.meta.url);
 const dependencyRoot = path.resolve(process.env.ANT_CODE_BROWSER_DEPENDENCY_ROOT ?? ROOT);
 const { chromium } = require(resolveDependency("playwright-core"));
@@ -25,7 +29,7 @@ let mediaRequests = 0;
 let runtime;
 
 before(async () => {
-  await fs.access(EDGE_PATH);
+  await fs.access(BROWSER_PATH);
 
   mediaServer = await listen(http.createServer((req, res) => {
     if (req.url?.startsWith("/pixel.png")) {
@@ -59,7 +63,7 @@ before(async () => {
   embedUrl = serverUrl(embedServer);
 
   browser = await chromium.launch({
-    executablePath: EDGE_PATH,
+    executablePath: BROWSER_PATH,
     headless: true,
     args: [
       "--disable-background-networking",
