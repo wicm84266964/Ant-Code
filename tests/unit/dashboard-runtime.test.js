@@ -1605,8 +1605,14 @@ test("dashboard runtime queues guide prompts and interrupts active work", async 
     assert.equal(guided.queued, true);
     assert.equal(guided.queue[0].kind, "guide");
 
-    const events = await waitForEvent(runtime, started.sessionId, () =>
-      runtime.listActiveEvents(started.sessionId).filter((event) => event.type === "files_updated").length >= 2
+    const events = await waitForEvent(runtime, started.sessionId, (event) =>
+      event.type === "background_subagent_snapshot"
+      && event.groups.some((group) =>
+        group.groupId === "group-dashboard-any"
+        && group.status === "running"
+        && group.wakePromptQueued === false
+      )
+      && runtime.listActiveEvents(started.sessionId).filter((item) => item.type === "files_updated").length >= 2
     );
     assert.equal(events.some((event) => event.type === "guide_queued"), true);
     assert.equal(events.some((event) => event.type === "turn_interrupt_requested" && event.reason === "guided"), true);
