@@ -96,7 +96,7 @@
     "yaml": "^2.9.0"
   },
   "devDependencies": {
-    "@types/node": "20.19.43",
+    "@types/node": "26.1.1",
     "axe-core": "4.12.1",
     "esbuild": "^0.28.0",
     "playwright-core": "1.61.1",
