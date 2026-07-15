@@ -98,7 +98,7 @@
   "devDependencies": {
     "@types/node": "20.19.43",
     "axe-core": "4.12.1",
-    "esbuild": "^0.28.0",
+    "esbuild": "^0.28.1",
     "playwright-core": "1.61.1",
     "postject": "^1.0.0-alpha.6"
   }
