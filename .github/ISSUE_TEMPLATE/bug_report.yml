@@ -1,0 +1,72 @@
+name: Bug report
+description: Report a reproducible Ant Code problem
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping improve Ant Code. Use a minimal example and remove API keys, gateway credentials, private source code, prompts, transcripts, local paths, and personal data.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: "For example: v1.3.1 or abc1234"
+    validations:
+      required: true
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - Linux
+        - macOS
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Runtime environment
+      description: Include the Node.js version, installation method, and interface used when relevant.
+      placeholder: "Node.js 22, npm install, TUI"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Provide the smallest reliable sequence that triggers the problem.
+      placeholder: |
+        1. Start...
+        2. Run...
+        3. Observe...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted logs
+      description: Attach only the minimum relevant output after removing sensitive content.
+      render: shell
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I searched existing issues for the same problem.
+          required: true
+        - label: I removed credentials, private repository content, transcripts, and personal data.
+          required: true

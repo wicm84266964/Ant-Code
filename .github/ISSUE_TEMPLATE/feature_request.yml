@@ -1,0 +1,39 @@
+name: Feature request
+description: Propose an Ant Code workflow improvement
+title: "[Feature]: "
+body:
+  - type: input
+    id: workflow
+    attributes:
+      label: Workflow
+      description: Which coding-agent task or interface would this improve?
+      placeholder: "For example: permission review, TUI session recovery, or Dashboard task tracking"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Describe the current limitation and who it affects.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the result you expect without relying on private project details.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I searched existing issues for a similar request.
+          required: true
+        - label: This request contains no credentials, private source, prompts, transcripts, or personal data.
+          required: true
