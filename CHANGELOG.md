@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.3.1 - 2026-07-16
 
 ### Fixed
 
@@ -11,6 +11,11 @@
 - Dashboard browser coverage now waits for both the resize separator state and
   the rendered file-panel geometry, removing a race that could report 480px
   while the persisted 600px layout was still settling.
+- Dashboard API requests now have bounded timeouts and preserve caller
+  cancellation, so refresh, file preview, and turn interruption cannot remain
+  pending forever during an event-stream reconnect.
+- Dashboard shutdown activity checks can be cancelled and recover from a
+  timeout with an explicit force-close path instead of staying on "checking".
 
 ### Validation
 
