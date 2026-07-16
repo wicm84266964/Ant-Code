@@ -196,6 +196,10 @@ const FILE_REFERENCE_PATTERN = /(?:[A-Za-z0-9_.-]+[\\/])*[A-Za-z0-9_.-]+\.[A-Za-
 const TRANSCRIPT_DOM_LIMIT = 300;
 const EVENT_STALE_AFTER_MS = 35_000;
 const EVENT_RECONNECT_MAX_ATTEMPTS = 6;
+const DASHBOARD_REQUEST_TIMEOUT_MS = 15_000;
+const DASHBOARD_LIFECYCLE_TIMEOUT_MS = 5_000;
+const DASHBOARD_SHUTDOWN_TIMEOUT_MS = 15_000;
+const DASHBOARD_INTERRUPT_TIMEOUT_MS = 5_000;
 const MAX_IMAGE_ATTACHMENTS = 6;
 const MAX_IMAGE_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const CURRENT_SESSION_STORAGE_KEY = "ant-code-dashboard-current-session";
@@ -1522,7 +1526,7 @@ async function interruptTurn() {
   const result = await postJson("/api/turns/interrupt", {
     sessionId: state.currentSessionId,
     reason: "user"
-  }).catch((error) => ({ ok: false, error: error.message }));
+  }, { timeoutMs: DASHBOARD_INTERRUPT_TIMEOUT_MS }).catch((error) => ({ ok: false, error: error.message }));
   els.sendButton.disabled = false;
   if (!result.ok) {
     showError(result.error ?? "中断失败");
@@ -4470,6 +4474,8 @@ function questionResolutionText(event) {
 
 async function showShutdownPanel() {
   const version = ++state.shutdownStatusVersion;
+  cancelScopedRequest("shutdown");
+  const request = beginScopedRequest("shutdown");
   state.shutdownActivity = null;
   els.shutdownCopy.textContent = "正在检查主任务、队列和后台任务，请稍候。";
   els.shutdownConfirm.disabled = true;
@@ -4477,13 +4483,25 @@ async function showShutdownPanel() {
   els.shutdownPanel.classList.remove("hidden");
   activateModal(els.shutdownPanel, { initialFocus: "#shutdown-cancel" });
   announceStatus("需要确认是否关闭 Dashboard");
-  const result = await getJson("/api/lifecycle/status")
-    .catch((error) => ({ ok: false, error: error.message }));
-  if (version !== state.shutdownStatusVersion || els.shutdownPanel.classList.contains("hidden")) return;
+  // This is the getJson("/api/lifecycle/status") probe; keep it scoped and bounded.
+  const result = await getJson("/api/lifecycle/status", {
+    signal: request.signal,
+    timeoutMs: DASHBOARD_LIFECYCLE_TIMEOUT_MS
+  }).catch((error) => ({ ok: false, error: error.message, code: error.code, timedOut: error.code === "DASHBOARD_REQUEST_TIMEOUT" }));
+  if (!isCurrentScopedRequest(request) || version !== state.shutdownStatusVersion || els.shutdownPanel.classList.contains("hidden")) return;
+  finishScopedRequest(request);
   if (!result.ok) {
-    els.shutdownCopy.textContent = `无法读取当前活动状态：${result.error?.message ?? result.error ?? "未知错误"}。请返回后重试。`;
-    els.shutdownConfirm.textContent = "无法检查";
-    announceStatus("无法检查 Dashboard 活动状态");
+    // If the activity probe is stuck, keep a safe escape hatch: explicit
+    // cancellation/force shutdown is still available and the request itself
+    // cannot hold the modal in a permanent checking state.
+    Object.assign(state, {
+      shutdownActivity: normalizeLifecycleActivity({ sessions: 1, total: 1, uncertain: true })
+    });
+    const detail = result.timedOut ? "活动检查超时" : (result.error?.message ?? result.error ?? "未知错误");
+    els.shutdownCopy.textContent = `无法确认当前活动状态：${detail}。可以取消任务并强制关闭，或返回继续处理。`;
+    els.shutdownConfirm.disabled = false;
+    els.shutdownConfirm.textContent = "强制关闭";
+    announceStatus("Dashboard 活动检查超时，可强制关闭");
     return;
   }
   state.shutdownActivity = normalizeLifecycleActivity(result.activity);
@@ -4492,6 +4510,7 @@ async function showShutdownPanel() {
 
 function hideShutdownPanel() {
   state.shutdownStatusVersion += 1;
+  cancelScopedRequest("shutdown");
   deactivateModal(els.shutdownPanel);
   els.shutdownPanel.classList.add("hidden");
   els.shutdownConfirm.disabled = false;
@@ -4500,10 +4519,16 @@ function hideShutdownPanel() {
 
 async function shutdownDashboard() {
   if (!state.shutdownActivity) return;
+  cancelScopedRequest("shutdown");
+  const request = beginScopedRequest("shutdown");
   els.shutdownConfirm.disabled = true;
   els.shutdownConfirm.textContent = "正在关闭";
-  const result = await postJson("/api/shutdown", shutdownRequestBody(state.shutdownActivity))
-    .catch((error) => ({ ok: false, error: error.message }));
+  const result = await postJson("/api/shutdown", shutdownRequestBody(state.shutdownActivity), {
+    signal: request.signal,
+    timeoutMs: DASHBOARD_SHUTDOWN_TIMEOUT_MS
+  }).catch((error) => ({ ok: false, error: error.message, code: error.code }));
+  if (!isCurrentScopedRequest(request)) return;
+  finishScopedRequest(request);
   if (!shutdownResultIsClosed(result)) {
     state.shutdownActivity = normalizeLifecycleActivity(result?.activity ?? state.shutdownActivity);
     els.shutdownCopy.textContent = `${result?.error?.message ?? result?.error ?? "关闭失败"} ${lifecycleActivitySummary(state.shutdownActivity)}。你可以返回继续处理，或重试取消任务并关闭。`;
@@ -4558,7 +4583,8 @@ export function normalizeLifecycleActivity(activity = {}) {
     quarantinedTurns: count(activity.quarantinedTurns),
     queuedTurns: count(activity.queuedTurns),
     backgroundTasks: count(activity.backgroundTasks),
-    pendingInteractions: count(activity.pendingInteractions)
+    pendingInteractions: count(activity.pendingInteractions),
+    uncertain: activity.uncertain === true
   };
   normalized.total = count(activity.total) || normalized.activeTurns + normalized.quarantinedTurns
     + normalized.queuedTurns + normalized.backgroundTasks + normalized.pendingInteractions;
@@ -4566,7 +4592,11 @@ export function normalizeLifecycleActivity(activity = {}) {
 }
 
 export function shutdownRequestBody(activity) {
-  return normalizeLifecycleActivity(activity).total > 0 ? { cancel: true } : {};
+  const normalized = normalizeLifecycleActivity(activity);
+  if (normalized.uncertain) {
+    return { cancel: true, force: true, timeoutMs: DASHBOARD_SHUTDOWN_TIMEOUT_MS };
+  }
+  return normalized.total > 0 ? { cancel: true } : {};
 }
 
 export function shutdownResultIsClosed(result) {
@@ -5200,33 +5230,72 @@ function isAbortError(error) {
 }
 
 async function getJson(url, options = {}) {
-  const response = await fetch(url, {
+  const response = await dashboardFetch(url, {
     credentials: "same-origin",
     signal: options.signal
-  });
+  }, options);
   return responseJson(response);
 }
 
 async function postJson(url, body, options = {}) {
-  const response = await fetch(url, {
+  const response = await dashboardFetch(url, {
     method: "POST",
     credentials: "same-origin",
     headers: dashboardJsonHeaders(),
     body: JSON.stringify(body),
     signal: options.signal
-  });
+  }, options);
   return responseJson(response);
 }
 
 async function deleteJson(url, body = {}, options = {}) {
-  const response = await fetch(url, {
+  const response = await dashboardFetch(url, {
     method: "DELETE",
     credentials: "same-origin",
     headers: dashboardJsonHeaders(),
     body: JSON.stringify(body),
     signal: options.signal
-  });
+  }, options);
   return responseJson(response);
+}
+
+/**
+ * Fetch Dashboard APIs with a bounded lifetime while preserving caller
+ * cancellation. A stalled local server must not leave controls permanently
+ * disabled.
+ */
+async function dashboardFetch(url, init = {}, options = {}) {
+  const timeoutMs = Number.isFinite(Number(options.timeoutMs))
+    ? Math.max(1, Number(options.timeoutMs))
+    : DASHBOARD_REQUEST_TIMEOUT_MS;
+  const controller = new AbortController();
+  let timedOut = false;
+  let timer = null;
+  const callerSignal = options.signal;
+  const abortFromCaller = () => controller.abort(callerSignal?.reason);
+  if (callerSignal?.aborted) {
+    abortFromCaller();
+  } else {
+    callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
+  }
+  timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (timedOut) {
+      const timeoutError = new Error(`请求超时（${Math.ceil(timeoutMs / 1000)} 秒）`);
+      timeoutError.name = "TimeoutError";
+      timeoutError.code = "DASHBOARD_REQUEST_TIMEOUT";
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+    callerSignal?.removeEventListener("abort", abortFromCaller);
+  }
 }
 
 async function responseJson(response) {
