@@ -4,6 +4,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_MODEL_OPTIONS, parseModelList } from "../model-gateway/models.js";
+import { DEFAULT_GATEWAY_MAX_RESPONSE_BYTES } from "../model-gateway/limits.js";
 import { recommendedMcpServers } from "../mcp/recommended.js";
 import { validateHookConfig } from "../hooks/registry.js";
 
@@ -141,13 +142,14 @@ const DEFAULT_CONFIG = Object.freeze({
     gatewayApiKey: null,
     gatewayMaxRetries: DEFAULT_GATEWAY_MAX_RETRIES,
     gatewayTimeoutMs: DEFAULT_GATEWAY_TIMEOUT_MS,
-    gatewayIdleTimeoutMs: DEFAULT_GATEWAY_IDLE_TIMEOUT_MS
+    gatewayIdleTimeoutMs: DEFAULT_GATEWAY_IDLE_TIMEOUT_MS,
+    gatewayMaxResponseBytes: DEFAULT_GATEWAY_MAX_RESPONSE_BYTES
   }
 });
 
 /**
  * @typedef {typeof DEFAULT_CONFIG & {
- *   lab: { gatewayUrl: string | null; gatewayHealthUrl: string | null; gatewayProtocol: string; gatewayApiKey: string | null; gatewayMaxRetries: number; configPath: string | null };
+ *   lab: { gatewayUrl: string | null; gatewayHealthUrl: string | null; gatewayProtocol: string; gatewayApiKey: string | null; gatewayMaxRetries: number; gatewayMaxResponseBytes: number; configPath: string | null };
  *   projectConfigPath: string | null;
  *   globalConfigPath: string;
  *   defaultModelAlias: string;
@@ -200,6 +202,7 @@ export async function loadConfig(options = {}) {
     gatewayMaxRetries: parseOptionalInteger(env.LAB_MODEL_GATEWAY_MAX_RETRIES, hardened.lab?.gatewayMaxRetries ?? DEFAULT_GATEWAY_MAX_RETRIES),
     gatewayTimeoutMs: parseOptionalInteger(env.LAB_MODEL_GATEWAY_TIMEOUT_MS, hardened.lab?.gatewayTimeoutMs ?? DEFAULT_GATEWAY_TIMEOUT_MS),
     gatewayIdleTimeoutMs: parseOptionalInteger(env.LAB_MODEL_GATEWAY_IDLE_TIMEOUT_MS, hardened.lab?.gatewayIdleTimeoutMs ?? DEFAULT_GATEWAY_IDLE_TIMEOUT_MS),
+    gatewayMaxResponseBytes: parseOptionalInteger(env.LAB_MODEL_GATEWAY_MAX_RESPONSE_BYTES, hardened.lab?.gatewayMaxResponseBytes ?? DEFAULT_GATEWAY_MAX_RESPONSE_BYTES),
     activeGatewayProfile: typeof hardened.lab?.activeGatewayProfile === "string" ? hardened.lab.activeGatewayProfile : "",
     gatewayProfiles: Array.isArray(hardened.lab?.gatewayProfiles) ? hardened.lab.gatewayProfiles : [],
     configPath: lab ? labConfigReadPath : explicitLabConfigPath ? labConfigPath : null
@@ -1207,7 +1210,7 @@ function validateVisionAgentConfig(value) {
 }
 
 /**
- * @param {{ gatewayProtocol?: string; gatewayApiKey?: string | null; gatewayMaxRetries?: number; gatewayTimeoutMs?: number; gatewayIdleTimeoutMs?: number }} lab
+ * @param {{ gatewayProtocol?: string; gatewayApiKey?: string | null; gatewayMaxRetries?: number; gatewayTimeoutMs?: number; gatewayIdleTimeoutMs?: number; gatewayMaxResponseBytes?: number }} lab
  */
 function validateLabConfig(lab) {
   const protocol = lab.gatewayProtocol ?? "lab-agent-gateway";
@@ -1225,6 +1228,10 @@ function validateLabConfig(lab) {
   }
   if (!Number.isInteger(lab.gatewayIdleTimeoutMs) || lab.gatewayIdleTimeoutMs < 1000 || lab.gatewayIdleTimeoutMs > 300000) {
     throw new Error(`Unsupported lab.gatewayIdleTimeoutMs: ${lab.gatewayIdleTimeoutMs}`);
+  }
+  const gatewayMaxResponseBytes = Number(lab.gatewayMaxResponseBytes);
+  if (!Number.isInteger(gatewayMaxResponseBytes) || gatewayMaxResponseBytes < 1024 || gatewayMaxResponseBytes > 256 * 1024 * 1024) {
+    throw new Error(`Unsupported lab.gatewayMaxResponseBytes: ${lab.gatewayMaxResponseBytes}`);
   }
 }
 

@@ -8,6 +8,7 @@ import {
 import { DEFAULT_THINKING_PREVIEW_BYTES } from "../../src/model-gateway/thinking-budget.js";
 import { createGatewayRequest, normalizeGatewayResponse } from "../../src/model-gateway/protocol.js";
 import { parseGatewayStream } from "../../src/model-gateway/streaming.js";
+import { GATEWAY_MAX_STREAM_RECORD_BYTES } from "../../src/model-gateway/limits.js";
 
 test("creates provider-independent gateway requests", () => {
   const request = createGatewayRequest({
@@ -413,6 +414,93 @@ test("OpenAI-compatible streams can explicitly treat reasoning-only chunks as vi
   assert.equal(JSON.stringify(response.raw).includes("正常中文报告"), false);
 });
 
+test("OpenAI-compatible stream rejects clean EOF without DONE or finish_reason", async () => {
+  const body = streamFromText(`data: ${JSON.stringify({
+    id: "chatcmpl-incomplete-eof",
+    model: "mimo-v2.5-pro",
+    choices: [{ delta: { reasoning_content: "I need to inspect the file. I need to see" } }]
+  })}`);
+
+  await assert.rejects(
+    parseOpenAIChatCompletionStream(body),
+    (error) => error?.code === "UPSTREAM_STREAM_ABORTED"
+      && error?.retryable === true
+      && error?.details?.reason === "missing_done_and_finish_reason"
+  );
+});
+
+test("OpenAI-compatible stream accepts finish_reason without a DONE sentinel", async () => {
+  const body = streamFromText(`data: ${JSON.stringify({
+    id: "chatcmpl-finish-no-done",
+    model: "resolved",
+    choices: [{ delta: { content: "complete" }, finish_reason: "stop" }]
+  })}`);
+
+  const response = await parseOpenAIChatCompletionStream(body);
+  assert.equal(response.text, "complete");
+  assert.equal(response.stopReason, "stop");
+});
+
+test("OpenAI-compatible stream rejects tool_calls finish without a valid call", async () => {
+  const body = streamFromText(`data: ${JSON.stringify({
+    choices: [{ delta: {}, finish_reason: "tool_calls" }]
+  })}`);
+
+  await assert.rejects(
+    parseOpenAIChatCompletionStream(body),
+    (error) => error?.code === "INCOMPLETE_TOOL_CALL"
+      && error?.retryable === true
+      && error?.details?.reason === "finish_without_valid_tool_call"
+  );
+});
+
+test("OpenAI-compatible stream rejects incomplete structured tool arguments", async () => {
+  for (const argumentsText of ["{", '{"outer":{"path":']) {
+    const body = streamFromText(`data: ${JSON.stringify({
+      choices: [{
+        delta: {
+          tool_calls: [{
+            index: 0,
+            id: "call-incomplete",
+            function: { name: "read_file", arguments: argumentsText }
+          }]
+        },
+        finish_reason: "tool_calls"
+      }]
+    })}`);
+
+    await assert.rejects(
+      parseOpenAIChatCompletionStream(body),
+      (error) => error?.code === "INCOMPLETE_TOOL_CALL"
+        && error?.retryable === true
+        && error?.details?.reason === "incomplete_tool_arguments"
+        && error?.details?.toolName === "read_file"
+    );
+  }
+});
+
+test("OpenAI-compatible stream recovers the last complete tool arguments object", async () => {
+  const body = streamFromText(`data: ${JSON.stringify({
+    choices: [{
+      delta: {
+        tool_calls: [{
+          index: 0,
+          id: "call-recovered",
+          function: { name: "read_file", arguments: '{}{"path":"README.md"}' }
+        }]
+      },
+      finish_reason: "tool_calls"
+    }]
+  })}`);
+
+  const response = await parseOpenAIChatCompletionStream(body);
+  assert.deepEqual(response.toolCalls, [{
+    id: "call-recovered",
+    name: "read_file",
+    input: { path: "README.md" }
+  }]);
+});
+
 test("parses text/event-stream gateway responses", async () => {
   const body = streamFromText([
     'data: {"type":"message_start","id":"msg-1","model":"resolved"}',
@@ -459,6 +547,196 @@ test("gateway SSE stream emits text deltas before the stream closes", async () =
   const response = await parsed;
   assert.equal(response.text, "live");
   assert.equal(response.stopReason, "stop");
+});
+
+test("gateway stream event callbacks have a hard completion deadline", async () => {
+  let cancelled = false;
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"type":"text_delta","text":"blocked"}\n\n'));
+    },
+    cancel() {
+      cancelled = true;
+    }
+  });
+
+  await assert.rejects(
+    parseGatewayStream(body, "text/event-stream", {
+      eventTimeoutMs: 20,
+      onEvent: () => new Promise(() => {})
+    }),
+    (error) => error?.code === "GATEWAY_EVENT_CALLBACK_TIMEOUT"
+  );
+  assert.equal(cancelled, true);
+});
+
+test("gateway stream cancellation interrupts a pending event callback", async () => {
+  let callbackStartedResolve;
+  const callbackStarted = new Promise((resolve) => {
+    callbackStartedResolve = resolve;
+  });
+  const controller = new AbortController();
+  const body = streamFromText('data: {"type":"text_delta","text":"blocked"}\n\n');
+  const parsed = parseGatewayStream(body, "text/event-stream", {
+    signal: controller.signal,
+    eventTimeoutMs: 1000,
+    onEvent: () => {
+      callbackStartedResolve();
+      return new Promise(() => {});
+    }
+  });
+
+  await callbackStarted;
+  controller.abort();
+  await assert.rejects(parsed, (error) => error?.name === "AbortError");
+});
+
+test("OpenAI stream cancellation interrupts a pending event callback", async () => {
+  let callbackStartedResolve;
+  const callbackStarted = new Promise((resolve) => {
+    callbackStartedResolve = resolve;
+  });
+  const controller = new AbortController();
+  const body = streamFromText([
+    'data: {"id":"chatcmpl-blocked","choices":[{"delta":{"content":"blocked"}}]}',
+    "",
+    "data: [DONE]",
+    ""
+  ].join("\n"));
+  const parsed = parseOpenAIChatCompletionStream(body, {
+    signal: controller.signal,
+    eventTimeoutMs: 1000,
+    onEvent: () => {
+      callbackStartedResolve();
+      return new Promise(() => {});
+    }
+  });
+
+  await callbackStarted;
+  controller.abort();
+  await assert.rejects(parsed, (error) => error?.name === "AbortError");
+});
+
+test("gateway signal-only cancellation interrupts a pending stream read", async () => {
+  let cancelled = false;
+  const controller = new AbortController();
+  const body = new ReadableStream({
+    cancel() {
+      cancelled = true;
+    }
+  });
+  const parsed = parseGatewayStream(body, "text/event-stream", {
+    signal: controller.signal
+  });
+
+  await waitFor(() => body.locked);
+  controller.abort();
+  await assert.rejects(parsed, (error) => error?.name === "AbortError");
+  await waitFor(() => cancelled && !body.locked);
+  assert.equal(cancelled, true);
+  assert.equal(body.locked, false);
+});
+
+test("OpenAI signal-only cancellation interrupts a pending stream read", async () => {
+  let cancelled = false;
+  const controller = new AbortController();
+  const body = new ReadableStream({
+    cancel() {
+      cancelled = true;
+    }
+  });
+  const parsed = parseOpenAIChatCompletionStream(body, {
+    signal: controller.signal
+  });
+
+  await waitFor(() => body.locked);
+  controller.abort();
+  await assert.rejects(parsed, (error) => error?.name === "AbortError");
+  await waitFor(() => cancelled && !body.locked);
+  assert.equal(cancelled, true);
+  assert.equal(body.locked, false);
+});
+
+test("gateway rejects and releases an oversized stream record", async () => {
+  let cancelled = false;
+  const oversized = `${JSON.stringify({
+    type: "text_delta",
+    text: "x".repeat(GATEWAY_MAX_STREAM_RECORD_BYTES)
+  })}\n`;
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(oversized));
+    },
+    cancel() {
+      cancelled = true;
+    }
+  });
+
+  await assert.rejects(
+    parseGatewayStream(body, "application/x-ndjson"),
+    (error) => error?.code === "GATEWAY_STREAM_RECORD_TOO_LARGE"
+      && error.maxBytes === GATEWAY_MAX_STREAM_RECORD_BYTES
+      && error.retryable === false
+  );
+  await waitFor(() => cancelled && !body.locked);
+  assert.equal(cancelled, true);
+  assert.equal(body.locked, false);
+});
+
+test("gateway limit rejection does not await a stalled cancel promise", async () => {
+  let cancelled = false;
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array(2));
+    },
+    cancel() {
+      cancelled = true;
+      return new Promise(() => {});
+    }
+  });
+  const parsed = parseGatewayStream(body, "application/x-ndjson", {
+    maxResponseBytes: 1
+  });
+
+  await assert.rejects(
+    Promise.race([
+      parsed,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("limit rejection timed out")), 500))
+    ]),
+    (error) => error?.code === "GATEWAY_RESPONSE_TOO_LARGE"
+  );
+  assert.equal(cancelled, true);
+  assert.equal(body.locked, false);
+});
+
+test("gateway stream event callback errors remain visible", async () => {
+  const expected = new Error("observer failed");
+  for (const cancel of [
+    () => {
+      throw new Error("cancel failed synchronously");
+    },
+    () => Promise.reject(new Error("cancel failed asynchronously"))
+  ]) {
+    let cancelCalled = false;
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"type":"text_delta","text":"blocked"}\n\n'));
+      },
+      cancel() {
+        cancelCalled = true;
+        return cancel();
+      }
+    });
+    await assert.rejects(
+      parseGatewayStream(body, "text/event-stream", {
+        onEvent: () => {
+          throw expected;
+        }
+      }),
+      expected
+    );
+    assert.equal(cancelCalled, true);
+  }
 });
 
 /**

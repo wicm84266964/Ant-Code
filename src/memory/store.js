@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { ensureContainedDirectory, withFileMutationLock } from "../storage/durable-file.js";
 
 const PROJECT_MEMORY_PATH = path.join(".lab-agent", "memory.md");
 const MAX_MEMORY_ENTRY_BYTES = 8 * 1024;
@@ -24,19 +25,21 @@ export async function appendProjectMemory(options) {
     };
   }
 
-  const filePath = path.join(options.cwd, PROJECT_MEMORY_PATH);
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-
   const timestamp = (options.now ?? new Date()).toISOString();
   const entry = `\n## ${timestamp}\n\n${text}\n`;
-  const existing = await fs.readFile(filePath, "utf8").catch((error) => {
-    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
-      return "# Project Memory\n";
+  const lexicalPath = path.join(options.cwd, PROJECT_MEMORY_PATH);
+  const directory = await ensureContainedDirectory(options.cwd, path.dirname(lexicalPath));
+  const filePath = path.join(directory, path.basename(lexicalPath));
+  await withFileMutationLock(filePath, async () => {
+    const handle = await fs.open(filePath, "a+", 0o600);
+    try {
+      const stat = await handle.stat();
+      await handle.writeFile(`${stat.size === 0 ? "# Project Memory\n" : ""}${entry}`, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
     }
-    throw error;
   });
-
-  await fs.writeFile(filePath, `${existing.replace(/\s*$/, "\n")}${entry}`, "utf8");
 
   return {
     ok: true,

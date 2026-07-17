@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { createServer } from "node:http";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -14,12 +15,27 @@ import { createMcpRuntime } from "../../src/mcp/runtime.js";
 import { documentIntakeTool } from "../../src/tools/document-tools.js";
 import { serializeToolResult } from "../../src/tools/result.js";
 import { createToolRuntime } from "../../src/tools/runtime.js";
-import { parseDuckDuckGoHtml } from "../../src/tools/web-tools.js";
+import {
+  collectRawHttpResponse,
+  parseDuckDuckGoHtml,
+  readResponseText,
+  WEB_FETCH_DEFAULT_MAX_BYTES,
+  webFetchTool
+} from "../../src/tools/web-tools.js";
 import { createWorkflowState, syncWorkflowCompletionOnFinal } from "../../src/tools/workflow-tools.js";
 import { listBackgroundAgentTasks } from "../../src/agents/background-registry.js";
 import { listBackgroundTerminalTasks } from "../../src/agents/background-terminal-registry.js";
 
 const execFileAsync = promisify(execFile);
+
+class FakeRawSocket extends EventEmitter {
+  destroyed = false;
+
+  destroy() {
+    this.destroyed = true;
+    return this;
+  }
+}
 
 test("glob matches source files with bounded output", async () => {
   const result = await globTool({
@@ -1348,6 +1364,201 @@ test("web_fetch fetches loopback HTML and converts it to markdown", async () => 
   }
 });
 
+test("web_fetch overall timeout includes a response body that never finishes", async () => {
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "text/plain" });
+    response.write("partial body");
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const startedAt = Date.now();
+  try {
+    await assert.rejects(
+      webFetchTool({
+        url: `http://127.0.0.1:${address.port}/stalled-body`,
+        timeoutMs: 1000,
+        maxBytes: 4096
+      }),
+      (error) => error?.code === "WEB_FETCH_TIMEOUT"
+    );
+    assert.ok(Date.now() - startedAt < 3000);
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("web_fetch caller abort interrupts a stalled response body", async () => {
+  let bodyStartedResolve;
+  const bodyStarted = new Promise((resolve) => {
+    bodyStartedResolve = resolve;
+  });
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "text/plain" });
+    response.write("partial body");
+    bodyStartedResolve();
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const controller = new AbortController();
+  try {
+    const pending = webFetchTool({
+      url: `http://127.0.0.1:${address.port}/caller-abort`,
+      timeoutMs: 30_000,
+      maxBytes: 4096,
+      signal: controller.signal
+    });
+    await bodyStarted;
+    controller.abort();
+    await assert.rejects(pending, (error) => error?.name === "AbortError");
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("web_fetch rejects an oversized default response from Content-Length without waiting for its body", async () => {
+  const server = createServer((_request, response) => {
+    response.writeHead(200, {
+      "content-type": "text/plain",
+      "content-length": WEB_FETCH_DEFAULT_MAX_BYTES + 1
+    });
+    response.flushHeaders();
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const startedAt = Date.now();
+  try {
+    await assert.rejects(
+      webFetchTool({
+        url: `http://127.0.0.1:${address.port}/oversized-content-length`,
+        timeoutMs: 30_000
+      }),
+      (error) => error?.code === "WEB_FETCH_RESPONSE_TOO_LARGE"
+        && error?.maxBytes === WEB_FETCH_DEFAULT_MAX_BYTES
+    );
+    assert.ok(Date.now() - startedAt < 3000);
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("web_fetch explicit maxBytes truncates only at a valid UTF-8 boundary", async () => {
+  const content = "你🙂再见";
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+    response.end(content);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  try {
+    const result = await webFetchTool({
+      url: `http://127.0.0.1:${address.port}/utf8`,
+      maxBytes: 5
+    });
+
+    assert.equal(result.truncated, true);
+    assert.equal(result.content, "你");
+    assert.ok(Buffer.byteLength(result.content, "utf8") <= 5);
+    assert.equal(result.bytes, Buffer.byteLength(content, "utf8"));
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("web_fetch returns at an explicit limit when declared content stops at that boundary", async () => {
+  const server = createServer((_request, response) => {
+    response.writeHead(200, {
+      "content-type": "text/plain",
+      "content-length": 10
+    });
+    response.write("abcde");
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const startedAt = Date.now();
+  try {
+    const result = await webFetchTool({
+      url: `http://127.0.0.1:${address.port}/declared-oversize`,
+      timeoutMs: 30_000,
+      maxBytes: 5
+    });
+
+    assert.equal(result.content, "abcde");
+    assert.equal(result.truncated, true);
+    assert.equal(result.bytes, 10);
+    assert.ok(Date.now() - startedAt < 3000);
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("bounded response reading cancels and releases its reader after crossing the limit", async () => {
+  let cancelled = false;
+  let released = false;
+  const reader = {
+    async read() {
+      return { done: false, value: Buffer.from("abcdef", "utf8") };
+    },
+    cancel() {
+      cancelled = true;
+    },
+    releaseLock() {
+      released = true;
+    }
+  };
+  const response = /** @type {Response} */ (/** @type {unknown} */ ({
+    headers: new Headers(),
+    body: { getReader: () => reader }
+  }));
+
+  const result = await readResponseText(response, 3, { truncateOnLimit: true });
+
+  assert.equal(result.text, "abc");
+  assert.equal(result.truncated, true);
+  assert.equal(cancelled, true);
+  assert.equal(released, true);
+});
+
+test("HTTPS proxy raw collection rejects oversized bodies and destroys the socket", async () => {
+  const socket = new FakeRawSocket();
+  const pending = collectRawHttpResponse(
+    "https://example.com/large",
+    /** @type {import("node:net").Socket} */ (/** @type {unknown} */ (socket)),
+    { maxBytes: 4 }
+  );
+
+  socket.emit("data", Buffer.from(
+    "HTTP/1.1 200 OK\r\nContent-Length: 10\r\nContent-Type: text/plain\r\n\r\nabcdefghij",
+    "latin1"
+  ));
+
+  await assert.rejects(pending, (error) => error?.code === "WEB_FETCH_RESPONSE_TOO_LARGE");
+  assert.equal(socket.destroyed, true);
+  assert.equal(socket.listenerCount("data"), 0);
+});
+
+test("HTTPS proxy raw collection returns a bounded partial response for explicit limits", async () => {
+  const socket = new FakeRawSocket();
+  const pending = collectRawHttpResponse(
+    "https://example.com/large",
+    /** @type {import("node:net").Socket} */ (/** @type {unknown} */ (socket)),
+    { maxBytes: 5, truncateOnLimit: true }
+  );
+
+  socket.emit("data", Buffer.from(
+    "HTTP/1.1 200 OK\r\nContent-Length: 10\r\nContent-Type: text/plain\r\n\r\nabcde",
+    "latin1"
+  ));
+  const response = await pending;
+
+  assert.equal(await response.text(), "abcde");
+  assert.equal(socket.destroyed, true);
+  assert.equal(socket.listenerCount("data"), 0);
+});
+
 test("web_fetch accepts URL aliases before execution", async () => {
   const server = createServer((request, response) => {
     response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
@@ -1372,7 +1583,7 @@ test("web_fetch accepts URL aliases before execution", async () => {
   }
 });
 
-test("web_fetch prefers configured fetch MCP and does not add a default max_length", async (t) => {
+test("web_fetch prefers configured fetch MCP and sends the default safety max_length", async (t) => {
   const mcpRuntime = createMcpRuntime({
     cwd: process.cwd(),
     config: {
@@ -1415,7 +1626,7 @@ test("web_fetch prefers configured fetch MCP and does not add a default max_leng
   assert.equal(result.result.provider, "mcp-fetch");
   assert.match(result.result.content, /mcp-fetch/);
   assert.match(result.result.content, /https:\/\/example\.com\/docs/);
-  assert.doesNotMatch(result.result.content, /max_length/);
+  assert.match(result.result.content, /"max_length":33554432/);
 });
 
 test("web_fetch honors explicit maxBytes for MCP fetch output", async (t) => {
@@ -1460,6 +1671,83 @@ test("web_fetch honors explicit maxBytes for MCP fetch output", async (t) => {
   assert.equal(result.result.truncated, true);
   assert.equal(Buffer.byteLength(result.result.content, "utf8"), 1024);
   assert.equal(result.result.bytes, 4096);
+});
+
+test("web_fetch truncates MCP output on a valid UTF-8 boundary", async () => {
+  const runtime = createToolRuntime({
+    cwd: process.cwd(),
+    config: { web: { fetchProvider: "mcp-first" } },
+    policy: { networkMode: "offline" },
+    mcpRuntime: {
+      async callTool() {
+        return {
+          ok: true,
+          result: { content: [{ type: "text", text: "你🙂再见" }] }
+        };
+      }
+    }
+  });
+
+  const result = await runtime.execute("web_fetch", {
+    url: "http://127.0.0.1:9/utf8",
+    maxBytes: 5
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.result.provider, "mcp-fetch");
+  assert.equal(result.result.content, "你");
+  assert.ok(Buffer.byteLength(result.result.content, "utf8") <= 5);
+});
+
+test("web_fetch rejects oversized default MCP output without falling back to builtin fetch", async () => {
+  const runtime = createToolRuntime({
+    cwd: process.cwd(),
+    config: { web: { fetchProvider: "mcp-first" } },
+    policy: { networkMode: "offline" },
+    mcpRuntime: {
+      async callTool() {
+        return {
+          ok: true,
+          result: {
+            content: [{ type: "text", text: "x".repeat(WEB_FETCH_DEFAULT_MAX_BYTES + 1) }]
+          }
+        };
+      }
+    }
+  });
+
+  const result = await runtime.execute("web_fetch", {
+    url: "http://127.0.0.1:9/oversized"
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "WEB_FETCH_RESPONSE_TOO_LARGE");
+});
+
+test("web_fetch treats an oversized MCP transport frame as terminal", async () => {
+  const runtime = createToolRuntime({
+    cwd: process.cwd(),
+    config: { web: { fetchProvider: "mcp-first" } },
+    policy: { networkMode: "offline" },
+    mcpRuntime: {
+      async callTool() {
+        return {
+          ok: false,
+          error: {
+            code: "MCP_TRANSPORT_FRAME_TOO_LARGE",
+            message: "oversized fixture frame"
+          }
+        };
+      }
+    }
+  });
+
+  const result = await runtime.execute("web_fetch", {
+    url: "http://127.0.0.1:9/transport-frame"
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "MCP_TRANSPORT_FRAME_TOO_LARGE");
 });
 
 test("web_search is blocked by lab-only policy for public fallback search", async () => {
@@ -2102,6 +2390,16 @@ test("background shell registry reconciles externally killed terminal tasks", as
   const record = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "background-terminal", "tasks", "killed-terminal.json"), "utf8"));
   assert.equal(record.status, "completed");
   assert.ok(record.finishedAt);
+});
+
+test("background terminal liveness sampling never runs tasklist synchronously", async () => {
+  const source = await fs.readFile(
+    new URL("../../src/agents/background-terminal-registry.js", import.meta.url),
+    "utf8"
+  );
+  assert.doesNotMatch(source, /\bspawnSync\b/);
+  assert.match(source, /processSnapshotInFlight/);
+  assert.match(source, /scheduleProcessLivenessSnapshot\(\)/);
 });
 
 async function makeTempWorkspace() {

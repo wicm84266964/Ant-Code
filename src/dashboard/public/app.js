@@ -28,11 +28,14 @@ const state = {
   connectionState: "idle",
   eventReconnectAttempt: 0,
   eventReconnectTimer: null,
+  eventConnectTimer: /** @type {ReturnType<typeof setTimeout> | null} */ (null),
   eventStaleTimer: null,
   lastEventAt: 0,
   permissionMode: "plan",
   pendingApproval: null,
+  approvalSubmitting: false,
   pendingQuestion: null,
+  questionSubmitting: false,
   questionReviewMode: false,
   questionReviewInertEntries: /** @type {{ node: any; inert: boolean }[]} */ ([]),
   trust: null,
@@ -195,6 +198,7 @@ const LOCAL_FILE_EXTENSIONS = new Set([
 const FILE_REFERENCE_PATTERN = /(?:[A-Za-z0-9_.-]+[\\/])*[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,8}(?::\d+)?/g;
 const TRANSCRIPT_DOM_LIMIT = 300;
 const EVENT_STALE_AFTER_MS = 35_000;
+const EVENT_CONNECT_TIMEOUT_MS = 10_000;
 const EVENT_RECONNECT_MAX_ATTEMPTS = 6;
 const DASHBOARD_REQUEST_TIMEOUT_MS = 15_000;
 const DASHBOARD_LIFECYCLE_TIMEOUT_MS = 5_000;
@@ -406,6 +410,7 @@ function bindEvents() {
   });
   window.addEventListener?.("offline", () => {
     clearEventReconnectTimer();
+    closeEventSource();
     setConnectionState("offline");
   });
   window.addEventListener?.("resize", () => {
@@ -917,6 +922,11 @@ async function loadTrust(options = {}) {
 
 async function loadSessions(options = {}) {
   const feedback = options.feedback === true;
+  // Event-driven background refreshes must not cancel a user-visible refresh;
+  // otherwise the cancelled request leaves the refresh control in "loading".
+  if (!feedback && state.sessionsLoading) {
+    return null;
+  }
   const request = beginScopedRequest("sessions");
   if (feedback) {
     setSessionsRefreshState("loading", "刷新中");
@@ -1659,17 +1669,24 @@ function connectEvents(sessionId) {
   if (state.lastEventSequence > 0) {
     params.set("after", String(state.lastEventSequence));
   }
-  const source = new EventSource(`/api/events?${params.toString()}`, { withCredentials: true });
+  let source;
+  try {
+    source = new EventSource(`/api/events?${params.toString()}`, { withCredentials: true });
+  } catch {
+    scheduleEventReconnect(sessionId);
+    return;
+  }
   state.eventSource = source;
+  armEventConnectTimer(source, sessionId);
   source.addEventListener("open", () => {
     if (state.eventSource !== source) return;
-    state.eventReconnectAttempt = 0;
-    markEventConnectionAlive();
+    clearEventConnectTimer();
+    markEventConnectionAlive(false);
     setConnectionState("connected");
   });
   source.addEventListener("heartbeat", () => {
     if (state.eventSource === source) {
-      markEventConnectionAlive();
+      markEventConnectionAlive(true);
     }
   });
   source.addEventListener("dashboard", (event) => {
@@ -1681,7 +1698,7 @@ function connectEvents(sessionId) {
       setConnectionState("stale");
       return;
     }
-    markEventConnectionAlive();
+    markEventConnectionAlive(true);
     if (shouldSkipDashboardEvent(payload)) {
       return;
     }
@@ -1690,6 +1707,7 @@ function connectEvents(sessionId) {
   });
   source.addEventListener("error", () => {
     if (state.eventSource !== source) return;
+    clearEventConnectTimer();
     source.close();
     state.eventSource = null;
     clearEventStaleTimer();
@@ -1710,6 +1728,7 @@ function ensureEventsConnected(sessionId) {
 
 function disconnectEvents() {
   clearEventReconnectTimer();
+  clearEventConnectTimer();
   clearEventStaleTimer();
   closeEventSource();
   state.eventSourceSessionId = null;
@@ -1719,18 +1738,42 @@ function disconnectEvents() {
 }
 
 function closeEventSource() {
+  clearEventConnectTimer();
+  clearEventStaleTimer();
   state.eventSource?.close();
   state.eventSource = null;
 }
 
-function markEventConnectionAlive() {
+function markEventConnectionAlive(stable = true) {
+  if (stable) {
+    state.eventReconnectAttempt = 0;
+  }
   state.lastEventAt = Date.now();
-  if (state.connectionState === "stale" || state.connectionState === "reconnecting") {
+  clearEventConnectTimer();
+  if (["connecting", "stale", "reconnecting"].includes(state.connectionState)) {
     setConnectionState("connected");
   }
   clearEventStaleTimer();
   const sessionId = state.eventSourceSessionId;
   armEventStaleTimer(sessionId, EVENT_STALE_AFTER_MS);
+}
+
+/** @param {EventSource} source @param {string} sessionId */
+function armEventConnectTimer(source, sessionId) {
+  clearEventConnectTimer();
+  state.eventConnectTimer = setTimeout(() => {
+    state.eventConnectTimer = null;
+    if (state.eventSource !== source || state.eventSourceSessionId !== sessionId) return;
+    source.close();
+    state.eventSource = null;
+    clearEventStaleTimer();
+    if (navigator.onLine === false) {
+      setConnectionState("offline");
+      return;
+    }
+    setConnectionState("stale");
+    scheduleEventReconnect(sessionId);
+  }, EVENT_CONNECT_TIMEOUT_MS);
 }
 
 function armEventStaleTimer(sessionId, delay) {
@@ -1782,6 +1825,13 @@ function clearEventReconnectTimer() {
   }
 }
 
+function clearEventConnectTimer() {
+  if (state.eventConnectTimer) {
+    clearTimeout(state.eventConnectTimer);
+    state.eventConnectTimer = null;
+  }
+}
+
 function clearEventStaleTimer() {
   if (state.eventStaleTimer) {
     clearTimeout(state.eventStaleTimer);
@@ -1826,6 +1876,20 @@ function rememberEventCursor(value) {
 }
 
 function handleDashboardEvent(event) {
+  if (event.type === "session_disposed" || (event.type === "error" && /会话不存在/.test(String(event.message ?? "")))) {
+    state.running = false;
+    state.queue = [];
+    hideApproval();
+    hideQuestion();
+    clearPendingGuide();
+    resetLiveStatus();
+    disconnectEvents();
+    els.runStatus.textContent = "会话已结束";
+    renderQueuePanel();
+    updateSendButton();
+    scheduleSessionsRefresh(0);
+    return;
+  }
   hideEmptyState();
   updateSessionStatus(event.sessionStatus);
   updateTurnChangeStats(event.turnChangeStats ?? event.changeStats, {
@@ -2671,7 +2735,9 @@ function reconcileBackgroundSubagentSnapshot(groups) {
       backgroundSubagent: true,
       coalesceKey: key,
       rawType: "background_subagent_snapshot",
-      title: group.kind === "terminal" ? "终端后台运行中" : group.status === "waiting" ? "等待子智能体唤醒主控" : "子智能体后台运行中",
+      title: group.kind === "terminal"
+        ? group.status === "cancelling" ? "终端后台任务正在确认退出" : "终端后台运行中"
+        : group.status === "waiting" ? "等待子智能体唤醒主控" : "子智能体后台运行中",
       kind: group.kind ?? previous.kind ?? "subagent",
       groupId: group.groupId ?? previous.groupId ?? null,
       taskId: group.taskId ?? previous.taskId ?? null,
@@ -2722,7 +2788,7 @@ function backgroundSubagentDisplayStatus(activity, previous) {
 }
 
 function backgroundSubagentVisible(activity) {
-  return activity.status === "starting" || activity.status === "running" || activity.status === "waiting" || activity.status === "stale" || activity.status === "lost";
+  return activity.status === "starting" || activity.status === "running" || activity.status === "cancelling" || activity.status === "waiting" || activity.status === "stale" || activity.status === "lost";
 }
 
 function updateLiveActivity(activity) {
@@ -2877,6 +2943,7 @@ function renderBackgroundSubagentStatus(background) {
 function backgroundSubagentCompactLabel(item) {
   if (item.kind === "terminal") {
     if (item.status === "starting") return "终端任务启动中";
+    if (item.status === "cancelling") return "终端任务退出确认中";
     if (item.status === "stale") return "终端任务回收中";
     return "终端后台运行";
   }
@@ -2890,6 +2957,7 @@ function backgroundSubagentCompactLabel(item) {
 function backgroundSubagentTitle(item) {
   if (item.kind === "terminal") {
     if (item.status === "starting") return "终端后台任务启动中";
+    if (item.status === "cancelling") return "终端后台任务退出确认中";
     if (item.status === "stale") return "终端后台任务回收中";
     return "终端后台任务运行中";
   }
@@ -2905,6 +2973,7 @@ function backgroundSubagentMeta(item) {
     return [
       item.taskId ? `task=${item.taskId}` : null,
       item.status === "starting" ? "启动中" : null,
+      item.status === "cancelling" ? "退出确认中" : null,
       item.runningCount === 1 ? "运行中" : null,
       item.lastProgressAt ? `更新 ${formatRelativeTime(item.lastProgressAt)}` : null
     ].filter(Boolean).join(" · ");
@@ -2943,7 +3012,7 @@ function backgroundSubagentCounts() {
   return {
     running: subagents.filter((item) => item.status === "running").length,
     terminalStarting: terminals.filter((item) => item.status === "starting").length,
-    terminals: terminals.filter((item) => item.status === "running").length,
+    terminals: terminals.filter((item) => item.status === "running" || item.status === "cancelling").length,
     terminalStale: terminals.filter((item) => item.status === "stale").length,
     stale: subagents.filter((item) => item.status === "stale").length,
     lost: subagents.filter((item) => item.status === "lost").length,
@@ -3878,6 +3947,7 @@ function normalizeComparableText(text) {
 
 function showApproval(approval) {
   state.pendingApproval = approval;
+  state.approvalSubmitting = false;
   els.approvalPanel.classList.remove("hidden");
   els.approvalPanel.setAttribute("tabindex", "-1");
   els.approvalPanel.setAttribute("role", "dialog");
@@ -3907,14 +3977,28 @@ function showApproval(approval) {
 }
 
 async function resolveApproval(action) {
-  if (!state.pendingApproval) return;
-  const approvalId = state.pendingApproval.id;
-  await postJson(`/api/approvals/${encodeURIComponent(approvalId)}`, { action });
+  const approval = state.pendingApproval;
+  if (!approval || state.approvalSubmitting) return;
+  state.approvalSubmitting = true;
+  const buttons = /** @type {HTMLButtonElement[]} */ (Array.from(els.approvalPanel.querySelectorAll("button[data-action]")));
+  for (const button of buttons) button.disabled = true;
+  const result = await postJson(`/api/approvals/${encodeURIComponent(approval.id)}`, { action })
+    .catch((error) => ({ ok: false, error: error.message }));
+  if (state.pendingApproval?.id !== approval.id) return;
+  if (!result.ok) {
+    state.approvalSubmitting = false;
+    for (const button of buttons) button.disabled = false;
+    showError(result.error ?? "权限确认提交失败");
+    return;
+  }
+  hideApproval();
+  els.runStatus.textContent = state.running ? "运行中" : "处理中";
 }
 
 function hideApproval() {
   deactivateModal(els.approvalPanel);
   state.pendingApproval = null;
+  state.approvalSubmitting = false;
   els.approvalPanel.classList.add("hidden");
   els.approvalPanel.innerHTML = "";
 }
@@ -3922,6 +4006,7 @@ function hideApproval() {
 function showQuestion(question) {
   deactivateQuestionReviewBackground();
   state.questionReviewMode = false;
+  state.questionSubmitting = false;
   state.pendingQuestion = {
     ...question,
     selectedChoices: new Set((question.choices ?? []).filter((choice) => choice.selected).map((choice) => choice.value ?? choice.label)),
@@ -4086,32 +4171,54 @@ function toggleQuestionChoice(value) {
 
 async function submitQuestion() {
   const question = state.pendingQuestion;
-  if (!question) return;
+  if (!question || state.questionSubmitting) return;
   rememberQuestionDraft();
   const selectedChoices = Array.from(question.selectedChoices);
   const customAnswer = (question.customDraft ?? "").trim();
-  await postJson(`/api/questions/${encodeURIComponent(question.id)}`, {
+  state.questionSubmitting = true;
+  const buttons = /** @type {HTMLButtonElement[]} */ (Array.from(els.questionPanel.querySelectorAll("button[data-action]")));
+  for (const button of buttons) button.disabled = true;
+  const result = await postJson(`/api/questions/${encodeURIComponent(question.id)}`, {
     selectedChoices,
     customAnswer,
     answer: customAnswer,
     cancelled: false
-  });
+  }).catch((error) => ({ ok: false, error: error.message }));
+  finishQuestionSubmission(question, buttons, result);
 }
 
 async function cancelQuestion() {
   const question = state.pendingQuestion;
-  if (!question) return;
-  await postJson(`/api/questions/${encodeURIComponent(question.id)}`, {
+  if (!question || state.questionSubmitting) return;
+  state.questionSubmitting = true;
+  const buttons = /** @type {HTMLButtonElement[]} */ (Array.from(els.questionPanel.querySelectorAll("button[data-action]")));
+  for (const button of buttons) button.disabled = true;
+  const result = await postJson(`/api/questions/${encodeURIComponent(question.id)}`, {
     cancelled: true,
     answer: "",
     selectedChoices: []
-  });
+  }).catch((error) => ({ ok: false, error: error.message }));
+  finishQuestionSubmission(question, buttons, result);
+}
+
+/** @param {any} question @param {HTMLButtonElement[]} buttons @param {any} result */
+function finishQuestionSubmission(question, buttons, result) {
+  if (state.pendingQuestion?.id !== question.id) return;
+  if (!result.ok) {
+    state.questionSubmitting = false;
+    for (const button of buttons) button.disabled = false;
+    showError(result.error ?? "需求确认提交失败");
+    return;
+  }
+  hideQuestion();
+  els.runStatus.textContent = state.running ? "运行中" : "处理中";
 }
 
 function hideQuestion() {
   deactivateModal(els.questionPanel);
   deactivateQuestionReviewBackground();
   state.questionReviewMode = false;
+  state.questionSubmitting = false;
   state.pendingQuestion = null;
   els.questionPanel.classList.remove("question-reviewing");
   els.questionPanel.classList.add("hidden");
@@ -4530,10 +4637,16 @@ async function shutdownDashboard() {
   if (!isCurrentScopedRequest(request)) return;
   finishScopedRequest(request);
   if (!shutdownResultIsClosed(result)) {
-    state.shutdownActivity = normalizeLifecycleActivity(result?.activity ?? state.shutdownActivity);
+    const requestTimedOut = result?.code === "DASHBOARD_REQUEST_TIMEOUT";
+    state.shutdownActivity = normalizeLifecycleActivity({
+      ...(result?.activity ?? state.shutdownActivity),
+      uncertain: requestTimedOut || result?.activity?.uncertain === true || state.shutdownActivity?.uncertain === true
+    });
     els.shutdownCopy.textContent = `${result?.error?.message ?? result?.error ?? "关闭失败"} ${lifecycleActivitySummary(state.shutdownActivity)}。你可以返回继续处理，或重试取消任务并关闭。`;
     els.shutdownConfirm.disabled = false;
-    els.shutdownConfirm.textContent = state.shutdownActivity.total > 0 ? "重试取消并关闭" : "重试关闭";
+    els.shutdownConfirm.textContent = state.shutdownActivity.uncertain
+      ? "强制关闭"
+      : state.shutdownActivity.total > 0 ? "重试取消并关闭" : "重试关闭";
     els.runStatus.textContent = "关闭失败";
     announceStatus("Dashboard 关闭失败，页面仍可继续使用");
     els.shutdownConfirm.focus({ preventScroll: true });
@@ -5230,41 +5343,41 @@ function isAbortError(error) {
 }
 
 async function getJson(url, options = {}) {
-  const response = await dashboardFetch(url, {
+  return dashboardFetch(url, {
     credentials: "same-origin",
     signal: options.signal
   }, options);
-  return responseJson(response);
 }
 
 async function postJson(url, body, options = {}) {
-  const response = await dashboardFetch(url, {
+  return dashboardFetch(url, {
     method: "POST",
     credentials: "same-origin",
     headers: dashboardJsonHeaders(),
     body: JSON.stringify(body),
     signal: options.signal
   }, options);
-  return responseJson(response);
 }
 
 async function deleteJson(url, body = {}, options = {}) {
-  const response = await dashboardFetch(url, {
+  return dashboardFetch(url, {
     method: "DELETE",
     credentials: "same-origin",
     headers: dashboardJsonHeaders(),
     body: JSON.stringify(body),
     signal: options.signal
   }, options);
-  return responseJson(response);
 }
 
 /**
- * Fetch Dashboard APIs with a bounded lifetime while preserving caller
- * cancellation. A stalled local server must not leave controls permanently
- * disabled.
+ * Fetch and decode Dashboard APIs within one bounded lifetime. Keeping the
+ * response-body read inside this scope matters when a server sends headers but
+ * never finishes the JSON body.
+ * @param {string} url
+ * @param {RequestInit} [init]
+ * @param {{ timeoutMs?: number; signal?: AbortSignal }} [options]
  */
-async function dashboardFetch(url, init = {}, options = {}) {
+export async function dashboardFetch(url, init = {}, options = {}) {
   const timeoutMs = Number.isFinite(Number(options.timeoutMs))
     ? Math.max(1, Number(options.timeoutMs))
     : DASHBOARD_REQUEST_TIMEOUT_MS;
@@ -5283,12 +5396,13 @@ async function dashboardFetch(url, init = {}, options = {}) {
     controller.abort();
   }, timeoutMs);
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    const response = await fetch(url, { ...init, signal: controller.signal });
+    return await responseJson(response);
   } catch (error) {
     if (timedOut) {
-      const timeoutError = new Error(`请求超时（${Math.ceil(timeoutMs / 1000)} 秒）`);
+      const timeoutError = new Error("请求超时（" + Math.ceil(timeoutMs / 1000) + " 秒）");
       timeoutError.name = "TimeoutError";
-      timeoutError.code = "DASHBOARD_REQUEST_TIMEOUT";
+      Object.defineProperty(timeoutError, "code", { value: "DASHBOARD_REQUEST_TIMEOUT" });
       throw timeoutError;
     }
     throw error;
@@ -5297,7 +5411,6 @@ async function dashboardFetch(url, init = {}, options = {}) {
     callerSignal?.removeEventListener("abort", abortFromCaller);
   }
 }
-
 async function responseJson(response) {
   const text = await response.text();
   let payload;

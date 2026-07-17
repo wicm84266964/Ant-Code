@@ -91,6 +91,108 @@ test("session store refuses to append over a corrupt partial chunk", async () =>
   );
 });
 
+test("session store rejects a sessions root that escapes through a junction", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "session-store-root-junction-"));
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), "session-store-root-outside-"));
+  await fs.mkdir(path.join(cwd, ".lab-agent"), { recursive: true });
+  await fs.symlink(
+    outside,
+    path.join(cwd, ".lab-agent", "sessions"),
+    process.platform === "win32" ? "junction" : "dir"
+  );
+  const store = createSessionStore({ cwd });
+
+  await assert.rejects(
+    store.writeMetadata({ id: "escaped-session", status: "completed" }),
+    (error) => error?.code === "STORAGE_PATH_OUTSIDE_WORKSPACE"
+  );
+  assert.equal(await fs.stat(path.join(outside, "escaped-session.json")).then(() => true).catch(() => false), false);
+});
+
+test("session store rejects transcript chunks that escape through a junction", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "session-store-chunk-junction-"));
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), "session-store-chunk-outside-"));
+  const store = createSessionStore({ cwd });
+  await store.writeMetadata({ id: "junction-session", status: "completed" });
+  await fs.writeFile(path.join(outside, "secret.json"), `${JSON.stringify({
+    version: "ant-code-transcript-chunk.v1",
+    sessionId: "junction-session",
+    index: 1,
+    messages: [{ role: "assistant", content: "OUTSIDE_SECRET" }]
+  })}\n`, "utf8");
+  await fs.symlink(
+    outside,
+    path.join(store.root, "chunk-junction"),
+    process.platform === "win32" ? "junction" : "dir"
+  );
+
+  const result = await store.readTranscriptChunk({
+    version: 1,
+    chunkSize: 50,
+    totalMessages: 1,
+    totalVisibleMessages: 1,
+    chunks: [{
+      index: 1,
+      file: "chunk-junction/secret.json",
+      messages: 1,
+      visibleMessages: 1,
+      bytes: 1,
+      encrypted: false
+    }]
+  }, 1);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "TRANSCRIPT_CHUNK_READ_ERROR");
+  assert.equal(JSON.stringify(result).includes("OUTSIDE_SECRET"), false);
+});
+
+test("session store keeps the committed snapshot readable when metadata commit fails", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "session-store-metadata-failure-"));
+  const sessionId = "metadata-failure-session";
+  const plaintext = createSessionStore({ cwd });
+  const committedMessages = Array.from({ length: 51 }, (_, index) => ({
+    role: index % 2 === 0 ? "user" : "assistant",
+    content: `committed ${index + 1}`
+  }));
+  const committedArchive = await plaintext.writeTranscriptChunks(sessionId, committedMessages);
+  await plaintext.writeMetadata({
+    id: sessionId,
+    status: "completed",
+    transcript: { archive: committedArchive, messages: committedMessages.slice(-50) }
+  });
+  const committedTailPath = path.join(plaintext.root, committedArchive.chunks.at(-1).file);
+  const committedTail = await fs.readFile(committedTailPath, "utf8");
+
+  const encrypted = createSessionStore({
+    cwd,
+    transcript: { enabled: true, retentionDays: 30, encryption: "required" },
+    env: { LAB_AGENT_TRANSCRIPT_KEY: "metadata-failure-key" }
+  });
+  const uncommittedArchive = await encrypted.writeTranscriptChunks(
+    sessionId,
+    [{ role: "assistant", content: "must remain uncommitted" }],
+    committedArchive
+  );
+  assert.equal(uncommittedArchive.chunks.length, committedArchive.chunks.length);
+  assert.equal(uncommittedArchive.chunks.at(-1).messages, 2);
+  await fs.mkdir(path.join(encrypted.root, `${sessionId}.json.enc`));
+
+  await assert.rejects(encrypted.writeMetadata({
+    id: sessionId,
+    status: "completed",
+    transcript: { archive: uncommittedArchive }
+  }));
+
+  const oldMetadata = await plaintext.readMetadataExact(sessionId);
+  const oldPage = await plaintext.readTranscriptPage(oldMetadata.metadata.transcript.archive, { limit: 100 });
+  assert.equal(oldMetadata.ok, true);
+  assert.equal(oldPage.ok, true);
+  assert.equal(oldPage.messages.length, 51);
+  assert.equal(oldPage.messages.at(-1).content, "committed 51");
+  assert.equal(await fs.readFile(committedTailPath, "utf8"), committedTail);
+  assert.notEqual(uncommittedArchive.chunks.at(-1).file, committedArchive.chunks.at(-1).file);
+});
+
 test("session store keeps legacy archives without visible counters pageable", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "session-store-legacy-"));
   const store = createSessionStore({ cwd });
@@ -111,4 +213,55 @@ test("session store keeps legacy archives without visible counters pageable", as
   assert.equal(page.messages[0].content, "legacy 51");
   assert.equal(page.summary.total, 125);
   assert.equal(page.chunksRead, 2);
+});
+
+test("session store migrates legacy plaintext metadata when encryption becomes required", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "session-store-encryption-migration-"));
+  const plaintext = createSessionStore({
+    cwd,
+    transcript: { enabled: true, retentionDays: 30, encryption: "off" },
+    env: {}
+  });
+  await plaintext.writeMetadata({ id: "migration-session", marker: "legacy-plaintext" });
+
+  const encrypted = createSessionStore({
+    cwd,
+    transcript: { enabled: true, retentionDays: 30, encryption: "required" },
+    env: { LAB_AGENT_TRANSCRIPT_KEY: "migration-test-key" }
+  });
+  const read = await encrypted.readMetadataExact("migration-session");
+  const entries = await fs.readdir(encrypted.root);
+
+  assert.equal(read.ok, true);
+  assert.equal(read.encrypted, true);
+  assert.equal(read.metadata.marker, "legacy-plaintext");
+  assert.deepEqual(entries.filter((name) => name.startsWith("migration-session.")), ["migration-session.json.enc"]);
+});
+
+test("session store prefers encrypted metadata and deletes every legacy format", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "session-store-encryption-dual-"));
+  const plaintext = createSessionStore({
+    cwd,
+    transcript: { enabled: true, retentionDays: 30, encryption: "off" },
+    env: {}
+  });
+  const plaintextPath = await plaintext.writeMetadata({ id: "dual-session", marker: "stale-plaintext" });
+  const stalePlaintext = await fs.readFile(plaintextPath, "utf8");
+
+  const encrypted = createSessionStore({
+    cwd,
+    transcript: { enabled: true, retentionDays: 30, encryption: "required" },
+    env: { LAB_AGENT_TRANSCRIPT_KEY: "dual-test-key" }
+  });
+  await encrypted.writeMetadata({ id: "dual-session", marker: "current-encrypted" });
+  await fs.writeFile(plaintextPath, stalePlaintext, "utf8");
+
+  const read = await encrypted.readMetadataExact("dual-session");
+  const deleted = await encrypted.deleteSession("dual-session");
+  const entries = await fs.readdir(encrypted.root);
+
+  assert.equal(read.ok, true);
+  assert.equal(read.metadata.marker, "current-encrypted");
+  assert.equal(deleted.deleted.length, 2);
+  assert.deepEqual(entries.filter((name) => name.startsWith("dual-session.")), []);
 });

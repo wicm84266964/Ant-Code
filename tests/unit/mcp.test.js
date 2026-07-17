@@ -38,6 +38,44 @@ test("keeps MCP stdio sessions connected and exposes diagnostics", async () => {
   runtime.close();
 });
 
+test("concurrent MCP requests share one in-flight stdio connection", async (t) => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-mcp-connect-"));
+  const startLog = path.join(cwd, "starts.log");
+  const runtime = createMcpRuntime({
+    cwd,
+    config: {
+      mcp: {
+        servers: [
+          {
+            name: "concurrent-echo",
+            transport: "stdio",
+            command: process.execPath,
+            args: [path.resolve("tests/fixtures/mcp-echo-server.js")],
+            env: { MCP_START_LOG: startLog },
+            envAllowlist: ["MCP_START_LOG"],
+            toolRisks: { echo: "read" }
+          }
+        ]
+      }
+    },
+    policy: { networkMode: "offline" }
+  });
+  t.after(() => runtime.close());
+
+  const [tools, prompts, resources] = await Promise.all([
+    runtime.listTools("concurrent-echo"),
+    runtime.listPrompts("concurrent-echo"),
+    runtime.listResources("concurrent-echo")
+  ]);
+  const starts = (await fs.readFile(startLog, "utf8")).trim().split(/\r?\n/).filter(Boolean);
+
+  assert.equal(tools.ok, true);
+  assert.equal(prompts.ok, true);
+  assert.equal(resources.ok, true);
+  assert.equal(starts.length, 1);
+  assert.equal(runtime.status("concurrent-echo").servers[0].status, "connected");
+});
+
 test("lists MCP prompts and resources through the persistent runtime", async () => {
   const runtime = createRuntime({ toolRisks: { echo: "read" } });
   const prompts = await runtime.listPrompts("local-echo");
@@ -370,6 +408,34 @@ test("MCP servers can configure request timeout", async (t) => {
   assert.equal(tools.ok, true);
 });
 
+test("MCP stdio rejects an oversized JSON frame before parsing it", async (t) => {
+  const runtime = createMcpRuntime({
+    cwd: process.cwd(),
+    config: {
+      mcp: {
+        servers: [
+          {
+            name: "oversized-frame",
+            transport: "stdio",
+            command: process.execPath,
+            args: [path.resolve("tests/fixtures/mcp-oversized-frame-server.js")],
+            requestTimeoutMs: 30_000,
+            toolRisks: { oversized: "read" }
+          }
+        ]
+      }
+    },
+    policy: { networkMode: "offline" }
+  });
+  t.after(() => runtime.close());
+
+  const result = await runtime.callTool("oversized-frame", "oversized", {});
+  const status = runtime.status("oversized-frame");
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "MCP_TRANSPORT_FRAME_TOO_LARGE");
+  assert.equal(status.servers[0].lastError.code, "MCP_TRANSPORT_FRAME_TOO_LARGE");
+});
 function createRuntime(serverOptions) {
   return createMcpRuntime({
     cwd: process.cwd(),

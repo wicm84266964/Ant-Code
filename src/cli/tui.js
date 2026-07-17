@@ -134,12 +134,14 @@ import { createScrollableRegion } from "./tui/scroll-region.js";
 import {
   boundedIndex,
   buildGuidePrompt,
+  createCoalescedAsyncRunner,
   isImmediateTuiCommand,
   isStopGuidance,
   prependQueuedPrompt,
   promoteQueuedPrompt,
   rememberRecentFile,
   removeQueuedPrompt,
+  resolveTuiExitAction,
   takeQueuedPrompt
 } from "./tui/workflows.js";
 
@@ -165,7 +167,7 @@ const TASK_FILTER_LABELS = Object.freeze({
 });
 
 /**
- * @param {{ cwd: string; env?: NodeJS.ProcessEnv; readonly?: boolean; allowWrite?: boolean; allowCommand?: boolean; fullAccess?: boolean; resume?: string | null }} options
+ * @param {{ cwd: string; env?: NodeJS.ProcessEnv; readonly?: boolean; allowWrite?: boolean; allowCommand?: boolean; fullAccess?: boolean; resume?: string | null; forceExitProcess?: (code: number) => void }} options
  */
 export async function runTui(options) {
   if (!input.isTTY || !output.isTTY) {
@@ -194,6 +196,7 @@ export async function runTui(options) {
   const initialWindowsConsoleCodePage = snapshotWindowsConsoleCodePage();
   enterTerminalAppMode(output, { env: options.env });
   let instance = null;
+  let forceExitCode = /** @type {number | null} */ (null);
   try {
     clearTerminalForFullRedraw(output);
     instance = render(h(TuiApp, {
@@ -201,7 +204,10 @@ export async function runTui(options) {
       env: options.env,
       session,
       initialTrusted: trust.trusted,
-      initialWindowsConsoleInputMode
+      initialWindowsConsoleInputMode,
+      onForceExit: (code) => {
+        forceExitCode = Number.isInteger(code) ? code : 130;
+      }
     }), {
       exitOnCtrlC: false,
       incrementalRendering: true,
@@ -211,6 +217,9 @@ export async function runTui(options) {
   } finally {
     instance?.unmount?.();
     exitTerminalAppMode(output, { env: options.env, initialWindowsConsoleInputMode, initialWindowsConsoleCodePage });
+  }
+  if (forceExitCode !== null) {
+    (options.forceExitProcess ?? process.exit)(forceExitCode);
   }
 }
 
@@ -309,7 +318,7 @@ function isProtectedConversationEntry(entry = {}) {
 }
 
 /**
- * @param {{ cwd: string; env?: NodeJS.ProcessEnv; session: Awaited<ReturnType<typeof createSession>> }} props
+ * @param {{ cwd: string; env?: NodeJS.ProcessEnv; session: Awaited<ReturnType<typeof createSession>>; onForceExit?: (code: number) => void }} props
  */
 function TuiApp(props) {
   if (props.session.permissionReadonlyLocked === undefined) {
@@ -406,6 +415,8 @@ function TuiApp(props) {
   const streamScrollOffsetRef = useRef(0);
   const sidePanelOffsetRef = useRef(0);
   const backgroundControllersRef = useRef(new Map());
+  const backgroundExitPendingRef = useRef(false);
+  const taskRecordsLoaderRef = useRef(/** @type {ReturnType<typeof createCoalescedAsyncRunner> | null} */ (null));
   const streamDeltaBufferRef = useRef(createStreamDeltaBuffer());
   const streamFlushTimerRef = useRef(null);
   const activityEventCountRef = useRef(0);
@@ -1106,7 +1117,7 @@ function TuiApp(props) {
     return records;
   }, [props.cwd, props.env]);
 
-  const loadTaskRecords = useCallback(async () => {
+  const readTaskRecords = useCallback(async () => {
     const store = createAgentTaskStore({ cwd: props.cwd });
     const groupStore = createAgentTaskGroupStore({ cwd: props.cwd });
     const records = await store.listTasks({ parentSessionId: sessionRef.current.id });
@@ -1115,6 +1126,26 @@ function TuiApp(props) {
     setTaskGroupRecords(groups);
     return records;
   }, [props.cwd]);
+
+  useEffect(() => {
+    const runner = createCoalescedAsyncRunner(readTaskRecords);
+    taskRecordsLoaderRef.current = runner;
+    return () => {
+      runner.dispose();
+      if (taskRecordsLoaderRef.current === runner) {
+        taskRecordsLoaderRef.current = null;
+      }
+    };
+  }, [readTaskRecords]);
+
+  const loadTaskRecords = useCallback(async () => {
+    try {
+      return await (taskRecordsLoaderRef.current?.run() ?? readTaskRecords());
+    } catch (error) {
+      debugTuiInput(props.env, `task_records_refresh_failed error=${error instanceof Error ? error.message : String(error)}`);
+      return [];
+    }
+  }, [props.env, readTaskRecords]);
 
   useEffect(() => {
     if (!startupConfirmed || !trusted) {
@@ -2650,6 +2681,11 @@ function TuiApp(props) {
     return () => clearInterval(timer);
   }, [idleSilent, props.env, runningBackgroundCount, startupConfirmed, trusted]);
 
+  const setBackgroundExitPendingValue = useCallback((value) => {
+    backgroundExitPendingRef.current = Boolean(value);
+    setBackgroundExitPending(Boolean(value));
+  }, []);
+
   const requestBackgroundExit = useCallback(async () => {
     const tasks = cancelBackgroundAgentTasks({ parentSessionId: sessionRef.current.id });
     for (const controller of backgroundControllersRef.current.values()) {
@@ -2657,17 +2693,40 @@ function TuiApp(props) {
         controller.abort();
       }
     }
-    setBackgroundExitPending(true);
+    setBackgroundExitPendingValue(true);
     setExitConfirmUntilValue(0);
     const count = tasks.length + backgroundControllersRef.current.size;
-    addEntry("system", "后台任务退出中", `已请求停止 ${count} 个后台子任务。请等待任务完全停止后再退出。`);
+    addEntry("system", "后台任务退出中", `已请求停止 ${count} 个后台子任务。任务未及时结束时，再次退出可强制关闭 TUI。`);
     setActivity((value) => ({ ...value, status: "后台任务退出中", lastTool: "background cancel" }));
     await loadTaskRecords();
-  }, [addEntry, loadTaskRecords, setExitConfirmUntilValue]);
+  }, [addEntry, loadTaskRecords, setBackgroundExitPendingValue, setExitConfirmUntilValue]);
+
+  const forceExitTui = useCallback((reason) => {
+    const current = stateRef.current;
+    current.pendingApproval?.resolve(false);
+    current.pendingQuestion?.resolve({ answer: "", selectedChoice: null });
+    interruptCurrentTurn(reason);
+    for (const controller of backgroundControllersRef.current.values()) {
+      if (!controller.signal.aborted) {
+        controller.abort();
+      }
+    }
+    props.onForceExit?.(130);
+    exit();
+  }, [exit, interruptCurrentTurn, props.onForceExit]);
 
   const requestExit = useCallback(() => {
     const backgroundCount = runningBackgroundCount();
-    if (backgroundExitPending || backgroundCount > 0) {
+    const action = resolveTuiExitAction({
+      confirmed: true,
+      backgroundExitPending: backgroundExitPendingRef.current,
+      backgroundCount
+    });
+    if (action === "force") {
+      forceExitTui("forced-background-exit");
+      return;
+    }
+    if (action === "cancel-background") {
       void requestBackgroundExit();
       return;
     }
@@ -2675,7 +2734,7 @@ function TuiApp(props) {
     stateRef.current.pendingQuestion?.resolve({ answer: "", selectedChoice: null });
     interruptCurrentTurn("exit");
     exit();
-  }, [backgroundExitPending, exit, interruptCurrentTurn, requestBackgroundExit, runningBackgroundCount]);
+  }, [exit, forceExitTui, interruptCurrentTurn, requestBackgroundExit, runningBackgroundCount]);
 
   const submitInput = useCallback(async (overridePrompt = null) => {
     const prompt = sanitizeComposerText(overridePrompt ?? stateRef.current.inputBuffer).trim();
@@ -2778,7 +2837,7 @@ function TuiApp(props) {
     if (!backgroundExitPending) {
       return undefined;
     }
-    const timer = setInterval(async () => {
+    const poll = createCoalescedAsyncRunner(async () => {
       const count = runningBackgroundCount();
       await loadTaskRecords();
       if (count > 0) {
@@ -2786,12 +2845,18 @@ function TuiApp(props) {
         return;
       }
       clearInterval(timer);
-      setBackgroundExitPending(false);
+      setBackgroundExitPendingValue(false);
       addEntry("system", "后台任务已停止", "后台任务已停止，可以再次退出。");
       setActivity((value) => ({ ...value, status: "后台任务已停止，可以退出" }));
+    });
+    const timer = setInterval(() => {
+      void poll.run().catch(() => {});
     }, 500);
-    return () => clearInterval(timer);
-  }, [addEntry, backgroundExitPending, loadTaskRecords, runningBackgroundCount]);
+    return () => {
+      clearInterval(timer);
+      poll.dispose();
+    };
+  }, [addEntry, backgroundExitPending, loadTaskRecords, runningBackgroundCount, setBackgroundExitPendingValue]);
 
   const handleEscInterrupt = useCallback(() => {
     const now = Date.now();
@@ -2819,12 +2884,22 @@ function TuiApp(props) {
       confirmationUntil: exitConfirmUntilRef.current,
       now
     });
-    if (result.confirmed) {
-      const backgroundCount = runningBackgroundCount();
-      if (backgroundExitPending || backgroundCount > 0) {
-        void requestBackgroundExit();
-        return;
-      }
+    const backgroundCount = runningBackgroundCount();
+    const action = resolveTuiExitAction({
+      confirmed: result.confirmed,
+      backgroundExitPending: backgroundExitPendingRef.current,
+      backgroundCount
+    });
+    if (action === "force") {
+      setExitConfirmUntilValue(0);
+      forceExitTui("ctrl-c-force-exit");
+      return;
+    }
+    if (action === "cancel-background") {
+      void requestBackgroundExit();
+      return;
+    }
+    if (action === "exit") {
       setExitConfirmUntilValue(0);
       current.pendingApproval?.resolve(false);
       current.pendingQuestion?.resolve({ answer: "", selectedChoice: null });
@@ -2832,14 +2907,21 @@ function TuiApp(props) {
       exit();
       return;
     }
-    const backgroundCount = runningBackgroundCount();
     setExitConfirmUntilValue(result.nextConfirmationUntil);
     setInterruptConfirmUntilValue(0);
-    setActivity((value) => ({ ...value, status: backgroundCount > 0 ? "再次按 Ctrl+C 停止后台任务并退出" : "再次按 Ctrl+C 退出" }));
-    addEntry("system", "退出确认", backgroundCount > 0
-      ? `${result.message}。仍有 ${backgroundCount} 个后台子任务运行；确认退出会先停止所有任务。`
+    const forcePending = backgroundExitPendingRef.current;
+    setActivity((value) => ({
+      ...value,
+      status: forcePending
+        ? "再次按 Ctrl+C 强制退出"
+        : backgroundCount > 0 ? "再次按 Ctrl+C 停止后台任务并退出" : "再次按 Ctrl+C 退出"
+    }));
+    addEntry("system", "退出确认", forcePending
+      ? `${result.message}。后台任务未确认停止；确认后将强制关闭 TUI。`
+      : backgroundCount > 0
+        ? `${result.message}。仍有 ${backgroundCount} 个后台子任务运行；确认退出会先停止所有任务。`
       : result.message);
-  }, [addEntry, backgroundExitPending, exit, interruptCurrentTurn, requestBackgroundExit, runningBackgroundCount, setExitConfirmUntilValue, setInterruptConfirmUntilValue]);
+  }, [addEntry, exit, forceExitTui, interruptCurrentTurn, requestBackgroundExit, runningBackgroundCount, setExitConfirmUntilValue, setInterruptConfirmUntilValue]);
 
   const toggleTranscriptDetail = useCallback(() => {
     const current = stateRef.current;

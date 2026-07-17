@@ -3,18 +3,28 @@ import tls from "node:tls";
 import { resolveProxyForUrl } from "../net/proxy.js";
 
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
-const DEFAULT_MAX_BYTES = 1024 * 1024;
+export const WEB_FETCH_DEFAULT_MAX_BYTES = 32 * 1024 * 1024;
+const DEFAULT_SEARCH_MAX_BYTES = 1024 * 1024;
+const RAW_HTTP_HEADER_MAX_BYTES = 64 * 1024;
 const MAX_SEARCH_RESULTS = 10;
 const MAX_REDIRECTS = 5;
+const RAW_TRUNCATED_RESPONSES = new WeakSet();
 
 export async function webFetchTool(input) {
   const url = normalizeUrl(input.url);
   const format = normalizeFetchFormat(input.format);
   const timeoutMs = clampNumber(input.timeoutMs ?? input.timeout ?? DEFAULT_FETCH_TIMEOUT_MS, 1000, 120_000);
-  const maxBytes = positiveIntegerOrNull(input.maxBytes);
+  const requestedMaxBytes = positiveIntegerOrNull(input.maxBytes);
+  const maxBytes = requestedMaxBytes ?? WEB_FETCH_DEFAULT_MAX_BYTES;
 
-  const response = await fetchWithTimeout(url, { timeoutMs, config: input.config, env: input.env, signal: input.signal });
-  const body = await readResponseText(response, maxBytes);
+  const { response, body } = await fetchTextWithTimeout(url, {
+    timeoutMs,
+    maxBytes,
+    truncateOnLimit: requestedMaxBytes !== null,
+    config: input.config,
+    env: input.env,
+    signal: input.signal
+  });
   const contentType = response.headers.get("content-type") ?? "";
   const htmlLike = contentType.includes("html") || looksLikeHtml(body.text);
   const content = formatFetchedContent(body.text, format, htmlLike, response.url);
@@ -67,8 +77,14 @@ async function searchSearxng({ query, maxResults, timeoutMs, searxngUrl, config,
   const endpoint = new URL("/search", searxngUrl);
   endpoint.searchParams.set("q", query);
   endpoint.searchParams.set("format", "json");
-  const response = await fetchWithTimeout(endpoint.href, { timeoutMs, config, env, signal });
-  const body = await readResponseText(response, DEFAULT_MAX_BYTES);
+  const { response, body } = await fetchTextWithTimeout(endpoint.href, {
+    timeoutMs,
+    maxBytes: DEFAULT_SEARCH_MAX_BYTES,
+    truncateOnLimit: true,
+    config,
+    env,
+    signal
+  });
   let json;
   try {
     json = JSON.parse(body.text);
@@ -93,8 +109,14 @@ async function searchSearxng({ query, maxResults, timeoutMs, searxngUrl, config,
 async function searchDuckDuckGo({ query, maxResults, timeoutMs, config, env, signal }) {
   const endpoint = new URL("https://duckduckgo.com/html/");
   endpoint.searchParams.set("q", query);
-  const response = await fetchWithTimeout(endpoint.href, { timeoutMs, config, env, signal });
-  const body = await readResponseText(response, DEFAULT_MAX_BYTES);
+  const { body } = await fetchTextWithTimeout(endpoint.href, {
+    timeoutMs,
+    maxBytes: DEFAULT_SEARCH_MAX_BYTES,
+    truncateOnLimit: true,
+    config,
+    env,
+    signal
+  });
   const results = parseDuckDuckGoHtml(body.text).slice(0, maxResults);
   return {
     provider: "duckduckgo-html",
@@ -195,25 +217,33 @@ function decodeHtml(value) {
     .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(Number.parseInt(code, 16)));
 }
 
-async function fetchWithTimeout(url, options) {
+/**
+ * @param {string} url
+ * @param {{ timeoutMs: number; maxBytes: number; truncateOnLimit?: boolean; config?: Record<string, any>; env?: NodeJS.ProcessEnv; signal?: AbortSignal }} options
+ */
+async function fetchTextWithTimeout(url, options) {
   const timeoutController = new AbortController();
   const linked = linkAbortSignals([timeoutController.signal, options.signal]);
-  const timer = setTimeout(() => timeoutController.abort(), options.timeoutMs);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    timeoutController.abort(webFetchTimeoutError(options.timeoutMs));
+  }, options.timeoutMs);
   try {
-    const proxyUrl = resolveProxyForUrl(url, { config: options.config, env: options.env });
-    if (proxyUrl) {
-      return await fetchViaHttpProxy(url, {
-        proxyUrl,
-        signal: linked.signal,
-        maxRedirects: MAX_REDIRECTS
-      });
-    }
-    return await fetch(url, {
-      signal: linked.signal,
-      headers: {
-        "user-agent": "ant-code/1.1 local-lab-agent"
-      }
+    const response = await fetchResponse(url, {
+      ...options,
+      signal: linked.signal
     });
+    const body = await readResponseText(response, options.maxBytes, {
+      signal: linked.signal,
+      truncateOnLimit: options.truncateOnLimit === true
+    });
+    return { response, body };
+  } catch (error) {
+    if (timedOut) {
+      throw webFetchTimeoutError(options.timeoutMs);
+    }
+    throw error;
   } finally {
     clearTimeout(timer);
     linked.cleanup();
@@ -221,14 +251,39 @@ async function fetchWithTimeout(url, options) {
 }
 
 /**
+ * @param {string} url
+ * @param {{ maxBytes: number; truncateOnLimit?: boolean; config?: Record<string, any>; env?: NodeJS.ProcessEnv; signal?: AbortSignal }} options
+ */
+async function fetchResponse(url, options) {
+  const proxyUrl = resolveProxyForUrl(url, { config: options.config, env: options.env });
+  if (proxyUrl) {
+    return fetchViaHttpProxy(url, {
+      proxyUrl,
+      signal: options.signal,
+      maxRedirects: MAX_REDIRECTS,
+      maxBytes: options.maxBytes,
+      truncateOnLimit: options.truncateOnLimit === true
+    });
+  }
+  return fetch(url, {
+    signal: options.signal,
+    headers: {
+      "user-agent": "ant-code/1.1 local-lab-agent"
+    }
+  });
+}
+
+/**
  * @param {Array<AbortSignal | undefined>} signals
  */
 function linkAbortSignals(signals) {
   const controller = new AbortController();
+  /** @type {Array<{ signal: AbortSignal; onAbort: () => void }>} */
   const listeners = [];
-  const abort = () => {
+  /** @param {AbortSignal | undefined} signal */
+  const abort = (signal) => {
     if (!controller.signal.aborted) {
-      controller.abort();
+      controller.abort(signal?.reason);
     }
   };
   for (const signal of signals) {
@@ -236,17 +291,18 @@ function linkAbortSignals(signals) {
       continue;
     }
     if (signal.aborted) {
-      abort();
+      abort(signal);
       continue;
     }
-    signal.addEventListener("abort", abort, { once: true });
-    listeners.push(signal);
+    const onAbort = () => abort(signal);
+    signal.addEventListener("abort", onAbort, { once: true });
+    listeners.push({ signal, onAbort });
   }
   return {
     signal: controller.signal,
     cleanup() {
-      for (const signal of listeners) {
-        signal.removeEventListener("abort", abort);
+      for (const listener of listeners) {
+        listener.signal.removeEventListener("abort", listener.onAbort);
       }
     }
   };
@@ -254,7 +310,7 @@ function linkAbortSignals(signals) {
 
 /**
  * @param {string} url
- * @param {{ proxyUrl: string; signal?: AbortSignal; maxRedirects: number }} options
+ * @param {{ proxyUrl: string; signal?: AbortSignal; maxRedirects: number; maxBytes: number; truncateOnLimit: boolean }} options
  */
 async function fetchViaHttpProxy(url, options) {
   const response = await requestViaHttpProxy(url, options);
@@ -269,7 +325,7 @@ async function fetchViaHttpProxy(url, options) {
 
 /**
  * @param {string} targetUrl
- * @param {{ proxyUrl: string; signal?: AbortSignal }} options
+ * @param {{ proxyUrl: string; signal?: AbortSignal; maxBytes: number; truncateOnLimit: boolean }} options
  */
 function requestViaHttpProxy(targetUrl, options) {
   return new Promise((resolve, reject) => {
@@ -280,7 +336,13 @@ function requestViaHttpProxy(targetUrl, options) {
       return;
     }
     if (target.protocol === "https:") {
-      proxyHttpsRequest({ target, proxy, signal: options.signal }).then(resolve, reject);
+      proxyHttpsRequest({
+        target,
+        proxy,
+        signal: options.signal,
+        maxBytes: options.maxBytes,
+        truncateOnLimit: options.truncateOnLimit
+      }).then(resolve, reject);
       return;
     }
     reject(new Error(`Unsupported proxied protocol: ${target.protocol}`));
@@ -306,7 +368,7 @@ function proxyHttpRequest(input) {
 }
 
 /**
- * @param {{ target: URL; proxy: URL; signal?: AbortSignal }} input
+ * @param {{ target: URL; proxy: URL; signal?: AbortSignal; maxBytes: number; truncateOnLimit: boolean }} input
  */
 function proxyHttpsRequest(input) {
   return new Promise((resolve, reject) => {
@@ -338,7 +400,10 @@ function proxyHttpsRequest(input) {
           ""
         ].join("\r\n"));
       });
-      collectRawHttpResponse(input.target.href, tlsSocket).then(resolve, reject);
+      collectRawHttpResponse(input.target.href, tlsSocket, {
+        maxBytes: input.maxBytes,
+        truncateOnLimit: input.truncateOnLimit
+      }).then(resolve, reject);
     });
     request.end();
   });
@@ -379,24 +444,127 @@ function wireSocketAbort(socket, signal) {
 /**
  * @param {string} url
  * @param {import("node:net").Socket} socket
+ * @param {{ maxBytes?: number; truncateOnLimit?: boolean }} [options]
  */
-function collectRawHttpResponse(url, socket) {
+export function collectRawHttpResponse(url, socket, options = {}) {
   return new Promise((resolve, reject) => {
+    const maxBytes = positiveIntegerOrNull(options.maxBytes) ?? WEB_FETCH_DEFAULT_MAX_BYTES;
+    const rawLimit = maxBytes + RAW_HTTP_HEADER_MAX_BYTES;
+    const truncateOnLimit = options.truncateOnLimit === true;
+    /** @type {Buffer[]} */
     const chunks = [];
-    let total = 0;
-    socket.on("data", (chunk) => {
-      const buffer = Buffer.from(chunk);
-      chunks.push(buffer);
-      total += buffer.length;
-    });
-    socket.once("error", reject);
-    socket.once("end", () => {
+    let retainedBytes = 0;
+    let receivedBytes = 0;
+    /** @type {number | null} */
+    let headerEnd = null;
+    let declaredOversize = false;
+    let settled = false;
+    const cleanup = () => {
+      socket.removeListener("data", onData);
+      socket.removeListener("error", onError);
+      socket.removeListener("end", onEnd);
+      socket.removeListener("close", onClose);
+    };
+    /**
+     * @param {(value: any) => void} callback
+     * @param {any} value
+     */
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+    const destroySocket = () => {
       try {
-        resolve(parseRawHttpResponse(url, Buffer.concat(chunks, total)));
-      } catch (error) {
-        reject(error);
+        socket.destroy();
+      } catch {
+        // The response has already settled; socket teardown is best-effort.
       }
-    });
+    };
+    /** @param {number} limit */
+    const trimRetained = (limit) => {
+      if (retainedBytes <= limit) return;
+      const prefix = Buffer.concat(chunks, retainedBytes).subarray(0, limit);
+      chunks.splice(0, chunks.length, prefix);
+      retainedBytes = prefix.length;
+    };
+    /** @param {number} observedBytes */
+    const rejectTooLarge = (observedBytes) => {
+      const error = webFetchResponseTooLargeError(maxBytes, observedBytes);
+      finish(reject, error);
+      destroySocket();
+    };
+    const resolvePartial = () => {
+      try {
+        trimRetained((headerEnd ?? 0) + maxBytes);
+        const response = parseRawHttpResponse(url, Buffer.concat(chunks, retainedBytes));
+        RAW_TRUNCATED_RESPONSES.add(response);
+        finish(resolve, response);
+        destroySocket();
+      } catch (error) {
+        finish(reject, error);
+        destroySocket();
+      }
+    };
+    /** @param {Buffer | Uint8Array} chunk */
+    const onData = (chunk) => {
+      if (settled) return;
+      const buffer = Buffer.from(chunk);
+      receivedBytes += buffer.length;
+      const retentionLimit = headerEnd === null ? rawLimit : headerEnd + maxBytes;
+      const remaining = Math.max(0, retentionLimit - retainedBytes);
+      if (remaining > 0) {
+        const kept = buffer.subarray(0, remaining);
+        chunks.push(kept);
+        retainedBytes += kept.length;
+      }
+
+      if (headerEnd === null) {
+        const raw = Buffer.concat(chunks, retainedBytes);
+        const separator = raw.indexOf("\r\n\r\n");
+        if (separator >= 0) {
+          headerEnd = separator + 4;
+          if (headerEnd > RAW_HTTP_HEADER_MAX_BYTES) {
+            rejectTooLarge(receivedBytes);
+            return;
+          }
+          const declared = raw.subarray(0, separator).toString("latin1").match(/\r\ncontent-length:\s*(\d+)/i);
+          const declaredBytes = declared ? Number(declared[1]) : null;
+          if (declaredBytes !== null && Number.isSafeInteger(declaredBytes) && declaredBytes > maxBytes) {
+            if (!truncateOnLimit) {
+              rejectTooLarge(declaredBytes);
+              return;
+            }
+            declaredOversize = true;
+          }
+          trimRetained(headerEnd + maxBytes);
+        } else if (retainedBytes >= RAW_HTTP_HEADER_MAX_BYTES) {
+          rejectTooLarge(receivedBytes);
+          return;
+        }
+      }
+
+      const receivedBodyBytes = headerEnd === null ? 0 : receivedBytes - headerEnd;
+      if (headerEnd !== null && (receivedBodyBytes > maxBytes || (declaredOversize && receivedBodyBytes >= maxBytes))) {
+        if (truncateOnLimit) resolvePartial();
+        else rejectTooLarge(receivedBodyBytes);
+      }
+    };
+    /** @param {Error} error */
+    const onError = (error) => finish(reject, error);
+    const onEnd = () => {
+      try {
+        finish(resolve, parseRawHttpResponse(url, Buffer.concat(chunks, retainedBytes)));
+      } catch (error) {
+        finish(reject, error);
+      }
+    };
+    const onClose = () => finish(reject, new Error("Proxy HTTPS response socket closed before the response ended"));
+    socket.on("data", onData);
+    socket.once("error", onError);
+    socket.once("end", onEnd);
+    socket.once("close", onClose);
   });
 }
 
@@ -558,57 +726,242 @@ function isRedirect(status) {
   return [301, 302, 303, 307, 308].includes(status);
 }
 
-async function readResponseText(response, maxBytes) {
+/**
+ * @param {Response} response
+ * @param {number | null | undefined} maxBytes
+ * @param {{ signal?: AbortSignal; truncateOnLimit?: boolean }} [options]
+ */
+export async function readResponseText(response, maxBytes, options = {}) {
+  const limit = positiveIntegerOrNull(maxBytes);
+  const contentLength = responseContentLength(response);
+  const truncateOnLimit = options.truncateOnLimit === true;
+  const knownOversize = limit !== null && contentLength !== null && contentLength > limit;
+  if (knownOversize && !truncateOnLimit) {
+    const error = webFetchResponseTooLargeError(limit, contentLength);
+    try {
+      await response.body?.cancel(error);
+    } catch {
+      // The response can already be closed or locked by an alternate fetch implementation.
+    }
+    throw error;
+  }
   const reader = response.body?.getReader();
   if (!reader) {
-    const text = await response.text();
-    if (!maxBytes) {
+    const text = await awaitWithAbort(response.text(), options.signal);
+    const bytes = Buffer.byteLength(text, "utf8");
+    if (limit === null) {
       return {
         text,
-        bytes: Buffer.byteLength(text, "utf8"),
+        bytes,
         truncated: false
       };
     }
+    if (bytes > limit && !truncateOnLimit) {
+      throw webFetchResponseTooLargeError(limit, bytes);
+    }
     return {
-      text: text.slice(0, maxBytes),
-      bytes: Buffer.byteLength(text, "utf8"),
-      truncated: Buffer.byteLength(text, "utf8") > maxBytes
+      text: utf8Prefix(Buffer.from(text, "utf8"), limit),
+      bytes,
+      truncated: bytes > limit
     };
   }
 
   const chunks = [];
   let bytes = 0;
   let keptBytes = 0;
-  let truncated = false;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
+  let truncated = RAW_TRUNCATED_RESPONSES.has(response) || knownOversize;
+  let completed = false;
+  try {
+    while (true) {
+      const { done, value } = await readResponseChunk(reader, options.signal);
+      if (done) {
+        completed = true;
+        break;
+      }
+      const chunk = Buffer.from(value);
+      bytes += chunk.length;
+      if (limit === null) {
+        chunks.push(chunk);
+        keptBytes += chunk.length;
+        continue;
+      }
+      if (keptBytes < limit) {
+        const remaining = limit - keptBytes;
+        const kept = chunk.subarray(0, Math.max(0, remaining));
+        chunks.push(kept);
+        keptBytes += kept.length;
+      }
+      if (bytes > limit || (knownOversize && keptBytes >= limit)) {
+        truncated = true;
+        completed = true;
+        cancelResponseReader(reader, new Error("Web response exceeded maxBytes"));
+        if (!truncateOnLimit) {
+          throw webFetchResponseTooLargeError(limit, Math.max(bytes, contentLength ?? 0));
+        }
+        break;
+      }
     }
-    const chunk = Buffer.from(value);
-    bytes += chunk.length;
-    if (!maxBytes) {
-      chunks.push(chunk);
-      keptBytes += chunk.length;
-      continue;
+  } finally {
+    if (!completed) {
+      cancelResponseReader(reader, options.signal?.reason);
     }
-    if (keptBytes < maxBytes) {
-      const remaining = maxBytes - keptBytes;
-      const kept = chunk.subarray(0, Math.max(0, remaining));
-      chunks.push(kept);
-      keptBytes += kept.length;
-    }
-    if (bytes > maxBytes) {
-      truncated = true;
-      await reader.cancel();
-      break;
+    try {
+      reader.releaseLock();
+    } catch {
+      // The underlying stream may still be settling after cancellation.
     }
   }
   return {
-    text: Buffer.concat(chunks).toString("utf8"),
-    bytes,
+    text: utf8Prefix(Buffer.concat(chunks), limit),
+    bytes: Math.max(bytes, contentLength ?? 0),
     truncated
   };
+}
+
+/** @param {Response} response */
+function responseContentLength(response) {
+  const raw = response.headers?.get?.("content-length");
+  if (raw === null || raw === undefined || String(raw).trim() === "") {
+    return null;
+  }
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+/**
+ * @param {Buffer} buffer
+ * @param {number | null | undefined} maxBytes
+ */
+export function utf8Prefix(buffer, maxBytes) {
+  if (maxBytes === null || maxBytes === undefined) {
+    return buffer.toString("utf8");
+  }
+  const decoder = new TextDecoder("utf-8");
+  const text = decoder.decode(buffer.subarray(0, Math.max(0, maxBytes)), { stream: true });
+  if (Buffer.byteLength(text, "utf8") <= maxBytes) {
+    return text;
+  }
+  let bytes = 0;
+  let end = 0;
+  for (const point of text) {
+    const pointBytes = Buffer.byteLength(point, "utf8");
+    if (bytes + pointBytes > maxBytes) break;
+    bytes += pointBytes;
+    end += point.length;
+  }
+  return text.slice(0, end);
+}
+
+/**
+ * @param {ReadableStreamDefaultReader<Uint8Array>} reader
+ * @param {AbortSignal | undefined} signal
+ */
+function readResponseChunk(reader, signal) {
+  if (!signal) {
+    return reader.read();
+  }
+  if (signal.aborted) {
+    cancelResponseReader(reader, signal.reason);
+    return Promise.reject(webFetchAbortError(signal.reason));
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    /**
+     * @param {(value: any) => void} callback
+     * @param {any} value
+     */
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback(value);
+    };
+    const onAbort = () => {
+      cancelResponseReader(reader, signal.reason);
+      finish(reject, webFetchAbortError(signal.reason));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve().then(() => reader.read()).then(
+      (chunk) => finish(resolve, chunk),
+      (error) => finish(reject, error)
+    );
+  });
+}
+
+/**
+ * @param {Promise<any>} promise
+ * @param {AbortSignal | undefined} signal
+ */
+function awaitWithAbort(promise, signal) {
+  if (!signal) {
+    return promise;
+  }
+  if (signal.aborted) {
+    return Promise.reject(webFetchAbortError(signal.reason));
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    /**
+     * @param {(value: any) => void} callback
+     * @param {any} value
+     */
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback(value);
+    };
+    const onAbort = () => finish(reject, webFetchAbortError(signal.reason));
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve(promise).then(
+      (value) => finish(resolve, value),
+      (error) => finish(reject, error)
+    );
+  });
+}
+
+/**
+ * @param {ReadableStreamDefaultReader<Uint8Array>} reader
+ * @param {unknown} reason
+ */
+function cancelResponseReader(reader, reason) {
+  try {
+    Promise.resolve(reader.cancel(reason)).catch(() => {});
+  } catch {
+    // Cancellation is best-effort; the linked fetch signal is also aborted.
+  }
+}
+
+/** @param {unknown} reason */
+function webFetchAbortError(reason) {
+  if (reason instanceof Error) {
+    return reason;
+  }
+  return Object.assign(new Error(reason ? String(reason) : "The web request was aborted"), {
+    name: "AbortError",
+    code: "ABORT_ERR"
+  });
+}
+
+/** @param {number} timeoutMs */
+function webFetchTimeoutError(timeoutMs) {
+  return Object.assign(new Error(`Web request timed out after ${timeoutMs}ms`), {
+    name: "TimeoutError",
+    code: "WEB_FETCH_TIMEOUT"
+  });
+}
+
+/**
+ * @param {number} maxBytes
+ * @param {number} observedBytes
+ */
+export function webFetchResponseTooLargeError(maxBytes, observedBytes) {
+  return Object.assign(new Error(`Web response exceeds the ${maxBytes}-byte safety limit`), {
+    name: "RangeError",
+    code: "WEB_FETCH_RESPONSE_TOO_LARGE",
+    maxBytes,
+    observedBytes
+  });
 }
 
 function normalizeUrl(value) {

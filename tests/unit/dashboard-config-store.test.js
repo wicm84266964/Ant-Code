@@ -65,3 +65,80 @@ test("dashboard config updater failures preserve the original file and release i
     []
   );
 });
+
+test("dashboard config release does not delete a replacement lock owner", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-config-lock-owner-"));
+  const file = path.join(cwd, "config.json");
+  const lock = path.join(cwd, ".config.json.ant-code.lock");
+  const displaced = path.join(cwd, ".config.json.displaced.lock");
+  await fs.writeFile(file, `${JSON.stringify({ value: 1 })}\n`, "utf8");
+
+  await mutateJsonConfig(file, async (data) => {
+    await fs.rename(lock, displaced);
+    await fs.writeFile(lock, `${JSON.stringify({ token: "replacement-owner", pid: process.pid })}\n`, "utf8");
+    return { ...data, value: 2 };
+  });
+
+  const replacement = JSON.parse(await fs.readFile(lock, "utf8"));
+  assert.equal(replacement.token, "replacement-owner");
+  assert.deepEqual(JSON.parse(await fs.readFile(file, "utf8")), { value: 2 });
+  await fs.rm(lock, { force: true });
+  await fs.rm(displaced, { force: true });
+});
+
+test("dashboard config stale reclaim restores a lock replaced before quarantine", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-config-stale-race-"));
+  const file = path.join(cwd, "config.json");
+  const lock = path.join(cwd, ".config.json.ant-code.lock");
+  await fs.writeFile(file, `${JSON.stringify({ value: 1 })}\n`, "utf8");
+  await fs.writeFile(lock, `${JSON.stringify({
+    token: "stale-owner",
+    pid: 2_147_483_647,
+    createdAt: "2000-01-01T00:00:00.000Z"
+  })}\n`, "utf8");
+  const staleAt = new Date(Date.now() - 60_000);
+  await fs.utimes(lock, staleAt, staleAt);
+
+  const originalRename = fs.rename;
+  let injected = false;
+  let replacementRestored = false;
+  let replacementMonitor = Promise.resolve();
+  fs.rename = async (source, destination) => {
+    if (!injected && path.resolve(source) === path.resolve(lock) && String(destination).includes(".stale.")) {
+      injected = true;
+      await fs.rm(lock, { force: true });
+      await fs.writeFile(lock, `${JSON.stringify({
+        token: "replacement-owner",
+        pid: process.pid,
+        createdAt: new Date().toISOString()
+      })}\n`, "utf8");
+      const result = await originalRename(source, destination);
+      replacementMonitor = (async () => {
+        const deadline = Date.now() + 1_000;
+        while (Date.now() < deadline) {
+          const owner = await fs.readFile(lock, "utf8").then(JSON.parse).catch(() => null);
+          if (owner?.token === "replacement-owner") {
+            replacementRestored = true;
+            await fs.rm(lock, { force: true });
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      })();
+      return result;
+    }
+    return originalRename(source, destination);
+  };
+
+  try {
+    await mutateJsonConfig(file, (data) => ({ ...data, value: 2 }));
+  } finally {
+    fs.rename = originalRename;
+    await replacementMonitor;
+  }
+
+  assert.equal(injected, true);
+  assert.equal(replacementRestored, true);
+  assert.deepEqual(JSON.parse(await fs.readFile(file, "utf8")), { value: 2 });
+  assert.deepEqual((await fs.readdir(cwd)).filter((name) => name.includes(".stale.")), []);
+});

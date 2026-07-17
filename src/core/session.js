@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { buildInitialContext } from "../context/builder.js";
 import { loadConfig } from "../config/load-config.js";
-import { formatGatewayError } from "../model-gateway/errors.js";
+import { formatGatewayError, normalizeGatewayError } from "../model-gateway/errors.js";
 import { createLabModelGateway } from "../model-gateway/client.js";
 import { listConfiguredModels } from "../model-gateway/models.js";
 import { runHooks } from "../hooks/runner.js";
@@ -26,6 +26,7 @@ const DEFAULT_PROMPT_COMPACT_RATIO = 1;
 const OUTPUT_HEALTH_CHECK_ENABLED = false;
 const OUTPUT_HEALTH_MAX_RETRIES = 1;
 const OUTPUT_HEALTH_RETRY_REQUIRED_REASONS = new Set([
+  "missing_terminal_signal",
   "repetitive_thinking_loop",
   "reasoning_only_length"
 ]);
@@ -538,15 +539,26 @@ export async function runSessionTurn(session, options) {
         });
         if (!outputHealth.ok && shouldRetryOutputHealth(outputHealth, outputHealthRetries)) {
           outputHealthRetries += 1;
+          /** @type {{ role: string; content: any; thinking?: any }} */
           const retryAssistantMessage = {
             role: "assistant",
             content: response.data.content.length > 0
               ? response.data.content
-              : [{ type: "text", text: finalOutput }]
+              : []
           };
+          if (thinking) {
+            retryAssistantMessage.thinking = thinking;
+          }
           const retryPromptMessage = {
             role: "user",
-            content: buildOutputHealthRepairPrompt(outputHealth, finalOutput)
+            content: buildOutputHealthRepairPrompt(
+              outputHealth,
+              outputHealth.reasons.includes("missing_terminal_signal")
+                ? assistantResponseText(
+                  /** @type {{ data: import("../model-gateway/protocol.js").NormalizedGatewayResponse }} */ (response).data
+                )
+                : finalOutput
+            )
           };
           messages.push(retryAssistantMessage);
           messages.push(retryPromptMessage);
@@ -561,6 +573,17 @@ export async function runSessionTurn(session, options) {
             retry: outputHealthRetries
           });
           continue;
+        }
+        if (!outputHealth.ok && outputHealth.mustRetry) {
+          return finishIncompleteAssistantResponse({
+            session,
+            sessionStore,
+            metadata,
+            eventOptions,
+            round: round + 1,
+            outputHealth,
+            options
+          });
         }
       }
       const workflowSync = syncWorkflowCompletionOnFinal(session.workflow, finalOutput);
@@ -999,6 +1022,9 @@ function analyzeAssistantOutputHealth(data, finalOutput, thinking) {
   const thinkingText = String(thinking?.text ?? "");
   const thinkingBytes = Number.isFinite(thinking?.bytes) ? thinking.bytes : gatewayThinkingBytes(data);
 
+  if (!stopReason && data?.toolCalls?.length === 0 && assistantResponseText(data).trim() === "") {
+    reasons.push("missing_terminal_signal");
+  }
   if (["length", "max_tokens", "token_limit", "context_length_exceeded"].includes(stopReason)) {
     reasons.push(`stop_reason:${stopReason}`);
   }
@@ -1026,6 +1052,62 @@ function analyzeAssistantOutputHealth(data, finalOutput, thinking) {
     reasons,
     mustRetry: reasons.some((reason) => OUTPUT_HEALTH_RETRY_REQUIRED_REASONS.has(reason))
   };
+}
+
+/** @param {import("../model-gateway/protocol.js").NormalizedGatewayResponse} data */
+function assistantResponseText(data) {
+  if (typeof data?.text === "string") {
+    return data.text;
+  }
+  return Array.isArray(data?.content)
+    ? data.content.map((block) => typeof block?.text === "string" ? block.text : "").join("")
+    : "";
+}
+
+/** @param {Record<string, any>} input */
+async function finishIncompleteAssistantResponse(input) {
+  const error = normalizeGatewayError(null, {
+    code: "UPSTREAM_STREAM_ABORTED",
+    message: "Upstream model response ended before a complete assistant message",
+    protocol: sessionGatewayProtocol(input.session),
+    details: {
+      reason: requiredOutputHealthReason(input.outputHealth),
+      retryable: false,
+      outputHealthReasons: input.outputHealth.reasons
+    }
+  });
+  input.metadata.gatewayErrors.push(error.code);
+  recordGatewayRoundError(input.metadata, {
+    round: input.round,
+    error
+  });
+  const output = formatGatewayError(error);
+  await emitEvent(input.eventOptions, {
+    type: "gateway_error",
+    error,
+    outputBytes: Buffer.byteLength(output, "utf8")
+  });
+  await persistSessionMetadata(
+    input.sessionStore,
+    input.metadata,
+    output,
+    "gateway_error",
+    input.session,
+    input.options
+  );
+  await emitEvent(input.eventOptions, {
+    type: "turn_complete",
+    status: "gateway_error",
+    outputBytes: Buffer.byteLength(output, "utf8")
+  });
+  return { session: input.session, output };
+}
+
+function requiredOutputHealthReason(outputHealth) {
+  const reasons = Array.isArray(outputHealth?.reasons) ? outputHealth.reasons : [];
+  return reasons.find((reason) => OUTPUT_HEALTH_RETRY_REQUIRED_REASONS.has(reason))
+    ?? reasons[0]
+    ?? "output_health_failed";
 }
 
 function shouldRetryOutputHealth(health, retries) {
@@ -1928,19 +2010,10 @@ async function persistSessionMetadata(store, metadata, output, status, session, 
   metadata.lastProviderUsage = metadata.usage.last ?? null;
   metadata.workflow = summarizeWorkflow(session.workflow);
   metadata.context = summarizeContextWindow(session);
-  const transcriptArchive = await persistTranscriptArchive(store, session);
-  const modelArchive = await persistModelContextArchive(store, session);
-  metadata.transcript = {
-    version: 2,
-    messages: persistableTranscriptMessages(transcriptMessagesForPersistence(session)),
-    contextMessages: persistableContextMessages(limitResumeContextMessages(session.messages, session.config.context)),
-    contextWindow: persistableContextWindow(session.contextWindow),
-    archive: persistableTranscriptArchive(transcriptArchive),
-    modelArchive: persistableTranscriptArchive(modelArchive)
-  };
-
-  const path = await store.writeMetadata(metadata);
-  metadata.metadataPath = path;
+  const committed = await commitSessionSnapshot(store, metadata, session);
+  Object.assign(metadata, committed.metadata);
+  const metadataPath = committed.metadataPath;
+  metadata.metadataPath = metadataPath;
   await runHooks({
     config: session.config,
     cwd: session.cwd,
@@ -1953,7 +2026,7 @@ async function persistSessionMetadata(store, metadata, output, status, session, 
       status,
       turnIndex: metadata.turnIndex,
       outputBytes: metadata.outputBytes,
-      metadataPath: path,
+      metadataPath,
       context: metadata.context
     }
   });
@@ -1964,22 +2037,15 @@ async function persistSessionMetadata(store, metadata, output, status, session, 
  * This intentionally does not emit session.end hooks or change terminal status.
  *
  * @param {Awaited<ReturnType<typeof createSession>>} session
- * @param {{ env?: NodeJS.ProcessEnv }} [options]
+ * @param {{ env?: NodeJS.ProcessEnv; store?: ReturnType<typeof createSessionStore> }} [options]
  */
 export async function persistSessionSnapshot(session, options = {}) {
-  const store = createSessionStore({
+  const store = options.store ?? createSessionStore({
     cwd: session.cwd,
     transcript: session.config?.transcript,
     env: options.env ?? process.env
   });
-  const current = await store.readMetadataExact(session.id);
-  if (!current.ok) {
-    const error = new Error(current.error?.message ?? "Session metadata is not available for persistence");
-    error.code = current.error?.code ?? "SESSION_METADATA_NOT_FOUND";
-    throw error;
-  }
-
-  const metadata = { ...current.metadata };
+  const metadata = {};
   metadata.model = session.model;
   metadata.permissionMode = session.permissionMode;
   metadata.fullAccess = session.fullAccess;
@@ -1988,19 +2054,8 @@ export async function persistSessionSnapshot(session, options = {}) {
   metadata.allowCommand = session.allowCommand;
   metadata.context = summarizeContextWindow(session);
   metadata.workflow = summarizeWorkflow(session.workflow);
-  const transcriptArchive = await persistTranscriptArchive(store, session);
-  const modelArchive = await persistModelContextArchive(store, session);
-  metadata.transcript = {
-    ...(metadata.transcript ?? {}),
-    version: 2,
-    messages: persistableTranscriptMessages(transcriptMessagesForPersistence(session)),
-    contextMessages: persistableContextMessages(limitResumeContextMessages(session.messages, session.config.context)),
-    contextWindow: persistableContextWindow(session.contextWindow),
-    archive: persistableTranscriptArchive(transcriptArchive),
-    modelArchive: persistableTranscriptArchive(modelArchive)
-  };
-  const metadataPath = await store.writeMetadata(metadata);
-  return { ok: true, metadataPath, metadata };
+  const committed = await commitSessionSnapshot(store, metadata, session, { requireExisting: true });
+  return { ok: true, metadataPath: committed.metadataPath, metadata: committed.metadata };
 }
 
 function persistableMessages(messages) {
@@ -2097,24 +2152,73 @@ function transcriptMessagesForPersistence(session) {
     : session.messages;
 }
 
-async function persistTranscriptArchive(store, session) {
-  session.transcriptArchive = normalizeTranscriptArchiveState(session.transcriptArchive);
-  const pending = session.transcriptArchive.pendingMessages;
-  const archive = await store.writeTranscriptChunks(session.id, pending, session.transcriptArchive);
-  session.transcriptArchive = normalizeTranscriptArchiveState(archive);
-  session.transcriptArchive.pendingMessages = [];
-  return session.transcriptArchive;
-}
+/**
+ * Commit both archives and their metadata pointers under one session lock.
+ * Each writer rebases its pending messages onto the latest committed archives.
+ *
+ * @param {ReturnType<typeof createSessionStore>} store
+ * @param {Record<string, any>} metadataUpdates
+ * @param {Awaited<ReturnType<typeof createSession>>} session
+ * @param {{ requireExisting?: boolean }} [options]
+ */
+async function commitSessionSnapshot(store, metadataUpdates, session, options = {}) {
+  const transcriptState = normalizeTranscriptArchiveState(session.transcriptArchive);
+  const modelState = normalizeTranscriptArchiveState(session.modelContextArchive);
+  const transcriptPending = transcriptState.pendingMessages.slice();
+  const modelPending = modelState.pendingMessages.slice();
 
-async function persistModelContextArchive(store, session) {
-  session.modelContextArchive = normalizeTranscriptArchiveState(session.modelContextArchive);
-  const pending = session.modelContextArchive.pendingMessages;
-  const archive = await store.writeTranscriptChunks(session.id, pending, session.modelContextArchive, {
-    suffix: "model-context"
+  const committed = await store.withSessionMutation(session.id, async () => {
+    const current = await store.readMetadataExact(session.id, { lockHeld: true });
+    if (!current.ok && (options.requireExisting === true || current.error?.code !== "SESSION_NOT_FOUND")) {
+      const error = Object.assign(
+        new Error(current.error?.message ?? "Session metadata is not available for persistence"),
+        { code: current.error?.code ?? "SESSION_METADATA_NOT_FOUND" }
+      );
+      throw error;
+    }
+
+    const currentMetadata = current.ok ? current.metadata : {};
+    const transcriptBase = current.ok
+      ? normalizeTranscriptArchiveState(currentMetadata.transcript?.archive)
+      : transcriptState;
+    const modelBase = current.ok
+      ? normalizeTranscriptArchiveState(currentMetadata.transcript?.modelArchive)
+      : modelState;
+    const transcriptArchive = await store.writeTranscriptChunks(
+      session.id,
+      transcriptPending,
+      transcriptBase,
+      { lockHeld: true }
+    );
+    const modelArchive = await store.writeTranscriptChunks(
+      session.id,
+      modelPending,
+      modelBase,
+      { suffix: "model-context", lockHeld: true }
+    );
+    const metadata = {
+      ...currentMetadata,
+      ...metadataUpdates,
+      transcript: {
+        ...(currentMetadata.transcript ?? {}),
+        ...(metadataUpdates.transcript ?? {}),
+        version: 2,
+        messages: persistableTranscriptMessages(transcriptMessagesForPersistence(session)),
+        contextMessages: persistableContextMessages(limitResumeContextMessages(session.messages, session.config.context)),
+        contextWindow: persistableContextWindow(session.contextWindow),
+        archive: persistableTranscriptArchive(transcriptArchive),
+        modelArchive: persistableTranscriptArchive(modelArchive)
+      }
+    };
+    const metadataPath = await store.writeMetadata(metadata, { lockHeld: true });
+    return { metadataPath, metadata, transcriptArchive, modelArchive };
   });
-  session.modelContextArchive = normalizeTranscriptArchiveState(archive);
-  session.modelContextArchive.pendingMessages = [];
-  return session.modelContextArchive;
+
+  session.transcriptArchive = normalizeTranscriptArchiveState(committed.transcriptArchive);
+  session.modelContextArchive = normalizeTranscriptArchiveState(committed.modelArchive);
+  session.transcriptArchive.pendingMessages = transcriptState.pendingMessages.slice(transcriptPending.length);
+  session.modelContextArchive.pendingMessages = modelState.pendingMessages.slice(modelPending.length);
+  return committed;
 }
 
 function appendTranscriptMessages(session, messages) {

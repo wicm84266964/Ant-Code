@@ -1,5 +1,10 @@
 #!/usr/bin/env node
+import fs from "node:fs";
 import readline from "node:readline";
+
+if (process.env.MCP_START_LOG) {
+  fs.appendFileSync(process.env.MCP_START_LOG, `${process.pid}\n`, "utf8");
+}
 
 const tools = Object.freeze([
   {

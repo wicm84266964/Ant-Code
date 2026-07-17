@@ -256,6 +256,43 @@ test("shutdown dialog traps focus, closes on Escape, and restores its trigger", 
   });
 });
 
+test("shutdown dialog recovers when lifecycle inspection never responds", async () => {
+  runtime.stallLifecycleStatus = true;
+  try {
+    await withDashboardPage({ width: 1280, height: 900 }, async (page) => {
+      const trigger = page.locator("#shutdown-button:visible, #header-shutdown-button:visible").first();
+      await trigger.click();
+      const confirm = page.locator("#shutdown-confirm");
+      assert.equal(await confirm.isDisabled(), true);
+      assert.equal(await confirm.textContent(), "检查中");
+
+      await page.locator("#shutdown-cancel").click();
+      await page.locator("#shutdown-panel").waitFor({ state: "hidden" });
+      assert.equal(await trigger.isEnabled(), true);
+
+      await trigger.click();
+      assert.equal(await confirm.textContent(), "检查中");
+      await page.reload({ waitUntil: "domcontentloaded", timeout: 5000 });
+      await page.waitForFunction(() => document.querySelectorAll("#thread-list .thread-item").length === 2);
+      assert.equal(await page.locator("#shutdown-panel").isHidden(), true);
+
+      const refreshedTrigger = page.locator("#shutdown-button:visible, #header-shutdown-button:visible").first();
+      await refreshedTrigger.click();
+
+      await page.waitForFunction(() => {
+        const button = document.querySelector("#shutdown-confirm");
+        return button && !button.disabled && button.textContent === "强制关闭";
+      }, null, { timeout: 8000 });
+      assert.match(await page.locator("#shutdown-copy").textContent(), /活动检查超时/);
+      await page.locator("#shutdown-cancel").click();
+      await page.locator("#shutdown-panel").waitFor({ state: "hidden" });
+      assert.equal(await refreshedTrigger.isEnabled(), true);
+    });
+  } finally {
+    runtime.stallLifecycleStatus = false;
+  }
+});
+
 test("permission radiogroup supports arrow, Home, and End keyboard behavior", async () => {
   await withDashboardPage({ width: 1280, height: 900 }, async (page) => {
     const plan = page.locator("#permission-mode button[data-mode='plan']");
@@ -469,6 +506,7 @@ function createBrowserRuntime(remoteImageUrl) {
     sessions,
     readCalls: [],
     activeSessionIds: new Set(),
+    stallLifecycleStatus: false,
     status: async () => ({
       ok: true,
       sessionStatus: {
@@ -492,18 +530,23 @@ function createBrowserRuntime(remoteImageUrl) {
       return { ok: false, status: 404, error: "not found" };
     },
     readTranscriptPage: async () => ({ ok: true, transcript: [], transcriptPage: { cursor: null, hasMore: false, total: 0 } }),
-    lifecycleStatus: async () => ({
-      ok: true,
-      activity: {
-        total: 0,
-        sessions: 0,
-        activeTurns: 0,
-        quarantinedTurns: 0,
-        queuedTurns: 0,
-        backgroundTasks: 0,
-        pendingInteractions: 0
+    async lifecycleStatus() {
+      if (this.stallLifecycleStatus) {
+        await new Promise(() => {});
       }
-    }),
+      return {
+        ok: true,
+        activity: {
+          total: 0,
+          sessions: 0,
+          activeTurns: 0,
+          quarantinedTurns: 0,
+          queuedTurns: 0,
+          backgroundTasks: 0,
+          pendingInteractions: 0
+        }
+      };
+    },
     startTurn: async () => ({ ok: false }),
     interruptTurn: async () => ({ ok: false }),
     cancelQueuedTurn: () => ({ ok: false }),

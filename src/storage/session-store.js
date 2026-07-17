@@ -1,6 +1,12 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import {
+  atomicWriteFile,
+  ensureContainedDirectory,
+  resolveContainedPath,
+  withFileMutationLock
+} from "./durable-file.js";
 
 const DEFAULT_TRANSCRIPT_CHUNK_SIZE = 50;
 const DEFAULT_TRANSCRIPT_PAGE_LIMIT = 100;
@@ -14,16 +20,18 @@ export function createSessionStore(options) {
   const root = path.join(options.cwd, ".lab-agent", "sessions");
   const policy = normalizeTranscriptPolicy(options.transcript);
   const env = options.env ?? process.env;
+  const ensureRoot = () => ensureContainedDirectory(options.cwd, root);
 
-  return {
+  const store = {
     root,
     assertReady() {
       assertPolicyReady(policy, env);
     },
     /**
      * @param {Record<string, any>} session
+     * @param {{ lockHeld?: boolean }} [writeOptions]
      */
-    async writeMetadata(session) {
+    async writeMetadata(session, writeOptions = {}) {
       if (!policy.enabled) {
         return null;
       }
@@ -31,12 +39,37 @@ export function createSessionStore(options) {
         return null;
       }
 
-      await fs.mkdir(root, { recursive: true });
+      await ensureRoot();
+      const sessionId = safeSessionId(session.id);
       const serialized = `${JSON.stringify(session, redactSession, 2)}\n`;
       const encrypted = encryptIfNeeded(serialized, policy, env);
-      const filePath = path.join(root, `${session.id}.${encrypted ? "json.enc" : "json"}`);
-      await fs.writeFile(filePath, encrypted ?? serialized, "utf8");
-      return filePath;
+      const paths = sessionMetadataPaths(root, sessionId);
+      const filePath = encrypted ? paths.encrypted : paths.plaintext;
+      const obsoletePath = encrypted ? paths.plaintext : paths.encrypted;
+      const write = async () => {
+        await atomicWriteFile(filePath, encrypted ?? serialized);
+        await fs.rm(obsoletePath, { force: true });
+        return filePath;
+      };
+      return writeOptions.lockHeld === true ? write() : withFileMutationLock(paths.lock, write);
+    },
+
+    /**
+     * Serialize all files that make up one committed session snapshot.
+     * Callers must pass lockHeld to nested store writes to avoid reacquiring this lock.
+     *
+     * @template T
+     * @param {string} sessionId
+     * @param {() => Promise<T>} operation
+     * @returns {Promise<T>}
+     */
+    async withSessionMutation(sessionId, operation) {
+      if (!policy.enabled || policy.retentionDays === 0) {
+        return operation();
+      }
+      await ensureRoot();
+      const paths = sessionMetadataPaths(root, safeSessionId(sessionId));
+      return withFileMutationLock(paths.lock, operation);
     },
 
     /**
@@ -44,31 +77,54 @@ export function createSessionStore(options) {
      * @param {{ now?: Date }} cleanupOptions
      */
     async cleanupExpiredSessions(retentionDays, cleanupOptions = {}) {
-      await fs.mkdir(root, { recursive: true });
+      await ensureRoot();
       const entries = await fs.readdir(root, { withFileTypes: true });
       const nowMs = (cleanupOptions.now ?? new Date()).getTime();
       const maxAgeMs = Math.max(0, retentionDays) * 24 * 60 * 60 * 1000;
+      /** @type {string[]} */
       const deleted = [];
 
-      for (const entry of entries) {
-        if (!entry.isFile() || !isSessionFile(entry.name)) {
+      const grouped = groupSessionEntries(entries);
+      for (const [sessionId, sessionEntries] of grouped) {
+        const records = await Promise.all(sessionEntries.map(async (entry) => {
+          const filePath = path.join(root, entry.name);
+          return { filePath, stat: await fs.stat(filePath) };
+        }));
+        const newestMtime = Math.max(...records.map((record) => record.stat.mtimeMs));
+        const expired = retentionDays === 0 || nowMs - newestMtime > maxAgeMs;
+        if (!expired) {
           continue;
         }
-        const filePath = path.join(root, entry.name);
-        const stat = await fs.stat(filePath);
-        const expired = retentionDays === 0 || nowMs - stat.mtimeMs > maxAgeMs;
-        if (expired) {
-          await fs.unlink(filePath);
-          await removeTranscriptDirectory(root, sessionIdFromFileName(entry.name));
-          deleted.push(filePath);
-        }
+        const paths = sessionMetadataPaths(root, sessionId);
+        await withFileMutationLock(paths.lock, async () => {
+          const currentEntries = (await fs.readdir(root, { withFileTypes: true }))
+            .filter((entry) => entry.isFile() && isSessionFile(entry.name))
+            .filter((entry) => sessionIdFromFileName(entry.name) === sessionId);
+          const currentRecords = await Promise.all(currentEntries.map(async (entry) => {
+            const filePath = path.join(root, entry.name);
+            return { filePath, stat: await fs.stat(filePath) };
+          }));
+          if (currentRecords.length === 0) {
+            return;
+          }
+          const currentNewestMtime = Math.max(...currentRecords.map((record) => record.stat.mtimeMs));
+          const stillExpired = retentionDays === 0 || nowMs - currentNewestMtime > maxAgeMs;
+          if (!stillExpired) {
+            return;
+          }
+          for (const record of currentRecords) {
+            await fs.rm(record.filePath, { force: true });
+            deleted.push(record.filePath);
+          }
+          await removeTranscriptDirectory(root, sessionId);
+        });
       }
 
       return { deleted };
     },
 
     async listSessions() {
-      await fs.mkdir(root, { recursive: true });
+      await ensureRoot();
       const entries = await fs.readdir(root, { withFileTypes: true });
       return entries
         .filter((entry) => entry.isFile() && isSessionFile(entry.name))
@@ -79,7 +135,7 @@ export function createSessionStore(options) {
      * @param {string} selector
      */
     async deleteSession(selector) {
-      await fs.mkdir(root, { recursive: true });
+      await ensureRoot();
       const records = await this.listSessionRecords();
       const selected = selectRecord(records, selector);
       if (!selected) {
@@ -89,17 +145,31 @@ export function createSessionStore(options) {
         };
       }
 
-      await fs.unlink(selected.path);
-      await removeTranscriptDirectory(root, selected.id);
+      const paths = sessionMetadataPaths(root, selected.id);
+      /** @type {string[]} */
+      const deleted = [];
+      await withFileMutationLock(paths.lock, async () => {
+        for (const filePath of [paths.plaintext, paths.encrypted]) {
+          try {
+            await fs.unlink(filePath);
+            deleted.push(filePath);
+          } catch (error) {
+            if (/** @type {NodeJS.ErrnoException} */ (error)?.code !== "ENOENT") {
+              throw error;
+            }
+          }
+        }
+        await removeTranscriptDirectory(root, selected.id);
+      });
       return {
         ok: true,
         id: selected.id,
-        deleted: [selected.path]
+        deleted
       };
     },
 
     async listSessionRecords() {
-      await fs.mkdir(root, { recursive: true });
+      await ensureRoot();
       const entries = await fs.readdir(root, { withFileTypes: true });
       const records = [];
       for (const entry of entries) {
@@ -117,14 +187,16 @@ export function createSessionStore(options) {
           ...await readRecordSummary(filePath, entry.name.endsWith(".json.enc"), policy, env)
         });
       }
-      return records.sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt));
+      return preferSessionRecordFormats(records, prefersEncryptedMetadata(policy, env))
+        .sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt));
     },
 
     /**
      * @param {string} selector
+     * @returns {Promise<Record<string, any>>}
      */
     async readMetadata(selector = "latest") {
-      await fs.mkdir(root, { recursive: true });
+      await ensureRoot();
       const records = await this.listSessionRecords();
       const selected = selectRecord(records, selector);
       if (!selected) {
@@ -140,6 +212,12 @@ export function createSessionStore(options) {
         return decoded;
       }
 
+      if (!selected.encrypted && prefersEncryptedMetadata(policy, env)) {
+        return this.withSessionMutation(selected.id, () => (
+          this.readMetadataExact(selected.id, { lockHeld: true })
+        ));
+      }
+
       return {
         ok: true,
         path: selected.path,
@@ -152,8 +230,10 @@ export function createSessionStore(options) {
      * Reads a fully-qualified session id without scanning or resolving prefixes.
      *
      * @param {string} sessionId
+     * @param {{ lockHeld?: boolean }} [readOptions]
+     * @returns {Promise<Record<string, any>>}
      */
-    async readMetadataExact(sessionId) {
+    async readMetadataExact(sessionId, readOptions = {}) {
       let id;
       try {
         id = safeSessionId(sessionId);
@@ -163,11 +243,14 @@ export function createSessionStore(options) {
           error: { code: "SESSION_ID_INVALID", message: error instanceof Error ? error.message : String(error) }
         };
       }
-      await fs.mkdir(root, { recursive: true });
-      for (const encrypted of [false, true]) {
-        const filePath = path.join(root, `${id}.${encrypted ? "json.enc" : "json"}`);
+      await ensureRoot();
+      const preferEncrypted = prefersEncryptedMetadata(policy, env);
+      const paths = sessionMetadataPaths(root, id);
+      for (const encrypted of preferEncrypted ? [true, false] : [false, true]) {
+        const filePath = encrypted ? paths.encrypted : paths.plaintext;
         try {
-          const raw = await fs.readFile(filePath, "utf8");
+          const containedPath = await resolveContainedPath(root, filePath);
+          const raw = await fs.readFile(containedPath, "utf8");
           const decoded = decodeMetadata(raw, policy, env);
           if (!decoded.ok) {
             return decoded;
@@ -178,7 +261,18 @@ export function createSessionStore(options) {
               error: { code: "SESSION_METADATA_ID_MISMATCH", message: `Session metadata does not match '${id}'` }
             };
           }
-          return { ok: true, path: filePath, encrypted, metadata: decoded.metadata };
+          if (!encrypted && preferEncrypted && readOptions.lockHeld !== true) {
+            return this.withSessionMutation(id, () => this.readMetadataExact(id, { lockHeld: true }));
+          }
+          const migratedPath = !encrypted && preferEncrypted
+            ? await this.writeMetadata(decoded.metadata, { lockHeld: true })
+            : null;
+          return {
+            ok: true,
+            path: migratedPath ?? filePath,
+            encrypted: Boolean(migratedPath) || encrypted,
+            metadata: decoded.metadata
+          };
         } catch (error) {
           if (error?.code !== "ENOENT") {
             return {
@@ -199,7 +293,7 @@ export function createSessionStore(options) {
      * @param {number} chunkIndex
      */
     async readTranscriptChunk(sessionOrArchive, chunkIndex) {
-      await fs.mkdir(root, { recursive: true });
+      await ensureRoot();
       const archive = typeof sessionOrArchive === "string"
         ? await resolveTranscriptArchiveForSession(this, sessionOrArchive)
         : normalizeTranscriptArchive(sessionOrArchive);
@@ -220,7 +314,7 @@ export function createSessionStore(options) {
       }
 
       try {
-        const filePath = safeStorePath(root, chunk.file);
+        const filePath = await resolveContainedPath(root, safeStorePath(root, chunk.file));
         const raw = await fs.readFile(filePath, "utf8");
         const decoded = decodeMetadata(raw, policy, env);
         if (!decoded.ok) {
@@ -357,6 +451,7 @@ export function createSessionStore(options) {
      * @param {string} sessionId
      * @param {Array<Record<string, any>>} messages
      * @param {Record<string, any>} archive
+     * @param {{ suffix?: string; lockHeld?: boolean }} [options]
      */
     async writeTranscriptChunks(sessionId, messages = [], archive = {}, options = {}) {
       if (!policy.enabled || policy.retentionDays === 0) {
@@ -367,77 +462,99 @@ export function createSessionStore(options) {
         return normalizeTranscriptArchive(archive);
       }
 
-      await fs.mkdir(root, { recursive: true });
+      await ensureRoot();
       const safeId = safeSessionId(sessionId);
-      const suffix = safeArchiveSuffix(options.suffix);
-      const dirName = `${safeId}.${suffix}`;
-      const dirPath = path.join(root, dirName);
-      await fs.mkdir(dirPath, { recursive: true });
+      const paths = sessionMetadataPaths(root, safeId);
+      const write = async () => {
+        const suffix = safeArchiveSuffix(options.suffix);
+        const dirName = `${safeId}.${suffix}`;
+        const dirPath = path.join(root, dirName);
+        await ensureContainedDirectory(root, dirPath);
 
-      const nextArchive = normalizeTranscriptArchive(archive);
-      const chunkSize = nextArchive.chunkSize;
-      let totalMessages = nextArchive.totalMessages;
-      let totalVisibleMessages = nextArchive.totalVisibleMessages;
-      const chunks = nextArchive.chunks.slice();
-      const encrypted = shouldEncrypt(policy, env);
-      let remaining = pending.slice();
+        const nextArchive = normalizeTranscriptArchive(archive);
+        const chunkSize = nextArchive.chunkSize;
+        let totalMessages = nextArchive.totalMessages;
+        let totalVisibleMessages = nextArchive.totalVisibleMessages;
+        const chunks = nextArchive.chunks.slice();
+        const encrypted = shouldEncrypt(policy, env);
+        const generation = crypto.randomBytes(8).toString("hex");
+        let remaining = pending.slice();
 
-      while (remaining.length > 0) {
-        let chunk = chunks[chunks.length - 1] ?? null;
-        let existingMessages = [];
-        if (chunk && chunk.messages < chunkSize) {
-          existingMessages = await readTranscriptChunkMessages(root, chunk, policy, env);
-        } else {
-          chunk = null;
+        const committedTail = chunks[chunks.length - 1] ?? null;
+        let tailToReplace = null;
+        let tailMessages = [];
+        if (committedTail && committedTail.messages < chunkSize) {
+          tailMessages = await readTranscriptChunkMessages(root, committedTail, policy, env);
+          tailToReplace = committedTail;
         }
 
-        if (!chunk) {
-          const index = chunks.length + 1;
-          chunk = {
-            index,
-            file: transcriptChunkFileName(dirName, index, encrypted),
-            messages: 0,
-            visibleMessages: 0,
-            bytes: 0,
-            encrypted
-          };
-          chunks.push(chunk);
-          existingMessages = [];
+        while (remaining.length > 0) {
+          let chunk;
+          let addition;
+          let nextMessages;
+          if (tailToReplace) {
+            addition = remaining.splice(0, chunkSize - tailMessages.length);
+            nextMessages = tailMessages.concat(addition);
+            chunk = {
+              index: tailToReplace.index,
+              file: transcriptChunkFileName(dirName, tailToReplace.index, encrypted, generation),
+              messages: 0,
+              visibleMessages: 0,
+              bytes: 0,
+              encrypted
+            };
+            chunks[chunks.length - 1] = chunk;
+            tailToReplace = null;
+            tailMessages = [];
+          } else {
+            const index = chunks.length + 1;
+            addition = remaining.splice(0, chunkSize);
+            nextMessages = addition;
+            chunk = {
+              index,
+              file: transcriptChunkFileName(dirName, index, encrypted, generation),
+              messages: 0,
+              visibleMessages: 0,
+              bytes: 0,
+              encrypted
+            };
+            chunks.push(chunk);
+          }
+
+          const write = await writeTranscriptChunkFile(root, {
+            sessionId: safeId,
+            dirName,
+            chunk,
+            messages: nextMessages,
+            encrypted,
+            generation,
+            policy,
+            env
+          });
+
+          chunk.file = write.file;
+          chunk.messages = nextMessages.length;
+          chunk.visibleMessages = countVisibleTranscriptMessages(nextMessages);
+          chunk.bytes = write.bytes;
+          chunk.encrypted = write.encrypted;
+          totalMessages += addition.length;
+          if (totalVisibleMessages !== null) {
+            totalVisibleMessages += countVisibleTranscriptMessages(addition);
+          }
         }
 
-        const room = Math.max(0, chunkSize - existingMessages.length);
-        const addition = remaining.splice(0, room || chunkSize);
-        const nextMessages = existingMessages.concat(addition).slice(0, chunkSize);
-        const write = await writeTranscriptChunkFile(root, {
-          sessionId: safeId,
-          dirName,
-          chunk,
-          messages: nextMessages,
-          encrypted,
-          policy,
-          env
-        });
-
-        chunk.file = write.file;
-        chunk.messages = nextMessages.length;
-        chunk.visibleMessages = countVisibleTranscriptMessages(nextMessages);
-        chunk.bytes = write.bytes;
-        chunk.encrypted = write.encrypted;
-        totalMessages += addition.length;
-        if (totalVisibleMessages !== null) {
-          totalVisibleMessages += countVisibleTranscriptMessages(addition);
-        }
-      }
-
-      return {
-        version: 1,
-        chunkSize,
-        totalMessages,
-        totalVisibleMessages,
-        chunks
+        return {
+          version: 1,
+          chunkSize,
+          totalMessages,
+          totalVisibleMessages,
+          chunks
+        };
       };
+      return options.lockHeld === true ? write() : withFileMutationLock(paths.lock, write);
     }
   };
+  return store;
 }
 
 async function resolveTranscriptArchiveForSession(store, selector) {
@@ -479,6 +596,69 @@ async function readRecordSummary(filePath, encrypted, policy, env) {
       readError: error instanceof Error ? error.message : String(error)
     };
   }
+}
+
+/**
+ * @param {string} root
+ * @param {string} sessionId
+ */
+function sessionMetadataPaths(root, sessionId) {
+  const id = safeSessionId(sessionId);
+  return {
+    plaintext: path.join(root, `${id}.json`),
+    encrypted: path.join(root, `${id}.json.enc`),
+    lock: path.join(root, `${id}.metadata`)
+  };
+}
+
+/**
+ * @param {import("node:fs").Dirent[]} entries
+ * @returns {Map<string, import("node:fs").Dirent[]>}
+ */
+function groupSessionEntries(entries) {
+  const grouped = new Map();
+  for (const entry of entries) {
+    if (!entry.isFile() || !isSessionFile(entry.name)) {
+      continue;
+    }
+    const id = sessionIdFromFileName(entry.name);
+    const current = grouped.get(id) ?? [];
+    current.push(entry);
+    grouped.set(id, current);
+  }
+  return grouped;
+}
+
+/**
+ * @param {Array<Record<string, any>>} records
+ * @param {boolean} preferEncrypted
+ */
+function preferSessionRecordFormats(records, preferEncrypted) {
+  const byId = new Map();
+  for (const record of records) {
+    const current = byId.get(record.id);
+    if (!current) {
+      byId.set(record.id, record);
+      continue;
+    }
+    if (record.encrypted === preferEncrypted && current.encrypted !== preferEncrypted) {
+      byId.set(record.id, record);
+      continue;
+    }
+    if (record.encrypted === current.encrypted && record.modifiedAt > current.modifiedAt) {
+      byId.set(record.id, record);
+    }
+  }
+  return [...byId.values()];
+}
+
+/**
+ * @param {{ encryption: string }} policy
+ * @param {NodeJS.ProcessEnv} env
+ */
+function prefersEncryptedMetadata(policy, env) {
+  return policy.encryption === "required"
+    || (policy.encryption === "optional" && Boolean(env.LAB_AGENT_TRANSCRIPT_KEY));
 }
 
 function transcriptMessageCount(metadata) {
@@ -692,9 +872,13 @@ function sessionIdFromFileName(name) {
 }
 
 function safeSessionId(value) {
-  return String(value ?? "session")
-    .replace(/[^A-Za-z0-9._-]/g, "-")
-    .slice(0, 120) || "session";
+  const text = String(value ?? "").trim();
+  if (!text || text.length > 120 || !/^[A-Za-z0-9._-]+$/.test(text)) {
+    throw Object.assign(new Error(`Invalid session id: ${text}`), {
+      code: "SESSION_ID_INVALID"
+    });
+  }
+  return text;
 }
 
 async function removeTranscriptDirectory(root, sessionId) {
@@ -748,14 +932,21 @@ function normalizeTranscriptChunk(chunk) {
   };
 }
 
-function transcriptChunkFileName(dirName, index, encrypted) {
+/**
+ * @param {string} dirName
+ * @param {number} index
+ * @param {boolean} encrypted
+ * @param {string} generation
+ */
+function transcriptChunkFileName(dirName, index, encrypted, generation) {
   const padded = String(index).padStart(6, "0");
-  return `${dirName}/chunk-${padded}.${encrypted ? "json.enc" : "json"}`;
+  const suffix = String(generation ?? "").replace(/[^a-f0-9]/gi, "").slice(0, 32);
+  return `${dirName}/chunk-${padded}${suffix ? `-${suffix}` : ""}.${encrypted ? "json.enc" : "json"}`;
 }
 
 async function readTranscriptChunkMessages(root, chunk, policy, env) {
   try {
-    const filePath = safeStorePath(root, chunk.file);
+    const filePath = await resolveContainedPath(root, safeStorePath(root, chunk.file));
     const raw = await fs.readFile(filePath, "utf8");
     const decoded = decodeMetadata(raw, policy, env);
     if (!decoded.ok) {
@@ -830,7 +1021,7 @@ function countVisibleTranscriptMessages(messages) {
 }
 
 async function writeTranscriptChunkFile(root, options) {
-  const file = transcriptChunkFileName(options.dirName, options.chunk.index, options.encrypted);
+  const file = transcriptChunkFileName(options.dirName, options.chunk.index, options.encrypted, options.generation);
   const filePath = safeStorePath(root, file);
   const payload = {
     version: "ant-code-transcript-chunk.v1",
@@ -840,7 +1031,7 @@ async function writeTranscriptChunkFile(root, options) {
   };
   const serialized = `${JSON.stringify(payload, redactSession, 2)}\n`;
   const encrypted = encryptIfNeeded(serialized, options.policy, options.env);
-  await fs.writeFile(filePath, encrypted ?? serialized, "utf8");
+  await atomicWriteFile(filePath, encrypted ?? serialized);
   return {
     file,
     encrypted: Boolean(encrypted),

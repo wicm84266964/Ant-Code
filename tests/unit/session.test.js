@@ -4,7 +4,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { createSession, runSessionTurn } from "../../src/core/session.js";
+import { createSession, persistSessionSnapshot, runSessionTurn } from "../../src/core/session.js";
 import { createSessionStore } from "../../src/storage/session-store.js";
 
 test("interactive session turns reuse bounded conversation context", async () => {
@@ -616,6 +616,86 @@ test("session retries reasoning-only length final output even when generic healt
   }
 });
 
+test("session retries normalized empty responses without a terminal signal", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
+  const requests = [];
+  const events = [];
+  const server = await listen(createMissingTerminalThenHealthyGateway(requests), "127.0.0.1");
+
+  try {
+    const env = mockGatewayEnv(serverUrl(server));
+    delete env.LAB_AGENT_TRANSCRIPT_ENABLED;
+    const session = await createSession({
+      cwd,
+      mode: "interactive",
+      env
+    });
+
+    const result = await runSessionTurn(session, {
+      prompt: "continue after the interrupted response",
+      env,
+      onEvent: (event) => events.push(event)
+    });
+
+    assert.equal(result.output, "恢复完成：已返回完整正文。");
+    assert.equal(requests.length, 2);
+    const retry = events.find((event) => event.type === "output_health_retry");
+    assert.equal(retry?.reasons.includes("missing_terminal_signal"), true);
+    assert.equal(JSON.stringify(requests[1]).includes("模型本轮没有返回可展示正文"), false);
+  } finally {
+    await close(server);
+  }
+});
+
+test("session reports gateway_error after normalized missing terminal retries are exhausted", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
+  const requests = [];
+  const events = [];
+  const server = await listen(createAlwaysMissingTerminalGateway(requests), "127.0.0.1");
+  const env = mockGatewayEnv(serverUrl(server));
+  const transcriptEnabled = env.LAB_AGENT_TRANSCRIPT_ENABLED;
+  env.LAB_AGENT_TRANSCRIPT_ENABLED = "true";
+
+  try {
+    const session = await createSession({
+      cwd,
+      mode: "interactive",
+      env
+    });
+
+    const result = await runSessionTurn(session, {
+      prompt: "do not accept an incomplete response",
+      env,
+      onEvent: (event) => events.push(event)
+    });
+
+    assert.equal(requests.length, 2);
+    assert.match(result.output, /UPSTREAM_STREAM_ABORTED/);
+    assert.equal(events.filter((event) => event.type === "output_health_retry").length, 1);
+    assert.equal(events.some((event) => event.type === "assistant_final"), false);
+    assert.equal(events.find((event) => event.type === "gateway_error")?.error?.code, "UPSTREAM_STREAM_ABORTED");
+    assert.equal(events.find((event) => event.type === "turn_complete")?.status, "gateway_error");
+
+    const metadataPath = path.join(cwd, ".lab-agent", "sessions", `${session.id}.json`);
+    const metadataText = await fs.readFile(metadataPath, "utf8");
+    const metadata = JSON.parse(metadataText);
+    assert.equal(metadata.status, "gateway_error");
+    assert.equal(metadata.gatewayErrors.includes("UPSTREAM_STREAM_ABORTED"), true);
+    assert.equal(metadataText.includes("模型本轮没有返回可展示正文"), false);
+  } finally {
+    if (transcriptEnabled === undefined) {
+      delete env.LAB_AGENT_TRANSCRIPT_ENABLED;
+    } else {
+      env.LAB_AGENT_TRANSCRIPT_ENABLED = transcriptEnabled;
+    }
+    try {
+      await close(server);
+    } finally {
+      await fs.rm(cwd, { recursive: true, force: true });
+    }
+  }
+});
+
 test("session retries repetitive thinking loops even when generic health check is disabled", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
   const requests = [];
@@ -644,6 +724,45 @@ test("session retries repetitive thinking loops even when generic health check i
     await close(server);
   }
 });
+
+for (const scenario of [
+  {
+    name: "reasoning-only length",
+    reason: "reasoning_only_length",
+    createGateway: createAlwaysReasoningOnlyLengthGateway
+  },
+  {
+    name: "repetitive thinking",
+    reason: "repetitive_thinking_loop",
+    createGateway: createAlwaysRepetitiveThinkingGateway
+  }
+]) {
+  test(`session preserves ${scenario.name} diagnosis when output-health retries are exhausted`, async () => {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
+    const requests = [];
+    const events = [];
+    const server = await listen(scenario.createGateway(requests), "127.0.0.1");
+
+    try {
+      const env = mockGatewayEnv(serverUrl(server));
+      const session = await createSession({ cwd, mode: "interactive", env });
+      const result = await runSessionTurn(session, {
+        prompt: "preserve the real output-health failure reason",
+        env,
+        onEvent: (event) => events.push(event)
+      });
+
+      const gatewayError = events.find((event) => event.type === "gateway_error")?.error;
+      assert.equal(requests.length, 2);
+      assert.match(result.output, /UPSTREAM_STREAM_ABORTED/);
+      assert.equal(gatewayError?.details?.reason, scenario.reason);
+      assert.equal(gatewayError?.details?.outputHealthReasons.includes(scenario.reason), true);
+      assert.equal(events.find((event) => event.type === "turn_complete")?.status, "gateway_error");
+    } finally {
+      await close(server);
+    }
+  });
+}
 
 test("session metadata preserves context token diagnostics and provider usage", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
@@ -1272,6 +1391,44 @@ test("session forwards gateway retry events during model turns", async () => {
     assert.equal(retry.round, 1);
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test("session retries OpenAI streams that end without a terminal signal", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
+  const requests = [];
+  const events = [];
+  const server = await listen(createIncompleteOpenAIThenHealthyGateway(requests), "127.0.0.1");
+
+  try {
+    const env = {
+      LAB_MODEL_GATEWAY_URL: `${serverUrl(server)}/v1/chat/completions`,
+      LAB_MODEL_GATEWAY_PROTOCOL: "openai-chat",
+      LAB_MODEL_GATEWAY_MAX_RETRIES: "1",
+      LAB_AGENT_MODEL: "mock-openai",
+      LAB_AGENT_NETWORK_MODE: "offline",
+      LAB_AGENT_TRANSCRIPT_ENABLED: "false"
+    };
+    const session = await createSession({
+      cwd,
+      mode: "interactive",
+      env
+    });
+
+    const result = await runSessionTurn(session, {
+      prompt: "recover the interrupted stream",
+      env,
+      onEvent: (event) => events.push(event)
+    });
+
+    assert.equal(result.output, "stream recovered");
+    assert.equal(requests.length, 2);
+    const retry = events.find((event) => event.type === "gateway_retry");
+    assert.equal(retry?.error?.code, "UPSTREAM_STREAM_ABORTED");
+    assert.equal(retry?.error?.details?.streamReason, "missing_done_and_finish_reason");
+    assert.equal(events.some((event) => event.type === "assistant_final"), true);
+  } finally {
+    await close(server);
   }
 });
 
@@ -2007,6 +2164,92 @@ test("session transcript archives complete history in 50-message chunks while me
   }
 });
 
+test("session snapshot preserves pending archive messages after a failed metadata write and retries once", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-persist-retry-"));
+  const env = {};
+  const session = await createSession({ cwd, mode: "interactive", env });
+  await runSessionTurn(session, { prompt: "seed metadata", env });
+
+  const retryMessage = { role: "user", content: "persist exactly once after retry" };
+  session.messages.push(retryMessage);
+  session.transcriptMessages.push(retryMessage);
+  session.transcriptArchive.pendingMessages.push(retryMessage);
+  session.modelContextArchive.pendingMessages.push(retryMessage);
+  const committedTranscriptTotal = session.transcriptArchive.totalMessages;
+  const committedModelTotal = session.modelContextArchive.totalMessages;
+
+  const store = createSessionStore({ cwd, transcript: session.config.transcript, env });
+  const failingStore = {
+    ...store,
+    async writeMetadata() {
+      throw Object.assign(new Error("injected metadata failure"), { code: "INJECTED_METADATA_FAILURE" });
+    }
+  };
+
+  await assert.rejects(
+    persistSessionSnapshot(session, { env, store: failingStore }),
+    (error) => error?.code === "INJECTED_METADATA_FAILURE"
+  );
+  assert.equal(session.transcriptArchive.totalMessages, committedTranscriptTotal);
+  assert.equal(session.modelContextArchive.totalMessages, committedModelTotal);
+  assert.equal(session.transcriptArchive.pendingMessages.length, 1);
+  assert.equal(session.modelContextArchive.pendingMessages.length, 1);
+
+  await persistSessionSnapshot(session, { env, store });
+  assert.equal(session.transcriptArchive.pendingMessages.length, 0);
+  assert.equal(session.modelContextArchive.pendingMessages.length, 0);
+
+  const saved = await store.readMetadataExact(session.id);
+  const transcript = await store.readTranscriptPage(saved.metadata.transcript.archive, { limit: 200 });
+  const modelContext = await store.readTranscriptPage(saved.metadata.transcript.modelArchive, { limit: 200 });
+  assert.equal(saved.ok, true);
+  assert.equal(transcript.ok, true);
+  assert.equal(modelContext.ok, true);
+  assert.equal(transcript.messages.filter((message) => message.content === retryMessage.content).length, 1);
+  assert.equal(modelContext.messages.filter((message) => message.content === retryMessage.content).length, 1);
+});
+
+test("concurrent session snapshots rebase pending messages onto the latest committed archives", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-persist-concurrent-"));
+  const env = {};
+  const seed = await createSession({ cwd, mode: "interactive", env });
+  await runSessionTurn(seed, { prompt: "seed concurrent archive", env });
+  const baseTotal = seed.transcriptArchive.totalMessages;
+  const left = await createSession({ cwd, mode: "interactive", env, resume: seed.id });
+  const right = await createSession({ cwd, mode: "interactive", env, resume: seed.id });
+
+  const appendPending = (session, content) => {
+    const message = { role: "user", content };
+    session.messages.push(message);
+    session.transcriptMessages.push(message);
+    session.transcriptArchive.pendingMessages.push(message);
+    session.modelContextArchive.pendingMessages.push(message);
+  };
+  appendPending(left, "concurrent left message");
+  appendPending(right, "concurrent right message");
+
+  const leftStore = createSessionStore({ cwd, transcript: left.config.transcript, env });
+  const rightStore = createSessionStore({ cwd, transcript: right.config.transcript, env });
+  await Promise.all([
+    persistSessionSnapshot(left, { env, store: leftStore }),
+    persistSessionSnapshot(right, { env, store: rightStore })
+  ]);
+
+  const saved = await leftStore.readMetadataExact(seed.id);
+  const transcript = await leftStore.readTranscriptPage(saved.metadata.transcript.archive, { limit: 200 });
+  const modelContext = await leftStore.readTranscriptPage(saved.metadata.transcript.modelArchive, {
+    limit: 200,
+    visibleRoles: ["user", "assistant", "tool"]
+  });
+  assert.equal(saved.ok, true);
+  assert.equal(saved.metadata.transcript.archive.totalMessages, baseTotal + 2);
+  assert.equal(saved.metadata.transcript.modelArchive.totalMessages, baseTotal + 2);
+  assert.equal(transcript.messages.some((message) => message.content === "concurrent left message"), true);
+  assert.equal(transcript.messages.some((message) => message.content === "concurrent right message"), true);
+  assert.equal(modelContext.messages.some((message) => message.content === "concurrent left message"), true);
+  assert.equal(modelContext.messages.some((message) => message.content === "concurrent right message"), true);
+});
+
 test("session model archive preserves tool-call context for resume after compaction", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
   await fs.writeFile(path.join(cwd, "notes.txt"), "important evidence from tool file", "utf8");
@@ -2543,6 +2786,91 @@ function createReasoningOnlyLengthThenHealthyGateway(requests) {
   });
 }
 
+function createAlwaysReasoningOnlyLengthGateway(requests) {
+  return http.createServer(async (request, response) => {
+    if (request.method !== "POST" || request.url !== "/v1/chat") {
+      response.writeHead(404, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { code: "NOT_FOUND" } }));
+      return;
+    }
+    const body = await readRequestJson(request);
+    requests.push(body);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      id: `mock-reasoning-only-length-${requests.length}`,
+      model: body.model,
+      content: [],
+      thinking: "The model spent the whole budget planning without producing visible text.".repeat(80),
+      toolCalls: [],
+      stopReason: "length",
+      raw: { thinkingBytes: 5200, textBytes: 0 }
+    }));
+  });
+}
+
+/**
+ * @param {Array<Record<string, any>>} requests
+ */
+function createMissingTerminalThenHealthyGateway(requests) {
+  return http.createServer(async (request, response) => {
+    if (request.method !== "POST" || request.url !== "/v1/chat") {
+      response.writeHead(404, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { code: "NOT_FOUND" } }));
+      return;
+    }
+
+    const body = await readRequestJson(request);
+    requests.push(body);
+    response.writeHead(200, { "content-type": "application/json" });
+
+    if (requests.length === 1) {
+      response.end(JSON.stringify(missingTerminalResponse(body.model, "mock-missing-terminal")));
+      return;
+    }
+
+    response.end(JSON.stringify({
+      id: "mock-missing-terminal-recovered",
+      model: body.model,
+      content: [{ type: "text", text: "恢复完成：已返回完整正文。" }],
+      toolCalls: [],
+      stopReason: "stop"
+    }));
+  });
+}
+
+/**
+ * @param {Array<Record<string, any>>} requests
+ */
+function createAlwaysMissingTerminalGateway(requests) {
+  return http.createServer(async (request, response) => {
+    if (request.method !== "POST" || request.url !== "/v1/chat") {
+      response.writeHead(404, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { code: "NOT_FOUND" } }));
+      return;
+    }
+
+    const body = await readRequestJson(request);
+    requests.push(body);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify(missingTerminalResponse(body.model, `mock-missing-terminal-${requests.length}`)));
+  });
+}
+
+function missingTerminalResponse(model, id) {
+  return {
+    id,
+    model,
+    content: [],
+    thinking: "I need to inspect the current state. I need to see",
+    toolCalls: [],
+    stopReason: null,
+    raw: {
+      thinkingBytes: 517,
+      textBytes: 0
+    }
+  };
+}
+
 /**
  * @param {Array<Record<string, any>>} requests
  */
@@ -2584,6 +2912,32 @@ function createRepetitiveThinkingThenHealthyGateway(requests) {
       content: [{ type: "text", text: "已跳出重复思考并给出最终正文。" }],
       toolCalls: [],
       stopReason: "stop"
+    }));
+  });
+}
+
+function createAlwaysRepetitiveThinkingGateway(requests) {
+  return http.createServer(async (request, response) => {
+    if (request.method !== "POST" || request.url !== "/v1/chat") {
+      response.writeHead(404, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { code: "NOT_FOUND" } }));
+      return;
+    }
+    const body = await readRequestJson(request);
+    requests.push(body);
+    const repeated = [
+      "Let me now create the entries and edit the files.",
+      "Actually, I should inspect the same format one more time before editing."
+    ].join("\n");
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      id: `mock-repetitive-thinking-${requests.length}`,
+      model: body.model,
+      content: [],
+      thinking: `${repeated}\n`.repeat(80),
+      toolCalls: [],
+      stopReason: "stop",
+      raw: { thinkingBytes: 9000, textBytes: 0 }
     }));
   });
 }
@@ -3009,6 +3363,30 @@ function createOpenAIStreamingGateway(requests) {
     response.write('data: {"id":"chatcmpl-live","model":"mock-openai","choices":[{"delta":{"reasoning_content":"checking "}}]}\n\n');
     response.write('data: {"choices":[{"delta":{"content":"hello "}}]}\n\n');
     response.write('data: {"choices":[{"delta":{"content":"world"},"finish_reason":"stop"}]}\n\n');
+    response.end("data: [DONE]\n\n");
+  });
+}
+
+/**
+ * @param {Array<Record<string, any>>} requests
+ */
+function createIncompleteOpenAIThenHealthyGateway(requests) {
+  return http.createServer(async (request, response) => {
+    if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
+      response.writeHead(404, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { code: "NOT_FOUND" } }));
+      return;
+    }
+
+    const body = await readRequestJson(request);
+    requests.push(body);
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    if (requests.length === 1) {
+      response.end('data: {"id":"chatcmpl-incomplete","model":"mock-openai","choices":[{"delta":{"reasoning_content":"I need to see"}}]}\n\n');
+      return;
+    }
+
+    response.write('data: {"id":"chatcmpl-recovered","model":"mock-openai","choices":[{"delta":{"content":"stream recovered"},"finish_reason":"stop"}]}\n\n');
     response.end("data: [DONE]\n\n");
   });
 }

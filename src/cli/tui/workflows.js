@@ -139,3 +139,67 @@ export function isImmediateTuiCommand(prompt) {
   const match = /^\/([a-z][\w-]*)\b/i.exec(String(prompt ?? "").trim());
   return IMMEDIATE_TUI_COMMANDS.has(match?.[1]?.toLowerCase());
 }
+
+/**
+ * Coalesces repeated async polling requests into one active operation and at
+ * most one trailing refresh.
+ * @param {() => Promise<any>} operation
+ */
+export function createCoalescedAsyncRunner(operation) {
+  let disposed = false;
+  let rerunRequested = false;
+  /** @type {Promise<any> | null} */
+  let inFlight = null;
+
+  const run = () => {
+    if (disposed) {
+      return Promise.resolve(undefined);
+    }
+    if (inFlight) {
+      rerunRequested = true;
+      return inFlight;
+    }
+    const work = Promise.resolve().then(operation);
+    const tracked = work.finally(() => {
+      if (inFlight !== tracked) {
+        return;
+      }
+      inFlight = null;
+      if (rerunRequested && !disposed) {
+        rerunRequested = false;
+        queueMicrotask(() => {
+          void run().catch(() => {});
+        });
+      }
+    });
+    inFlight = tracked;
+    return tracked;
+  };
+
+  return {
+    run,
+    dispose() {
+      disposed = true;
+      rerunRequested = false;
+    },
+    get active() {
+      return inFlight !== null;
+    }
+  };
+}
+
+/**
+ * @param {{ confirmed?: boolean; backgroundExitPending?: boolean; backgroundCount?: number }} state
+ */
+export function resolveTuiExitAction(state = {}) {
+  if (state.confirmed !== true) {
+    return "confirm";
+  }
+  if (state.backgroundExitPending === true) {
+    return "force";
+  }
+  if (Number(state.backgroundCount ?? 0) > 0) {
+    return "cancel-background";
+  }
+  return "exit";
+}

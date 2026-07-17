@@ -29,6 +29,9 @@ const BACKGROUND_DEAD_HEARTBEAT_MS = 5 * 60 * 1000;
 const DEFAULT_INTERRUPT_FORCE_SETTLE_MS = 5_000;
 const DEFAULT_LIFECYCLE_WAIT_MS = 5_000;
 const MAX_LIFECYCLE_WAIT_MS = 30_000;
+const LIFECYCLE_STATUS_WAIT_MS = 3_000;
+const LIFECYCLE_POLL_INTERVAL_MS = 250;
+const FORCE_SHUTDOWN_GRACE_MS = 2_000;
 const TURN_REQUEST_TTL_MS = 5 * 60 * 1000;
 const MAX_TURN_REQUESTS = 1_000;
 const MAX_PROMPT_BYTES = 256 * 1024;
@@ -74,7 +77,13 @@ class ActiveSessionCapacityError extends Error {
 }
 
 /**
- * @param {{ cwd: string; env?: NodeJS.ProcessEnv }} options
+ * @param {{
+ *   cwd: string;
+ *   env?: NodeJS.ProcessEnv;
+ *   runTurn?: any;
+ *   lifecycleActivity?: (active: any, cwd: string) => Promise<any>;
+ *   cancelBackgroundWork?: (state: any, options?: any) => Promise<any>;
+ * }} options
  */
 export function createDashboardRuntime(options) {
   const runtimeEnv = options.env ?? process.env;
@@ -87,6 +96,10 @@ export function createDashboardRuntime(options) {
   let selectedModelId = "";
   let shuttingDown = false;
   let activeSweepPromise = null;
+  /** @type {any} */
+  const readRuntimeActivity = options.lifecycleActivity ?? dashboardRuntimeActivity;
+  /** @type {any} */
+  const cancelBackgroundWork = options.cancelBackgroundWork ?? cancelSessionBackgroundWork;
   const resolveConfigEnv = () => dashboardConfigEnv(options.cwd, runtimeEnv);
   const activeSweepTimer = setInterval(() => {
     if (activeSweepPromise || shuttingDown) {
@@ -449,8 +462,12 @@ export function createDashboardRuntime(options) {
         encrypted: record.encrypted === true
       }));
       const byId = new Map(persisted.map((record) => [record.id, record]));
-      for (const state of active.values()) {
-        const snapshot = await buildBackgroundSubagentSnapshot(state);
+      const activeStates = [...active.values()];
+      const groupSnapshots = await loadDashboardGroupSnapshots(activeStates);
+      for (const state of activeStates) {
+        const snapshot = await buildBackgroundSubagentSnapshot(state, {
+          groups: groupSnapshots.get(path.resolve(state.session.cwd)) ?? []
+        });
         const activeRecord = activeSessionRecord(state, byId.get(state.session.id), snapshot);
         byId.set(activeRecord.id, activeRecord);
       }
@@ -765,7 +782,7 @@ export function createDashboardRuntime(options) {
         cwd: state.session.cwd,
         taskId
       }).filter((task) => (
-        (task.status === "starting" || task.status === "running")
+        (task.status === "starting" || task.status === "running" || task.status === "cancelling")
         && task.cwd
         && path.resolve(task.cwd) === path.resolve(state.session.cwd)
       ));
@@ -777,17 +794,18 @@ export function createDashboardRuntime(options) {
           error: "后台终端任务不存在、不属于该会话或已结束"
         };
       }
-      const cancelled = cancelBackgroundTerminalTasks({
+      const cancellationResults = await cancelBackgroundTerminalTasks({
         parentSessionId: state.session.id,
         cwd: state.session.cwd,
         taskId
       });
+      const cancelled = cancellationResults.filter((task) => task.status === "cancelled" && task.cancellationConfirmed === true);
       if (cancelled.length === 0) {
         return {
           ok: false,
-          status: 404,
-          code: "BACKGROUND_TERMINAL_NOT_ACTIVE",
-          error: "后台终端任务不存在、不属于该会话或已结束"
+          status: 409,
+          code: "BACKGROUND_TERMINAL_CANCEL_UNCONFIRMED",
+          error: cancellationResults[0]?.cancelError || "后台终端任务未确认退出，未标记为已取消"
         };
       }
       appendDashboardEvent(state, {
@@ -994,9 +1012,24 @@ export function createDashboardRuntime(options) {
       return { ok: false, status: 404, error: "需求核对请求不存在或已处理" };
     },
     async lifecycleStatus() {
+      const timeoutMs = Math.min(LIFECYCLE_STATUS_WAIT_MS, lifecycleWaitMs(undefined, runtimeEnv));
+      const probe = await waitForLifecycleOperation(
+        (signal) => readRuntimeActivity(active, options.cwd, { signal }),
+        Date.now() + timeoutMs
+      );
+      if (!probe.settled || probe.error) {
+        return {
+          ok: false,
+          status: 503,
+          code: probe.error ? "LIFECYCLE_STATUS_FAILED" : "LIFECYCLE_STATUS_TIMEOUT",
+          error: probe.error ? "Dashboard 活动状态检查失败" : "Dashboard 活动状态检查超时",
+          activity: dashboardMemoryActivity(active, true),
+          timeoutMs
+        };
+      }
       return {
         ok: true,
-        activity: await dashboardRuntimeActivity(active, options.cwd)
+        activity: probe.value
       };
     },
     async sweepIdleSessions() {
@@ -1013,20 +1046,45 @@ export function createDashboardRuntime(options) {
       if (shuttingDown) {
         return { ok: false, status: 409, code: "SHUTDOWN_IN_PROGRESS", error: "Dashboard 已在关闭" };
       }
-      const initial = await dashboardRuntimeActivity(active, options.cwd);
-      const cancelActive = input.cancel === true || input.cancelActive === true || input.force === true;
-      const cancelBackground = input.cancel === true || input.cancelBackground === true || input.force === true;
-      if (initial.total > 0 && !cancelActive && !cancelBackground) {
-        return {
-          ok: false,
-          status: 409,
-          code: "ACTIVE_WORK_REQUIRES_DECISION",
-          error: "仍有活动任务，请明确选择取消并关闭或返回",
-          activity: initial
-        };
-      }
+      const forceShutdown = input.force === true;
+      const requestedTimeoutMs = lifecycleWaitMs(input.timeoutMs, runtimeEnv);
+      const timeoutMs = forceShutdown
+        ? Math.min(requestedTimeoutMs, FORCE_SHUTDOWN_GRACE_MS)
+        : requestedTimeoutMs;
+      const deadline = Date.now() + timeoutMs;
       shuttingDown = true;
+      let completed = false;
       try {
+        const initialProbe = forceShutdown
+          ? { settled: false }
+          : await waitForLifecycleOperation(
+            (signal) => readRuntimeActivity(active, options.cwd, { signal }),
+            deadline
+          );
+        const initial = initialProbe.settled && !initialProbe.error
+          ? initialProbe.value
+          : dashboardMemoryActivity(active, true);
+        if ((!initialProbe.settled || initialProbe.error) && !forceShutdown) {
+          return {
+            ok: false,
+            status: 409,
+            code: initialProbe.error ? "SHUTDOWN_ACTIVITY_FAILED" : "SHUTDOWN_ACTIVITY_TIMEOUT",
+            error: initialProbe.error ? "关闭前活动状态检查失败" : "关闭前活动状态检查超时",
+            activity: initial,
+            timeoutMs
+          };
+        }
+        const cancelActive = input.cancel === true || input.cancelActive === true || forceShutdown;
+        const cancelBackground = input.cancel === true || input.cancelBackground === true || forceShutdown;
+        if (initial.total > 0 && !cancelActive && !cancelBackground) {
+          return {
+            ok: false,
+            status: 409,
+            code: "ACTIVE_WORK_REQUIRES_DECISION",
+            error: "仍有活动任务，请明确选择取消并关闭或返回",
+            activity: initial
+          };
+        }
         if (cancelActive) {
           for (const state of active.values()) {
             cancelAllQueuedTurns(state, "shutdown");
@@ -1038,15 +1096,30 @@ export function createDashboardRuntime(options) {
           }
         }
         if (cancelBackground) {
-          cancelWorkspaceBackgroundTerminals(options.cwd);
-          for (const state of active.values()) {
-            await cancelSessionBackgroundWork(state);
+          await cancelWorkspaceBackgroundTerminals(options.cwd, { memoryOnly: forceShutdown });
+          const cancellations = [...active.values()].map((state) => (
+            Promise.resolve().then(() => cancelBackgroundWork(state, { cancelTerminals: false }))
+          ));
+          const cancellation = await waitForLifecycleOperation(
+            () => Promise.allSettled(cancellations),
+            deadline
+          );
+          if ((!cancellation.settled || cancellation.error) && !forceShutdown) {
+            return {
+              ok: false,
+              status: 409,
+              code: cancellation.error ? "SHUTDOWN_BACKGROUND_FAILED" : "SHUTDOWN_BACKGROUND_TIMEOUT",
+              error: cancellation.error ? "后台任务清理失败" : "后台任务未在清理时限内结束",
+              activity: dashboardMemoryActivity(active, true),
+              timeoutMs
+            };
           }
         }
-        const timeoutMs = lifecycleWaitMs(input.timeoutMs, runtimeEnv);
-        const settled = await waitForRuntimeActivity(active, timeoutMs, options.cwd);
-        if (settled.total > 0 && input.force !== true) {
-          shuttingDown = false;
+        const activityResult = forceShutdown
+          ? { settled: false, activity: dashboardMemoryActivity(active, true) }
+          : await waitForRuntimeActivity(active, deadline, options.cwd, readRuntimeActivity);
+        const settled = activityResult.activity;
+        if ((!activityResult.settled || settled.total > 0) && !forceShutdown) {
           return {
             ok: false,
             status: 409,
@@ -1056,24 +1129,36 @@ export function createDashboardRuntime(options) {
             timeoutMs
           };
         }
+        const sweepSettled = await waitForLifecyclePromise(activeSweepPromise, deadline);
+        if (!sweepSettled && !forceShutdown) {
+          return {
+            ok: false,
+            status: 409,
+            code: "SHUTDOWN_SWEEP_TIMEOUT",
+            error: "会话维护任务未在清理时限内结束",
+            activity: settled,
+            timeoutMs
+          };
+        }
         clearInterval(activeSweepTimer);
-        await activeSweepPromise;
         for (const state of active.values()) {
           disposeTurnState(state, "shutdown");
         }
         active.clear();
         turnRequests.clear();
+        completed = true;
         return {
           ok: true,
-          forced: settled.total > 0,
+          forced: forceShutdown || !activityResult.settled || settled.total > 0 || !sweepSettled,
           cancelled: cancelActive || cancelBackground,
           activity: settled,
           initialActivity: initial,
           timeoutMs
         };
-      } catch (error) {
-        shuttingDown = false;
-        throw error;
+      } finally {
+        if (!completed) {
+          shuttingDown = false;
+        }
       }
     },
     sessionFiles(sessionId) {
@@ -1155,7 +1240,7 @@ async function reclaimActiveSessions(active, options) {
         || !basicReclaimableState(state, policy, options.ttlOnly === true)
         || listBackgroundAgentTasks({ parentSessionId: sessionId }).length > 0
         || listBackgroundTerminalTasks({ parentSessionId: sessionId, cwd: state.session.cwd })
-          .some((task) => task.status === "starting" || task.status === "running")
+          .some((task) => task.status === "starting" || task.status === "running" || task.status === "cancelling")
       ) {
         return;
       }
@@ -1178,7 +1263,6 @@ function basicReclaimableState(state, policy, requireExpired) {
     || state.quarantinedTurnId
     || state.controller
     || state.forceSettleTimer
-    || state.backgroundSnapshotTimer
     || state.queuedPrompts.length > 0
     || state.listeners.size > 0
     || state.pendingApprovals.size > 0
@@ -1200,6 +1284,20 @@ async function isSessionStatePersisted(state, env) {
   });
   const result = await store.readMetadataExact(state.session.id);
   return result.ok && String(result.metadata?.id ?? "") === state.session.id;
+}
+
+/** @param {any} state @param {any} env */
+function scheduleSessionPersistenceCheck(state, env) {
+  void isSessionStatePersisted(state, env).then(
+    (persisted) => {
+      if (!state.disposed && !state.running && !state.currentTurnId) {
+        state.persisted = persisted;
+      }
+    },
+    () => {
+      // Persistence remains conservative (false) when the background check fails.
+    }
+  );
 }
 
 function activeSessionCapacityResult(active, policy) {
@@ -1840,12 +1938,17 @@ function quarantinedSessionResult(state) {
   };
 }
 
-async function dashboardRuntimeActivity(active, cwd = process.cwd()) {
+/** @param {any} active @param {string} cwd @param {{ signal?: AbortSignal }} [options] */
+async function dashboardRuntimeActivity(active, cwd = process.cwd(), options = {}) {
   const result = emptyRuntimeActivity();
   const activeSessionIds = new Set();
-  for (const state of active.values()) {
+  const activeStates = [...active.values()];
+  const groupSnapshots = await loadDashboardGroupSnapshots(activeStates, options);
+  for (const state of activeStates) {
     activeSessionIds.add(state.session.id);
-    const activity = await dashboardSessionActivity(state);
+    const activity = await dashboardSessionActivity(state, {
+      groups: groupSnapshots.get(path.resolve(state.session.cwd)) ?? []
+    });
     result.activeTurns += activity.activeTurns;
     result.quarantinedTurns += activity.quarantinedTurns;
     result.queuedTurns += activity.queuedTurns;
@@ -1854,7 +1957,7 @@ async function dashboardRuntimeActivity(active, cwd = process.cwd()) {
   }
   const workspace = path.resolve(cwd);
   const orphanTerminals = listBackgroundTerminalTasks({ cwd })
-    .filter((task) => task.status === "starting" || task.status === "running")
+    .filter((task) => task.status === "starting" || task.status === "running" || task.status === "cancelling")
     .filter((task) => task.cwd && path.resolve(task.cwd) === workspace)
     .filter((task) => !task.parentSessionId || !activeSessionIds.has(task.parentSessionId));
   result.backgroundTasks += orphanTerminals.length;
@@ -1863,15 +1966,33 @@ async function dashboardRuntimeActivity(active, cwd = process.cwd()) {
   return result;
 }
 
-async function dashboardSessionActivity(state) {
-  const snapshot = await buildBackgroundSubagentSnapshot(state);
+/** @param {any} active @param {boolean} [uncertain] */
+function dashboardMemoryActivity(active, uncertain = false) {
+  const result = /** @type {any} */ (emptyRuntimeActivity());
+  for (const state of active.values()) {
+    result.activeTurns += state.running ? 1 : 0;
+    result.quarantinedTurns += state.quarantinedTurnId ? 1 : 0;
+    result.queuedTurns += state.queuedPrompts.length;
+    result.pendingInteractions += state.pendingApprovals.size + state.pendingQuestions.size;
+  }
+  result.sessions = active.size;
+  result.total = activityTotal(result);
+  if (uncertain) {
+    result.uncertain = true;
+  }
+  return result;
+}
+
+/** @param {any} state @param {{ groups?: Array<Record<string, any>>; signal?: AbortSignal }} [options] */
+async function dashboardSessionActivity(state, options = {}) {
+  const snapshot = await buildBackgroundSubagentSnapshot(state, options);
   const activeTurns = state.running ? 1 : 0;
   const visibleBackgroundTasks = snapshot.groups.reduce((total, group) => (
     total + Math.max(1, nonNegativeInteger(group.runningCount))
   ), 0);
   const registeredAgents = listBackgroundAgentTasks({ parentSessionId: state.session.id }).length;
   const registeredTerminals = listBackgroundTerminalTasks({ parentSessionId: state.session.id, cwd: state.session.cwd })
-    .filter((task) => task.status === "starting" || task.status === "running")
+    .filter((task) => task.status === "starting" || task.status === "running" || task.status === "cancelling")
     .filter((task) => !task.cwd || path.resolve(task.cwd) === path.resolve(state.session.cwd))
     .length;
   const result = {
@@ -1903,20 +2024,15 @@ function activityTotal(activity) {
   return activity.activeTurns + activity.queuedTurns + activity.backgroundTasks + activity.pendingInteractions;
 }
 
-async function cancelSessionBackgroundWork(state) {
+/** @param {any} state @param {any} [options] */
+async function cancelSessionBackgroundWork(state, options = {}) {
   const aborted = cancelBackgroundAgentTasks({ parentSessionId: state.session.id });
-  for (const task of listBackgroundTerminalTasks({ parentSessionId: state.session.id, cwd: state.session.cwd })) {
-    if (
-      (task.status === "starting" || task.status === "running")
-      && task.cwd
-      && path.resolve(task.cwd) === path.resolve(state.session.cwd)
-    ) {
-      cancelBackgroundTerminalTasks({
-        parentSessionId: state.session.id,
-        cwd: state.session.cwd,
-        taskId: task.taskId
-      });
-    }
+  if (options.cancelTerminals !== false) {
+    await cancelBackgroundTerminalTasks({
+      parentSessionId: state.session.id,
+      cwd: state.session.cwd,
+      workspaceCwd: state.session.cwd
+    });
   }
   const abortedIds = new Set(aborted.filter((task) => task.aborted === true).map((task) => task.taskId));
   const taskStore = createAgentTaskStore({ cwd: state.session.cwd });
@@ -1951,24 +2067,17 @@ async function cancelSessionBackgroundWork(state) {
       }
     });
   }
-  await appendBackgroundSubagentSnapshot(state);
+  scheduleBackgroundSubagentSnapshot(state);
 }
 
-function cancelWorkspaceBackgroundTerminals(cwd) {
-  const workspace = path.resolve(cwd);
-  for (const task of listBackgroundTerminalTasks({ cwd })) {
-    if (
-      (task.status === "starting" || task.status === "running")
-      && task.cwd
-      && path.resolve(task.cwd) === workspace
-    ) {
-      cancelBackgroundTerminalTasks({
-        parentSessionId: task.parentSessionId,
-        cwd,
-        taskId: task.taskId
-      });
-    }
-  }
+/** @param {string} cwd @param {Record<string, any>} [options] */
+async function cancelWorkspaceBackgroundTerminals(cwd, options = {}) {
+  return cancelBackgroundTerminalTasks({
+    cwd,
+    workspaceCwd: cwd,
+    refresh: options.memoryOnly !== true,
+    persist: options.memoryOnly !== true
+  });
 }
 
 function cancelAllQueuedTurns(state, reason) {
@@ -1990,14 +2099,20 @@ function cancelAllQueuedTurns(state, reason) {
   return removed;
 }
 
-async function waitForRuntimeActivity(active, timeoutMs, cwd) {
-  const deadline = Date.now() + timeoutMs;
-  let activity = await dashboardRuntimeActivity(active, cwd);
-  while (activity.total > 0 && Date.now() < deadline) {
+async function waitForRuntimeActivity(active, deadline, cwd, readActivity = dashboardRuntimeActivity) {
+  let activity = dashboardMemoryActivity(active, true);
+  while (Date.now() < deadline) {
+    const probe = await waitForLifecycleOperation((signal) => readActivity(active, cwd, { signal }), deadline);
+    if (!probe.settled || probe.error) {
+      return { settled: false, activity: dashboardMemoryActivity(active, true), error: probe.error };
+    }
+    activity = probe.value;
+    if (activity.total <= 0) {
+      return { settled: true, activity };
+    }
     await waitForLifecycleTick(deadline);
-    activity = await dashboardRuntimeActivity(active, cwd);
   }
-  return activity;
+  return { settled: false, activity: dashboardMemoryActivity(active, true) };
 }
 
 async function waitForSessionActivity(state, timeoutMs) {
@@ -2012,9 +2127,53 @@ async function waitForSessionActivity(state, timeoutMs) {
 
 function waitForLifecycleTick(deadline) {
   return new Promise((resolve) => {
-    const delay = Math.max(1, Math.min(25, deadline - Date.now()));
+    const delay = Math.max(1, Math.min(LIFECYCLE_POLL_INTERVAL_MS, deadline - Date.now()));
     setTimeout(resolve, delay);
   });
+}
+
+/**
+ * @param {Promise<unknown> | null | undefined} promise
+ * @param {number} deadline
+ * @returns {Promise<boolean>}
+ */
+async function waitForLifecyclePromise(promise, deadline) {
+  if (!promise) {
+    return true;
+  }
+  const result = await waitForLifecycleOperation(() => promise, deadline);
+  return result.settled;
+}
+
+/**
+ * @param {(signal: AbortSignal) => any} operation
+ * @param {number} deadline
+ */
+async function waitForLifecycleOperation(operation, deadline) {
+  const remaining = Math.max(0, deadline - Date.now());
+  if (remaining <= 0) {
+    return { settled: false };
+  }
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let timer = null;
+  const controller = new AbortController();
+  const work = Promise.resolve().then(() => operation(controller.signal));
+  try {
+    return await Promise.race([
+      work.then(
+        (value) => ({ settled: true, value }),
+        (error) => ({ settled: true, error })
+      ),
+      new Promise((resolve) => {
+        timer = setTimeout(() => {
+          resolve({ settled: false });
+          controller.abort(new Error("Dashboard lifecycle operation timed out"));
+        }, remaining);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function lifecycleWaitMs(value, env = process.env) {
@@ -2055,6 +2214,8 @@ function disposeTurnState(state, reason) {
   state.currentTurnId = "";
   state.turnEnv = null;
   state.finalOutput = "";
+  state.backgroundSnapshotDirty = false;
+  state.backgroundSnapshotPromise = null;
   state.events.length = 0;
   state.listeners.clear();
   if (canReleaseSessionMemory) {
@@ -3046,6 +3207,8 @@ function createTurnState(session, runTurn = runSessionTurn, options = {}) {
     pendingQuestions: new Map(),
     finalOutput: "",
     backgroundSnapshotTimer: null,
+    backgroundSnapshotDirty: false,
+    backgroundSnapshotPromise: null,
     hooksTrusted: false
   };
 }
@@ -3418,10 +3581,10 @@ function runTurnInBackground(state, item, env) {
             appendDashboardEvent(state, mapped);
           }
           if (String(event.type ?? "").startsWith("subagent_group_")) {
-            await appendBackgroundSubagentSnapshot(state);
+            scheduleBackgroundSubagentSnapshot(state);
           }
           if (String(event.type ?? "").startsWith("background_terminal_")) {
-            await appendBackgroundSubagentSnapshot(state);
+            scheduleBackgroundSubagentSnapshot(state);
           }
           if (currentTurn && event.type === "tool_finish" && (event.name === "todo_write" || event.name === "plan_update")) {
             appendWorkflowSnapshot(state, event.name);
@@ -3483,10 +3646,6 @@ function runTurnInBackground(state, item, env) {
       if (wasQuarantined) {
         state.status = "interrupted";
       }
-      state.persisted = !state.disposed && await isSessionStatePersisted(state, env);
-      if (!state.disposed) {
-        await appendBackgroundSubagentSnapshot(state);
-      }
       state.currentPrompt = "";
       state.currentAttachmentBytes = 0;
       const next = wasQuarantined || state.disposed ? null : state.queuedPrompts.shift();
@@ -3509,6 +3668,12 @@ function runTurnInBackground(state, item, env) {
         state.currentTurnId = "";
         state.currentTranscriptStart = activeTranscriptMessages(state).length;
         state.turnEnv = null;
+      }
+      if (!state.disposed) {
+        if (!next) {
+          scheduleSessionPersistenceCheck(state, env);
+        }
+        scheduleBackgroundSubagentSnapshot(state);
       }
     }
   });
@@ -3895,8 +4060,9 @@ async function queueBackgroundWakePrompt(state, event, env) {
       at: new Date().toISOString()
     });
     appendQueueUpdated(state);
-    await markWakePromptConsumed(state, event);
-    await appendBackgroundSubagentSnapshot(state);
+    void markWakePromptConsumed(state, event)
+      .finally(() => scheduleBackgroundSubagentSnapshot(state));
+    scheduleBackgroundSubagentSnapshot(state);
     return { ok: true, queued: true, item };
   } else {
     beginPrompt(state, item, env);
@@ -3910,8 +4076,9 @@ async function queueBackgroundWakePrompt(state, event, env) {
       started: true,
       at: new Date().toISOString()
     });
-    await markWakePromptConsumed(state, event);
-    await appendBackgroundSubagentSnapshot(state);
+    void markWakePromptConsumed(state, event)
+      .finally(() => scheduleBackgroundSubagentSnapshot(state));
+    scheduleBackgroundSubagentSnapshot(state);
     return { ok: true, started: true, item };
   }
 }
@@ -3935,6 +4102,9 @@ async function appendBackgroundSubagentSnapshot(state) {
     return;
   }
   const snapshot = await buildBackgroundSubagentSnapshot(state);
+  if (state.disposed) {
+    return;
+  }
   if (!snapshot.hasRecords && snapshot.groups.length === 0) {
     appendDashboardEvent(state, {
       type: "background_subagent_snapshot",
@@ -3960,11 +4130,39 @@ async function appendBackgroundSubagentSnapshot(state) {
   updateBackgroundSnapshotPolling(state, snapshot.groups);
 }
 
-async function buildBackgroundSubagentSnapshot(state) {
+/** @param {any} state */
+function scheduleBackgroundSubagentSnapshot(state) {
+  if (state.disposed) {
+    return null;
+  }
+  if (state.backgroundSnapshotPromise) {
+    state.backgroundSnapshotDirty = true;
+    return state.backgroundSnapshotPromise;
+  }
+  state.backgroundSnapshotDirty = false;
+  const promise = appendBackgroundSubagentSnapshot(state)
+    .catch(() => {})
+    .finally(() => {
+      if (state.backgroundSnapshotPromise === promise) {
+        state.backgroundSnapshotPromise = null;
+        if (state.backgroundSnapshotDirty && !state.disposed) {
+          state.backgroundSnapshotDirty = false;
+          queueMicrotask(() => scheduleBackgroundSubagentSnapshot(state));
+        }
+      }
+    });
+  state.backgroundSnapshotPromise = promise;
+  return promise;
+}
+
+/** @param {any} state @param {{ groups?: Array<Record<string, any>>; signal?: AbortSignal }} [options] */
+async function buildBackgroundSubagentSnapshot(state, options = {}) {
   try {
     const groupStore = createAgentTaskGroupStore({ cwd: state.session.cwd });
     const taskStore = createAgentTaskStore({ cwd: state.session.cwd });
-    const groups = await groupStore.listGroups({ parentSessionId: state.session.id });
+    const groups = Array.isArray(options.groups)
+      ? options.groups.filter((group) => group.parentSessionId === state.session.id)
+      : await groupStore.listGroups({ parentSessionId: state.session.id, signal: options.signal });
     const visible = [];
     for (const group of groups) {
       const tasks = await readDashboardGroupTasks(taskStore, group.taskIds);
@@ -3999,7 +4197,7 @@ async function buildBackgroundSubagentSnapshot(state) {
       });
     }
     const terminals = listBackgroundTerminalTasks({ parentSessionId: state.session.id, cwd: state.session.cwd })
-      .filter((task) => task.status === "running" || task.status === "starting")
+      .filter((task) => task.status === "running" || task.status === "starting" || task.status === "cancelling")
       .map((task) => ({
         groupId: null,
         taskId: task.taskId,
@@ -4007,7 +4205,7 @@ async function buildBackgroundSubagentSnapshot(state) {
         profile: "terminal",
         waitFor: null,
         wakeParent: false,
-        status: task.status === "starting" ? "starting" : "running",
+        status: task.status === "starting" ? "starting" : task.status === "cancelling" ? "cancelling" : "running",
         stale: false,
         staleKind: null,
         staleReason: "",
@@ -4024,7 +4222,7 @@ async function buildBackgroundSubagentSnapshot(state) {
           task.stdoutPath ? `stdout=${task.stdoutPath}` : null
         ].filter(Boolean).join(" · "),
         taskCount: 1,
-        runningCount: task.status === "running" ? 1 : 0,
+        runningCount: task.status === "running" || task.status === "cancelling" ? 1 : 0,
         updatedAt: task.updatedAt
       }));
     return {
@@ -4035,6 +4233,28 @@ async function buildBackgroundSubagentSnapshot(state) {
   } catch {
     return { hasRecords: false, totalGroups: 0, groups: [] };
   }
+}
+
+/**
+ * @param {any[]} states
+ * @param {{ signal?: AbortSignal }} [options]
+ * @returns {Promise<Map<string, Array<Record<string, any>> | null>>}
+ */
+async function loadDashboardGroupSnapshots(states, options = {}) {
+  /** @type {Map<string, Array<Record<string, any>> | null>} */
+  const byWorkspace = new Map();
+  for (const state of states) {
+    const cwd = path.resolve(state.session.cwd);
+    if (!byWorkspace.has(cwd)) {
+      byWorkspace.set(cwd, null);
+    }
+  }
+  await Promise.all([...byWorkspace.keys()].map(async (cwd) => {
+    const store = createAgentTaskGroupStore({ cwd });
+    const groups = await store.listGroups({ signal: options.signal });
+    byWorkspace.set(cwd, groups);
+  }));
+  return byWorkspace;
 }
 
 async function readDashboardGroupTasks(taskStore, taskIds = []) {
@@ -4140,7 +4360,7 @@ function startBackgroundSnapshotPolling(state) {
     return;
   }
   state.backgroundSnapshotTimer = setInterval(() => {
-    void appendBackgroundSubagentSnapshot(state);
+    scheduleBackgroundSubagentSnapshot(state);
   }, BACKGROUND_SNAPSHOT_INTERVAL_MS);
   state.backgroundSnapshotTimer.unref?.();
 }
