@@ -1,5 +1,11 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import {
+  atomicWriteFile,
+  ensureContainedDirectory,
+  resolveContainedPath,
+  withFileMutationLock
+} from "../storage/durable-file.js";
 
 const TASK_VERSION = 2;
 const TASK_OUTPUT_PREVIEW_CHARS = 32_000;
@@ -8,6 +14,10 @@ const TERMINAL_TASK_STATUSES = new Set(["completed", "failed", "partial", "block
 export function createAgentTaskStore(options) {
   const root = path.join(options.cwd, ".lab-agent", "tasks");
   const outputRoot = path.join(options.cwd, ".lab-agent", "task-outputs");
+  let resolvedRoot = null;
+  let resolvedOutputRoot = null;
+  const taskRoot = () => resolvedRoot ??= ensureContainedDirectory(options.cwd, root);
+  const taskOutputRoot = () => resolvedOutputRoot ??= ensureContainedDirectory(options.cwd, outputRoot);
 
   return {
     root,
@@ -20,35 +30,45 @@ export function createAgentTaskStore(options) {
         updatedAt: now,
         status: task.status ?? "queued"
       });
-      await writeTask(root, record);
+      const directory = await taskRoot();
+      const filePath = path.join(directory, `${safeTaskId(record.id)}.json`);
+      await withFileMutationLock(filePath, () => writeTask(directory, record));
       return record;
     },
     async updateTask(taskId, patch) {
-      const current = await this.readTask(taskId);
-      if (!current.ok) {
-        return current;
-      }
-      const now = new Date().toISOString();
-      const status = patch.status ? normalizeStatus(patch.status) : current.task.status;
-      const terminal = TERMINAL_TASK_STATUSES.has(status);
-      const record = normalizeTask({
-        ...current.task,
-        ...patch,
-        updatedAt: now,
-        progressAt: patch.progressAt ?? (isProgressPatch(patch) ? now : current.task.progressAt),
-        heartbeatAt: patch.heartbeatAt ?? (terminal ? now : current.task.heartbeatAt)
+      const id = safeTaskId(taskId);
+      const directory = await taskRoot();
+      const filePath = path.join(directory, `${id}.json`);
+      return withFileMutationLock(filePath, async () => {
+        const current = await readTaskFile(filePath);
+        if (!current.ok) {
+          return current;
+        }
+        const now = new Date().toISOString();
+        const status = patch.status ? normalizeStatus(patch.status) : current.task.status;
+        const terminal = TERMINAL_TASK_STATUSES.has(status);
+        const record = normalizeTask({
+          ...current.task,
+          ...patch,
+          metadata: patch.metadata && typeof patch.metadata === "object"
+            ? { ...current.task.metadata, ...patch.metadata }
+            : current.task.metadata,
+          updatedAt: now,
+          progressAt: patch.progressAt ?? (isProgressPatch(patch) ? now : current.task.progressAt),
+          heartbeatAt: patch.heartbeatAt ?? (terminal ? now : current.task.heartbeatAt)
+        });
+        await writeTask(directory, record);
+        return { ok: true, task: record };
       });
-      await writeTask(root, record);
-      return { ok: true, task: record };
     },
     async writeTaskOutput(taskId, output) {
       const id = safeTaskId(taskId);
       const text = String(output ?? "");
       const bytes = Buffer.byteLength(text, "utf8");
-      await fs.mkdir(outputRoot, { recursive: true });
-      const filePath = path.join(outputRoot, `${id}.txt`);
-      await fs.writeFile(filePath, text, "utf8");
-      const relativePath = path.relative(options.cwd, filePath);
+      const directory = await taskOutputRoot();
+      const filePath = path.join(directory, `${id}.txt`);
+      await withFileMutationLock(filePath, () => atomicWriteFile(filePath, text));
+      const relativePath = path.join(".lab-agent", "task-outputs", `${id}.txt`);
       return {
         path: relativePath,
         bytes,
@@ -62,13 +82,15 @@ export function createAgentTaskStore(options) {
         return { ok: false, error: { code: "TASK_OUTPUT_PATH_MISSING", message: "Task has no sidecar output path." } };
       }
       try {
+        const directory = await taskOutputRoot();
         const filePath = path.resolve(options.cwd, outputPath);
         const rootPath = path.resolve(outputRoot);
         if (!filePath.toLowerCase().startsWith(rootPath.toLowerCase() + path.sep)) {
           return { ok: false, error: { code: "TASK_OUTPUT_PATH_OUTSIDE_STORE", message: "Task output path is outside the task output store." } };
         }
-        const text = await fs.readFile(filePath, "utf8");
-        return { ok: true, path: filePath, output: text };
+        const safePath = await resolveContainedPath(directory, filePath);
+        const text = await fs.readFile(safePath, "utf8");
+        return { ok: true, path: safePath, output: text };
       } catch (error) {
         return {
           ok: false,
@@ -80,30 +102,19 @@ export function createAgentTaskStore(options) {
       }
     },
     async readTask(taskId) {
-      try {
-        const filePath = path.join(root, `${safeTaskId(taskId)}.json`);
-        const raw = await fs.readFile(filePath, "utf8");
-        return { ok: true, path: filePath, task: normalizeTask(JSON.parse(raw)) };
-      } catch (error) {
-        return {
-          ok: false,
-          error: {
-            code: "AGENT_TASK_NOT_FOUND",
-            message: error instanceof Error ? error.message : String(error)
-          }
-        };
-      }
+      const directory = await taskRoot();
+      return readTaskFile(path.join(directory, `${safeTaskId(taskId)}.json`));
     },
     async listTasks(options = {}) {
-      await fs.mkdir(root, { recursive: true });
-      const entries = await fs.readdir(root, { withFileTypes: true });
+      const directory = await taskRoot();
+      const entries = await fs.readdir(directory, { withFileTypes: true });
       const tasks = [];
       for (const entry of entries) {
         if (!entry.isFile() || !entry.name.endsWith(".json")) {
           continue;
         }
         try {
-          const raw = await fs.readFile(path.join(root, entry.name), "utf8");
+          const raw = await fs.readFile(path.join(directory, entry.name), "utf8");
           const task = normalizeTask(JSON.parse(raw));
           if (options.parentSessionId && task.parentSessionId !== options.parentSessionId) {
             continue;
@@ -196,8 +207,26 @@ function normalizeStatus(value) {
 }
 
 async function writeTask(root, task) {
-  await fs.mkdir(root, { recursive: true });
-  await fs.writeFile(path.join(root, `${safeTaskId(task.id)}.json`), `${JSON.stringify(task, null, 2)}\n`, "utf8");
+  await atomicWriteFile(path.join(root, `${safeTaskId(task.id)}.json`), `${JSON.stringify(task, null, 2)}\n`);
+}
+
+/**
+ * @param {string} filePath
+ * @returns {Promise<any>}
+ */
+async function readTaskFile(filePath) {
+  try {
+    const raw = await fs.readFile(filePath, "utf8");
+    return { ok: true, path: filePath, task: normalizeTask(JSON.parse(raw)) };
+  } catch (error) {
+    return {
+      ok: false,
+      error: {
+        code: /** @type {NodeJS.ErrnoException} */ (error)?.code === "ENOENT" ? "AGENT_TASK_NOT_FOUND" : "AGENT_TASK_READ_ERROR",
+        message: error instanceof Error ? error.message : String(error)
+      }
+    };
+  }
 }
 
 function safeTaskId(value) {

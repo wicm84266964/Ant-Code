@@ -1,4 +1,10 @@
 import { emptyResponse, normalizeGatewayResponse } from "./protocol.js";
+import { emitGatewayEvent } from "./event-callback.js";
+import {
+  assertGatewayStreamRecordSize,
+  gatewayResponseLimitError,
+  normalizeGatewayMaxResponseBytes
+} from "./limits.js";
 
 /**
  * Parse a lab gateway streaming response.
@@ -9,7 +15,7 @@ import { emptyResponse, normalizeGatewayResponse } from "./protocol.js";
  *
  * @param {ReadableStream<Uint8Array> | null} body
  * @param {string | null} contentType
- * @param {{ onEvent?: (event: Record<string, any>) => void | Promise<void>; signal?: AbortSignal; idleTimeoutMs?: number }} [options]
+ * @param {{ onEvent?: (event: Record<string, any>) => void | Promise<void>; signal?: AbortSignal; idleTimeoutMs?: number; eventTimeoutMs?: number; maxResponseBytes?: number }} [options]
  */
 export async function parseGatewayStream(body, contentType, options = {}) {
   if (!body) {
@@ -62,11 +68,14 @@ async function parseServerSentEvents(body, options = {}) {
     text += chunk;
     const parts = text.split(/\r?\n\r?\n/);
     text = parts.pop() ?? "";
+    assertGatewayStreamRecordSize(text);
     for (const eventText of parts) {
+      assertGatewayStreamRecordSize(eventText);
       await consumeServerSentEvent(eventText, records, response, options);
     }
   }
   if (text.trim()) {
+    assertGatewayStreamRecordSize(text);
     await consumeServerSentEvent(text, records, response, options);
   }
   return records;
@@ -105,11 +114,14 @@ async function parseNewlineDelimitedJson(body, options = {}) {
     text += chunk;
     const lines = text.split(/\r?\n/);
     text = lines.pop() ?? "";
+    assertGatewayStreamRecordSize(text);
     for (const line of lines) {
+      assertGatewayStreamRecordSize(line);
       await consumeJsonLine(line, records, response, options);
     }
   }
   if (text.trim()) {
+    assertGatewayStreamRecordSize(text);
     await consumeJsonLine(text, records, response, options);
   }
   return records;
@@ -139,7 +151,7 @@ async function consumeJsonLine(line, records, response, options = {}) {
 async function applyStreamRecord(response, record, options = {}) {
   const event = applyStreamRecordPayload(response, record);
   if (event) {
-    await emitStreamEvent(options.onEvent, event);
+    await emitStreamEvent(options.onEvent, event, options);
   }
 }
 
@@ -215,15 +227,31 @@ function applyStreamRecordPayload(response, record) {
 async function* streamTextChunks(body, options = {}) {
   const reader = body.getReader();
   const decoder = new TextDecoder();
+  const maxResponseBytes = normalizeGatewayMaxResponseBytes(options.maxResponseBytes);
+  let receivedBytes = 0;
+  let completed = false;
   try {
     while (true) {
       const { done, value } = await readStreamChunk(reader, options);
       if (done) {
+        completed = true;
         break;
       }
+      const chunkBytes = Number(value?.byteLength ?? 0);
+      if (chunkBytes > maxResponseBytes - receivedBytes) {
+        throw gatewayResponseLimitError(
+          "GATEWAY_RESPONSE_TOO_LARGE",
+          maxResponseBytes,
+          receivedBytes + chunkBytes
+        );
+      }
+      receivedBytes += chunkBytes;
       yield decoder.decode(value, { stream: true });
     }
   } finally {
+    if (!completed) {
+      cancelReader(reader, options.signal?.reason ?? new Error("Gateway stream consumer stopped before completion"));
+    }
     try {
       reader.releaseLock();
     } catch {
@@ -242,30 +270,42 @@ function readStreamChunk(reader, options = {}) {
   if (signal?.aborted) {
     return Promise.reject(abortError(signal.reason));
   }
-  if (!idleTimeoutMs) {
+  if (!idleTimeoutMs && !signal) {
     return reader.read();
   }
   return new Promise((resolve, reject) => {
     let settled = false;
+    /** @type {ReturnType<typeof setTimeout> | null} */
+    let timer = null;
+    /** @type {(() => void) | null} */
+    let onAbort = null;
     const finish = (callback, value) => {
       if (settled) {
         return;
       }
       settled = true;
-      clearTimeout(timer);
-      signal?.removeEventListener?.("abort", onAbort);
+      if (timer) clearTimeout(timer);
+      if (onAbort) signal?.removeEventListener?.("abort", onAbort);
       callback(value);
     };
-    const timer = setTimeout(() => {
-      cancelReader(reader, timeoutError(idleTimeoutMs));
-      finish(reject, timeoutError(idleTimeoutMs));
-    }, idleTimeoutMs);
-    const onAbort = () => {
-      cancelReader(reader, signal.reason);
-      finish(reject, abortError(signal.reason));
-    };
-    signal?.addEventListener?.("abort", onAbort, { once: true });
-    reader.read().then(
+    if (idleTimeoutMs) {
+      timer = setTimeout(() => {
+        cancelReader(reader, timeoutError(idleTimeoutMs));
+        finish(reject, timeoutError(idleTimeoutMs));
+      }, idleTimeoutMs);
+    }
+    if (signal) {
+      onAbort = () => {
+        cancelReader(reader, signal.reason);
+        finish(reject, abortError(signal.reason));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+    }
+    Promise.resolve().then(() => reader.read()).then(
       (chunk) => finish(resolve, chunk),
       (error) => finish(reject, error)
     );
@@ -312,10 +352,11 @@ function appendText(response, text) {
 /**
  * @param {(event: Record<string, any>) => void | Promise<void>} [onEvent]
  * @param {Record<string, any>} event
+ * @param {{ signal?: AbortSignal; eventTimeoutMs?: number }} [options]
  */
-async function emitStreamEvent(onEvent, event) {
-  if (!onEvent) {
-    return;
-  }
-  await onEvent(event);
+async function emitStreamEvent(onEvent, event, options = {}) {
+  await emitGatewayEvent(onEvent, event, {
+    signal: options.signal,
+    timeoutMs: options.eventTimeoutMs
+  });
 }

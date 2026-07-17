@@ -1,5 +1,11 @@
 import { appendThinkingPreview, limitThinkingPreview } from "./thinking-budget.js";
+import { emitGatewayEvent } from "./event-callback.js";
 import { redactGatewayText } from "./errors.js";
+import {
+  assertGatewayStreamRecordSize,
+  gatewayResponseLimitError,
+  normalizeGatewayMaxResponseBytes
+} from "./limits.js";
 import { emptyResponse, normalizeContent } from "./protocol.js";
 
 /**
@@ -84,13 +90,19 @@ export function normalizeOpenAIChatCompletionResponse(raw, options = {}) {
  * non-streaming JSON with a streaming content type, so this accepts both forms.
  *
  * @param {ReadableStream<Uint8Array> | null} body
- * @param {{ onEvent?: (event: Record<string, any>) => void | Promise<void>; reasoningContentMode?: string }} [options]
+ * @param {{ onEvent?: (event: Record<string, any>) => void | Promise<void>; reasoningContentMode?: string; signal?: AbortSignal; idleTimeoutMs?: number; eventTimeoutMs?: number; maxResponseBytes?: number }} [options]
  * @returns {Promise<import("./protocol.js").NormalizedGatewayResponse>}
  */
 export async function parseOpenAIChatCompletionStream(body, options = {}) {
   const aggregate = createOpenAIStreamAggregate();
+  const onEvent = options.onEvent
+    ? (event) => emitGatewayEvent(options.onEvent, event, {
+      signal: options.signal,
+      timeoutMs: options.eventTimeoutMs
+    })
+    : undefined;
   const stream = await readOpenAIStream(body, async (record) => {
-    await applyOpenAIStreamRecord(aggregate, record, options.onEvent);
+    await applyOpenAIStreamRecord(aggregate, record, onEvent);
   }, options);
   const text = stream.text;
   const trimmed = text.trim();
@@ -101,11 +113,21 @@ export async function parseOpenAIChatCompletionStream(body, options = {}) {
     return normalizeOpenAIChatCompletionResponse(JSON.parse(trimmed), options);
   }
 
-  const toolCalls = Array.from(aggregate.toolCalls.values()).map((call, index) => ({
-    id: call.id || `tool-${index + 1}`,
-    name: call.name,
-    input: parseArguments(call.arguments)
-  })).filter((call) => typeof call.name === "string" && call.name.length > 0);
+  const toolCalls = normalizeOpenAIStreamToolCalls(aggregate.toolCalls);
+  if (aggregate.finishReason === "tool_calls" && toolCalls.length === 0) {
+    throw openAIStreamProtocolError(
+      "INCOMPLETE_TOOL_CALL",
+      "OpenAI-compatible stream ended with finish_reason=tool_calls but no valid tool call",
+      "finish_without_valid_tool_call"
+    );
+  }
+  if (stream.records.length > 0 && !stream.sawDone && !aggregate.sawFinishReason) {
+    throw openAIStreamProtocolError(
+      "UPSTREAM_STREAM_ABORTED",
+      "OpenAI-compatible stream ended before [DONE] or finish_reason",
+      "missing_done_and_finish_reason"
+    );
+  }
 
   const visibleReasoning = visibleReasoningFallback({
     reasoning_content: aggregate.thinking
@@ -133,6 +155,7 @@ function createOpenAIStreamAggregate() {
     thinking: "",
     thinkingBytes: 0,
     thinkingTruncated: false,
+    sawFinishReason: false,
     finishReason: null,
     usage: null,
     toolCalls: new Map()
@@ -288,8 +311,60 @@ function parseArguments(value) {
     const parsed = JSON.parse(value);
     return isPlainObject(parsed) ? parsed : {};
   } catch {
-    return parseLastJsonObject(value);
+    return parseLastJsonObject(value) ?? {};
   }
+}
+
+/**
+ * @param {Map<number, Record<string, any>>} calls
+ */
+function normalizeOpenAIStreamToolCalls(calls) {
+  return Array.from(calls.entries()).map(([index, call]) => {
+    const name = typeof call?.name === "string" ? call.name : "";
+    if (!name) {
+      throw openAIStreamProtocolError(
+        "INCOMPLETE_TOOL_CALL",
+        "OpenAI-compatible stream ended before a tool call name was complete",
+        "missing_tool_name",
+        { toolIndex: index }
+      );
+    }
+    return {
+      id: call.id || `tool-${index + 1}`,
+      name,
+      input: parseOpenAIStreamToolArguments(call.arguments, { index, name })
+    };
+  });
+}
+
+/**
+ * @param {unknown} value
+ * @param {{ index: number; name: string }} tool
+ */
+function parseOpenAIStreamToolArguments(value, tool) {
+  if (isPlainObject(value)) {
+    return value;
+  }
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(value);
+    if (isPlainObject(parsed)) {
+      return parsed;
+    }
+  } catch {
+    const recovered = parseLastJsonObject(value);
+    if (recovered) {
+      return recovered;
+    }
+  }
+  throw openAIStreamProtocolError(
+    "INCOMPLETE_TOOL_CALL",
+    `OpenAI-compatible stream ended with incomplete arguments for tool '${tool.name}'`,
+    "incomplete_tool_arguments",
+    { toolIndex: tool.index, toolName: tool.name }
+  );
 }
 
 /**
@@ -300,7 +375,7 @@ function parseArguments(value) {
  */
 function parseLastJsonObject(value) {
   const trimmed = value.trim();
-  for (let index = trimmed.lastIndexOf("{"); index >= 0; index = trimmed.lastIndexOf("{", index - 1)) {
+  for (let index = trimmed.lastIndexOf("{"); index >= 0;) {
     try {
       const parsed = JSON.parse(trimmed.slice(index));
       if (isPlainObject(parsed)) {
@@ -309,26 +384,39 @@ function parseLastJsonObject(value) {
     } catch {
       // Keep scanning earlier object starts.
     }
+    if (index === 0) {
+      break;
+    }
+    index = trimmed.lastIndexOf("{", index - 1);
   }
-  return {};
+  return null;
 }
 
 /**
  * @param {ReadableStream<Uint8Array> | null} body
  * @param {(record: unknown) => void | Promise<void>} onRecord
- * @param {{ signal?: AbortSignal; idleTimeoutMs?: number }} [options]
+ * @param {{ signal?: AbortSignal; idleTimeoutMs?: number; maxResponseBytes?: number }} [options]
  */
 async function readOpenAIStream(body, onRecord, options = {}) {
   if (!body) {
-    return { text: "", records: [] };
+    return { text: "", records: [], sawDone: false };
   }
   const reader = body.getReader();
   const decoder = new TextDecoder();
+  const maxResponseBytes = normalizeGatewayMaxResponseBytes(options.maxResponseBytes);
+  let receivedBytes = 0;
   let text = "";
   let lineBuffer = "";
   const records = [];
+  let sawDone = false;
+  let completed = false;
 
   const emitLine = async (line) => {
+    assertGatewayStreamRecordSize(line);
+    if (isOpenAIStreamDoneLine(line)) {
+      sawDone = true;
+      return;
+    }
     let record;
     try {
       record = parseStreamingLine(line);
@@ -350,6 +438,7 @@ async function readOpenAIStream(body, onRecord, options = {}) {
     } else {
       lineBuffer = "";
     }
+    assertGatewayStreamRecordSize(lineBuffer);
     for (const line of lines) {
       await emitLine(line);
     }
@@ -359,14 +448,27 @@ async function readOpenAIStream(body, onRecord, options = {}) {
     while (true) {
       const { value, done } = await readStreamChunk(reader, options);
       if (done) {
+        completed = true;
         break;
       }
+      const chunkBytes = Number(value?.byteLength ?? 0);
+      if (chunkBytes > maxResponseBytes - receivedBytes) {
+        throw gatewayResponseLimitError(
+          "GATEWAY_RESPONSE_TOO_LARGE",
+          maxResponseBytes,
+          receivedBytes + chunkBytes
+        );
+      }
+      receivedBytes += chunkBytes;
       const chunk = decoder.decode(value, { stream: true });
       text += chunk;
       lineBuffer += chunk;
       await drainLines(false);
     }
   } finally {
+    if (!completed) {
+      cancelReader(reader, options.signal?.reason ?? new Error("Gateway stream consumer stopped before completion"));
+    }
     try {
       reader.releaseLock();
     } catch {
@@ -379,7 +481,14 @@ async function readOpenAIStream(body, onRecord, options = {}) {
     lineBuffer += tail;
   }
   await drainLines(true);
-  return { text, records };
+  return { text, records, sawDone };
+}
+
+/** @param {string} line */
+function isOpenAIStreamDoneLine(line) {
+  const trimmed = line.trim();
+  const payload = trimmed.startsWith("data:") ? trimmed.slice("data:".length).trim() : trimmed;
+  return payload === "[DONE]";
 }
 
 function attachOpenAIStreamPreview(error, text, line) {
@@ -396,30 +505,42 @@ function readStreamChunk(reader, options = {}) {
   if (signal?.aborted) {
     return Promise.reject(abortError(signal.reason));
   }
-  if (!idleTimeoutMs) {
+  if (!idleTimeoutMs && !signal) {
     return reader.read();
   }
   return new Promise((resolve, reject) => {
     let settled = false;
+    /** @type {ReturnType<typeof setTimeout> | null} */
+    let timer = null;
+    /** @type {(() => void) | null} */
+    let onAbort = null;
     const finish = (callback, value) => {
       if (settled) {
         return;
       }
       settled = true;
-      clearTimeout(timer);
-      signal?.removeEventListener?.("abort", onAbort);
+      if (timer) clearTimeout(timer);
+      if (onAbort) signal?.removeEventListener?.("abort", onAbort);
       callback(value);
     };
-    const timer = setTimeout(() => {
-      cancelReader(reader, timeoutError(idleTimeoutMs));
-      finish(reject, timeoutError(idleTimeoutMs));
-    }, idleTimeoutMs);
-    const onAbort = () => {
-      cancelReader(reader, signal.reason);
-      finish(reject, abortError(signal.reason));
-    };
-    signal?.addEventListener?.("abort", onAbort, { once: true });
-    reader.read().then(
+    if (idleTimeoutMs) {
+      timer = setTimeout(() => {
+        cancelReader(reader, timeoutError(idleTimeoutMs));
+        finish(reject, timeoutError(idleTimeoutMs));
+      }, idleTimeoutMs);
+    }
+    if (signal) {
+      onAbort = () => {
+        cancelReader(reader, signal.reason);
+        finish(reject, abortError(signal.reason));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+    }
+    Promise.resolve().then(() => reader.read()).then(
       (chunk) => finish(resolve, chunk),
       (error) => finish(reject, error)
     );
@@ -496,6 +617,7 @@ async function applyOpenAIStreamRecord(aggregate, record, onEvent) {
     return;
   }
   if (typeof choice.finish_reason === "string") {
+    aggregate.sawFinishReason = choice.finish_reason.trim().length > 0;
     aggregate.finishReason = choice.finish_reason;
   }
   if (isPlainObject(choice.message)) {
@@ -584,6 +706,15 @@ async function applyOpenAIStreamRecord(aggregate, record, onEvent) {
       stopReason: aggregate.finishReason
     });
   }
+}
+
+function openAIStreamProtocolError(code, message, reason, details = {}) {
+  const error = new Error(message);
+  error.name = "GatewayStreamProtocolError";
+  error.code = code;
+  error.retryable = true;
+  error.details = { reason, ...details };
+  return error;
 }
 
 /**

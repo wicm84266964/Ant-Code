@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { registerBackgroundTerminalTask, updateBackgroundTerminalTask } from "../agents/background-terminal-registry.js";
@@ -8,6 +9,10 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 120_000;
 const DEFAULT_BACKGROUND_LOG_DIR = ".lab-agent/background-terminal";
 const DEFAULT_BACKGROUND_LAUNCH_TIMEOUT_MS = 15_000;
+const SHELL_TERMINATION_ESCALATION_MS = 750;
+const SHELL_TERMINATION_SETTLE_MS = 2_000;
+const MAX_SHELL_OUTPUT_BYTES = 4 * 1024 * 1024;
+const SHELL_OUTPUT_TRUNCATION_MARKER = Buffer.from("\n...[shell output truncated; preserving head and tail]...\n", "utf8");
 
 /**
  * @param {{ cwd: string; command: string; timeoutMs?: number; env?: NodeJS.ProcessEnv; signal?: AbortSignal; policy?: Record<string, any> }} input
@@ -45,22 +50,42 @@ export async function bashTool(input) {
  */
 export async function backgroundShellTool(input) {
   const taskId = sanitizeTaskId(input.taskId) || `terminal-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const terminalInstanceId = randomUUID();
   const logDir = path.resolve(input.cwd, input.logDir || DEFAULT_BACKGROUND_LOG_DIR);
   await fs.promises.mkdir(logDir, { recursive: true });
   const stdoutPath = path.join(logDir, `${taskId}.stdout.log`);
   const stderrPath = path.join(logDir, `${taskId}.stderr.log`);
   const scrubbed = scrubEnvironment(input.env ?? process.env, { allowSensitive: input.policy?.fullAccess === true });
-  registerBackgroundTerminalTask({
-    taskId,
-    parentSessionId: input.parentSessionId,
-    title: input.title,
-    command: input.command,
-    cwd: input.cwd,
-    pid: null,
-    stdoutPath,
-    stderrPath,
-    status: "starting"
-  });
+  try {
+    registerBackgroundTerminalTask({
+      taskId,
+      instanceId: terminalInstanceId,
+      parentSessionId: input.parentSessionId,
+      title: input.title,
+      command: input.command,
+      cwd: input.cwd,
+      pid: null,
+      stdoutPath,
+      stderrPath,
+      status: "starting"
+    });
+  } catch (error) {
+    return {
+      taskId,
+      command: input.command,
+      exitCode: null,
+      started: false,
+      stdoutPath,
+      stderrPath,
+      scrubbedEnv: scrubbed.removed,
+      error: {
+        code: error && typeof error === "object" && "code" in error
+          ? String(error.code)
+          : "BACKGROUND_TERMINAL_TASK_ID_CONFLICT",
+        message: error instanceof Error ? error.message : String(error)
+      }
+    };
+  }
   await notifyBackgroundTerminalEvent(input, {
     type: "background_terminal_registered",
     taskId,
@@ -70,10 +95,11 @@ export async function backgroundShellTool(input) {
     status: "starting"
   });
   const started = process.platform === "win32"
-    ? await startWindowsBackgroundShell({ ...input, taskId, logDir, stdoutPath, stderrPath, scrubbed })
-    : startPosixBackgroundShell({ ...input, taskId, stdoutPath, stderrPath, scrubbed });
+    ? await startWindowsBackgroundShell({ ...input, taskId, terminalInstanceId, logDir, stdoutPath, stderrPath, scrubbed })
+    : startPosixBackgroundShell({ ...input, taskId, terminalInstanceId, stdoutPath, stderrPath, scrubbed });
   if (started.error) {
     updateBackgroundTerminalTask(taskId, {
+      instanceId: terminalInstanceId,
       status: started.cancelled ? "cancelled" : "failed",
       error: started.error.message,
       launcherPid: started.launcherPid ?? null,
@@ -92,6 +118,7 @@ export async function backgroundShellTool(input) {
     };
   }
   updateBackgroundTerminalTask(taskId, {
+    instanceId: terminalInstanceId,
     status: "running",
     pid: started.pid,
     launcherPid: started.launcherPid ?? null
@@ -180,7 +207,7 @@ async function startWindowsBackgroundShell(input) {
     launcher.stderr.on("data", (chunk) => stderr.push(Buffer.from(chunk)));
     launcher.on("spawn", () => {
       launcherPid = launcher.pid ?? null;
-      updateBackgroundTerminalTask(input.taskId, { launcherPid });
+      updateBackgroundTerminalTask(input.taskId, { instanceId: input.terminalInstanceId, launcherPid });
       if (input.signal?.aborted) {
         onAbort();
       }
@@ -245,6 +272,7 @@ function startPosixBackgroundShell(input) {
   child.on("close", (exitCode, signal) => {
     const stoppedExternally = ["SIGTERM", "SIGINT", "SIGHUP"].includes(signal);
     updateBackgroundTerminalTask(input.taskId, {
+      instanceId: input.terminalInstanceId,
       status: exitCode === 0 || stoppedExternally ? "completed" : "failed",
       exitCode,
       signal
@@ -253,6 +281,7 @@ function startPosixBackgroundShell(input) {
   });
   child.on("error", (error) => {
     updateBackgroundTerminalTask(input.taskId, {
+      instanceId: input.terminalInstanceId,
       status: "failed",
       error: error instanceof Error ? error.message : String(error)
     });
@@ -269,10 +298,11 @@ async function notifyBackgroundTerminalEvent(input, event) {
 }
 
 /**
- * @param {{ executable: string; args: string[]; cwd: string; timeoutMs?: number; env?: NodeJS.ProcessEnv; signal?: AbortSignal; policy?: Record<string, any> }} input
+ * @param {{ executable: string; args: string[]; cwd: string; timeoutMs?: number; env?: NodeJS.ProcessEnv; signal?: AbortSignal; policy?: Record<string, any>; spawnProcess?: typeof spawn; terminationSettleMs?: number }} input
  */
-function runShellCommand(input) {
+export function runShellCommand(input) {
   const timeoutMs = Math.min(input.timeoutMs ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
+  const terminationSettleMs = Math.max(1, Number(input.terminationSettleMs) || SHELL_TERMINATION_SETTLE_MS);
   const scrubbed = scrubEnvironment(input.env ?? process.env, { allowSensitive: input.policy?.fullAccess === true });
   const startedAt = Date.now();
   const command = input.args.at(-1) ?? "";
@@ -283,7 +313,7 @@ function runShellCommand(input) {
 
   return new Promise((resolve) => {
     let settled = false;
-    const child = spawn(input.executable, input.args, {
+    const child = (input.spawnProcess ?? spawn)(input.executable, input.args, {
       cwd: input.cwd,
       env: scrubbed.env,
       windowsHide: true,
@@ -296,6 +326,7 @@ function runShellCommand(input) {
     let timedOut = false;
     let interrupted = false;
     let escalationTimer = null;
+    let terminationSettleTimer = null;
 
     const timeout = setTimeout(() => {
       timedOut = true;
@@ -308,6 +339,10 @@ function runShellCommand(input) {
         clearTimeout(escalationTimer);
         escalationTimer = null;
       }
+      if (terminationSettleTimer) {
+        clearTimeout(terminationSettleTimer);
+        terminationSettleTimer = null;
+      }
       input.signal?.removeEventListener?.("abort", onAbort);
     };
 
@@ -318,6 +353,36 @@ function runShellCommand(input) {
       settled = true;
       cleanup();
       resolve(result);
+    };
+
+    const forceSettleTermination = () => {
+      child.stdout?.removeListener?.("data", onStdoutData);
+      child.stderr?.removeListener?.("data", onStderrData);
+      child.stdout?.destroy?.();
+      child.stderr?.destroy?.();
+      child.unref?.();
+      finish({
+        command,
+        exitCode: null,
+        signal: null,
+        timedOut,
+        durationMs: Date.now() - startedAt,
+        stdout: stdout.toString(),
+        stderr: stderr.toString(),
+        stdoutTruncated: stdout.truncated,
+        stderrTruncated: stderr.truncated,
+        stdoutBytes: stdout.bytes,
+        stderrBytes: stderr.bytes,
+        scrubbedEnv: scrubbed.removed,
+        interrupted,
+        terminationUnconfirmed: true,
+        error: {
+          code: interrupted ? "SHELL_INTERRUPTED" : "SHELL_TIMEOUT",
+          message: interrupted
+            ? "Shell command did not confirm exit after interruption; control was returned after the termination grace period."
+            : "Shell command did not confirm exit before the termination grace period expired."
+        }
+      });
     };
 
     const onAbort = () => {
@@ -335,6 +400,9 @@ function runShellCommand(input) {
       if (reason === "abort") {
         interrupted = true;
       }
+      if (!terminationSettleTimer) {
+        terminationSettleTimer = setTimeout(forceSettleTermination, terminationSettleMs);
+      }
       if (!target.pid) {
         target.kill("SIGTERM");
         return;
@@ -342,31 +410,39 @@ function runShellCommand(input) {
       if (process.platform === "win32") {
         killWindowsProcessTree(target.pid);
         target.kill("SIGTERM");
-        return;
-      }
-      try {
-        process.kill(-target.pid, "SIGTERM");
-      } catch {
-        target.kill("SIGTERM");
+      } else {
+        try {
+          process.kill(-target.pid, "SIGTERM");
+        } catch {
+          target.kill("SIGTERM");
+        }
       }
       if (!escalationTimer) {
         escalationTimer = setTimeout(() => {
           try {
-            process.kill(-target.pid, "SIGKILL");
+            if (process.platform === "win32") {
+              killWindowsProcessTree(target.pid);
+              target.kill("SIGKILL");
+            } else {
+              process.kill(-target.pid, "SIGKILL");
+            }
           } catch {
             target.kill("SIGKILL");
           }
-        }, 750);
+        }, Math.min(SHELL_TERMINATION_ESCALATION_MS, terminationSettleMs));
       }
     }
 
-    child.stdout.on("data", (chunk) => {
+    const onStdoutData = (chunk) => {
       stdout.append(chunk);
-    });
+    };
 
-    child.stderr.on("data", (chunk) => {
+    const onStderrData = (chunk) => {
       stderr.append(chunk);
-    });
+    };
+
+    child.stdout.on("data", onStdoutData);
+    child.stderr.on("data", onStderrData);
 
     child.on("spawn", () => {
       if (input.signal?.aborted) {
@@ -467,28 +543,58 @@ function interruptedShellResult(command, scrubbedEnv, startedAt, message) {
   };
 }
 
-/**
- * @param {Buffer} current
- * @param {Buffer} chunk
- */
-function createOutputCollector() {
+/** @param {number} [maxBytes] */
+export function createOutputCollector(maxBytes = MAX_SHELL_OUTPUT_BYTES) {
+  const limit = Math.max(SHELL_OUTPUT_TRUNCATION_MARKER.length + 2, Math.trunc(Number(maxBytes) || MAX_SHELL_OUTPUT_BYTES));
+  const retainedLimit = limit - SHELL_OUTPUT_TRUNCATION_MARKER.length;
+  const headLimit = Math.floor(retainedLimit / 2);
+  const tailLimit = retainedLimit - headLimit;
+  /** @type {Buffer[]} */
   let chunks = [];
+  /** @type {Buffer | null} */
+  let head = null;
+  /** @type {Buffer | null} */
+  let tail = null;
+  let retainedBytes = 0;
   let bytes = 0;
+  let truncated = false;
 
   return {
     get bytes() {
       return bytes;
     },
     get truncated() {
-      return false;
+      return truncated;
     },
     append(chunk) {
       const buffer = Buffer.from(chunk);
       bytes += buffer.length;
-      chunks.push(buffer);
+      if (!truncated && retainedBytes + buffer.length <= limit) {
+        chunks.push(buffer);
+        retainedBytes += buffer.length;
+        return;
+      }
+      if (!truncated) {
+        const combined = Buffer.concat([...chunks, buffer], retainedBytes + buffer.length);
+        head = Buffer.from(combined.subarray(0, headLimit));
+        tail = Buffer.from(combined.subarray(Math.max(headLimit, combined.length - tailLimit)));
+        chunks = [];
+        retainedBytes = 0;
+        truncated = true;
+        return;
+      }
+      const combinedTail = Buffer.concat([tail ?? Buffer.alloc(0), buffer]);
+      tail = Buffer.from(combinedTail.subarray(Math.max(0, combinedTail.length - tailLimit)));
     },
     toString() {
-      return Buffer.concat(chunks).toString("utf8");
+      if (!truncated) {
+        return Buffer.concat(chunks, retainedBytes).toString("utf8");
+      }
+      return Buffer.concat([
+        head ?? Buffer.alloc(0),
+        SHELL_OUTPUT_TRUNCATION_MARKER,
+        tail ?? Buffer.alloc(0)
+      ]).toString("utf8");
     }
   };
 }

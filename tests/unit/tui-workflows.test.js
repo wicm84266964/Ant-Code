@@ -3,12 +3,14 @@ import test from "node:test";
 import {
   boundedIndex,
   buildGuidePrompt,
+  createCoalescedAsyncRunner,
   isImmediateTuiCommand,
   isStopGuidance,
   prependQueuedPrompt,
   promoteQueuedPrompt,
   rememberRecentFile,
   removeQueuedPrompt,
+  resolveTuiExitAction,
   takeQueuedPrompt
 } from "../../src/cli/tui/workflows.js";
 
@@ -58,6 +60,55 @@ test("busy-safe TUI commands can run immediately instead of entering the prompt 
   assert.equal(isImmediateTuiCommand("/run npm test"), false);
   assert.equal(isImmediateTuiCommand("please inspect"), false);
 });
+
+test("coalesced async runner bounds overlapping polls and performs one trailing refresh", async () => {
+  const gates = [deferred(), deferred()];
+  let calls = 0;
+  let active = 0;
+  let maxActive = 0;
+  const runner = createCoalescedAsyncRunner(async () => {
+    const index = calls;
+    calls += 1;
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    await gates[index].promise;
+    active -= 1;
+  });
+
+  const first = runner.run();
+  const duplicateA = runner.run();
+  const duplicateB = runner.run();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 1);
+  assert.equal(duplicateA, first);
+  assert.equal(duplicateB, first);
+
+  gates[0].resolve();
+  await first;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 2);
+  assert.equal(maxActive, 1);
+
+  gates[1].resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  runner.dispose();
+  assert.equal(runner.active, false);
+});
+
+test("TUI exit action offers a force path after background cancellation stalls", () => {
+  assert.equal(resolveTuiExitAction({ confirmed: false, backgroundCount: 2 }), "confirm");
+  assert.equal(resolveTuiExitAction({ confirmed: true, backgroundCount: 2 }), "cancel-background");
+  assert.equal(resolveTuiExitAction({ confirmed: true, backgroundExitPending: true, backgroundCount: 2 }), "force");
+  assert.equal(resolveTuiExitAction({ confirmed: true, backgroundCount: 0 }), "exit");
+});
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
 
 test("guide prompts preserve active-turn context without changing the visible queue order", () => {
   const prompt = buildGuidePrompt("Prefer the smallest patch.", "Fix the failing TUI scroll test.");

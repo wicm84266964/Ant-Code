@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.3.2 - 2026-07-17
+
+### Fixed
+
+- Session archives, metadata, memory records, and task registries now use
+  durable atomic updates with cross-process coordination and crash recovery,
+  preventing lost updates and partial files under concurrent writers.
+- Encrypted session migration now serializes competing readers and writers so
+  migration cannot publish stale data or temporarily fall back to plaintext.
+- Background terminal state now reconciles externally terminated processes and
+  writes its registry atomically, keeping list and cancellation results
+  accurate after crashes or interrupted cleanup.
+- Gateway callbacks now have bounded execution and consistent timeout/error
+  convergence, while buffered and streaming responses enforce explicit size
+  limits before unbounded data can accumulate.
+- MCP connections now deduplicate concurrent startup, recover cleanly from
+  failed handshakes, and reject oversized protocol frames.
+
+### Validation
+
+- Added cross-process crash-recovery, storage concurrency, property-sequence,
+  background-terminal safety, oversized-frame, and reliability soak coverage.
 ## 1.3.1 - 2026-07-16
 
 ### Fixed

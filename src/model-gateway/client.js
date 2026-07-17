@@ -8,6 +8,15 @@ import {
 import { listConfiguredModels } from "./models.js";
 import { createGatewayRequest, normalizeGatewayResponse } from "./protocol.js";
 import { parseGatewayStream } from "./streaming.js";
+import { emitGatewayEvent, isGatewayEventCallbackError } from "./event-callback.js";
+import {
+  DEFAULT_GATEWAY_MAX_RESPONSE_BYTES,
+  GATEWAY_MAX_ERROR_BODY_BYTES,
+  gatewayResponseLimitCode,
+  gatewayResponseLimitDetails,
+  gatewayResponseLimitError,
+  normalizeGatewayMaxResponseBytes
+} from "./limits.js";
 
 const DEFAULT_GATEWAY_MAX_RETRIES = 5;
 const DEFAULT_GATEWAY_TIMEOUT_MS = 900000;
@@ -15,6 +24,7 @@ const DEFAULT_GATEWAY_IDLE_TIMEOUT_MS = 300000;
 const BASE_RETRY_DELAY_MS = 200;
 const MAX_RETRY_DELAY_MS = 30000;
 const GATEWAY_TRANSIENT_ERROR_PATTERN = /KVTransferError|WaitingForInput|Decode transfer failed|premature close|stream.*interrupted/i;
+const RETRYABLE_STREAM_PROTOCOL_CODES = new Set(["UPSTREAM_STREAM_ABORTED", "INCOMPLETE_TOOL_CALL"]);
 
 /**
  * @param {import("../config/load-config.js").LabAgentConfig} config
@@ -72,6 +82,7 @@ export function createLabModelGateway(config) {
       const maxAttempts = maxRetries + 1;
       const timeoutMs = resolveGatewayTimeoutMs(config);
       const idleTimeoutMs = resolveGatewayIdleTimeoutMs(config);
+      const maxResponseBytes = resolveGatewayMaxResponseBytes(config);
       const retryHistory = [];
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         let response;
@@ -108,7 +119,7 @@ export function createLabModelGateway(config) {
               })
             };
           }
-          const delayed = await emitRetryAndDelay(request, {
+          const retry = await emitRetryAndDelay(request, {
             attempt,
             maxAttempts,
             retryHistory,
@@ -116,7 +127,10 @@ export function createLabModelGateway(config) {
             error,
             stage: "fetch"
           });
-          if (!delayed) {
+          if (retry.eventError) {
+            return gatewayEventCallbackFailure(retry.eventError, { attempts: attempt, maxAttempts, stage: "fetch", retryHistory });
+          }
+          if (!retry.delayed) {
             return abortedRetryError(attempt, maxAttempts, retryHistory);
           }
           continue;
@@ -124,11 +138,12 @@ export function createLabModelGateway(config) {
 
         const responseHeaderMs = Date.now() - startedAt;
         if (!response.ok) {
-          let body;
+          let errorBody;
           try {
-            body = await boundedResponseText(response, {
+            errorBody = await boundedResponseText(response, {
               signal: attemptAbort.signal,
-              idleTimeoutMs
+              idleTimeoutMs,
+              maxResponseBytes: GATEWAY_MAX_ERROR_BODY_BYTES
             });
           } catch (error) {
             attemptAbort.cleanup();
@@ -139,11 +154,16 @@ export function createLabModelGateway(config) {
             });
             retryHistory.push(errorRetrySummary(error, attempt, retryable, "http_body"));
             if (!retryable) {
+              const limitCode = gatewayResponseLimitCode(error);
               return {
                 ok: false,
                 error: normalizeGatewayError(error, {
-                  code: attemptAbort.timedOut ? "GATEWAY_TIMEOUT" : undefined,
-                  message: attemptAbort.timedOut ? `Gateway request timed out after ${timeoutMs}ms` : undefined,
+                  code: attemptAbort.timedOut ? "GATEWAY_TIMEOUT" : limitCode ?? undefined,
+                  message: attemptAbort.timedOut
+                    ? `Gateway request timed out after ${timeoutMs}ms`
+                    : limitCode
+                      ? error instanceof Error ? error.message : String(error)
+                      : undefined,
                   details: {
                     attempts: attempt,
                     maxAttempts,
@@ -151,12 +171,13 @@ export function createLabModelGateway(config) {
                     responseHeaderMs,
                     timeoutMs,
                     idleTimeoutMs,
+                    ...gatewayResponseLimitDetails(error),
                     retryHistory
                   }
                 })
               };
             }
-            const delayed = await emitRetryAndDelay(request, {
+            const retry = await emitRetryAndDelay(request, {
               attempt,
               maxAttempts,
               retryHistory,
@@ -164,7 +185,10 @@ export function createLabModelGateway(config) {
               error,
               stage: "http_body"
             });
-            if (!delayed) {
+            if (retry.eventError) {
+              return gatewayEventCallbackFailure(retry.eventError, { attempts: attempt, maxAttempts, stage: "http_body", retryHistory });
+            }
+            if (!retry.delayed) {
               return abortedRetryError(attempt, maxAttempts, retryHistory);
             }
             continue;
@@ -177,7 +201,12 @@ export function createLabModelGateway(config) {
             status: response.status,
             protocol,
             details: {
-              body,
+              body: errorBody.body,
+              bodyTruncated: errorBody.truncated,
+              bodyLimitCode: errorBody.truncated ? "GATEWAY_ERROR_BODY_TOO_LARGE" : null,
+              bodyMaxBytes: GATEWAY_MAX_ERROR_BODY_BYTES,
+              bodyReceivedBytes: errorBody.receivedBytes,
+              ...(errorBody.truncated ? { retryable: false } : {}),
               attempts: attempt,
               maxAttempts,
               responseHeaderMs,
@@ -194,7 +223,7 @@ export function createLabModelGateway(config) {
           if (!retryable) {
             return { ok: false, error };
           }
-          const delayed = await emitRetryAndDelay(request, {
+          const retry = await emitRetryAndDelay(request, {
             attempt,
             maxAttempts,
             retryHistory,
@@ -202,7 +231,10 @@ export function createLabModelGateway(config) {
             error,
             stage: "http"
           });
-          if (!delayed) {
+          if (retry.eventError) {
+            return gatewayEventCallbackFailure(retry.eventError, { attempts: attempt, maxAttempts, stage: "http", retryHistory });
+          }
+          if (!retry.delayed) {
             return abortedRetryError(attempt, maxAttempts, retryHistory);
           }
           continue;
@@ -213,17 +245,36 @@ export function createLabModelGateway(config) {
           const contentType = response.headers.get("content-type");
           data = await parseResponseForProtocol(protocol, response, contentType, request.onEvent, config, {
             signal: attemptAbort.signal,
-            idleTimeoutMs
+            idleTimeoutMs,
+            maxResponseBytes
           });
           attemptAbort.cleanup();
         } catch (error) {
           attemptAbort.cleanup();
           const contentType = response.headers.get("content-type") ?? "";
+          if (isGatewayEventCallbackError(error)) {
+            return gatewayEventCallbackFailure(error, {
+              attempts: attempt,
+              maxAttempts,
+              stage: "parse_body",
+              contentType,
+              retryHistory
+            });
+          }
+          const streamError = /** @type {{ retryable?: boolean; details?: Record<string, any> }} */ (error);
+          const limitCode = gatewayResponseLimitCode(error);
+          const streamProtocolCode = gatewayStreamProtocolCode(error);
           const streamInterrupted = isGatewayStreamInterruptedError(error);
           const normalized = normalizeGatewayError(error, {
-            code: attemptAbort.timedOut ? "GATEWAY_TIMEOUT" : streamInterrupted ? "GATEWAY_STREAM_INTERRUPTED" : "GATEWAY_RESPONSE_PARSE_ERROR",
+            code: attemptAbort.timedOut
+              ? "GATEWAY_TIMEOUT"
+              : limitCode ?? streamProtocolCode ?? (streamInterrupted ? "GATEWAY_STREAM_INTERRUPTED" : "GATEWAY_RESPONSE_PARSE_ERROR"),
             message: attemptAbort.timedOut
               ? `Gateway request timed out after ${timeoutMs}ms`
+              : limitCode
+                ? error instanceof Error ? error.message : String(error)
+              : streamProtocolCode
+                ? error instanceof Error ? error.message : String(error)
               : streamInterrupted
                 ? "Gateway response stream was interrupted before it could be fully read"
                 : "Gateway response could not be parsed",
@@ -237,6 +288,13 @@ export function createLabModelGateway(config) {
               responseHeaderMs,
               timeoutMs,
               idleTimeoutMs,
+              ...(streamProtocolCode ? {
+                retryable: streamError?.retryable === true,
+                streamReason: streamError?.details?.reason ?? null,
+                toolIndex: streamError?.details?.toolIndex ?? null,
+                toolName: streamError?.details?.toolName ?? null
+              } : {}),
+              ...gatewayResponseLimitDetails(error),
               retryHistory
             }
           });
@@ -246,19 +304,27 @@ export function createLabModelGateway(config) {
             config,
             signal: request.signal
           });
-          retryHistory.push(gatewayErrorRetrySummary(normalized, attempt, retryable, streamInterrupted ? "read_body" : "parse_body"));
+          retryHistory.push(gatewayErrorRetrySummary(normalized, attempt, retryable, limitCode || streamInterrupted ? "read_body" : "parse_body"));
           if (!retryable) {
             return { ok: false, error: normalized };
           }
-          const delayed = await emitRetryAndDelay(request, {
+          const retry = await emitRetryAndDelay(request, {
             attempt,
             maxAttempts,
             retryHistory,
             delayMs: retryDelayMs(attempt),
             error: normalized,
-            stage: streamInterrupted ? "read_body" : "parse_body"
+            stage: limitCode || streamInterrupted ? "read_body" : "parse_body"
           });
-          if (!delayed) {
+          if (retry.eventError) {
+            return gatewayEventCallbackFailure(retry.eventError, {
+              attempts: attempt,
+              maxAttempts,
+              stage: limitCode || streamInterrupted ? "read_body" : "parse_body",
+              retryHistory
+            });
+          }
+          if (!retry.delayed) {
             return abortedRetryError(attempt, maxAttempts, retryHistory);
           }
           continue;
@@ -305,6 +371,16 @@ function resolveGatewayIdleTimeoutMs(config) {
   return Math.max(50, Math.min(300000, Math.trunc(value)));
 }
 
+/**
+ * @param {import("../config/load-config.js").LabAgentConfig} config
+ */
+function resolveGatewayMaxResponseBytes(config) {
+  return normalizeGatewayMaxResponseBytes(
+    config.lab?.gatewayMaxResponseBytes,
+    DEFAULT_GATEWAY_MAX_RESPONSE_BYTES
+  );
+}
+
 function createGatewayAttemptAbort(parentSignal, timeoutMs) {
   const controller = new AbortController();
   let timedOut = false;
@@ -340,6 +416,9 @@ function createGatewayAttemptAbort(parentSignal, timeoutMs) {
  */
 function shouldRetryGatewayFetchError(error, options) {
   if (options.signal?.aborted) {
+    return false;
+  }
+  if (gatewayResponseLimitCode(error)) {
     return false;
   }
   if (error && typeof error === "object" && "name" in error && error.name === "AbortError") {
@@ -401,15 +480,38 @@ async function emitRetryAndDelay(request, input) {
     retryable: true,
     retryHistory: input.retryHistory
   });
-  await request.onEvent?.({
-    type: "gateway_retry",
-    attempt: input.attempt,
-    maxAttempts: input.maxAttempts,
-    delayMs: input.delayMs,
-    stage: input.stage,
-    error
-  });
-  return delay(input.delayMs, request.signal);
+  try {
+    await emitGatewayEvent(request.onEvent, {
+      type: "gateway_retry",
+      attempt: input.attempt,
+      maxAttempts: input.maxAttempts,
+      delayMs: input.delayMs,
+      stage: input.stage,
+      error
+    }, {
+      signal: request.signal
+    });
+  } catch (eventError) {
+    if (isGatewayEventCallbackError(eventError)) {
+      return { delayed: false, eventError };
+    }
+    throw eventError;
+  }
+  return { delayed: await delay(input.delayMs, request.signal), eventError: null };
+}
+
+function gatewayEventCallbackFailure(error, details = {}) {
+  const code = error?.code === "GATEWAY_EVENT_CALLBACK_TIMEOUT"
+    ? "GATEWAY_EVENT_CALLBACK_TIMEOUT"
+    : "GATEWAY_EVENT_CALLBACK_FAILED";
+  return {
+    ok: false,
+    error: normalizeGatewayError(error, {
+      code,
+      message: error instanceof Error ? error.message : "Gateway event callback failed",
+      details: { ...details, retryable: false }
+    })
+  };
 }
 
 function normalizeRetryEventError(error, details) {
@@ -454,6 +556,9 @@ function shouldRetryGatewayHttpError(error, options) {
   if (options.signal?.aborted || options.attempt >= options.maxAttempts) {
     return false;
   }
+  if (error?.details?.bodyTruncated === true) {
+    return false;
+  }
   if (Number(error.status) >= 500) {
     return true;
   }
@@ -469,8 +574,14 @@ function shouldRetryGatewayResponseError(error, options) {
     return false;
   }
   return error.code === "GATEWAY_STREAM_INTERRUPTED"
+    || RETRYABLE_STREAM_PROTOCOL_CODES.has(error.code)
     || isRetryableGatewayParseError(error)
     || isConfiguredGatewayRetryable(error, options.config);
+}
+
+function gatewayStreamProtocolCode(error) {
+  const code = error && typeof error === "object" && "code" in error ? String(error.code ?? "") : "";
+  return RETRYABLE_STREAM_PROTOCOL_CODES.has(code) ? code : null;
 }
 
 function isRetryableGatewayParseError(error) {
@@ -547,22 +658,39 @@ function delay(ms, signal) {
   });
 }
 
+/**
+ * @param {ReadableStream<Uint8Array> | null} body
+ * @param {{ signal?: AbortSignal; idleTimeoutMs?: number; maxResponseBytes?: number; limitCode?: string }} [options]
+ */
 async function readResponseText(body, options = {}) {
   if (!body) {
     return "";
   }
   const reader = body.getReader();
   const decoder = new TextDecoder();
+  const maxResponseBytes = normalizeGatewayMaxResponseBytes(options.maxResponseBytes);
+  const limitCode = options.limitCode ?? "GATEWAY_RESPONSE_TOO_LARGE";
+  let receivedBytes = 0;
   let text = "";
+  let completed = false;
   try {
     while (true) {
       const { done, value } = await readStreamChunk(reader, options);
       if (done) {
+        completed = true;
         break;
       }
+      const chunkBytes = Number(value?.byteLength ?? 0);
+      if (chunkBytes > maxResponseBytes - receivedBytes) {
+        throw gatewayResponseLimitError(limitCode, maxResponseBytes, receivedBytes + chunkBytes);
+      }
+      receivedBytes += chunkBytes;
       text += decoder.decode(value, { stream: true });
     }
   } finally {
+    if (!completed) {
+      cancelReader(reader, options.signal?.reason ?? new Error("Gateway response consumer stopped before completion"));
+    }
     try {
       reader.releaseLock();
     } catch {
@@ -579,30 +707,42 @@ function readStreamChunk(reader, options = {}) {
   if (signal?.aborted) {
     return Promise.reject(abortError());
   }
-  if (!idleTimeoutMs) {
+  if (!idleTimeoutMs && !signal) {
     return reader.read();
   }
   return new Promise((resolve, reject) => {
     let settled = false;
+    /** @type {ReturnType<typeof setTimeout> | null} */
+    let timer = null;
+    /** @type {(() => void) | null} */
+    let onAbort = null;
     const finish = (callback, value) => {
       if (settled) {
         return;
       }
       settled = true;
-      clearTimeout(timer);
-      signal?.removeEventListener?.("abort", onAbort);
+      if (timer) clearTimeout(timer);
+      if (onAbort) signal?.removeEventListener?.("abort", onAbort);
       callback(value);
     };
-    const timer = setTimeout(() => {
-      cancelReader(reader, timeoutError(idleTimeoutMs));
-      finish(reject, timeoutError(idleTimeoutMs));
-    }, idleTimeoutMs);
-    const onAbort = () => {
-      cancelReader(reader, signal.reason);
-      finish(reject, abortError());
-    };
-    signal?.addEventListener?.("abort", onAbort, { once: true });
-    reader.read().then(
+    if (idleTimeoutMs) {
+      timer = setTimeout(() => {
+        cancelReader(reader, timeoutError(idleTimeoutMs));
+        finish(reject, timeoutError(idleTimeoutMs));
+      }, idleTimeoutMs);
+    }
+    if (signal) {
+      onAbort = () => {
+        cancelReader(reader, signal.reason);
+        finish(reject, abortError());
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+    }
+    Promise.resolve().then(() => reader.read()).then(
       (chunk) => finish(resolve, chunk),
       (error) => finish(reject, error)
     );
@@ -636,7 +776,7 @@ function timeoutError(ms) {
  * @param {string | null} contentType
  * @param {(event: Record<string, any>) => void | Promise<void>} [onEvent]
  * @param {import("../config/load-config.js").LabAgentConfig} [config]
- * @param {{ signal?: AbortSignal; idleTimeoutMs?: number }} [options]
+ * @param {{ signal?: AbortSignal; idleTimeoutMs?: number; maxResponseBytes?: number }} [options]
  */
 function parseStreamForProtocol(protocol, body, contentType, onEvent, config, options = {}) {
   return protocol === "openai-chat"
@@ -650,9 +790,10 @@ function parseStreamForProtocol(protocol, body, contentType, onEvent, config, op
  * @param {string | null} contentType
  * @param {(event: Record<string, any>) => void | Promise<void>} [onEvent]
  * @param {import("../config/load-config.js").LabAgentConfig} [config]
- * @param {{ signal?: AbortSignal; idleTimeoutMs?: number }} [options]
+ * @param {{ signal?: AbortSignal; idleTimeoutMs?: number; maxResponseBytes?: number }} [options]
  */
 async function parseResponseForProtocol(protocol, response, contentType, onEvent, config, options = {}) {
+  assertResponseContentLength(response, options.maxResponseBytes, "GATEWAY_RESPONSE_TOO_LARGE");
   if (isStreamingContentType(contentType)) {
     return parseStreamForProtocol(protocol, response.body, contentType, onEvent, config, options);
   }
@@ -772,10 +913,99 @@ function resolveOpenAIExtraBody(config) {
 
 /**
  * @param {Response} response
+ * @param {{ signal?: AbortSignal; idleTimeoutMs?: number; maxResponseBytes?: number }} [options]
  */
 async function boundedResponseText(response, options = {}) {
-  const text = await readResponseText(response.body, options);
-  return redactGatewayText(text).slice(0, 1000);
+  const maxResponseBytes = normalizeGatewayMaxResponseBytes(
+    options.maxResponseBytes,
+    GATEWAY_MAX_ERROR_BODY_BYTES
+  );
+  const declaredBytes = responseContentLength(response);
+  if (declaredBytes !== null && declaredBytes > maxResponseBytes) {
+    cancelResponseBody(response.body, gatewayResponseLimitError(
+      "GATEWAY_ERROR_BODY_TOO_LARGE",
+      maxResponseBytes,
+      declaredBytes
+    ));
+    return { body: "", truncated: true, receivedBytes: declaredBytes };
+  }
+  if (!response.body) {
+    return { body: "", truncated: false, receivedBytes: 0 };
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  let retainedBytes = 0;
+  let receivedBytes = 0;
+  let completed = false;
+  let truncated = declaredBytes !== null && declaredBytes > maxResponseBytes;
+  try {
+    while (true) {
+      const { done, value } = await readStreamChunk(reader, options);
+      if (done) {
+        completed = true;
+        break;
+      }
+      const chunkBytes = Number(value?.byteLength ?? 0);
+      receivedBytes += chunkBytes;
+      const remaining = Math.max(0, maxResponseBytes - retainedBytes);
+      if (remaining > 0) {
+        const retained = chunkBytes > remaining ? value.subarray(0, remaining) : value;
+        retainedBytes += retained.byteLength;
+        text += decoder.decode(retained, { stream: true });
+      }
+      if (chunkBytes > remaining || truncated && retainedBytes >= maxResponseBytes) {
+        truncated = true;
+        break;
+      }
+    }
+  } finally {
+    if (!completed) {
+      cancelReader(reader, gatewayResponseLimitError(
+        "GATEWAY_ERROR_BODY_TOO_LARGE",
+        maxResponseBytes,
+        Math.max(receivedBytes, declaredBytes ?? 0)
+      ));
+    }
+    try {
+      reader.releaseLock();
+    } catch {
+      // Reader cancellation closes pending reads before the lock is released.
+    }
+  }
+  text += decoder.decode();
+  return {
+    body: redactGatewayText(text).slice(0, 1000),
+    truncated,
+    receivedBytes: Math.max(receivedBytes, declaredBytes ?? 0)
+  };
+}
+
+/** @param {Response} response @returns {number | null} */
+function responseContentLength(response) {
+  const raw = response.headers.get("content-length");
+  if (raw === null || raw.trim() === "") return null;
+  const contentLength = Number(raw);
+  return Number.isSafeInteger(contentLength) && contentLength >= 0 ? contentLength : null;
+}
+
+/** @param {Response} response @param {unknown} maxBytesValue @param {string} code */
+function assertResponseContentLength(response, maxBytesValue, code) {
+  const maxBytes = normalizeGatewayMaxResponseBytes(maxBytesValue);
+  const contentLength = responseContentLength(response);
+  if (contentLength === null || contentLength <= maxBytes) return;
+  const error = gatewayResponseLimitError(code, maxBytes, contentLength);
+  cancelResponseBody(response.body, error);
+  throw error;
+}
+
+/** @param {ReadableStream<Uint8Array> | null} body @param {unknown} reason */
+function cancelResponseBody(body, reason) {
+  try {
+    Promise.resolve(body?.cancel(reason)).catch(() => {});
+  } catch {
+    // Best effort; the body has not been locked by a reader yet.
+  }
 }
 
 /**

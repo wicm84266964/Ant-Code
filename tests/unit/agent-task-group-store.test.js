@@ -100,3 +100,37 @@ test("ensureGroup preserves concurrent task ids for the same group", async () =>
   assert.equal(read.ok, true);
   assert.deepEqual(read.group.taskIds.sort(), ["task-a", "task-b"]);
 });
+
+test("task group stores coalesce one history scan across active sessions", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-group-scan-cache-"));
+  const root = path.join(cwd, ".lab-agent", "task-groups");
+  await fs.mkdir(root, { recursive: true });
+  await Promise.all(Array.from({ length: 300 }, (_, index) => fs.writeFile(
+    path.join(root, `group-${index}.json`),
+    JSON.stringify({
+      id: `group-${index}`,
+      parentSessionId: `session-${index % 10}`,
+      status: "running",
+      taskIds: [`task-${index}`],
+      updatedAt: new Date(2026, 0, 1, 0, 0, index).toISOString()
+    }),
+    "utf8"
+  )));
+  let scans = 0;
+  const stores = Array.from({ length: 10 }, () => createAgentTaskGroupStore({
+    cwd,
+    onListScan: () => {
+      scans += 1;
+    }
+  }));
+
+  const results = await Promise.all(stores.map((store, index) => store.listGroups({
+    parentSessionId: `session-${index}`
+  })));
+  const repeated = await stores[0].listGroups({ parentSessionId: "session-0" });
+
+  assert.equal(scans, 1);
+  assert.equal(results.every((groups) => groups.length === 30), true);
+  assert.equal(repeated.length, 30);
+  assert.equal(scans, 1);
+});

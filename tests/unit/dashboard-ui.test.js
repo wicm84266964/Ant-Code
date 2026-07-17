@@ -319,8 +319,9 @@ test("dashboard keeps background subagent status visible after the main turn end
   assert.match(app, /applyIdleRunStatus\("完成"\)/);
   assert.match(app, /const subagents = items\.filter\(\(item\) => item\.kind !== "terminal"\)/);
   assert.match(app, /terminalStarting: terminals\.filter\(\(item\) => item\.status === "starting"\)\.length/);
-  assert.match(app, /terminals: terminals\.filter\(\(item\) => item\.status === "running"\)\.length/);
+  assert.match(app, /terminals: terminals\.filter\(\(item\) => item\.status === "running" \|\| item\.status === "cancelling"\)\.length/);
   assert.match(app, /return "终端后台任务启动中"/);
+  assert.match(app, /return "终端后台任务退出确认中"/);
   assert.match(app, /return "终端后台任务运行中"/);
   assert.match(app, /return "终端后台任务回收中"/);
   assert.match(app, /return "子智能体运行中"/);
@@ -487,6 +488,29 @@ test("dashboard responsive, composer, focus, and scroll helpers enforce UI behav
     .replace("await init();", "");
   const module = await import(`data:text/javascript,${encodeURIComponent(`${harness}\n${code}`)}`);
 
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => ({
+    ok: true,
+    status: 200,
+    text() {
+      return new Promise((_resolve, reject) => {
+        init.signal.addEventListener("abort", () => {
+          const error = new Error("aborted body");
+          error.name = "AbortError";
+          reject(error);
+        }, { once: true });
+      });
+    }
+  });
+  try {
+    await assert.rejects(
+      module.dashboardFetch("/stalled-json", {}, { timeoutMs: 10 }),
+      (error) => error.code === "DASHBOARD_REQUEST_TIMEOUT"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
   assert.equal(module.normalizedResponsiveView(1440, "files"), "conversation");
   assert.equal(module.normalizedResponsiveView(1024, "sessions"), "sessions");
   assert.equal(module.normalizedResponsiveView(768, "files"), "files");
@@ -532,6 +556,11 @@ test("dashboard responsive, composer, focus, and scroll helpers enforce UI behav
   });
   assert.equal(activity.total, 7);
   assert.deepEqual(module.shutdownRequestBody(activity), { cancel: true });
+  assert.deepEqual(module.shutdownRequestBody({ ...activity, uncertain: true }), {
+    cancel: true,
+    force: true,
+    timeoutMs: 15_000
+  });
   assert.deepEqual(module.shutdownRequestBody({ total: 0 }), {});
   assert.equal(module.shutdownResultIsClosed({ ok: false, status: 409 }), false);
   assert.equal(module.shutdownResultIsClosed({ ok: true }), true);
@@ -625,6 +654,13 @@ test("dashboard exposes responsive navigation and accessible interaction semanti
   assert.match(app, /aria-checked/);
   assert.match(app, /newReplyAvailable \? "有新回复" : "回到底部"/);
   assert.match(app, /getJson\("\/api\/lifecycle\/status"\)/);
+  assert.match(app, /const requestTimedOut = result\?\.code === "DASHBOARD_REQUEST_TIMEOUT"/);
+  assert.match(app, /const EVENT_CONNECT_TIMEOUT_MS = 10_000/);
+  assert.match(app, /armEventConnectTimer\(source, sessionId\)/);
+  assert.match(app, /markEventConnectionAlive\(false\)/);
+  assert.match(app, /markEventConnectionAlive\(true\)/);
+  assert.match(app, /if \(!feedback && state\.sessionsLoading\)/);
+  assert.match(app, /event\.type === "session_disposed"/);
   assert.match(app, /if \(!shutdownResultIsClosed\(result\)\)/);
   assert.match(app, /state\.shutdownActivity\.total > 0 \? "重试取消并关闭" : "重试关闭"/);
   assert.doesNotMatch(app, /els\.modelStatus\.setAttribute\("aria-expanded"/);

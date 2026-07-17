@@ -132,23 +132,45 @@ function withInProcessConfigLock(key, operation) {
 async function acquireConfigFileLock(filePath) {
   const lockPath = path.join(path.dirname(filePath), `.${path.basename(filePath)}.ant-code.lock`);
   const deadline = Date.now() + CONFIG_LOCK_TIMEOUT_MS;
+  const token = `${process.pid}-${randomBytes(12).toString("hex")}`;
   await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
   for (;;) {
     try {
       const handle = await fs.open(lockPath, "wx", 0o600);
-      await handle.writeFile(`${JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() })}\n`, "utf8");
+      await handle.writeFile(`${JSON.stringify({ token, pid: process.pid, createdAt: new Date().toISOString() })}\n`, "utf8");
       await handle.sync();
       return async () => {
         await handle.close().catch(() => {});
-        await fs.rm(lockPath, { force: true }).catch(() => {});
+        const owner = await readConfigLockOwner(lockPath);
+        if (owner?.token === token) {
+          await fs.rm(lockPath, { force: true }).catch(() => {});
+        }
       };
     } catch (error) {
       if (/** @type {NodeJS.ErrnoException} */ (error)?.code !== "EEXIST") {
         throw error;
       }
       const stat = await fs.stat(lockPath).catch(() => null);
-      if (stat && await isAbandonedConfigLock(lockPath, stat)) {
-        await fs.rm(lockPath, { force: true }).catch(() => {});
+      const observedOwner = stat ? await readConfigLockOwner(lockPath) : null;
+      if (stat && await isAbandonedConfigLock(lockPath, stat, observedOwner)) {
+        const observedFingerprint = configLockFingerprint(observedOwner, stat);
+        const quarantinePath = `${lockPath}.stale.${process.pid}.${randomBytes(8).toString("hex")}`;
+        try {
+          await fs.rename(lockPath, quarantinePath);
+          const [quarantinedOwner, quarantinedStat] = await Promise.all([
+            readConfigLockOwner(quarantinePath),
+            fs.stat(quarantinePath)
+          ]);
+          if (configLockFingerprint(quarantinedOwner, quarantinedStat) !== observedFingerprint) {
+            await restoreQuarantinedConfigLock(lockPath, quarantinePath);
+            continue;
+          }
+          await fs.rm(quarantinePath, { force: true });
+        } catch (reclaimError) {
+          if (!["ENOENT", "EEXIST"].includes(/** @type {NodeJS.ErrnoException} */ (reclaimError)?.code ?? "")) {
+            throw reclaimError;
+          }
+        }
         continue;
       }
       if (Date.now() >= deadline) {
@@ -166,14 +188,12 @@ async function acquireConfigFileLock(filePath) {
 /**
  * @param {string} lockPath
  * @param {import("node:fs").Stats} stat
+ * @param {Record<string, any> | null} owner
  */
-async function isAbandonedConfigLock(lockPath, stat) {
+async function isAbandonedConfigLock(lockPath, stat, owner) {
   if (Date.now() - stat.mtimeMs <= CONFIG_LOCK_STALE_MS) {
     return false;
   }
-  const owner = await fs.readFile(lockPath, "utf8")
-    .then((text) => JSON.parse(text))
-    .catch(() => null);
   const pid = Number(owner?.pid);
   if (!Number.isInteger(pid) || pid <= 0) {
     return true;
@@ -184,6 +204,47 @@ async function isAbandonedConfigLock(lockPath, stat) {
   } catch (error) {
     return /** @type {NodeJS.ErrnoException} */ (error)?.code === "ESRCH";
   }
+}
+
+/**
+ * @param {Record<string, any> | null} owner
+ * @param {import("node:fs").Stats} stat
+ */
+function configLockFingerprint(owner, stat) {
+  const token = String(owner?.token ?? "").trim();
+  if (token) {
+    return `token:${token}`;
+  }
+  return [
+    "legacy",
+    Number(owner?.pid) || 0,
+    String(owner?.createdAt ?? ""),
+    Number(stat.dev) || 0,
+    Number(stat.ino) || 0,
+    stat.size,
+    stat.mtimeMs
+  ].join(":");
+}
+
+/** @param {string} lockPath @param {string} quarantinePath */
+async function restoreQuarantinedConfigLock(lockPath, quarantinePath) {
+  try {
+    await fs.rename(quarantinePath, lockPath);
+  } catch (error) {
+    const conflict = Object.assign(new Error("Configuration lock changed during stale-lock reclamation"), {
+      code: "CONFIG_LOCK_RECLAIM_RACE",
+      status: 409,
+      cause: error
+    });
+    throw conflict;
+  }
+}
+
+/** @param {string} lockPath */
+async function readConfigLockOwner(lockPath) {
+  return fs.readFile(lockPath, "utf8")
+    .then((text) => JSON.parse(text))
+    .catch(() => null);
 }
 
 /** @param {string} directory */

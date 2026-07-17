@@ -38,7 +38,8 @@ test("loads gateway retry budget from environment and project config", async () 
     lab: {
       gatewayMaxRetries: 1,
       gatewayTimeoutMs: 120000,
-      gatewayIdleTimeoutMs: 30000
+      gatewayIdleTimeoutMs: 30000,
+      gatewayMaxResponseBytes: 4194304
     }
   });
 
@@ -46,18 +47,21 @@ test("loads gateway retry budget from environment and project config", async () 
   assert.equal(fromProject.lab.gatewayMaxRetries, 1);
   assert.equal(fromProject.lab.gatewayTimeoutMs, 120000);
   assert.equal(fromProject.lab.gatewayIdleTimeoutMs, 30000);
+  assert.equal(fromProject.lab.gatewayMaxResponseBytes, 4194304);
 
   const fromEnv = await loadConfig({
     cwd,
     env: {
       LAB_MODEL_GATEWAY_MAX_RETRIES: "3",
       LAB_MODEL_GATEWAY_TIMEOUT_MS: "45000",
-      LAB_MODEL_GATEWAY_IDLE_TIMEOUT_MS: "15000"
+      LAB_MODEL_GATEWAY_IDLE_TIMEOUT_MS: "15000",
+      LAB_MODEL_GATEWAY_MAX_RESPONSE_BYTES: "8388608"
     }
   });
   assert.equal(fromEnv.lab.gatewayMaxRetries, 3);
   assert.equal(fromEnv.lab.gatewayTimeoutMs, 45000);
   assert.equal(fromEnv.lab.gatewayIdleTimeoutMs, 15000);
+  assert.equal(fromEnv.lab.gatewayMaxResponseBytes, 8388608);
 });
 
 test("loads transcript policy from environment", async () => {

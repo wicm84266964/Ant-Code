@@ -505,7 +505,7 @@ export const BUILT_IN_TOOLS = Object.freeze([
   },
   {
     name: "web_fetch",
-    description: "Fetch an HTTP(S) URL and return text, markdown, or html through the network permission engine. Returns the full fetched body unless maxBytes is explicitly supplied.",
+    description: "Fetch an HTTP(S) URL and return text, markdown, or html through the network permission engine. Responses have a 32 MiB safety limit; an explicit maxBytes returns truncated content at that limit.",
     risk: "network",
     supportsAbort: true,
     inputSchema: {

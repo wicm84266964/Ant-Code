@@ -1,6 +1,6 @@
 {
   "name": "@ant-code/cli",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "description": "AGPL-licensed local coding agent with a terminal UI, local dashboard, tool permissions, skills, MCP integration, and model gateway adapters.",
   "type": "module",
   "private": true,
@@ -81,7 +81,10 @@
     "build:dashboard-assets": "node scripts/build-dashboard-assets.js",
     "build:exe": "node scripts/build-windows-exe.js",
     "verify:release": "npm run check && npm run verify:install && npm run verify:gateway && npm run verify:readiness && npm run check:release-seal && npm run audit",
-    "test": "node scripts/run-tests.js"
+    "test": "node scripts/run-tests.js",
+    "test:process": "node scripts/run-process-tests.js",
+    "test:soak": "node --expose-gc tests/soak/reliability-soak.js",
+    "test:soak:long": "node --expose-gc tests/soak/reliability-soak.js --long"
   },
   "engines": {
     "node": ">=20"

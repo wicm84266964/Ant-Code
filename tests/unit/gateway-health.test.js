@@ -8,6 +8,7 @@ import { createMockGatewayServer } from "../../scripts/mock-gateway.js";
 import { createLabModelGateway } from "../../src/model-gateway/client.js";
 import { formatGatewayError, normalizeGatewayError } from "../../src/model-gateway/errors.js";
 import { formatGatewayHealthReport, runGatewayHealth } from "../../src/model-gateway/health.js";
+import { GATEWAY_MAX_STREAM_RECORD_BYTES } from "../../src/model-gateway/limits.js";
 
 test("normalizes gateway timeout errors", () => {
   const error = new Error("operation aborted");
@@ -152,6 +153,225 @@ test("gateway client normalizes HTTP errors with bounded response body", async (
     assert.ok(result.error.diagnostics.some((hint) => /server logs/i.test(hint)));
   } finally {
     await close(server);
+  }
+});
+
+test("gateway client treats event callback failures as terminal without retrying", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  try {
+    globalThis.fetch = async () => {
+      calls += 1;
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode([
+            'data: {"type":"message_start","id":"msg-callback","model":"resolved"}',
+            "",
+            'data: {"type":"text_delta","text":"hello"}',
+            "",
+            'data: {"type":"message_stop","stopReason":"stop"}',
+            "",
+            "data: [DONE]",
+            ""
+          ].join("\n")));
+          controller.close();
+        }
+      }), {
+        status: 200,
+        headers: { "content-type": "text/event-stream" }
+      });
+    };
+    const gateway = createLabModelGateway({
+      modelAlias: "test-model",
+      networkMode: "offline",
+      allowedHosts: [],
+      lab: {
+        gatewayUrl: "http://127.0.0.1/v1/chat",
+        gatewayMaxRetries: 2,
+        gatewayProtocol: "lab-agent-gateway"
+      }
+    });
+
+    const result = await gateway.sendChat({
+      messages: [{ role: "user", content: "hello" }],
+      stream: true,
+      onEvent: () => {
+        throw new Error("observer failed");
+      }
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error.code, "GATEWAY_EVENT_CALLBACK_FAILED");
+    assert.equal(result.error.details.retryable, false);
+    assert.equal(result.error.details.stage, "parse_body");
+    assert.equal(calls, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("gateway client rejects chunked oversized responses without retrying", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const declaredLength of [null, "10"]) {
+      let calls = 0;
+      let cancelled = false;
+      let body;
+      globalThis.fetch = async () => {
+        calls += 1;
+        body = new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array(700));
+            controller.enqueue(new Uint8Array(700));
+          },
+          cancel() {
+            cancelled = true;
+          }
+        });
+        return new Response(body, {
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream",
+            ...(declaredLength ? { "content-length": declaredLength } : {})
+          }
+        });
+      };
+      const gateway = createLabModelGateway({
+        modelAlias: "test-model",
+        networkMode: "offline",
+        allowedHosts: [],
+        lab: {
+          gatewayUrl: "http://127.0.0.1/v1/chat",
+          gatewayMaxRetries: 2,
+          gatewayMaxResponseBytes: 1024
+        }
+      });
+
+      const result = await gateway.sendChat({
+        messages: [{ role: "user", content: "hello" }],
+        stream: true
+      });
+
+      assert.equal(result.ok, false);
+      assert.equal(result.error.code, "GATEWAY_RESPONSE_TOO_LARGE");
+      assert.equal(result.error.details.maxBytes, 1024);
+      assert.equal(result.error.details.retryable, false);
+      assert.equal(result.error.details.attempts, 1);
+      assert.equal(calls, 1);
+      assert.equal(cancelled, true);
+      assert.equal(body.locked, false);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("gateway client rejects oversized stream records without retrying", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  let cancelled = false;
+  let body;
+  try {
+    const payload = new TextEncoder().encode(`${JSON.stringify({
+      type: "text_delta",
+      text: "x".repeat(GATEWAY_MAX_STREAM_RECORD_BYTES)
+    })}\n`);
+    globalThis.fetch = async () => {
+      calls += 1;
+      body = new ReadableStream({
+        start(controller) {
+          controller.enqueue(payload);
+        },
+        cancel() {
+          cancelled = true;
+        }
+      });
+      return new Response(body, {
+        status: 200,
+        headers: { "content-type": "application/x-ndjson" }
+      });
+    };
+    const gateway = createLabModelGateway({
+      modelAlias: "test-model",
+      networkMode: "offline",
+      allowedHosts: [],
+      lab: {
+        gatewayUrl: "http://127.0.0.1/v1/chat",
+        gatewayMaxRetries: 2
+      }
+    });
+
+    const result = await gateway.sendChat({
+      messages: [{ role: "user", content: "hello" }],
+      stream: true
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error.code, "GATEWAY_STREAM_RECORD_TOO_LARGE");
+    assert.equal(result.error.details.retryable, false);
+    assert.equal(result.error.details.attempts, 1);
+    assert.equal(calls, 1);
+    assert.equal(cancelled, true);
+    assert.equal(body.locked, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("gateway client preflights oversized HTTP error bodies without retrying", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  let cancelled = false;
+  let cancelReason = null;
+  let body;
+  try {
+    globalThis.fetch = async () => {
+      calls += 1;
+      body = new ReadableStream({
+        cancel(reason) {
+          cancelled = true;
+          cancelReason = reason;
+        }
+      });
+      return new Response(body, {
+        status: 503,
+        headers: {
+          "content-type": "application/json",
+          "content-length": String(64 * 1024 + 1)
+        }
+      });
+    };
+    const gateway = createLabModelGateway({
+      modelAlias: "test-model",
+      networkMode: "offline",
+      allowedHosts: [],
+      lab: {
+        gatewayUrl: "http://127.0.0.1/v1/chat",
+        gatewayMaxRetries: 2
+      }
+    });
+
+    const result = await gateway.sendChat({
+      messages: [{ role: "user", content: "hello" }]
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error.code, "GATEWAY_HTTP_ERROR");
+    assert.equal(result.error.status, 503);
+    assert.equal(result.error.details.bodyTruncated, true);
+    assert.equal(result.error.details.bodyLimitCode, "GATEWAY_ERROR_BODY_TOO_LARGE");
+    assert.equal(result.error.details.bodyMaxBytes, 64 * 1024);
+    assert.equal(result.error.details.retryable, false);
+    assert.equal(result.error.details.attempts, 1);
+    assert.equal(result.error.details.body, "");
+    assert.ok(result.error.diagnostics.some((hint) => /server logs/i.test(hint)));
+    assert.equal(calls, 1);
+    assert.equal(cancelled, true);
+    assert.equal(cancelReason.code, "GATEWAY_ERROR_BODY_TOO_LARGE");
+    assert.equal(cancelReason.retryable, false);
+    assert.equal(body.locked, false);
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });
 

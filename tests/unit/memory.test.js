@@ -70,6 +70,24 @@ test("appendProjectMemory rejects empty entries", async () => {
   assert.equal(result.error.code, "MEMORY_EMPTY");
 });
 
+test("appendProjectMemory preserves concurrent entries exactly once", async () => {
+  const cwd = await makeTempWorkspace();
+  const entries = Array.from({ length: 24 }, (_value, index) => `concurrent-memory-${index + 1}`);
+
+  const results = await Promise.all(entries.map((text, index) => appendProjectMemory({
+    cwd,
+    text,
+    now: new Date(Date.UTC(2026, 6, 16, 0, 0, index))
+  })));
+
+  assert.equal(results.every((result) => result.ok), true);
+  const content = await fs.readFile(projectMemoryPath(cwd), "utf8");
+  assert.equal(content.match(/^# Project Memory$/gm)?.length, 1);
+  for (const entry of entries) {
+    assert.equal(content.match(new RegExp(`^${entry}$`, "gm"))?.length, 1, entry);
+  }
+});
+
 async function makeTempWorkspace() {
   return fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
 }

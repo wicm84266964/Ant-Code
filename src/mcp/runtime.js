@@ -1,5 +1,4 @@
 import { spawn } from "node:child_process";
-import readline from "node:readline";
 import path from "node:path";
 import { decidePermission } from "../permissions/policy-engine.js";
 import { withProxyEnvironment } from "../net/proxy.js";
@@ -7,8 +6,29 @@ import { scrubEnvironment } from "../tools/env-scrubber.js";
 import { getAntCodeVersion, resolvePackageRoot } from "../version.js";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+const MCP_STDIO_MAX_FRAME_BYTES = 64 * 1024 * 1024;
 const MCP_PROTOCOL_VERSION = "2024-11-05";
 const PACKAGE_ROOT = resolvePackageRoot();
+const sessionConnectionPromises = new WeakMap();
+
+/**
+ * @typedef {{ close: () => void }} McpLineReader
+ * @typedef {{ code: string; message: string }} McpSessionError
+ * @typedef {{
+ *   name: string;
+ *   status: string;
+ *   child: import("node:child_process").ChildProcessWithoutNullStreams;
+ *   lines: McpLineReader | null;
+ *   stderr: string;
+ *   scrubbedEnv: string[];
+ *   toolsCache: any[] | null;
+ *   lastError: McpSessionError | null;
+ *   serverInfo: Record<string, any> | null;
+ *   request: (method: string, params: Record<string, any>, signal?: AbortSignal) => Promise<any>;
+ *   notify: (method: string, params: Record<string, any>) => void;
+ *   close: () => void;
+ * }} StdioSession
+ */
 
 /**
  * @param {{
@@ -429,6 +449,27 @@ async function ensureSession(server, cwd, sessions, config) {
   if (existing && existing.status === "connected") {
     return { ok: true, session: existing };
   }
+  let connections = sessionConnectionPromises.get(sessions);
+  if (!connections) {
+    connections = new Map();
+    sessionConnectionPromises.set(sessions, connections);
+  }
+  const pending = connections.get(server.name);
+  if (pending) {
+    return pending;
+  }
+  const connection = connectSession(server, cwd, sessions, config)
+    .finally(() => {
+      if (connections.get(server.name) === connection) {
+        connections.delete(server.name);
+      }
+    });
+  connections.set(server.name, connection);
+  return connection;
+}
+
+async function connectSession(server, cwd, sessions, config) {
+  const existing = sessions.get(server.name);
   closeStoredSession(existing);
   const session = await createStdioSession(server, cwd, config);
   sessions.set(server.name, session);
@@ -448,6 +489,12 @@ async function ensureSession(server, cwd, sessions, config) {
   return { ok: true, session };
 }
 
+/**
+ * @param {StdioSession} session
+ * @param {string} method
+ * @param {Record<string, any>} params
+ * @param {AbortSignal | undefined} signal
+ */
 async function requestFromSession(session, method, params, signal = undefined) {
   try {
     const result = await session.request(method, params, signal);
@@ -460,15 +507,19 @@ async function requestFromSession(session, method, params, signal = undefined) {
         error: { code: "MCP_INTERRUPTED", message: "MCP request was interrupted by the local user." }
       };
     }
+    const code = error && typeof error === "object" && "code" in error && String(error.code).startsWith("MCP_")
+      ? String(error.code)
+      : "MCP_REQUEST_FAILED";
     session.status = "failed";
     session.lastError = {
-      code: "MCP_REQUEST_FAILED",
+      code,
       message: error instanceof Error ? error.message : String(error)
     };
     return { ok: false, error: session.lastError };
   }
 }
 
+/** @param {unknown} error */
 function isAbortError(error) {
   return error instanceof Error && /aborted/i.test(error.message);
 }
@@ -476,19 +527,22 @@ function isAbortError(error) {
 /**
  * @param {ReturnType<typeof normalizeServers>[number]} server
  * @param {string} cwd
+ * @param {Record<string, any> | undefined} config
  */
 async function createStdioSession(server, cwd, config) {
   const envWithProxy = withProxyEnvironment({ ...process.env, ...server.env }, { config });
   const scrubbed = scrubEnvironment(envWithProxy, { allow: server.envAllowlist });
-  const child = spawn(server.command, server.args, {
+  const child = /** @type {import("node:child_process").ChildProcessWithoutNullStreams} */ (spawn(server.command, server.args, {
     cwd: server.cwd ? path.resolve(cwd, server.cwd) : cwd,
-    env: scrubbed.env,
+    env: /** @type {NodeJS.ProcessEnv} */ (scrubbed.env),
     windowsHide: true,
     stdio: ["pipe", "pipe", "pipe"]
-  });
+  }));
 
+  /** @type {Map<number, { resolve: (value: any) => void; reject: (error: Error) => void; timeout: NodeJS.Timeout }>} */
   const pending = new Map();
   let nextId = 1;
+  /** @type {StdioSession} */
   const session = {
     name: server.name,
     status: "starting",
@@ -517,6 +571,10 @@ async function createStdioSession(server, cwd, config) {
           }
           pending.delete(id);
         };
+        /**
+         * @param {(value: any) => void} fn
+         * @param {any} value
+         */
         const finish = (fn, value) => {
           if (settled) {
             return;
@@ -576,25 +634,121 @@ async function createStdioSession(server, cwd, config) {
   });
 
   child.on("exit", (code, signal) => {
-    if (session.status !== "closed") {
+    if (session.status !== "closed" && !session.lastError) {
       session.status = "failed";
       session.lastError = { code: "MCP_PROCESS_EXITED", message: `MCP server exited code=${code} signal=${signal}` };
     }
-    closePending(pending, new Error(session.lastError?.message ?? "MCP server exited"));
+    closePending(pending, Object.assign(new Error(session.lastError?.message ?? "MCP server exited"), {
+      code: session.lastError?.code ?? "MCP_PROCESS_EXITED"
+    }));
   });
 
-  const lines = readline.createInterface({ input: child.stdout });
-  session.lines = lines;
-  lines.on("line", (line) => {
-    if (!line.trim()) {
-      return;
+  const lines = createBoundedJsonLineReader(child.stdout, {
+    maxFrameBytes: MCP_STDIO_MAX_FRAME_BYTES,
+    onLine(line) {
+      if (!line.trim()) {
+        return;
+      }
+      handleMessage(line, pending);
+    },
+    onError(error) {
+      session.status = "failed";
+      session.lastError = { code: error.code, message: error.message };
+      closePending(pending, error);
+      try {
+        child.stdout.destroy();
+      } catch {
+        // The transport is already failing.
+      }
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // The transport error has already settled all pending requests.
+      }
     }
-    handleMessage(line, pending);
   });
+  session.lines = lines;
 
   return session;
 }
 
+/**
+ * @param {import("node:stream").Readable} input
+ * @param {{ maxFrameBytes: number; onLine: (line: string) => void; onError: (error: Error & { code: string }) => void }} options
+ */
+function createBoundedJsonLineReader(input, options) {
+  /** @type {Buffer[]} */
+  let chunks = [];
+  let frameBytes = 0;
+  let closed = false;
+
+  function close() {
+    if (closed) return;
+    closed = true;
+    chunks = [];
+    frameBytes = 0;
+    input.removeListener("data", onData);
+    input.removeListener("end", onEnd);
+  }
+
+  function emitLine() {
+    let frame = Buffer.concat(chunks, frameBytes);
+    chunks = [];
+    frameBytes = 0;
+    if (frame.length > 0 && frame[frame.length - 1] === 0x0d) {
+      frame = frame.subarray(0, frame.length - 1);
+    }
+    options.onLine(frame.toString("utf8"));
+  }
+
+  /** @param {Buffer | Uint8Array | string} chunk */
+  function onData(chunk) {
+    if (closed) return;
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    let offset = 0;
+    while (offset < buffer.length && !closed) {
+      const newline = buffer.indexOf(0x0a, offset);
+      const end = newline >= 0 ? newline : buffer.length;
+      const segmentBytes = end - offset;
+      const observedBytes = frameBytes + segmentBytes;
+      if (observedBytes > options.maxFrameBytes) {
+        const error = mcpTransportFrameTooLargeError(options.maxFrameBytes, observedBytes);
+        close();
+        options.onError(error);
+        return;
+      }
+      if (segmentBytes > 0) {
+        chunks.push(buffer.subarray(offset, end));
+        frameBytes += segmentBytes;
+      }
+      if (newline < 0) return;
+      emitLine();
+      offset = newline + 1;
+    }
+  }
+
+  function onEnd() {
+    if (closed) return;
+    if (frameBytes > 0) emitLine();
+    close();
+  }
+
+  input.on("data", onData);
+  input.once("end", onEnd);
+  return { close };
+}
+
+/**
+ * @param {number} maxBytes
+ * @param {number} observedBytes
+ */
+function mcpTransportFrameTooLargeError(maxBytes, observedBytes) {
+  return Object.assign(new Error("MCP stdio response frame exceeds the " + maxBytes + "-byte safety limit"), {
+    code: "MCP_TRANSPORT_FRAME_TOO_LARGE",
+    maxBytes,
+    observedBytes
+  });
+}
 function closeStoredSession(session) {
   if (session && session.status !== "closed") {
     session.close();

@@ -398,6 +398,7 @@ test("dashboard runtime saves local model gateway config", async () => {
   const runtime = createDashboardRuntime({ cwd, env: {} });
 
   const saved = await runtime.saveModelConfig({
+    saveTarget: "project",
     gatewayUrl: "https://local.gateway.example/v1/chat/completions",
     gatewayProtocol: "openai-chat",
     gatewayApiKey: "secret-key",
@@ -546,6 +547,7 @@ test("dashboard runtime refreshes idle active session after saving gateway key",
     assert.equal(runtime.active.get(started.sessionId).session.config.lab.gatewayApiKey, "old-key");
 
     const saved = await runtime.saveModelConfig({
+      saveTarget: "project",
       sessionId: started.sessionId,
       gatewayUrl: env.LAB_MODEL_GATEWAY_URL,
       gatewayProtocol: "lab-agent-gateway",
@@ -601,6 +603,7 @@ test("dashboard runtime preserves running context usage when saving model window
     assert.ok(before > 0);
 
     const saved = await runtime.saveModelConfig({
+      saveTarget: "project",
       sessionId: started.sessionId,
       gatewayUrl: runtime.env.LAB_MODEL_GATEWAY_URL,
       gatewayProtocol: "lab-agent-gateway",
@@ -653,6 +656,7 @@ test("dashboard runtime switches gateway profiles without mixing previous provid
   const runtime = createDashboardRuntime({ cwd, env: {} });
 
   const saved = await runtime.saveModelConfig({
+    saveTarget: "project",
     gatewayUrl: "https://beta-gateway.example/v1/chat/completions",
     gatewayProtocol: "openai-chat",
     gatewayApiKey: "beta-key",
@@ -711,6 +715,7 @@ test("dashboard model config ignores process gateway env overrides", async () =>
   assert.equal(initial.gatewayConfig.sources.apiKey.type, "environment");
 
   const saved = await runtime.saveModelConfig({
+    saveTarget: "project",
     gatewayUrl: "https://beta-gateway.example/v1/chat/completions",
     gatewayProtocol: "openai-chat",
     gatewayApiKey: "beta-key",
@@ -747,6 +752,7 @@ test("dashboard runtime keeps environment key visible as fallback after project 
   });
 
   const saved = await runtime.saveModelConfig({
+    saveTarget: "project",
     gatewayUrl: "https://project.gateway.example/v1/chat/completions",
     gatewayProtocol: "openai-chat",
     modelId: "project-model",
@@ -770,6 +776,7 @@ test("dashboard runtime adds models to the active gateway when the same key is s
   const runtime = createDashboardRuntime({ cwd, env: {} });
 
   await runtime.saveModelConfig({
+    saveTarget: "project",
     gatewayUrl: "https://beta-gateway.example/v1/chat/completions",
     gatewayProtocol: "openai-chat",
     gatewayApiKey: "beta-key",
@@ -779,6 +786,7 @@ test("dashboard runtime adds models to the active gateway when the same key is s
     switchToModel: true
   });
   const saved = await runtime.saveModelConfig({
+    saveTarget: "project",
     gatewayUrl: "https://beta-gateway.example/v1/chat/completions",
     gatewayProtocol: "openai-chat",
     gatewayApiKey: "beta-key",
@@ -803,6 +811,7 @@ test("dashboard runtime preserves concurrent model config updates through atomic
   const runtime = createDashboardRuntime({ cwd, env: {} });
 
   const results = await Promise.all(Array.from({ length: 8 }, (_, index) => runtime.saveModelConfig({
+    saveTarget: "project",
     gatewayUrl: "https://concurrent-gateway.example/v1/chat/completions",
     gatewayProtocol: "openai-chat",
     gatewayApiKey: "concurrent-key",
@@ -826,6 +835,7 @@ test("dashboard runtime deletes a registered model from the active gateway", asy
   const runtime = createDashboardRuntime({ cwd, env: {} });
 
   await runtime.saveModelConfig({
+    saveTarget: "project",
     gatewayUrl: "https://alpha-gateway.example/v1/chat/completions",
     gatewayProtocol: "openai-chat",
     gatewayApiKey: "alpha-key",
@@ -835,6 +845,7 @@ test("dashboard runtime deletes a registered model from the active gateway", asy
     switchToModel: true
   });
   await runtime.saveModelConfig({
+    saveTarget: "project",
     gatewayUrl: "https://alpha-gateway.example/v1/chat/completions",
     gatewayProtocol: "openai-chat",
     modelId: "alpha-vision",
@@ -870,6 +881,7 @@ test("dashboard runtime clears the active gateway when deleting its final model"
   const runtime = createDashboardRuntime({ cwd, env: {} });
 
   await runtime.saveModelConfig({
+    saveTarget: "project",
     gatewayUrl: "https://beta-gateway.example/v1/chat/completions",
     gatewayProtocol: "openai-chat",
     gatewayApiKey: "beta-key",
@@ -902,6 +914,7 @@ test("dashboard runtime replaces the edited model id instead of keeping the stal
   const runtime = createDashboardRuntime({ cwd, env: {} });
 
   await runtime.saveModelConfig({
+    saveTarget: "project",
     gatewayUrl: "https://alpha-gateway.example/v1/chat/completions",
     gatewayProtocol: "openai-chat",
     gatewayApiKey: "alpha-key",
@@ -915,6 +928,7 @@ test("dashboard runtime replaces the edited model id instead of keeping the stal
   });
 
   const saved = await runtime.saveModelConfig({
+    saveTarget: "project",
     gatewayUrl: "https://alpha-gateway.example/v1/chat/completions",
     gatewayProtocol: "openai-chat",
     previousModelId: "wrong-model",
@@ -2446,6 +2460,207 @@ test("dashboard runtime shutdown reports activity and requires bounded cancel or
   gate.resolve();
 });
 
+test("dashboard runtime bounds stalled lifecycle probes and releases the shutdown lock", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-shutdown-probe-timeout-"));
+  const never = new Promise(() => {});
+  let lifecycleCalls = 0;
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: { ANT_CODE_DASHBOARD_LIFECYCLE_WAIT_MS: "50" },
+    lifecycleActivity: () => {
+      lifecycleCalls += 1;
+      return never;
+    }
+  });
+
+  const status = await runtime.lifecycleStatus();
+  assert.equal(status.ok, false);
+  assert.equal(status.code, "LIFECYCLE_STATUS_TIMEOUT");
+  assert.equal(status.activity.uncertain, true);
+
+  const timedOut = await runtime.shutdown({ timeoutMs: 50 });
+  assert.equal(timedOut.ok, false);
+  assert.equal(timedOut.code, "SHUTDOWN_ACTIVITY_TIMEOUT");
+
+  const callsBeforeForce = lifecycleCalls;
+  const forced = await runtime.shutdown({ force: true, timeoutMs: 50 });
+  assert.equal(forced.ok, true);
+  assert.equal(forced.forced, true);
+  assert.equal(runtime.active.size, 0);
+  assert.equal(lifecycleCalls, callsBeforeForce);
+});
+
+test("dashboard session listing scans group history once for ten active sessions", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-group-index-"));
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: {},
+    runTurn: async (_session, options) => {
+      await options.onEvent({ type: "turn_complete", status: "completed" });
+      return { output: "done" };
+    }
+  });
+  await runtime.trustWorkspace();
+  for (let index = 0; index < 10; index += 1) {
+    const started = await runtime.startTurn({ prompt: `active ${index}`, permissionMode: "plan" });
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+  }
+  await waitForCondition(() => [...runtime.active.values()].every((state) => !state.backgroundSnapshotPromise));
+
+  const groupRoot = path.join(cwd, ".lab-agent", "task-groups");
+  await fs.mkdir(groupRoot, { recursive: true });
+  await Promise.all(Array.from({ length: 300 }, (_, index) => fs.writeFile(
+    path.join(groupRoot, `unrelated-${index}.json`),
+    JSON.stringify({
+      id: `unrelated-${index}`,
+      parentSessionId: "unrelated-session",
+      status: "running",
+      taskIds: []
+    }),
+    "utf8"
+  )));
+
+  const originalReadFile = fs.readFile;
+  const originalNow = Date.now;
+  let groupReads = 0;
+  let virtualNow = originalNow();
+  fs.readFile = async (filePath, ...args) => {
+    if (path.resolve(String(filePath)).startsWith(`${path.resolve(groupRoot)}${path.sep}`)) {
+      groupReads += 1;
+    }
+    return originalReadFile(filePath, ...args);
+  };
+  Date.now = () => (virtualNow += 600);
+  try {
+    const records = await runtime.listSessionRecords();
+    assert.equal(records.filter((record) => record.active).length, 10);
+    assert.ok(groupReads <= 300, `expected at most one 300-file scan, received ${groupReads} reads`);
+  } finally {
+    Date.now = originalNow;
+    fs.readFile = originalReadFile;
+    await runtime.shutdown({ force: true, timeoutMs: 50 });
+  }
+});
+
+test("dashboard lifecycle timeout reuses the in-flight group scan without overlap", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-group-timeout-"));
+  const groupRoot = path.join(cwd, ".lab-agent", "task-groups");
+  await fs.mkdir(groupRoot, { recursive: true });
+  await Promise.all(Array.from({ length: 300 }, (_, index) => fs.writeFile(
+    path.join(groupRoot, `history-${index}.json`),
+    JSON.stringify({ id: `history-${index}`, parentSessionId: "other", status: "completed", taskIds: [] }),
+    "utf8"
+  )));
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: { ANT_CODE_DASHBOARD_LIFECYCLE_WAIT_MS: "50" }
+  });
+  runtime.active.set("active-timeout", {
+    session: { id: "active-timeout", cwd, status: "active" },
+    running: false,
+    quarantinedTurnId: "",
+    queuedPrompts: [],
+    pendingApprovals: new Map(),
+    pendingQuestions: new Map()
+  });
+
+  const gate = deferred();
+  const originalReadFile = fs.readFile;
+  let groupReads = 0;
+  fs.readFile = async (filePath, ...args) => {
+    if (path.resolve(String(filePath)).startsWith(`${path.resolve(groupRoot)}${path.sep}`)) {
+      groupReads += 1;
+      await gate.promise;
+    }
+    return originalReadFile(filePath, ...args);
+  };
+  try {
+    const first = await runtime.lifecycleStatus();
+    const second = await runtime.lifecycleStatus();
+    assert.equal(first.code, "LIFECYCLE_STATUS_TIMEOUT");
+    assert.equal(second.code, "LIFECYCLE_STATUS_TIMEOUT");
+    assert.equal(groupReads, 32);
+
+    gate.resolve();
+    await waitForCondition(() => groupReads === 300);
+    const recovered = await runtime.lifecycleStatus();
+    assert.equal(recovered.ok, true);
+    assert.equal(groupReads, 300);
+  } finally {
+    gate.resolve();
+    fs.readFile = originalReadFile;
+    runtime.active.clear();
+    await runtime.shutdown({ force: true, timeoutMs: 50 });
+  }
+});
+
+test("dashboard runtime bounds stalled background cleanup and still permits force shutdown", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-shutdown-background-timeout-"));
+  const never = new Promise(() => {});
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: { ANT_CODE_DASHBOARD_LIFECYCLE_WAIT_MS: "50" },
+    lifecycleActivity: async (active) => ({
+      sessions: active.size,
+      activeTurns: 0,
+      quarantinedTurns: 0,
+      queuedTurns: 0,
+      backgroundTasks: 0,
+      pendingInteractions: 0,
+      total: 0
+    }),
+    cancelBackgroundWork: () => never,
+    runTurn: async (_session, options) => {
+      await options.onEvent({ type: "turn_complete", status: "completed" });
+      return { output: "done" };
+    }
+  });
+  await runtime.trustWorkspace();
+  const started = await runtime.startTurn({ prompt: "seed", permissionMode: "plan" });
+  await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+
+  const timedOut = await runtime.shutdown({ cancel: true, timeoutMs: 50 });
+  assert.equal(timedOut.ok, false);
+  assert.equal(timedOut.code, "SHUTDOWN_BACKGROUND_TIMEOUT");
+  assert.equal(runtime.active.has(started.sessionId), true);
+
+  const forced = await runtime.shutdown({ force: true, timeoutMs: 50 });
+  assert.equal(forced.ok, true);
+  assert.equal(forced.forced, true);
+  assert.equal(runtime.active.size, 0);
+});
+
+test("dashboard runtime emits terminal run state before background observability refresh", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-terminal-before-snapshot-"));
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: {},
+    runTurn: async (_session, options) => {
+      await options.onEvent({ type: "turn_complete", status: "completed" });
+      return { output: "done" };
+    }
+  });
+  await runtime.trustWorkspace();
+  const started = await runtime.startTurn({ prompt: "finish promptly", permissionMode: "plan" });
+  const terminalEvents = await waitForEvent(
+    runtime,
+    started.sessionId,
+    (event) => event.type === "run_state" && event.running === false
+  );
+  const terminal = terminalEvents.find((event) => event.type === "run_state" && event.running === false);
+  assert.ok(terminal);
+  assert.equal(runtime.active.peek(started.sessionId).running, false);
+
+  const events = await waitForEvent(
+    runtime,
+    started.sessionId,
+    (event) => event.type === "background_subagent_snapshot" && event.sequence > terminal.sequence
+  );
+  const snapshot = events.find((event) => event.type === "background_subagent_snapshot" && event.sequence > terminal.sequence);
+  assert.ok(snapshot);
+  await runtime.shutdown({ force: true, timeoutMs: 50 });
+});
+
 test("dashboard runtime refuses metadata cwd outside the dashboard workspace", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-cwd-root-"));
   const child = path.join(cwd, "child");
@@ -2585,6 +2800,7 @@ test("dashboard active capacity evicts the least recently used persisted state a
     const result = await runtime.startTurn({ prompt: `session ${index + 1}`, permissionMode: "plan" });
     started.push(result);
     await waitForEvent(runtime, result.sessionId, (event) => event.type === "run_state" && event.running === false);
+    await waitForCondition(() => runtime.active.peek(result.sessionId).persisted === true);
   }
   const [first, second, third] = started.map((result) => runtime.active.peek(result.sessionId));
   first.lastAccessedAt = 1;
@@ -2635,6 +2851,7 @@ test("dashboard idle TTL waits for listeners, pending interactions, background w
   await runtime.trustWorkspace();
   const started = await runtime.startTurn({ prompt: "ttl state", permissionMode: "plan" });
   await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+  await waitForCondition(() => runtime.active.peek(started.sessionId).persisted === true);
   const state = runtime.active.peek(started.sessionId);
   const unsubscribe = runtime.subscribe(started.sessionId, () => {});
   state.lastAccessedAt = Date.now() - 100;
@@ -2728,6 +2945,19 @@ async function waitForEvent(runtime, sessionId, predicate, timeoutMs = 5000) {
   });
 }
 
+async function waitForCondition(predicate, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for dashboard condition");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+function cleanupAbortError() {
+  const error = new Error("test-cleanup");
+  error.name = "AbortError";
+  return error;
+}
 function transcriptText(message) {
   if (typeof message?.content === "string") {
     return message.content;

@@ -1,13 +1,19 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { atomicWriteFile, ensureContainedDirectory, withFileMutationLock } from "../storage/durable-file.js";
 
 const GROUP_VERSION = 1;
+const GROUP_LIST_CACHE_MS = 500;
 const TERMINAL_STATUSES = new Set(["completed", "failed", "partial", "blocked", "cancelled", "interrupted"]);
 const ISSUE_STATUSES = new Set(["failed", "partial", "blocked", "interrupted"]);
-const groupWriteLocks = new Map();
+const groupListCache = new Map();
 
+/** @param {{ cwd: string; onListScan?: () => void }} options */
 export function createAgentTaskGroupStore(options) {
   const root = path.join(options.cwd, ".lab-agent", "task-groups");
+  const onListScan = options.onListScan;
+  let resolvedRoot = null;
+  const groupRoot = () => resolvedRoot ??= ensureContainedDirectory(options.cwd, root);
 
   return {
     root,
@@ -20,13 +26,18 @@ export function createAgentTaskGroupStore(options) {
         updatedAt: now,
         status: group.status ?? "running"
       });
-      await writeGroup(root, record);
+      const directory = await groupRoot();
+      await withGroupLock(directory, record.id, async () => {
+        await writeGroup(directory, record);
+        invalidateGroupListCache(directory);
+      });
       return record;
     },
     async ensureGroup(group) {
       const id = safeGroupId(group.id);
-      return withGroupLock(root, id, async () => {
-        const existing = await this.readGroup(id);
+      const directory = await groupRoot();
+      return withGroupLock(directory, id, async () => {
+        const existing = await readGroupFile(path.join(directory, `${id}.json`));
         if (existing.ok) {
           const taskIds = mergeUnique(existing.group.taskIds, group.taskIds);
           const record = normalizeGroup({
@@ -38,16 +49,32 @@ export function createAgentTaskGroupStore(options) {
             createdAt: existing.group.createdAt,
             updatedAt: new Date().toISOString()
           });
-          await writeGroup(root, record);
+          await writeGroup(directory, record);
+          invalidateGroupListCache(directory);
           return { ok: true, group: record };
         }
-        return this.createGroup({ ...group, id });
+        if (existing.error?.code !== "AGENT_TASK_GROUP_NOT_FOUND") {
+          return existing;
+        }
+        const now = new Date().toISOString();
+        const record = normalizeGroup({
+          ...group,
+          id,
+          version: GROUP_VERSION,
+          createdAt: group.createdAt ?? now,
+          updatedAt: now,
+          status: group.status ?? "running"
+        });
+        await writeGroup(directory, record);
+        invalidateGroupListCache(directory);
+        return { ok: true, group: record };
       });
     },
     async updateGroup(groupId, patch) {
       const id = safeGroupId(groupId);
-      return withGroupLock(root, id, async () => {
-        const latest = await this.readGroup(id);
+      const directory = await groupRoot();
+      return withGroupLock(directory, id, async () => {
+        const latest = await readGroupFile(path.join(directory, `${id}.json`));
         if (!latest.ok) {
           return latest;
         }
@@ -55,47 +82,28 @@ export function createAgentTaskGroupStore(options) {
           ...latest.group,
           ...patch,
           taskIds: patch.taskIds ? mergeUnique(latest.group.taskIds, patch.taskIds) : latest.group.taskIds,
+          metadata: patch.metadata && typeof patch.metadata === "object"
+            ? { ...latest.group.metadata, ...patch.metadata }
+            : latest.group.metadata,
           updatedAt: new Date().toISOString()
         });
-        await writeGroup(root, record);
+        await writeGroup(directory, record);
+        invalidateGroupListCache(directory);
         return { ok: true, group: record };
       });
     },
     async readGroup(groupId) {
-      try {
-        const filePath = path.join(root, `${safeGroupId(groupId)}.json`);
-        const raw = await fs.readFile(filePath, "utf8");
-        return { ok: true, path: filePath, group: normalizeGroup(JSON.parse(raw)) };
-      } catch (error) {
-        return {
-          ok: false,
-          error: {
-            code: "AGENT_TASK_GROUP_NOT_FOUND",
-            message: error instanceof Error ? error.message : String(error)
-          }
-        };
-      }
+      const directory = await groupRoot();
+      return readGroupFile(path.join(directory, `${safeGroupId(groupId)}.json`));
     },
     async listGroups(options = {}) {
-      await fs.mkdir(root, { recursive: true });
-      const entries = await fs.readdir(root, { withFileTypes: true });
-      const groups = [];
-      for (const entry of entries) {
-        if (!entry.isFile() || !entry.name.endsWith(".json")) {
-          continue;
-        }
-        try {
-          const raw = await fs.readFile(path.join(root, entry.name), "utf8");
-          const group = normalizeGroup(JSON.parse(raw));
-          if (options.parentSessionId && group.parentSessionId !== options.parentSessionId) {
-            continue;
-          }
-          groups.push(group);
-        } catch {
-          // Ignore corrupt group records in list views; direct read still reports errors.
-        }
-      }
-      return groups.sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)));
+      const listOptions = /** @type {{ parentSessionId?: string; signal?: AbortSignal }} */ (options);
+      const directory = await groupRoot();
+      const groups = await loadGroupList(directory, onListScan, listOptions.signal);
+      return groups
+        .filter((group) => !listOptions.parentSessionId || group.parentSessionId === listOptions.parentSessionId)
+        .map(cloneGroup)
+        .sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)));
     }
   };
 }
@@ -159,28 +167,148 @@ function mergeUnique(left = [], right = []) {
 }
 
 async function writeGroup(root, group) {
-  await fs.mkdir(root, { recursive: true });
-  await fs.writeFile(path.join(root, `${safeGroupId(group.id)}.json`), `${JSON.stringify(group, null, 2)}\n`, "utf8");
+  await atomicWriteFile(path.join(root, `${safeGroupId(group.id)}.json`), `${JSON.stringify(group, null, 2)}\n`);
 }
 
 async function withGroupLock(root, groupId, fn) {
-  const key = `${path.resolve(root).toLowerCase()}::${groupId}`;
-  const previous = groupWriteLocks.get(key) ?? Promise.resolve();
-  let release;
-  const current = new Promise((resolve) => {
-    release = resolve;
-  });
-  const queued = previous.then(() => current, () => current);
-  groupWriteLocks.set(key, queued);
-  await previous.catch(() => {});
+  return withFileMutationLock(path.join(root, `${safeGroupId(groupId)}.json`), fn);
+}
+
+/**
+ * @param {string} filePath
+ * @returns {Promise<any>}
+ */
+async function readGroupFile(filePath) {
   try {
-    return await fn();
-  } finally {
-    release();
-    if (groupWriteLocks.get(key) === queued) {
-      groupWriteLocks.delete(key);
+    const raw = await fs.readFile(filePath, "utf8");
+    return { ok: true, path: filePath, group: normalizeGroup(JSON.parse(raw)) };
+  } catch (error) {
+    return {
+      ok: false,
+      error: {
+        code: /** @type {NodeJS.ErrnoException} */ (error)?.code === "ENOENT" ? "AGENT_TASK_GROUP_NOT_FOUND" : "AGENT_TASK_GROUP_READ_ERROR",
+        message: error instanceof Error ? error.message : String(error)
+      }
+    };
+  }
+}
+
+/**
+ * @param {string} root
+ * @param {(() => void) | undefined} onScan
+ * @param {AbortSignal | undefined} signal
+ * @returns {Promise<Array<Record<string, any>>>}
+ */
+function loadGroupList(root, onScan, signal) {
+  const key = path.resolve(root).toLowerCase();
+  let cached = groupListCache.get(key);
+  if (!cached) {
+    cached = { groups: [], loadedAt: 0, inFlight: null, dirty: false };
+    groupListCache.set(key, cached);
+  }
+  if (!cached.dirty && cached.loadedAt > 0 && Date.now() - cached.loadedAt <= GROUP_LIST_CACHE_MS) {
+    return waitForGroupList(Promise.resolve(cached.groups), signal);
+  }
+  if (cached.inFlight) {
+    return waitForGroupList(cached.inFlight, signal);
+  }
+  cached.dirty = false;
+  onScan?.();
+  const inFlight = scanGroupList(root).then((groups) => {
+    if (!cached.dirty) {
+      cached.groups = groups;
+      cached.loadedAt = Date.now();
+    }
+    return groups;
+  }).finally(() => {
+    if (cached.inFlight === inFlight) {
+      cached.inFlight = null;
+    }
+  });
+  cached.inFlight = inFlight;
+  return waitForGroupList(inFlight, signal);
+}
+
+/**
+ * Cancel only this caller's wait. The shared scan remains in-flight so a
+ * timeout cannot start an overlapping scan on the next request.
+ *
+ * @param {Promise<Array<Record<string, any>>>} promise
+ * @param {AbortSignal | undefined} signal
+ */
+function waitForGroupList(promise, signal) {
+  if (!signal) {
+    return promise;
+  }
+  if (signal.aborted) {
+    return Promise.reject(groupListAbortError(signal));
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    /** @type {(callback: (value: any) => void, value: any) => void} */
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", abort);
+      callback(value);
+    };
+    const abort = () => finish(reject, groupListAbortError(signal));
+    signal.addEventListener("abort", abort, { once: true });
+    promise.then(
+      (groups) => finish(resolve, groups),
+      (error) => finish(reject, error)
+    );
+  });
+}
+
+/** @param {AbortSignal} signal */
+function groupListAbortError(signal) {
+  const error = signal.reason instanceof Error ? signal.reason : new Error("Task group scan was cancelled");
+  if (!error.name || error.name === "Error") error.name = "AbortError";
+  return error;
+}
+
+/** @param {string} root */
+async function scanGroupList(root) {
+  const entries = await fs.readdir(root, { withFileTypes: true });
+  const files = entries.filter((entry) => entry.isFile() && entry.name.endsWith(".json"));
+  /** @type {Array<Record<string, any>>} */
+  const groups = [];
+  for (let offset = 0; offset < files.length; offset += 32) {
+    const batch = await Promise.all(files.slice(offset, offset + 32).map(async (entry) => {
+      try {
+        const raw = await fs.readFile(path.join(root, entry.name), "utf8");
+        return normalizeGroup(JSON.parse(raw));
+      } catch {
+        return null;
+      }
+    }));
+    for (const group of batch) {
+      if (group) groups.push(group);
     }
   }
+  return groups;
+}
+
+/** @param {string} root */
+function invalidateGroupListCache(root) {
+  const cached = groupListCache.get(path.resolve(root).toLowerCase());
+  if (cached) {
+    cached.dirty = true;
+    cached.loadedAt = 0;
+  }
+}
+
+/**
+ * @param {Record<string, any>} group
+ * @returns {Record<string, any>}
+ */
+function cloneGroup(group) {
+  return {
+    ...group,
+    taskIds: Array.isArray(group.taskIds) ? group.taskIds.slice() : [],
+    metadata: group.metadata && typeof group.metadata === "object" ? { ...group.metadata } : {}
+  };
 }
 
 export function safeGroupId(value) {

@@ -31,7 +31,14 @@ import {
 import { rgCountTool, rgFilesTool, rgFilesWithMatchesTool, rgSearchTool } from "./rg-tools.js";
 import { tsDiagnosticsTool, tsFindDefinitionTool, tsFindReferencesTool, tsSymbolsTool } from "./semantic-tools.js";
 import { backgroundShellTool, bashTool, powershellTool } from "./shell-tools.js";
-import { networkHostsForWebTool, webFetchTool, webSearchTool } from "./web-tools.js";
+import {
+  networkHostsForWebTool,
+  utf8Prefix,
+  WEB_FETCH_DEFAULT_MAX_BYTES,
+  webFetchResponseTooLargeError,
+  webFetchTool,
+  webSearchTool
+} from "./web-tools.js";
 import { createWorkflowState, planUpdateTool, recordFileChange, recordValidation, todoReadTool, todoWriteTool } from "./workflow-tools.js";
 
 const HANDLERS = Object.freeze({
@@ -248,7 +255,7 @@ export function createToolRuntime(options) {
       }
 
       if (name === "background_terminal_cancel") {
-        const result = cancelBackgroundTerminalForTool(options, input);
+        const result = await cancelBackgroundTerminalForTool(options, input);
         await notifyBackgroundTerminalEvent(options, {
           type: "background_terminal_cancelled",
           taskId: result.taskId,
@@ -462,10 +469,20 @@ async function executeMcpFetchTool(options, input) {
   if (!execution.ok) {
     return execution;
   }
-  return {
-    ok: true,
-    result: normalizeMcpFetchResult(input, execution.result)
-  };
+  try {
+    return {
+      ok: true,
+      result: normalizeMcpFetchResult(input, execution.result)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: {
+        code: error && typeof error === "object" && "code" in error ? String(error.code) : "MCP_FETCH_RESULT_INVALID",
+        message: error instanceof Error ? error.message : String(error)
+      }
+    };
+  }
 }
 
 async function executeBuiltinWebFetchTool(options, input, definition) {
@@ -532,10 +549,11 @@ function normalizeWebFetchProvider(config = {}) {
 
 function buildMcpFetchArguments(input) {
   const args = { url: input.url };
-  const maxLength = Number(input.maxBytes ?? input.maxLength);
-  if (Number.isFinite(maxLength) && maxLength > 0) {
-    args.max_length = Math.max(1024, Math.floor(maxLength));
-  }
+  const requestedMaxLength = Number(input.maxBytes ?? input.maxLength);
+  const maxLength = Number.isFinite(requestedMaxLength) && requestedMaxLength > 0
+    ? Math.floor(requestedMaxLength)
+    : WEB_FETCH_DEFAULT_MAX_BYTES;
+  args.max_length = Math.max(1024, maxLength);
   if (String(input.format ?? "").toLowerCase() === "html") {
     args.raw = true;
   }
@@ -584,13 +602,17 @@ function extractMcpText(result) {
 }
 
 function normalizeMcpFetchContent(content, input) {
-  const maxBytes = positiveIntegerOrNull(input.maxBytes ?? input.maxLength);
+  const requestedMaxBytes = positiveIntegerOrNull(input.maxBytes ?? input.maxLength);
+  const maxBytes = requestedMaxBytes ?? WEB_FETCH_DEFAULT_MAX_BYTES;
   const buffer = Buffer.from(String(content ?? ""), "utf8");
-  if (!maxBytes || buffer.length <= maxBytes) {
+  if (buffer.length <= maxBytes) {
     return { text: buffer.toString("utf8"), bytes: buffer.length, truncated: false };
   }
+  if (requestedMaxBytes === null) {
+    throw webFetchResponseTooLargeError(maxBytes, buffer.length);
+  }
   return {
-    text: buffer.subarray(0, maxBytes).toString("utf8"),
+    text: utf8Prefix(buffer, maxBytes),
     bytes: buffer.length,
     truncated: true
   };
@@ -628,7 +650,7 @@ function listBackgroundTerminalsForTool(options, input = {}) {
   });
   const activeOnly = input.activeOnly !== false;
   const filtered = activeOnly
-    ? tasks.filter((task) => task.status === "starting" || task.status === "running")
+    ? tasks.filter((task) => task.status === "starting" || task.status === "running" || task.status === "cancelling")
     : tasks;
   return {
     parentSessionId,
@@ -638,19 +660,21 @@ function listBackgroundTerminalsForTool(options, input = {}) {
   };
 }
 
-function cancelBackgroundTerminalForTool(options, input = {}) {
+async function cancelBackgroundTerminalForTool(options, input = {}) {
   const taskId = String(input.taskId ?? "").trim();
   const parentSessionId = input.includeAllSessions === true ? null : options.backgroundParentSessionId ?? options.parentSessionId ?? null;
-  const cancelled = cancelBackgroundTerminalTasks({
+  const results = await cancelBackgroundTerminalTasks({
     cwd: options.cwd,
     parentSessionId,
     taskId
   });
+  const cancelled = results.filter((task) => task.cancellationConfirmed === true && task.status === "cancelled");
   return {
     taskId,
     parentSessionId,
     cancelledTaskIds: cancelled.map((task) => task.taskId),
-    cancelled: cancelled.map(formatBackgroundTerminalTask)
+    cancelled: cancelled.map(formatBackgroundTerminalTask),
+    unconfirmed: results.filter((task) => task.cancellationConfirmed !== true).map(formatBackgroundTerminalTask)
   };
 }
 
@@ -668,6 +692,12 @@ function formatBackgroundTerminalTask(task) {
     updatedAt: task.updatedAt,
     finishedAt: task.finishedAt,
     cancelledAt: task.cancelledAt,
+    cancellationConfirmed: task.cancellationConfirmed === true,
+    cancelRequestedAt: task.cancelRequestedAt,
+    cancelFailedAt: task.cancelFailedAt,
+    cancelError: task.cancelError,
+    processIdentity: task.processIdentity,
+    launcherIdentity: task.launcherIdentity,
     stdoutPath: task.stdoutPath,
     stderrPath: task.stderrPath,
     exitCode: task.exitCode,

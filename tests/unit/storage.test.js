@@ -34,6 +34,50 @@ test("session store cleanup removes expired metadata", async () => {
   assert.deepEqual(await store.listSessions(), []);
 });
 
+test("session cleanup rechecks freshness after a concurrent metadata write", async () => {
+  const cwd = await makeTempWorkspace();
+  const store = createSessionStore({ cwd });
+  const filePath = await store.writeMetadata({ id: "renewed-session", marker: "old" });
+  const oldTime = new Date("2026-01-01T00:00:00.000Z");
+  await fs.utimes(filePath, oldTime, oldTime);
+
+  const originalStat = fs.stat;
+  let releaseFirstStat;
+  let firstStatObservedResolve;
+  const firstStatObserved = new Promise((resolve) => {
+    firstStatObservedResolve = resolve;
+  });
+  const releaseFirst = new Promise((resolve) => {
+    releaseFirstStat = resolve;
+  });
+  let intercepted = false;
+  fs.stat = async (...args) => {
+    const result = await originalStat(...args);
+    if (!intercepted && path.resolve(String(args[0])) === path.resolve(filePath)) {
+      intercepted = true;
+      firstStatObservedResolve();
+      await releaseFirst;
+    }
+    return result;
+  };
+
+  try {
+    const cleanup = store.cleanupExpiredSessions(1, {
+      now: new Date("2026-04-28T00:00:00.000Z")
+    });
+    await firstStatObserved;
+    await fs.writeFile(filePath, `${JSON.stringify({ id: "renewed-session", marker: "fresh" })}\n`, "utf8");
+    releaseFirstStat();
+    const result = await cleanup;
+
+    assert.deepEqual(result.deleted, []);
+    assert.equal(JSON.parse(await fs.readFile(filePath, "utf8")).marker, "fresh");
+  } finally {
+    fs.stat = originalStat;
+    releaseFirstStat?.();
+  }
+});
+
 test("session store deletes selected metadata and transcript chunks", async () => {
   const cwd = await makeTempWorkspace();
   const store = createSessionStore({ cwd });
