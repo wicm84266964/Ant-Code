@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.3.3 - 2026-07-25
+
+### Fixed
+
+- Windows background terminal workers are now tracked by their exact runtime
+  process handles, so cancellation and external-exit reconciliation no longer
+  depend on slow or restricted system-wide process enumeration.
+- Verified Windows terminal cancellation now falls back to terminating the
+  owned root process when process-tree control is unavailable, while recovered
+  persisted tasks continue to require creation-identity checks before a PID can
+  be terminated.
+
+### Validation
+
+- `node --test tests/unit/background-terminal-registry-safety.test.js`
+- `node --test tests/unit/tools.test.js` (88 tests)
+
 ## 1.3.2 - 2026-07-17
 
 ### Fixed

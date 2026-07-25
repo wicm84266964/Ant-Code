@@ -4,6 +4,7 @@ import path from "node:path";
 import { atomicWriteFileSync } from "../storage/durable-file.js";
 
 /** @typedef {Record<string, any>} TerminalTask */
+/** @typedef {{instanceId: string | null, pid: number, child: import("node:child_process").ChildProcess}} RuntimeProcess */
 /** @typedef {(pid: number) => Promise<any> | any} ProcessInspector */
 /** @type {Map<string, TerminalTask>} */
 const running = new Map();
@@ -38,6 +39,8 @@ let processSnapshotInFlight = null;
 let processSnapshotGeneration = 0;
 /** @type {Map<string, Promise<any>>} */
 const processIdentityCaptures = new Map();
+/** @type {Map<string, RuntimeProcess>} */
+const runtimeProcesses = new Map();
 /** @type {WeakMap<TerminalTask, Promise<TerminalTask>>} */
 const terminalCancellations = new WeakMap();
 /** @type {Map<string, PersistedRootState>} */
@@ -55,6 +58,7 @@ export function registerBackgroundTerminalTask(task) {
     Object.assign(error, { code: "BACKGROUND_TERMINAL_TASK_ID_CONFLICT" });
     throw error;
   }
+  runtimeProcesses.delete(id);
   const now = new Date().toISOString();
   invalidateProcessLivenessSnapshot();
   const entry = normalizeTask({
@@ -109,6 +113,34 @@ export function registerBackgroundTerminalTask(task) {
       persistTask(current);
     }
   };
+}
+
+/**
+ * Keep the exact process handle for tasks launched by this runtime. Persisted
+ * tasks still use creation-identity verification after a process restart.
+ *
+ * @param {any} taskId
+ * @param {any} instanceId
+ * @param {import("node:child_process").ChildProcess} child
+ */
+export function registerBackgroundTerminalProcess(taskId, instanceId, child) {
+  const id = String(taskId ?? "").trim();
+  const normalizedInstanceId = normalizeInstanceId(instanceId);
+  const pid = normalizeProcessId(child?.pid);
+  const current = terminal.get(id);
+  if (!id || !pid || !current || current.instanceId !== normalizedInstanceId) {
+    return false;
+  }
+  const record = { instanceId: normalizedInstanceId, pid, child };
+  runtimeProcesses.set(id, record);
+  const release = () => {
+    if (runtimeProcesses.get(id) === record) {
+      runtimeProcesses.delete(id);
+    }
+  };
+  child.once("close", release);
+  child.once("error", release);
+  return true;
 }
 
 /** @param {any} taskId @param {TerminalTask} [patch] */
@@ -247,7 +279,10 @@ function reconcileTerminalTaskLiveness(task, liveness) {
   }
   const field = task.status === "starting" ? "launcherPid" : "pid";
   const identityField = field === "pid" ? "processIdentity" : "launcherIdentity";
-  const livenessStatus = processLivenessStatus(task[field], task[identityField], liveness);
+  const runtimeProcess = runtimeProcessForTask(task, field);
+  const livenessStatus = runtimeProcess
+    ? runtimeProcessAlive(runtimeProcess) ? "alive" : "dead"
+    : processLivenessStatus(task[field], task[identityField], liveness);
   if (livenessStatus === "alive" || livenessStatus === "unknown") {
     return task;
   }
@@ -644,7 +679,9 @@ function createProcessLivenessSnapshot(tasks) {
     return null;
   }
   const needsSnapshot = tasks.some((task) => (
-    ACTIVE_STATUSES.has(task?.status) && (task.pid || task.launcherPid)
+    ACTIVE_STATUSES.has(task?.status)
+    && (task.pid || task.launcherPid)
+    && !runtimeProcessForTask(task, task.status === "starting" ? "launcherPid" : "pid")
   ));
   if (!needsSnapshot) {
     return { known: true, pids: new Set(), identities: new Map() };
@@ -853,11 +890,23 @@ async function performTerminalTaskCancellation(task, options) {
   running.set(task.taskId, task);
   if (options.persist) persistTask(task);
 
-  /** @type {Array<{pid: number, identity: string, pidField: string}>} */
+  /** @type {Array<{pid: number, identity: string, pidField: string, runtimeProcess?: RuntimeProcess}>} */
   const targets = [];
   for (const pidField of ["pid", "launcherPid"]) {
     const pid = normalizeProcessId(task[pidField]);
     if (!pid || targets.some((target) => target.pid === pid)) {
+      continue;
+    }
+    const runtimeProcess = runtimeProcessForTask(task, pidField);
+    if (runtimeProcess) {
+      if (runtimeProcessAlive(runtimeProcess)) {
+        targets.push({
+          pid,
+          identity: `runtime:${task.instanceId ?? "legacy"}:${pid}`,
+          pidField,
+          runtimeProcess
+        });
+      }
       continue;
     }
     const identity = await ensureTaskIdentity(task, pidField, options.inspectProcess);
@@ -934,6 +983,20 @@ async function terminateVerifiedProcessTree(options) {
   if (!pid || !options.identity) {
     return { exited: false, error: "Process identity is invalid." };
   }
+  if (options.runtimeProcess) {
+    if (!runtimeProcessAlive(options.runtimeProcess)) {
+      return { exited: true };
+    }
+    sendProcessTreeSignal(pid, false);
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < options.timeoutMs) {
+      await delay(Math.min(PROCESS_CANCEL_POLL_MS, Math.max(1, options.timeoutMs - (Date.now() - startedAt))));
+      if (!runtimeProcessAlive(options.runtimeProcess)) {
+        return { exited: true };
+      }
+    }
+    return { exited: false, error: "Process exit was not confirmed before the cancellation deadline." };
+  }
   const before = await inspectProcessSafely(options.inspectProcess, pid);
   if (!before.alive || (before.identity && before.identity !== options.identity)) {
     return { exited: true };
@@ -965,6 +1028,7 @@ function sendProcessTreeSignal(pid, force) {
     return false;
   }
   if (process.platform === "win32") {
+    let requested = false;
     try {
       const killer = spawn("taskkill", ["/pid", String(pid), "/t", "/f"], {
         windowsHide: true,
@@ -972,10 +1036,17 @@ function sendProcessTreeSignal(pid, force) {
       });
       killer.once("error", () => {});
       killer.unref?.();
-      return true;
+      requested = true;
     } catch {
-      return false;
+      // Fall through to terminating the already verified root process.
     }
+    try {
+      process.kill(pid, force ? "SIGKILL" : "SIGTERM");
+      requested = true;
+    } catch {
+      // The process may already have exited.
+    }
+    return requested;
   }
   const signal = force ? "SIGKILL" : "SIGTERM";
   try {
@@ -989,6 +1060,26 @@ function sendProcessTreeSignal(pid, force) {
       return false;
     }
   }
+}
+
+/** @param {TerminalTask} task @param {string} pidField */
+function runtimeProcessForTask(task, pidField) {
+  if (!task || pidField !== "pid") {
+    return null;
+  }
+  const record = runtimeProcesses.get(task.taskId);
+  return record
+    && record.instanceId === task.instanceId
+    && record.pid === normalizeProcessId(task.pid)
+    ? record
+    : null;
+}
+
+/** @param {RuntimeProcess} record */
+function runtimeProcessAlive(record) {
+  return record.child.exitCode === null
+    && record.child.signalCode === null
+    && processExists(record.pid);
 }
 
 /** @param {any} pid */

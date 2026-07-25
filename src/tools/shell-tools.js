@@ -2,7 +2,11 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { registerBackgroundTerminalTask, updateBackgroundTerminalTask } from "../agents/background-terminal-registry.js";
+import {
+  registerBackgroundTerminalProcess,
+  registerBackgroundTerminalTask,
+  updateBackgroundTerminalTask
+} from "../agents/background-terminal-registry.js";
 import { scrubEnvironment } from "./env-scrubber.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -117,12 +121,14 @@ export async function backgroundShellTool(input) {
       error: started.error
     };
   }
-  updateBackgroundTerminalTask(taskId, {
-    instanceId: terminalInstanceId,
-    status: "running",
-    pid: started.pid,
-    launcherPid: started.launcherPid ?? null
-  });
+  if (started.registryUpdated !== true) {
+    updateBackgroundTerminalTask(taskId, {
+      instanceId: terminalInstanceId,
+      status: "running",
+      pid: started.pid,
+      launcherPid: started.launcherPid ?? null
+    });
+  }
   return {
     taskId,
     command: input.command,
@@ -138,7 +144,6 @@ export async function backgroundShellTool(input) {
 
 async function startWindowsBackgroundShell(input) {
   const workerPath = path.join(input.logDir, `${input.taskId}.worker.ps1`);
-  const launcherPath = path.join(input.logDir, `${input.taskId}.launcher.ps1`);
   await fs.promises.writeFile(workerPath, [
     "$ErrorActionPreference = 'Continue'",
     `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8`,
@@ -147,20 +152,14 @@ async function startWindowsBackgroundShell(input) {
     `} 1>> ${powerShellSingleQuoted(input.stdoutPath)} 2>> ${powerShellSingleQuoted(input.stderrPath)}`,
     ""
   ].join("\r\n"), "utf8");
-  await fs.promises.writeFile(launcherPath, [
-    "$ErrorActionPreference = 'Stop'",
-    `$process = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoLogo','-NoProfile','-ExecutionPolicy','Bypass','-File', ${powerShellSingleQuoted(workerPath)}) -WorkingDirectory ${powerShellSingleQuoted(input.cwd)} -WindowStyle Hidden -PassThru`,
-    "Write-Output $process.Id",
-    ""
-  ].join("\r\n"), "utf8");
   return new Promise((resolve) => {
     let settled = false;
-    let launcherPid = null;
-    const launcher = spawn("powershell.exe", ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", launcherPath], {
+    const worker = spawn("powershell.exe", ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", workerPath], {
       cwd: input.cwd,
       env: input.scrubbed.env,
       windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"]
+      detached: true,
+      stdio: "ignore"
     });
     const finish = (result) => {
       if (settled) {
@@ -169,20 +168,20 @@ async function startWindowsBackgroundShell(input) {
       settled = true;
       clearTimeout(timeout);
       input.signal?.removeEventListener?.("abort", onAbort);
-      resolve({ launcherPid, ...result });
+      resolve({ launcherPid: null, ...result });
     };
-    const terminateLauncher = () => {
-      if (launcher.pid) {
-        killWindowsProcessTree(launcher.pid);
+    const terminateWorker = () => {
+      if (worker.pid) {
+        killWindowsProcessTree(worker.pid);
       }
       try {
-        launcher.kill("SIGTERM");
+        worker.kill("SIGTERM");
       } catch {
-        // The launcher may already have exited.
+        // The worker may already have exited.
       }
     };
     const onAbort = () => {
-      terminateLauncher();
+      terminateWorker();
       finish({
         cancelled: true,
         error: {
@@ -192,49 +191,47 @@ async function startWindowsBackgroundShell(input) {
       });
     };
     const timeout = setTimeout(() => {
-      terminateLauncher();
+      terminateWorker();
       finish({
         error: {
           code: "BACKGROUND_SHELL_LAUNCH_TIMEOUT",
-          message: "Background shell launcher timed out before returning a process id."
+          message: "Background shell worker timed out before confirming startup."
         }
       });
     }, DEFAULT_BACKGROUND_LAUNCH_TIMEOUT_MS);
     input.signal?.addEventListener?.("abort", onAbort, { once: true });
-    const stdout = [];
-    const stderr = [];
-    launcher.stdout.on("data", (chunk) => stdout.push(Buffer.from(chunk)));
-    launcher.stderr.on("data", (chunk) => stderr.push(Buffer.from(chunk)));
-    launcher.on("spawn", () => {
-      launcherPid = launcher.pid ?? null;
-      updateBackgroundTerminalTask(input.taskId, { instanceId: input.terminalInstanceId, launcherPid });
+    worker.on("spawn", () => {
+      const pid = worker.pid ?? null;
+      const updated = updateBackgroundTerminalTask(input.taskId, {
+        instanceId: input.terminalInstanceId,
+        status: "running",
+        pid,
+        launcherPid: null
+      });
+      if (!updated || !registerBackgroundTerminalProcess(input.taskId, input.terminalInstanceId, worker)) {
+        terminateWorker();
+        finish({
+          error: {
+            code: "BACKGROUND_SHELL_REGISTRATION_ERROR",
+            message: "Background shell worker started but could not be attached to its terminal record."
+          }
+        });
+        return;
+      }
+      worker.unref?.();
       if (input.signal?.aborted) {
         onAbort();
+        return;
       }
+      finish({ pid, registryUpdated: true });
     });
-    launcher.on("error", (error) => {
+    worker.on("error", (error) => {
       finish({
         error: {
           code: "BACKGROUND_SHELL_SPAWN_ERROR",
           message: error instanceof Error ? error.message : String(error)
         }
       });
-    });
-    launcher.on("close", (exitCode) => {
-      if (settled) {
-        return;
-      }
-      const pid = Number(Buffer.concat(stdout).toString("utf8").trim().split(/\s+/).find((part) => /^\d+$/.test(part)));
-      if (exitCode !== 0 || !Number.isFinite(pid)) {
-        finish({
-          error: {
-            code: "BACKGROUND_SHELL_SPAWN_ERROR",
-            message: Buffer.concat(stderr).toString("utf8").trim() || `Background launcher exited ${exitCode}`
-          }
-        });
-        return;
-      }
-      finish({ pid });
     });
   });
 }
