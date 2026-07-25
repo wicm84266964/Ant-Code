@@ -2408,7 +2408,15 @@ async function makeTempWorkspace() {
 
 async function killProcessTree(pid) {
   if (process.platform === "win32") {
-    await execFileAsync("taskkill", ["/pid", String(pid), "/t", "/f"]).catch(() => null);
+    try {
+      await execFileAsync("taskkill", ["/pid", String(pid), "/t", "/f"]);
+    } catch {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        // Already exited or cannot be controlled in this environment.
+      }
+    }
     return;
   }
   try {
