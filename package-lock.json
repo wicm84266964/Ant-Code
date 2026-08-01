@@ -11,9 +11,9 @@
       "dependencies": {
         "@vscode/ripgrep": "1.18.0",
         "ink": "^6.8.0",
-        "katex": "^0.16.46",
-        "mermaid": "^11.15.0",
-        "react": "^19.2.5",
+        "katex": "^0.18.1",
+        "mermaid": "^11.16.0",
+        "react": "^19.2.8",
         "typescript": "6.0.3",
         "yaml": "^2.9.0"
       },
@@ -25,7 +25,7 @@
         "@types/node": "20.19.43",
         "axe-core": "4.12.1",
         "esbuild": "^0.28.1",
-        "playwright-core": "1.61.1",
+        "playwright-core": "1.62.0",
         "postject": "^1.0.0-alpha.6"
       },
       "engines": {
@@ -530,12 +530,12 @@
       }
     },
     "node_modules/@mermaid-js/parser": {
-      "version": "1.1.1",
-      "resolved": "https://registry.npmjs.org/@mermaid-js/parser/-/parser-1.1.1.tgz",
-      "integrity": "sha512-VuHdsYMK1bT6X2JbcAaWAhugTRvRBRyuZgd+c22swUeI9g/ntaxF7CY7dYarhZovofCbUNO0G7JesfmNtjYOCw==",
+      "version": "1.2.0",
+      "resolved": "https://registry.npmjs.org/@mermaid-js/parser/-/parser-1.2.0.tgz",
+      "integrity": "sha512-oYPyv8A4As1yH5Bx+04iQEQxXuIQDe0GKCNSRgao6z8AM9jixXIfP0vsppRLvGf+nKIOb9/LdpWA4YuJiVvESA==",
       "license": "MIT",
       "dependencies": {
-        "@chevrotain/types": "~11.1.1"
+        "@chevrotain/types": "~11.1.2"
       }
     },
     "node_modules/@types/d3": {
@@ -1908,9 +1908,9 @@
       }
     },
     "node_modules/katex": {
-      "version": "0.16.46",
-      "resolved": "https://registry.npmjs.org/katex/-/katex-0.16.46.tgz",
-      "integrity": "sha512-WHy4Coo+bGZyH7NwJKHkS04YFsFcarWbAEOAC3EMndzdN6VSZqklLLIgfxzyaW9jDoeGYJX9SWbJPKpecox0Uw==",
+      "version": "0.18.1",
+      "resolved": "https://registry.npmjs.org/katex/-/katex-0.18.1.tgz",
+      "integrity": "sha512-Td8GCYSxDAoMhHOlKmCFMJ/hz5qlAAb71n66Dryw9nfCVfumLo7nhuotbvKom/XPADmrYC3O5QR71EPq4DarJQ==",
       "funding": [
         "https://opencollective.com/katex",
         "https://github.com/sponsors/katex"
@@ -1962,32 +1962,57 @@
       }
     },
     "node_modules/mermaid": {
-      "version": "11.15.0",
-      "resolved": "https://registry.npmjs.org/mermaid/-/mermaid-11.15.0.tgz",
-      "integrity": "sha512-pTMbcf3rWdtLiYGpmoTjHEpeY8seiy6sR+9nD7LOs8KfUbHE4lOUAprTRqRAcWSQ6MQpdX+YEsxShtGsINtPtw==",
+      "version": "11.16.0",
+      "resolved": "https://registry.npmjs.org/mermaid/-/mermaid-11.16.0.tgz",
+      "integrity": "sha512-Zvm3kbstgdpvIJPPItlL7fppIZ3kibvc1oZIGxdvk9t6UFz6flv+Jw7FtRGKwfcI8OckmH04LqG6LlS6X4B1pA==",
       "license": "MIT",
       "dependencies": {
-        "@braintree/sanitize-url": "^7.1.1",
+        "@braintree/sanitize-url": "^7.1.2",
         "@iconify/utils": "^3.0.2",
-        "@mermaid-js/parser": "^1.1.1",
+        "@mermaid-js/parser": "^1.2.0",
         "@types/d3": "^7.4.3",
         "@upsetjs/venn.js": "^2.0.0",
-        "cytoscape": "^3.33.1",
+        "cytoscape": "^3.33.3",
         "cytoscape-cose-bilkent": "^4.1.0",
         "cytoscape-fcose": "^2.2.0",
         "d3": "^7.9.0",
         "d3-sankey": "^0.12.3",
         "dagre-d3-es": "7.0.14",
-        "dayjs": "^1.11.19",
-        "dompurify": "^3.3.1",
+        "dayjs": "^1.11.20",
+        "dompurify": "^3.3.3",
         "es-toolkit": "^1.45.1",
-        "katex": "^0.16.25",
+        "katex": "^0.16.45",
         "khroma": "^2.1.0",
         "marked": "^16.3.0",
         "roughjs": "^4.6.6",
         "stylis": "^4.3.6",
         "ts-dedent": "^2.2.0",
         "uuid": "^11.1.0 || ^12 || ^13 || ^14.0.0"
+      }
+    },
+    "node_modules/mermaid/node_modules/commander": {
+      "version": "8.3.0",
+      "resolved": "https://registry.npmjs.org/commander/-/commander-8.3.0.tgz",
+      "integrity": "sha512-OkTL9umf+He2DZkUq8f8J9of7yL6RJKI24dVITBmNfZBmri9zYZQrKkuXiKhyfPSu8tUhnVBB1iKXevvnlR4Ww==",
+      "license": "MIT",
+      "engines": {
+        "node": ">= 12"
+      }
+    },
+    "node_modules/mermaid/node_modules/katex": {
+      "version": "0.16.47",
+      "resolved": "https://registry.npmjs.org/katex/-/katex-0.16.47.tgz",
+      "integrity": "sha512-Eeo8Ys1doU1z+x8AZsPpQu+p/QcZBI5PeOo7QGQdy2x2m0MU/hYagBbGOmXwr5KVbEfVuWv9LpnQWeehogurjg==",
+      "funding": [
+        "https://opencollective.com/katex",
+        "https://github.com/sponsors/katex"
+      ],
+      "license": "MIT",
+      "dependencies": {
+        "commander": "^8.3.0"
+      },
+      "bin": {
+        "katex": "cli.js"
       }
     },
     "node_modules/mimic-fn": {
@@ -2036,16 +2061,16 @@
       "license": "MIT"
     },
     "node_modules/playwright-core": {
-      "version": "1.61.1",
-      "resolved": "https://registry.npmjs.org/playwright-core/-/playwright-core-1.61.1.tgz",
-      "integrity": "sha512-h7Qlt6m4REp25qvIdvbDtVmD4LqVXfpRxhORv9L0jzETM05p4fuPJ3dKyuSXQxDSbXnmS79HAgi9589lGSpLkg==",
+      "version": "1.62.0",
+      "resolved": "https://registry.npmjs.org/playwright-core/-/playwright-core-1.62.0.tgz",
+      "integrity": "sha512-nsNRyq0r2zsG8AcRHWknc9QRA5XCueC7gWMrs+Gx2tlZn9hcl8zudfh00lhJPY1DE7NmZ6bDsT9g2yey8mXljA==",
       "dev": true,
       "license": "Apache-2.0",
       "bin": {
         "playwright-core": "cli.js"
       },
       "engines": {
-        "node": ">=18"
+        "node": ">=20"
       }
     },
     "node_modules/points-on-curve": {
@@ -2081,9 +2106,9 @@
       }
     },
     "node_modules/react": {
-      "version": "19.2.5",
-      "resolved": "https://registry.npmjs.org/react/-/react-19.2.5.tgz",
-      "integrity": "sha512-llUJLzz1zTUBrskt2pwZgLq59AemifIftw4aB7JxOqf1HY2FDaGDxgwpAPVzHU1kdWabH7FauP4i1oEeer2WCA==",
+      "version": "19.2.8",
+      "resolved": "https://registry.npmjs.org/react/-/react-19.2.8.tgz",
+      "integrity": "sha512-PWaYA1L/q9u2u7xYQi+Y3L3Yfnie7XyLeaJICV1MGD6LprsBxcAqGjYyr0eY3p+QdsA+x/Irkt4Qif8D63+Sbw==",
       "license": "MIT",
       "engines": {
         "node": ">=0.10.0"
