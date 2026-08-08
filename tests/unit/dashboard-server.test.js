@@ -309,6 +309,42 @@ test("dashboard gateway profile route forwards switch requests", async () => {
   }
 });
 
+test("dashboard gateway profile route forwards delete requests", async () => {
+  const calls = [];
+  const server = createDashboardServer({
+    cwd: process.cwd(),
+    runtime: {
+      ...createRuntimeStub(),
+      deleteGatewayProfile: async (body) => {
+        calls.push(body);
+        return {
+          ok: true,
+          deletedProfile: body.profileId,
+          clearedGateway: true,
+          gatewayConfig: { gatewayUrl: "", activeProfileId: "" },
+          gatewayProfiles: [],
+          sessionStatus: { model: "", context: { maxTokens: 200000 } },
+          models: []
+        };
+      }
+    }
+  });
+  await listen(server, "127.0.0.1", 0);
+
+  try {
+    const response = await fetchJson(server, "/api/gateway-profile/gw-alpha", {
+      method: "DELETE",
+      body: { sessionId: "s1" }
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.body.deletedProfile, "gw-alpha");
+    assert.deepEqual(calls, [{ sessionId: "s1", profileId: "gw-alpha" }]);
+  } finally {
+    await close(server);
+  }
+});
+
 test("dashboard server serves static assets from configured public dir", async () => {
   const publicDir = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-public-"));
   await fs.mkdir(path.join(publicDir, "vendor"), { recursive: true });
@@ -976,6 +1012,7 @@ function createRuntimeStub() {
     guideTurn: () => ({ ok: false }),
     deleteSession: async () => ({ ok: false }),
     deleteModelConfig: async () => ({ ok: false }),
+    deleteGatewayProfile: async () => ({ ok: false }),
     clearContext: async () => ({ ok: false }),
     compactContext: async () => ({ ok: false }),
     sessionCwd: async () => ({ ok: false }),

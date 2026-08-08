@@ -261,7 +261,7 @@ test("dashboard runtime includes the active turn in the queued attachment budget
 test("dashboard runtime exposes model and context status", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
   const server = await listen(createGateway("status answer"), "127.0.0.1", 0);
-  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server, { LAB_AGENT_MODEL: "status-model" }) });
 
   try {
     const initial = await runtime.status();
@@ -375,8 +375,7 @@ test("dashboard runtime can apply model agent defaults when switching", async ()
   assert.deepEqual(switched.agentModelTiers, {
     cheap: "vision-flash",
     default: "vision-default",
-    strong: "vision-strong",
-    vision: "example-vision-model"
+    strong: "vision-strong"
   });
   assert.deepEqual(switched.models.find((model) => model.id === "vision-model")?.agentModelTiers, {
     cheap: "vision-flash",
@@ -388,8 +387,7 @@ test("dashboard runtime can apply model agent defaults when switching", async ()
   assert.deepEqual(local.agents.modelTiers, {
     cheap: "vision-flash",
     default: "vision-default",
-    strong: "vision-strong",
-    vision: "example-vision-model"
+    strong: "vision-strong"
   });
 });
 
@@ -693,6 +691,53 @@ test("dashboard runtime switches gateway profiles without mixing previous provid
   });
 });
 
+test("dashboard runtime clears stale agent routes when an older gateway profile has no agent config", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-profile-agents-"));
+  await fs.mkdir(path.join(cwd, ".lab-agent"), { recursive: true });
+  await fs.writeFile(path.join(cwd, ".lab-agent", "config.json"), JSON.stringify({
+    modelAlias: "alpha-main",
+    models: [{ id: "alpha-main" }, { id: "alpha-agent" }],
+    agents: {
+      modelTiers: { cheap: "alpha-agent", default: "alpha-agent", strong: "alpha-agent" },
+      vision: { enabled: false, model: null }
+    },
+    lab: {
+      gatewayUrl: "https://alpha.gateway.example/v1/chat/completions",
+      gatewayProtocol: "openai-chat",
+      gatewayApiKey: "alpha-key",
+      activeGatewayProfile: "profile-alpha",
+      gatewayProfiles: [
+        {
+          id: "profile-alpha",
+          gatewayUrl: "https://alpha.gateway.example/v1/chat/completions",
+          gatewayProtocol: "openai-chat",
+          gatewayApiKey: "alpha-key",
+          modelAlias: "alpha-main",
+          models: [{ id: "alpha-main" }, { id: "alpha-agent" }]
+        },
+        {
+          id: "profile-beta",
+          gatewayUrl: "https://beta.gateway.example/v1/chat/completions",
+          gatewayProtocol: "openai-chat",
+          gatewayApiKey: null,
+          modelAlias: "beta-main",
+          models: [{ id: "beta-main" }]
+        }
+      ]
+    }
+  }), "utf8");
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+
+  const switched = await runtime.switchGatewayProfile({ profileId: "profile-beta" });
+
+  assert.deepEqual(switched.models.map((model) => model.id), ["beta-main"]);
+  assert.deepEqual(switched.agentModelTiers, {});
+  assert.equal(switched.visionAgent.enabled, false);
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.equal(local.agents.modelTiers, undefined);
+  assert.equal(local.agents.vision.enabled, false);
+});
+
 test("dashboard model config ignores process gateway env overrides", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
   const runtime = createDashboardRuntime({
@@ -739,7 +784,7 @@ test("dashboard model config ignores process gateway env overrides", async () =>
   assert.equal(after.gatewayConfig.sources.apiKey.type, "project");
 });
 
-test("dashboard runtime keeps environment key visible as fallback after project model config without local key", async () => {
+test("dashboard runtime does not reuse an environment key after switching gateway URL", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
   const runtime = createDashboardRuntime({
     cwd,
@@ -763,12 +808,192 @@ test("dashboard runtime keeps environment key visible as fallback after project 
 
   assert.equal(saved.ok, true);
   assert.equal(saved.gatewayConfig.gatewayUrl, "https://project.gateway.example/v1/chat/completions");
-  assert.equal(saved.gatewayConfig.apiKeyConfigured, true);
+  assert.equal(saved.gatewayConfig.apiKeyConfigured, false);
   assert.equal(saved.gatewayConfig.sources.gatewayUrl.type, "project");
-  assert.equal(saved.gatewayConfig.sources.apiKey.type, "environment");
+  assert.equal(saved.gatewayConfig.sources.apiKey.type, "project");
 
   const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
-  assert.equal(local.lab.gatewayApiKey, undefined);
+  assert.equal(local.lab.gatewayApiKey, null);
+  const environmentProfile = local.lab.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("env.gateway"));
+  assert.ok(environmentProfile);
+  assert.equal(Object.prototype.hasOwnProperty.call(environmentProfile, "gatewayApiKey"), false);
+});
+
+test("dashboard runtime keeps no-key profiles isolated across switches and model deletion", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-no-key-profile-"));
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: {
+      LAB_MODEL_GATEWAY_URL: "https://env.gateway.example/v1/chat/completions",
+      LAB_MODEL_GATEWAY_PROTOCOL: "openai-chat",
+      LAB_MODEL_GATEWAY_API_KEY: "env-key",
+      LAB_AGENT_MODEL: "env-model"
+    }
+  });
+
+  await runtime.saveModelConfig({
+    saveTarget: "project",
+    gatewayUrl: "https://no-key.gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    modelId: "no-key-a",
+    label: "No Key A",
+    modalities: ["text"],
+    switchToModel: true
+  });
+  const saved = await runtime.saveModelConfig({
+    saveTarget: "project",
+    gatewayUrl: "https://no-key.gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    modelId: "no-key-b",
+    label: "No Key B",
+    modalities: ["text"],
+    switchToModel: true
+  });
+  const environmentProfile = saved.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("env.gateway"));
+  const noKeyProfile = saved.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("no-key.gateway"));
+
+  const environmentSwitch = await runtime.switchGatewayProfile({ profileId: environmentProfile.id });
+  assert.equal(environmentSwitch.gatewayConfig.apiKeyConfigured, true);
+  const noKeySwitch = await runtime.switchGatewayProfile({ profileId: noKeyProfile.id });
+  assert.equal(noKeySwitch.gatewayConfig.apiKeyConfigured, false);
+
+  const deleted = await runtime.deleteModelConfig({ modelId: "no-key-a" });
+  assert.deepEqual(deleted.models.map((model) => model.id), ["no-key-b"]);
+  assert.equal(deleted.gatewayConfig.apiKeyConfigured, false);
+
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.equal(local.lab.gatewayApiKey, null);
+  assert.equal(local.lab.gatewayProfiles.find((profile) => profile.id === noKeyProfile.id).gatewayApiKey, null);
+  assert.equal(local.lab.gatewayProfiles.find((profile) => profile.id === environmentProfile.id).gatewayApiKey, undefined);
+});
+
+test("dashboard runtime clears a stale health URL when the field is blank", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-health-"));
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+
+  await runtime.saveModelConfig({
+    gatewayUrl: "https://old.gateway.example/v1/chat/completions",
+    gatewayHealthUrl: "https://health-old.example/health",
+    gatewayProtocol: "openai-chat",
+    modelId: "old-model"
+  });
+  const saved = await runtime.saveModelConfig({
+    gatewayUrl: "https://old.gateway.example/v1/chat/completions",
+    gatewayHealthUrl: "",
+    gatewayProtocol: "openai-chat",
+    modelId: "new-model"
+  });
+
+  assert.equal(saved.gatewayConfig.gatewayHealthUrl, "");
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.equal(local.lab.gatewayHealthUrl, null);
+  assert.equal(local.allowedHosts.includes("health-old.example"), false);
+  assert.equal(local.allowedHosts.includes("old.gateway.example"), true);
+});
+
+test("dashboard runtime preserves custom gateway ids and collapses endpoint duplicates", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-custom-profile-"));
+  await fs.mkdir(path.join(cwd, ".lab-agent"), { recursive: true });
+  await fs.writeFile(path.join(cwd, ".lab-agent", "config.json"), JSON.stringify({
+    modelAlias: "legacy-model",
+    models: [{ id: "legacy-model" }],
+    allowedHosts: ["buddy.example"],
+    lab: {
+      gatewayUrl: "https://buddy.example/v1/chat/completions",
+      gatewayProtocol: "openai-chat",
+      gatewayApiKey: "generated-key",
+      activeGatewayProfile: "gw-stale-generated",
+      gatewayProfiles: [
+        {
+          id: "legacy-custom-id",
+          gatewayUrl: "https://buddy.example/v1/chat/completions",
+          gatewayProtocol: "openai-chat",
+          gatewayApiKey: "legacy-key",
+          modelAlias: "legacy-model",
+          models: [{ id: "legacy-model" }]
+        },
+        {
+          id: "gw-stale-generated",
+          gatewayUrl: "https://buddy.example/v1/chat/completions",
+          gatewayProtocol: "openai-chat",
+          gatewayApiKey: "generated-key",
+          modelAlias: "legacy-model",
+          models: [{ id: "legacy-model" }]
+        }
+      ]
+    }
+  }), "utf8");
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+
+  const saved = await runtime.saveModelConfig({
+    saveTarget: "project",
+    gatewayUrl: "https://buddy.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "replacement-key",
+    modelId: "edited-model",
+    previousModelId: "legacy-model",
+    switchToModel: true
+  });
+
+  assert.equal(saved.gatewayConfig.activeProfileId, "legacy-custom-id");
+  assert.deepEqual(saved.gatewayProfiles.map((profile) => profile.id), ["legacy-custom-id"]);
+  const localAfterSave = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.equal(localAfterSave.lab.gatewayProfiles.length, 1);
+  assert.equal(localAfterSave.lab.gatewayProfiles[0].id, "legacy-custom-id");
+  assert.equal(localAfterSave.lab.gatewayProfiles[0].gatewayApiKey, "replacement-key");
+
+  const deleted = await runtime.deleteGatewayProfile({ profileId: "legacy-custom-id" });
+  assert.equal(deleted.ok, true);
+  assert.deepEqual(deleted.gatewayProfiles, []);
+  const localAfterDelete = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.deepEqual(localAfterDelete.lab.gatewayProfiles, []);
+  assert.equal(localAfterDelete.lab.gatewayApiKey, null);
+  assert.equal(localAfterDelete.allowedHosts.includes("buddy.example"), false);
+});
+
+test("dashboard runtime does not carry an expired project key into a new gateway across turns", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-key-isolation-"));
+  await fs.mkdir(path.join(cwd, ".lab-agent"), { recursive: true });
+  await fs.writeFile(path.join(cwd, ".lab-agent", "config.json"), JSON.stringify({
+    modelAlias: "old-model",
+    models: [{ id: "old-model", label: "Old Model", modalities: ["text"] }],
+    allowedHosts: ["old-gateway.example"],
+    lab: {
+      gatewayUrl: "https://old-gateway.example/v1/chat/completions",
+      gatewayProtocol: "lab-agent-gateway",
+      gatewayApiKey: "expired-old-key"
+    }
+  }), "utf8");
+  const requests = [];
+  const server = await listen(createHeaderRecordingGateway(requests, "new gateway answer"), "127.0.0.1", 0);
+  const address = server.address();
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+
+  try {
+    const saved = await runtime.saveModelConfig({
+      saveTarget: "project",
+      gatewayUrl: `http://127.0.0.1:${address.port}`,
+      gatewayProtocol: "lab-agent-gateway",
+      modelId: "new-model",
+      label: "New Model",
+      modalities: ["text"],
+      switchToModel: true
+    });
+    assert.equal(saved.ok, true);
+    assert.equal(saved.gatewayConfig.apiKeyConfigured, false);
+
+    await runtime.trustWorkspace();
+    const first = await runtime.startTurn({ prompt: "first new turn", permissionMode: "plan" });
+    await waitForEvent(runtime, first.sessionId, (event) => event.type === "run_state" && event.running === false);
+    const second = await runtime.startTurn({ sessionId: first.sessionId, prompt: "second new turn", permissionMode: "plan" });
+    await waitForEvent(runtime, first.sessionId, (event) => event.type === "run_state" && event.running === false && event.sequence > second.eventCursor);
+
+    assert.equal(requests.length, 2);
+    assert.deepEqual(requests.map((request) => request.authorization), ["", ""]);
+    assert.deepEqual(requests.map((request) => request.body.model), ["new-model", "new-model"]);
+  } finally {
+    await close(server);
+  }
 });
 
 test("dashboard runtime adds models to the active gateway when the same key is submitted again", async () => {
@@ -898,15 +1123,60 @@ test("dashboard runtime clears the active gateway when deleting its final model"
   assert.equal(deleted.clearedGateway, true);
   assert.equal(deleted.gatewayConfig.gatewayUrl, "");
   assert.equal(deleted.gatewayConfig.apiKeyConfigured, false);
-  assert.deepEqual(deleted.models.map((model) => model.id), ["example-coding-model", "example-vision-model"]);
+  assert.deepEqual(deleted.models, []);
   assert.equal(deleted.sessionStatus.model, "");
 
   const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
   assert.equal(local.modelAlias, "");
   assert.deepEqual(local.models, []);
   assert.equal(local.lab.gatewayUrl, null);
-  assert.equal(local.lab.gatewayApiKey, undefined);
+  assert.equal(local.lab.gatewayApiKey, null);
   assert.equal(local.lab.gatewayProfiles.some((profile) => profile.gatewayUrl.includes("beta-gateway")), false);
+});
+
+test("dashboard runtime deletes the active gateway profile without falling back to an expired profile", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-delete-gateway-"));
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+
+  await runtime.saveModelConfig({
+    saveTarget: "project",
+    gatewayUrl: "https://old-gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "expired-old-key",
+    modelId: "old-model",
+    label: "Old Model",
+    modalities: ["text"],
+    switchToModel: true
+  });
+  const saved = await runtime.saveModelConfig({
+    saveTarget: "project",
+    gatewayUrl: "https://new-gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "new-key",
+    modelId: "new-model",
+    label: "New Model",
+    modalities: ["text"],
+    switchToModel: true
+  });
+
+  const deleted = await runtime.deleteGatewayProfile({ profileId: saved.gatewayConfig.activeProfileId });
+
+  assert.equal(deleted.ok, true);
+  assert.equal(deleted.clearedGateway, true);
+  assert.equal(deleted.gatewayConfig.gatewayUrl, "");
+  assert.equal(deleted.gatewayConfig.apiKeyConfigured, false);
+  assert.deepEqual(deleted.models, []);
+  assert.equal(deleted.gatewayProfiles.length, 1);
+  assert.equal(deleted.gatewayProfiles[0].gatewayUrl, "https://old-gateway.example/v1/chat/completions");
+  assert.equal(deleted.gatewayProfiles[0].current, false);
+
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.equal(local.lab.gatewayUrl, null);
+  assert.equal(local.lab.gatewayApiKey, null);
+  assert.equal(local.lab.activeGatewayProfile, "");
+  assert.deepEqual(local.models, []);
+  assert.equal(local.allowedHosts.includes("new-gateway.example"), false);
+  assert.equal(local.allowedHosts.includes("old-gateway.example"), true);
 });
 
 test("dashboard runtime replaces the edited model id instead of keeping the stale entry", async () => {
@@ -3029,6 +3299,27 @@ function createRecordingGateway(requests, text) {
     res.end(JSON.stringify({
       id: `recording-${requests.length}`,
       model: "mock-model",
+      content: [{ type: "text", text }],
+      toolCalls: [],
+      stopReason: "stop"
+    }));
+  });
+}
+
+function createHeaderRecordingGateway(requests, text) {
+  return http.createServer(async (req, res) => {
+    let body = "";
+    for await (const chunk of req) {
+      body += Buffer.from(chunk).toString("utf8");
+    }
+    requests.push({
+      authorization: req.headers.authorization ?? "",
+      body: JSON.parse(body)
+    });
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      id: `header-recording-${requests.length}`,
+      model: "new-model",
       content: [{ type: "text", text }],
       toolCalls: [],
       stopReason: "stop"

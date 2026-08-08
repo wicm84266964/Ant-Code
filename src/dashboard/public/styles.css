@@ -3046,6 +3046,12 @@ button {
   padding-bottom: 10px;
 }
 
+.gateway-profile-row {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
 .gateway-profile-option {
   align-items: center;
   background: rgba(255, 255, 255, 0.035);
@@ -3058,6 +3064,31 @@ button {
   min-width: 0;
   padding: 8px 10px;
   text-align: left;
+}
+
+.gateway-profile-delete {
+  align-self: stretch;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 6px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  padding: 0 9px;
+}
+
+.gateway-profile-delete:hover,
+.gateway-profile-delete.confirm {
+  border-color: rgba(232, 108, 108, 0.5);
+  color: #ffb3b3;
+}
+
+.gateway-profile-delete-copy {
+  color: #ffb3b3;
+  font-size: 11px;
+  grid-column: 1 / -1;
+  line-height: 1.45;
 }
 
 .gateway-profile-option:hover,

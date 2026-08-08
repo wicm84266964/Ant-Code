@@ -364,12 +364,17 @@ ant-code -p "Reply exactly: ready"
 Config precedence is:
 
 ```text
-defaults < packaged lab-agent.config.json < project lab-agent.config.json < LAB_AGENT_CONFIG file < environment variables
+defaults < packaged lab-agent.config.json < LAB_AGENT_CONFIG/user config
+         < model and gateway environment defaults < project config
+         < runtime environment controls
 ```
 
-The environment layer is convenient for temporary tests, but it can also mask a
-JSON change. If Ant Code still shows an old model after editing the config, run
-these checks in the same terminal:
+Project model and gateway settings intentionally override model and gateway
+environment defaults so Dashboard changes take effect immediately. Runtime
+controls such as network mode and context limits still take precedence from the
+environment. Gateway keys are inherited only when the protocol and URL still
+identify the same endpoint. If Ant Code still shows an old model or gateway,
+run these checks in the same terminal:
 
 ```powershell
 Get-ChildItem Env:LAB_AGENT_MODEL,Env:LAB_AGENT_MODELS,Env:LAB_MODEL_GATEWAY_PROTOCOL,Env:LAB_MODEL_GATEWAY_URL,Env:LAB_MODEL_GATEWAY_HEALTH_URL,Env:LAB_AGENT_CONFIG,Env:LAB_MODEL_GATEWAY_API_KEY -ErrorAction SilentlyContinue
@@ -379,9 +384,10 @@ Clear temporary process overrides with `Remove-Item Env:<NAME>` or update the
 Windows user variable with `[Environment]::SetEnvironmentVariable(...)`. User
 environment variable changes require a new terminal.
 
-### One-Off Environment Override
+### One-Off Environment Defaults
 
-For temporary testing, environment variables override JSON config:
+For temporary testing in a project without explicit model or gateway settings,
+environment variables provide defaults:
 
 ```powershell
 $env:LAB_MODEL_GATEWAY_PROTOCOL = "openai-chat"

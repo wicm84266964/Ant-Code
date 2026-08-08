@@ -268,6 +268,21 @@ test("context summaries expose local token budget and configured model window", 
   assert.equal(summary.messageTokens, estimateTokensFromBytes(summary.messageBytes));
 });
 
+test("model context windows cap larger local token and byte budgets", () => {
+  const window = createContextWindow({
+    modelAlias: "smaller-model",
+    models: [{ id: "smaller-model", contextTokens: 128000 }],
+    context: {
+      maxTokens: 400000,
+      maxBytes: 1600000
+    }
+  });
+
+  assert.equal(window.modelMaxTokens, 128000);
+  assert.equal(window.maxTokens, 128000);
+  assert.equal(window.maxBytes, 512000);
+});
+
 test("prompt payload estimates include tools and tool results shown to the model", () => {
   const toolResultText = "file content\n".repeat(200);
   const estimate = estimatePromptPayload({

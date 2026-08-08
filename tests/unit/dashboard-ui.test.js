@@ -405,6 +405,8 @@ test("dashboard composer controls keep confirmations reviewable and critical sta
   assert.match(app, /normalizeGatewayProfiles\(status\.gatewayProfiles\)/);
   assert.match(app, /data-profile-id/);
   assert.match(app, /postJson\("\/api\/gateway-profile"/);
+  assert.match(app, /data-action="delete-gateway-profile"/);
+  assert.match(app, /deleteJson\(`\/api\/gateway-profile\/\$\{encodeURIComponent\(profileId\)\}`/);
   assert.match(app, /data-action="delete-model"/);
   assert.match(app, /data-action="edit-current-model"/);
   assert.match(app, /data-action="edit-model"/);
@@ -415,6 +417,8 @@ test("dashboard composer controls keep confirmations reviewable and critical sta
   assert.match(app, /event\.stopPropagation\(\);[\s\S]*const action = event\.target\.closest\("button\[data-action\]"\);/);
   assert.match(app, /model-delete-confirm-copy/);
   assert.match(css, /\.gateway-profile-list\s*\{/);
+  assert.match(css, /\.gateway-profile-row\s*\{/);
+  assert.match(css, /\.gateway-profile-delete\s*\{/);
   assert.match(css, /\.model-panel-actions\s*\{/);
   assert.match(css, /\.model-option-row\s*\{[^}]*grid-template-areas: "model edit delete";[^}]*grid-template-columns: minmax\(0, 1fr\) auto auto;/s);
   assert.match(css, /\.model-option-row\.confirming-delete\s*\{[^}]*grid-template-areas:/s);
