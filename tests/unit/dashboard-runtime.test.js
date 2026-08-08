@@ -449,13 +449,12 @@ test("dashboard runtime saves local model gateway config", async () => {
   });
 });
 
-test("dashboard runtime saves model gateway config as user global default", async () => {
+test("dashboard runtime defaults model gateway config to the user global store", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-"));
   const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: home } });
 
   const saved = await runtime.saveModelConfig({
-    saveTarget: "global",
     gatewayUrl: "https://global.gateway.example/v1/chat/completions",
     gatewayProtocol: "openai-chat",
     gatewayApiKey: "global-key",
@@ -872,12 +871,14 @@ test("dashboard runtime clears a stale health URL when the field is blank", asyn
   const runtime = createDashboardRuntime({ cwd, env: {} });
 
   await runtime.saveModelConfig({
+    saveTarget: "project",
     gatewayUrl: "https://old.gateway.example/v1/chat/completions",
     gatewayHealthUrl: "https://health-old.example/health",
     gatewayProtocol: "openai-chat",
     modelId: "old-model"
   });
   const saved = await runtime.saveModelConfig({
+    saveTarget: "project",
     gatewayUrl: "https://old.gateway.example/v1/chat/completions",
     gatewayHealthUrl: "",
     gatewayProtocol: "openai-chat",

@@ -2838,7 +2838,7 @@ function updateLiveStatus() {
     els.liveSubtasks.innerHTML = "";
     return;
   }
-  const primary = active.find((activity) => activity.toolName !== "agent_run") || active[0];
+  const primary = primaryLiveActivity(active);
   const subtasks = active.filter((activity) => activity.toolName === "agent_run");
   els.liveTitle.textContent = liveStatusTitle(primary, subtasks, background);
   els.liveSubtasks.innerHTML = "";
@@ -2885,6 +2885,13 @@ function liveStatusTitle(primary, subtasks, background) {
   return primary?.title === "开始任务" && subtasks.length > 0
     ? "子智能体运行中"
     : primary?.title || state.liveTitle || "正在处理";
+}
+
+/** @param {Array<Record<string, any>>} active */
+function primaryLiveActivity(active) {
+  return active.find((activity) => activity.rawType === "gateway_retry")
+    || active.find((activity) => activity.toolName !== "agent_run")
+    || active[0];
 }
 
 function gatewayRetryChipText(activity) {
@@ -3386,6 +3393,7 @@ function renderModelConfigPanel() {
   const sourceNote = gatewaySourceNote(gateway);
   const keySource = sourceLabel(gateway.sources?.apiKey);
   const gatewayDefaultNote = environmentGatewayDefaultNote(gateway);
+  const saveTarget = /** @type {string} */ ("global");
   const currentAgentTiers = {
     cheap: current.agentModelTiers?.cheap ?? state.agentModelTiers?.cheap ?? "",
     default: current.agentModelTiers?.default ?? state.agentModelTiers?.default ?? "",
@@ -3397,11 +3405,28 @@ function renderModelConfigPanel() {
     <form class="model-config-card" id="model-config-form">
       <div class="model-config-head">
         <div>
-          <div class="model-config-kicker">${editing ? "当前项目配置" : "保存到当前项目"}</div>
+          <div class="model-config-kicker">${editing ? "编辑模型配置" : "添加模型配置"}</div>
           <h2 id="model-config-title">${editing ? "编辑模型网关" : "添加模型网关"}</h2>
         </div>
         <button class="icon-button" type="button" data-action="close-model-config" title="关闭">×</button>
       </div>
+      <fieldset class="model-config-scope" aria-label="保存范围">
+        <legend>保存范围</legend>
+        <label>
+          <input name="saveTarget" type="radio" value="project"${saveTarget === "project" ? " checked" : ""} />
+          <span>
+            <strong>当前项目默认</strong>
+            <small>.lab-agent/config.json，优先于全局默认</small>
+          </span>
+        </label>
+        <label>
+          <input name="saveTarget" type="radio" value="global"${saveTarget === "global" ? " checked" : ""} />
+          <span>
+            <strong>全局默认</strong>
+            <small>${escapeHtml(gateway.globalConfigPath || "用户级配置文件")}，新项目自动使用</small>
+          </span>
+        </label>
+      </fieldset>
       <div class="model-config-grid">
         <label>
           <span>网关 URL</span>
@@ -3461,7 +3486,7 @@ function renderModelConfigPanel() {
       <div class="model-config-note">
         <div>${escapeHtml(sourceNote)}</div>
         ${gatewayDefaultNote ? `<div>${escapeHtml(gatewayDefaultNote)}</div>` : ""}
-        <div>保存后写入 .lab-agent/config.json，作为这个项目的默认配置。Key 不会在这里回显。</div>
+        <div>保存为当前项目默认会覆盖本文件夹；保存为全局默认会作为新项目兜底。Key 不会在这里回显。</div>
       </div>
       <div class="model-config-actions">
         <button type="button" data-action="close-model-config">取消</button>
@@ -3489,6 +3514,7 @@ async function saveModelConfig(event) {
   }
   const data = new FormData(form);
   const payload = {
+    saveTarget: data.get("saveTarget") || "global",
     gatewayUrl: data.get("gatewayUrl"),
     gatewayProtocol: data.get("gatewayProtocol"),
     gatewayApiKey: data.get("gatewayApiKey"),
@@ -3525,9 +3551,9 @@ async function saveModelConfig(event) {
     hideModelPanel();
     if (payload.switchToModel) {
       const activeModelId = String(result.sessionStatus?.model ?? payload.modelId ?? "").trim();
-      showNotice("模型配置已保存", `模型已切换为 ${modelDisplayName(activeModelId, payload.label || payload.modelId)}`);
+      showNotice("模型配置已保存", `${modelSaveTargetLabel(payload.saveTarget)}，模型已切换为 ${modelDisplayName(activeModelId, payload.label || payload.modelId)}`);
     } else {
-      showNotice("模型配置已保存", "本地配置已更新");
+      showNotice("模型配置已保存", `${modelSaveTargetLabel(payload.saveTarget)}已更新`);
     }
   } catch (error) {
     showError(error.message ?? "保存模型配置失败");
@@ -3685,6 +3711,8 @@ function normalizeGatewayConfig(value) {
     gatewayProtocol: String(value?.gatewayProtocol ?? "openai-chat"),
     apiKeyConfigured: value?.apiKeyConfigured === true,
     activeProfileId: String(value?.activeProfileId ?? ""),
+    globalConfigPath: String(value?.globalConfigPath ?? ""),
+    projectConfigPath: String(value?.projectConfigPath ?? ""),
     sources: {
       gatewayUrl: normalizeConfigSource(value?.sources?.gatewayUrl),
       gatewayHealthUrl: normalizeConfigSource(value?.sources?.gatewayHealthUrl),
@@ -3802,6 +3830,10 @@ function gatewaySummary() {
   return `${url} · ${key} · ${source}`;
 }
 
+function modelSaveTargetLabel(target) {
+  return String(target) === "global" ? "全局默认" : "当前项目默认";
+}
+
 function gatewaySourceNote(gateway) {
   const urlSource = sourceLabel(gateway.sources?.gatewayUrl);
   const protocolSource = sourceLabel(gateway.sources?.gatewayProtocol);
@@ -3815,10 +3847,21 @@ function environmentGatewayDefaultNote(gateway) {
   if (sources.gatewayUrl?.type === "environment") envFields.push("网关 URL");
   if (sources.gatewayProtocol?.type === "environment") envFields.push("协议");
   if (sources.apiKey?.type === "environment") envFields.push("API Key");
-  if (envFields.length === 0) {
+  const globalFields = [];
+  if (sources.gatewayUrl?.type === "global") globalFields.push("网关 URL");
+  if (sources.gatewayProtocol?.type === "global") globalFields.push("协议");
+  if (sources.apiKey?.type === "global") globalFields.push("API Key");
+  if (envFields.length === 0 && globalFields.length === 0) {
     return "";
   }
-  return `全局默认（环境变量）正在提供：${envFields.join("、")}。在这里保存后，当前项目配置会优先生效。`;
+  const parts = [];
+  if (globalFields.length > 0) {
+    parts.push(`全局默认配置正在提供：${globalFields.join("、")}`);
+  }
+  if (envFields.length > 0) {
+    parts.push(`环境变量正在提供：${envFields.join("、")}`);
+  }
+  return `${parts.join("；")}。保存为当前项目默认后，本项目会优先生效。`;
 }
 
 function sourceBadge(source) {

@@ -3182,6 +3182,59 @@ button {
   font-weight: 800;
 }
 
+.model-config-scope {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+  padding: 10px;
+}
+
+.model-config-scope legend {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 800;
+  padding: 0 5px;
+}
+
+.model-config-scope label {
+  align-items: flex-start;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 7px;
+  cursor: pointer;
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+  padding: 9px;
+}
+
+.model-config-scope input {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.model-config-scope span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.model-config-scope strong {
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.model-config-scope small {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
 .model-config-grid {
   display: grid;
   gap: 10px;
@@ -4270,6 +4323,10 @@ textarea:focus {
   }
 
   .model-config-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .model-config-scope {
     grid-template-columns: 1fr;
   }
 

@@ -50,6 +50,15 @@ test("delegation guard detects broad repository exploration", () => {
   assert.match(second.text, /planner/);
 });
 
+test("delegation guard classifies rg_files as a file listing operation", () => {
+  const classified = classifyToolUse("rg_files", {
+    path: "src/dashboard",
+    glob: "**/*.js"
+  }, { ok: true }, { complexPrompt: false });
+
+  assert.equal(classified.broad, false);
+});
+
 test("delegation guard stops reminding after agent_run", () => {
   const guard = createDelegationGuard({
     config: { agents: { delegationGuard: { softThreshold: 2, strongThreshold: 4 } } },

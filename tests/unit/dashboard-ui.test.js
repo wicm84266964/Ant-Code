@@ -65,6 +65,58 @@ test("dashboard running send button exposes interrupt action", async () => {
   assert.match(source, /els\.sendButton\.title = "点击中断当前任务"/);
 });
 
+test("dashboard prioritizes transient gateway retry over background status", async () => {
+  const appPath = path.resolve("src/dashboard/public/app.js");
+  const source = await fs.readFile(appPath, "utf8");
+  const harness = `
+    const document = {
+      querySelector() {
+        return {
+          addEventListener() {},
+          classList: { add() {}, remove() {}, toggle() {} },
+          dataset: {},
+          textContent: "",
+          innerHTML: "",
+          append() {},
+          replaceChildren() {},
+          querySelectorAll() { return []; },
+          querySelector() { return null; },
+          setAttribute() {}
+        };
+      },
+      addEventListener() {}
+    };
+    const window = {};
+    const navigator = { clipboard: { writeText() {} } };
+    const requestAnimationFrame = () => {};
+    class EventSource {}
+    function renderMarkdown() { return ""; }
+    function hydrateRichContent() {}
+    function visibleTranscriptRole(role) { return role; }
+  `;
+  const code = source
+    .replace(/import[^\n]+\n/g, "")
+    .replace("await init();", "")
+    .replace(/export\s+/g, "");
+  const module = await import(`data:text/javascript,${encodeURIComponent(`${harness}\n${code}\nexport { primaryLiveActivity, liveStatusTitle };`)}`);
+  const terminal = {
+    rawType: "background_terminal_started",
+    title: "终端后台任务运行中",
+    status: "running",
+    toolName: "background_shell"
+  };
+  const retry = {
+    rawType: "gateway_retry",
+    title: "网关重试中",
+    status: "running"
+  };
+
+  const primary = module.primaryLiveActivity([terminal, retry]);
+
+  assert.equal(primary, retry);
+  assert.equal(module.liveStatusTitle(primary, [], [terminal]), "网关响应异常，正在自动重试");
+});
+
 test("dashboard app keeps directory paths when linkifying file references", async () => {
   const appPath = path.resolve("src/dashboard/public/app.js");
   const source = await fs.readFile(appPath, "utf8");
@@ -411,6 +463,12 @@ test("dashboard composer controls keep confirmations reviewable and critical sta
   assert.match(app, /data-action="edit-current-model"/);
   assert.match(app, /data-action="edit-model"/);
   assert.match(app, /previousModelId: state\.editingModelId/);
+  assert.match(app, /name="saveTarget"/);
+  assert.match(app, /value="project"/);
+  assert.match(app, /value="global"/);
+  assert.match(app, /当前项目默认/);
+  assert.match(app, /全局默认/);
+  assert.match(app, /saveTarget: data\.get\("saveTarget"\) \|\| "global"/);
   assert.match(app, /showNotice\(result\.clearedGateway \? "当前网关配置已清空" : "模型配置已删除"\)/);
   assert.match(app, /这是当前网关最后一个模型，会清空当前网关配置/);
   assert.match(app, /deleteJson\(`\/api\/model-config\/\$\{encodeURIComponent\(modelId\)\}`/);

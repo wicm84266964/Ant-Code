@@ -24,6 +24,14 @@
   inherited by project gateways. Editing a gateway now collapses duplicate
   endpoint profiles while preserving custom profile IDs, and clearing a health
   URL removes its unused host from the Dashboard-managed allowlist.
+- The Dashboard now exposes project and global model-config save scopes, uses
+  the global user config when no scope is supplied, and reports which scope was
+  updated after saving.
+- Gateway retries remain the primary live status even while background work is
+  active, and the final failure replaces the retry status instead of creating a
+  disconnected activity entry.
+- `rg_files` is classified as a directory-scoped file-list operation by the
+  delegation guard instead of being treated as a glob search.
 
 ### Added
 

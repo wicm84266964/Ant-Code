@@ -2577,7 +2577,7 @@ function normalizeModelConfigInput(input, config) {
 }
 
 function normalizeSaveTarget(value) {
-  const text = String(value ?? "").trim().toLowerCase();
+  const text = String(value ?? "global").trim().toLowerCase();
   if (["global", "user", "default", "defaults"].includes(text)) {
     return "global";
   }

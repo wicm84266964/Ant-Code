@@ -158,7 +158,7 @@ export function mapSessionEventToDashboard(event) {
     })];
   }
   if (type === "gateway_error" || type === "gateway_not_configured") {
-    return [activity("gateway-error", "模型请求失败", event.error?.message ?? "网关未配置或请求失败", "failed", "gateway", event)];
+    return [activity("gateway-error", "模型请求失败", event.error?.message ?? "网关未配置或请求失败", "failed", "gateway", event, { coalesceKey: "gateway" })];
   }
   if (type === "turn_interrupted") {
     return [activity("turn-interrupted", "任务已中断", event.reason ?? "用户中断", "interrupted", "session", event)];
