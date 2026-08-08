@@ -1217,27 +1217,35 @@ test("model command explains local gateway-owned model selection", async () => {
   assert.match(output, /Ant Code model/);
   assert.match(output, /current: external-model-alias/);
   assert.match(output, /current context window: unknown/);
-  assert.match(output, /example-vision-model context=200k/);
+  assert.doesNotMatch(output, /example-vision-model/);
   assert.match(output, /gateway protocol: openai-chat/);
   assert.match(output, /does not call provider account\/model-list endpoints/);
 });
 
-test("model command reports current repo example model context", async () => {
+test("model command reports explicitly configured model context", async () => {
   const cwd = await makeTempWorkspace();
+  await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
+    modelAlias: "configured-vision-model",
+    models: [{
+      id: "configured-vision-model",
+      label: "Configured Vision Model",
+      modalities: ["text", "image"],
+      contextTokens: 200000
+    }]
+  }), "utf8");
   const output = await runSlashCommand({
     command: parseSlashCommand("/model"),
     cwd,
     env: {
-      LAB_AGENT_MODEL: "example-vision-model",
       LAB_MODEL_GATEWAY_PROTOCOL: "openai-chat",
       LAB_MODEL_GATEWAY_URL: "http://127.0.0.1:8080/v1/chat/completions"
     }
   });
 
   assert.match(output, /Ant Code model/);
-  assert.match(output, /current: example-vision-model/);
+  assert.match(output, /current: configured-vision-model/);
   assert.match(output, /current context window: 200k tokens/);
-  assert.match(output, /example-vision-model context=200k/);
+  assert.match(output, /configured-vision-model context=200k/);
   assert.match(output, /gateway protocol: openai-chat/);
   assert.match(output, /does not call provider account\/model-list endpoints/);
 });

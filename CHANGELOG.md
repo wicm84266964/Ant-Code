@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.3.4 - 2026-08-08
+
+### Fixed
+
+- Bundled example models are no longer exposed as runtime defaults for new or
+  unconfigured installations.
+- Gateway API keys are scoped to their matching gateway profile, preventing a
+  stale project or environment key from leaking into a newly configured URL.
+- Environment and user-level gateway keys are no longer copied into project
+  gateway profiles, and explicit no-key profiles remain isolated after profile
+  switches and model deletion.
+- Clearing an optional gateway health URL now removes the stale value, while
+  switching older profiles without agent routing clears previous-provider
+  subagent model assignments.
+- An explicitly empty model list is now preserved, so deleting the final model
+  does not restore bundled examples.
+- Deleting the active model or gateway now leaves Ant Code unconfigured instead
+  of silently falling back to an older gateway profile.
+- Deleting a gateway removes its no-longer-used Dashboard-managed hosts, and
+  local context budgets are capped by the configured model context window.
+- Environment keys without a matching environment gateway URL are no longer
+  inherited by project gateways. Editing a gateway now collapses duplicate
+  endpoint profiles while preserving custom profile IDs, and clearing a health
+  URL removes its unused host from the Dashboard-managed allowlist.
+
+### Added
+
+- Gateway profiles can now be deleted from the Dashboard.
+
 ## 1.3.3 - 2026-07-25
 
 ### Fixed

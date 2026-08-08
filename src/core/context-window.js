@@ -24,9 +24,13 @@ const DEFAULT_PRESERVE_RECENT_TOKENS = 8_000;
 export function createContextWindow(config = {}) {
   const context = config.context ?? {};
   const maxMessages = positiveInteger(context.maxMessages, DEFAULT_MAX_MESSAGES);
-  const maxBytes = positiveInteger(context.maxBytes, DEFAULT_MAX_BYTES);
   const modelMaxTokens = positiveIntegerOrNull(context.modelMaxTokens) ?? resolveModelContextTokens(config);
-  const maxTokens = positiveInteger(context.maxTokens, modelMaxTokens ?? DEFAULT_MAX_TOKENS);
+  const configuredMaxTokens = positiveInteger(context.maxTokens, modelMaxTokens ?? DEFAULT_MAX_TOKENS);
+  const maxTokens = modelMaxTokens ? Math.min(configuredMaxTokens, modelMaxTokens) : configuredMaxTokens;
+  const configuredMaxBytes = positiveInteger(context.maxBytes, DEFAULT_MAX_BYTES);
+  const maxBytes = modelMaxTokens
+    ? Math.min(configuredMaxBytes, modelMaxTokens * DEFAULT_TOKEN_BYTES)
+    : configuredMaxBytes;
   const keepRecentMessages = Math.min(
     positiveInteger(context.keepRecentMessages, DEFAULT_KEEP_MESSAGES),
     Math.max(1, maxMessages)

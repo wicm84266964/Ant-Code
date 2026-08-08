@@ -373,6 +373,12 @@ async function routeRequest(req, res, options, url, requestBody) {
     const result = await options.runtime.switchGatewayProfile(body);
     return sendJson(res, result.ok ? 200 : result.status ?? 400, result);
   }
+  if (req.method === "DELETE" && url.pathname.startsWith("/api/gateway-profile/")) {
+    const profileId = decodeURIComponent(url.pathname.slice("/api/gateway-profile/".length));
+    const body = requestBody ?? {};
+    const result = await options.runtime.deleteGatewayProfile({ ...body, profileId });
+    return sendJson(res, result.ok ? 200 : result.status ?? 400, result);
+  }
   if (req.method === "POST" && url.pathname === "/api/model-config") {
     const body = requestBody ?? {};
     const result = await options.runtime.saveModelConfig(body);

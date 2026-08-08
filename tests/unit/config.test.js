@@ -258,7 +258,7 @@ test("loads model choices from environment", async () => {
   assert.equal(config.configSources.models.type, "environment");
 });
 
-test("project model and gateway config override environment defaults but keep env key fallback", async () => {
+test("project gateway endpoint changes do not inherit an environment key", async () => {
   const cwd = await makeTempWorkspace();
   await writeJson(cwd, {
     modelAlias: "project-model",
@@ -286,11 +286,56 @@ test("project model and gateway config override environment defaults but keep en
   assert.deepEqual(config.models.map((model) => model.id), ["project-model"]);
   assert.equal(config.lab.gatewayUrl, "https://project.gateway.example/v1/chat/completions");
   assert.equal(config.lab.gatewayProtocol, "openai-chat");
-  assert.equal(config.lab.gatewayApiKey, "env-key");
+  assert.equal(config.lab.gatewayApiKey, null);
   assert.equal(config.configSources.modelAlias.type, "project");
   assert.equal(config.configSources.models.type, "project");
   assert.equal(config.configSources.lab.gatewayUrl.type, "project");
   assert.equal(config.configSources.lab.gatewayProtocol.type, "project");
+  assert.equal(config.configSources.lab.gatewayApiKey.type, "project");
+});
+
+test("project gateways do not inherit an environment key without an environment URL", async () => {
+  const cwd = await makeTempWorkspace();
+  await writeJson(cwd, {
+    modelAlias: "buddy-model",
+    models: [{ id: "buddy-model" }],
+    lab: {
+      gatewayUrl: "https://buddy.example/v1/chat/completions",
+      gatewayProtocol: "openai-chat"
+    }
+  });
+
+  const config = await loadConfig({
+    cwd,
+    env: { LAB_MODEL_GATEWAY_API_KEY: "unscoped-env-key" }
+  });
+
+  assert.equal(config.lab.gatewayUrl, "https://buddy.example/v1/chat/completions");
+  assert.equal(config.lab.gatewayApiKey, null);
+  assert.equal(config.configSources.lab.gatewayApiKey.type, "project");
+});
+
+test("project settings may inherit an environment key for the same gateway endpoint", async () => {
+  const cwd = await makeTempWorkspace();
+  await writeJson(cwd, {
+    modelAlias: "project-model",
+    models: [{ id: "project-model" }],
+    lab: {
+      gatewayUrl: "https://shared.gateway.example/v1/chat/completions",
+      gatewayProtocol: "openai-chat"
+    }
+  });
+
+  const config = await loadConfig({
+    cwd,
+    env: {
+      LAB_MODEL_GATEWAY_URL: "https://shared.gateway.example/v1/chat/completions",
+      LAB_MODEL_GATEWAY_PROTOCOL: "openai-chat",
+      LAB_MODEL_GATEWAY_API_KEY: "env-key"
+    }
+  });
+
+  assert.equal(config.lab.gatewayApiKey, "env-key");
   assert.equal(config.configSources.lab.gatewayApiKey.type, "environment");
 });
 
@@ -578,7 +623,7 @@ test("project config sets custom model window and leaves in-flight compaction of
   assert.equal(config.agents.modelTiers.cheap, "external-v1");
   assert.equal(config.agents.modelTiers.default, "external-v1");
   assert.equal(config.agents.modelTiers.strong, "external-v1");
-  assert.equal(config.agents.modelTiers.vision, "example-vision-model");
+  assert.equal(config.agents.modelTiers.vision, undefined);
   assert.equal(config.agents.maxRounds, null);
   assert.equal(config.agents.orchestration.maxParallelReadonlyAgentRuns, 2);
   assert.ok(config.allowedHosts.includes("gateway.lab.example"));
@@ -615,32 +660,13 @@ test("loads bundled config when no project or lab config is present", async () =
 
   assert.equal(config.projectConfigPath, null);
   assert.match(config.bundledConfigPath, /lab-agent\.config\.json$/);
-  assert.equal(config.modelAlias, "example-coding-model");
+  assert.equal(config.modelAlias, "");
   assert.equal(config.context.maxTokens, 200000);
   assert.equal(config.context.maxBytes, 800000);
   assert.equal(config.context.summaryBytes, 65536);
   assert.equal(config.context.promptCompactRatio, undefined);
-  assert.deepEqual(config.models.map((model) => [model.id, model.reasoningContentMode]), [
-    ["example-coding-model", "visible-when-no-content"],
-    ["example-vision-model", "visible-when-no-content"]
-  ]);
-  assert.deepEqual(config.models.map((model) => [model.id, model.thinking, model.openaiExtraBody?.thinking?.type]), [
-    ["example-coding-model", false, undefined],
-    ["example-vision-model", false, undefined]
-  ]);
-  assert.deepEqual(config.models.map((model) => [model.id, model.contextTokens]), [
-    ["example-coding-model", 200000],
-    ["example-vision-model", 200000]
-  ]);
-  assert.deepEqual(config.models.map((model) => [model.id, model.modalities]), [
-    ["example-coding-model", ["text"]],
-    ["example-vision-model", ["text", "image"]]
-  ]);
-  assert.deepEqual(config.models.map((model) => [model.id, model.agentModelTiers]), [
-    ["example-coding-model", undefined],
-    ["example-vision-model", undefined]
-  ]);
-  assert.equal(config.agents.modelTiers.vision, "example-vision-model");
+  assert.deepEqual(config.models, []);
+  assert.deepEqual(config.agents.modelTiers, {});
   assert.equal(config.agents.budgets.defaults.maxToolCalls, undefined);
   assert.equal(config.agents.budgets.defaults.maxOutputBytes, 320000);
   assert.equal(config.agents.orchestration.maxParallelReadonlyAgentRuns, 3);
@@ -652,28 +678,26 @@ test("loads bundled config when no project or lab config is present", async () =
   assert.equal(config.allowedHosts.includes("gateway.example.com"), false);
   assert.deepEqual(config.agents.vision, {
     enabled: false,
-    model: "example-vision-model",
+    model: null,
     autoUseWhenMainModelTextOnly: true
   });
 });
 
-test("environment model selection preserves the bundled model catalog", async () => {
+test("environment model selection does not expose the bundled example catalog", async () => {
   const cwd = await makeTempWorkspace();
   const config = await loadConfig({ cwd, env: { LAB_AGENT_MODEL: "external-model-alias" } });
 
   assert.equal(config.modelAlias, "external-model-alias");
-  assert.deepEqual(config.models.map((model) => model.id), [
-    "external-model-alias",
-    "example-coding-model",
-    "example-vision-model"
-  ]);
+  assert.deepEqual(config.models.map((model) => model.id), ["external-model-alias"]);
   assert.equal(config.lab.gatewayUrl, null);
 });
 
-test("project config overlays bundled example defaults without resetting model window", async () => {
+test("explicit empty project model list remains empty instead of restoring bundled examples", async () => {
   const cwd = await makeTempWorkspace();
   await fs.mkdir(path.join(cwd, ".lab-agent"), { recursive: true });
   await fs.writeFile(path.join(cwd, ".lab-agent", "config.json"), JSON.stringify({
+    modelAlias: "",
+    models: [],
     lab: {
       gatewayApiKey: "test-key"
     }
@@ -684,14 +708,11 @@ test("project config overlays bundled example defaults without resetting model w
   assert.equal(path.basename(config.projectConfigPath), "config.json");
   assert.equal(path.basename(path.dirname(config.projectConfigPath)), ".lab-agent");
   assert.match(config.bundledConfigPath, /lab-agent\.config\.json$/);
-  assert.equal(config.modelAlias, "example-coding-model");
+  assert.equal(config.modelAlias, "");
   assert.equal(config.context.maxTokens, 200000);
   assert.equal(config.context.promptCompactRatio, undefined);
   assert.equal(config.context.maxBytes, 800000);
-  assert.deepEqual(config.models.map((model) => [model.id, model.contextTokens]), [
-    ["example-coding-model", 200000],
-    ["example-vision-model", 200000]
-  ]);
+  assert.deepEqual(config.models, []);
   assert.equal(config.lab.gatewayApiKey, "test-key");
 });
 

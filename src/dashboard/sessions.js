@@ -352,6 +352,62 @@ export function createDashboardRuntime(options) {
         gatewayProfiles: publicGatewayProfiles(activeConfig)
       };
     },
+    /** @param {Record<string, any>} input */
+    async deleteGatewayProfile(input = {}) {
+      const configEnv = await resolveConfigEnv();
+      const profileId = String(input.profileId ?? input.id ?? "").trim();
+      if (!profileId) {
+        return { ok: false, status: 400, error: "请选择要删除的网关" };
+      }
+      const sessionId = String(input.sessionId ?? "").trim();
+      const state = sessionId ? active.get(sessionId) : null;
+      if (state?.running) {
+        return {
+          ok: false,
+          status: 409,
+          error: "任务运行中，结束或中断后再删除网关",
+          models: modelOptions(state.session.config),
+          gatewayConfig: publicGatewayConfig(state.session.config),
+          gatewayProfiles: publicGatewayProfiles(state.session.config)
+        };
+      }
+      let config = await loadConfig({ cwd: options.cwd, env: configEnv });
+      const localPath = localProjectConfigPath(options.cwd);
+      let deletion = buildGatewayProfileDeleteConfig(await readJsonConfig(localPath), config, profileId);
+      if (!deletion.ok) {
+        return { ok: false, status: 404, error: deletion.error };
+      }
+      const mutation = await mutateDashboardConfig(localPath, async (/** @type {Record<string, any>} */ local) => {
+        config = await loadConfig({ cwd: options.cwd, env: await resolveConfigEnv() });
+        deletion = buildGatewayProfileDeleteConfig(local, config, profileId);
+        if (!deletion.ok) {
+          throw dashboardConfigResultError(deletion);
+        }
+        return deletion.config;
+      });
+      if (!mutation.ok) {
+        return mutation;
+      }
+      const refreshed = await loadConfig({ cwd: options.cwd, env: await resolveConfigEnv() });
+      selectedModelId = deletion.clearedGateway ? "" : String(refreshed.modelAlias ?? "").trim();
+      if (state) {
+        applySessionConfig(state.session, refreshed);
+        state.persisted = false;
+      }
+      return {
+        ok: true,
+        deletedProfile: profileId,
+        clearedGateway: deletion.clearedGateway,
+        configRevision: mutation.revision,
+        sessionId: state?.session.id,
+        sessionStatus: state ? sessionStatusSummary(state.session) : sessionStatusFromConfig(refreshed),
+        models: modelOptions(state?.session.config ?? refreshed),
+        agentModelTiers: publicAgentModelTiers(state?.session.config ?? refreshed),
+        visionAgent: publicVisionAgent(state?.session.config ?? refreshed),
+        gatewayConfig: publicGatewayConfig(state?.session.config ?? refreshed),
+        gatewayProfiles: publicGatewayProfiles(state?.session.config ?? refreshed)
+      };
+    },
     async switchGatewayProfile(input = {}) {
       const configEnv = await resolveConfigEnv();
       const profileId = String(input.profileId ?? input.id ?? "").trim();
@@ -2606,16 +2662,31 @@ function buildLocalModelConfig(local, config, normalized) {
     upsertModelEntry(models, normalized.model);
   }
   const previousModelWasAlias = String(config.modelAlias ?? local.modelAlias ?? "").trim() === normalized.previousModelId;
+  const targetProfileId = gatewayProfileForEndpoint(
+    gatewayProfilesForPersistence(local, config),
+    normalized.gatewayProtocol,
+    normalized.gatewayUrl
+  )?.id ?? gatewayProfileIdFromParts(normalized.gatewayProtocol, normalized.gatewayUrl);
   const lab = {
     ...(isPlainObject(local.lab) ? local.lab : {}),
     gatewayUrl: normalized.gatewayUrl,
-    gatewayProtocol: normalized.gatewayProtocol
+    gatewayProtocol: normalized.gatewayProtocol,
+    activeGatewayProfile: targetProfileId
   };
   if (normalized.gatewayHealthUrl) {
     lab.gatewayHealthUrl = normalized.gatewayHealthUrl;
+  } else {
+    lab.gatewayHealthUrl = null;
   }
   if (normalized.gatewayApiKey) {
     lab.gatewayApiKey = normalized.gatewayApiKey;
+  } else if (!sameGatewayConfig(config, normalized)) {
+    const matchingProfile = gatewayProfilesOwnedByConfig(local)
+      .find((profile) => profile.id === gatewayProfileIdFromParts(normalized.gatewayProtocol, normalized.gatewayUrl));
+    const credential = matchingProfile
+      ? gatewayProfileCredentialState(local, matchingProfile.id)
+      : { explicit: false };
+    lab.gatewayApiKey = credential.explicit ? credential.value : null;
   }
   const allowedHosts = Array.from(new Set([
     ...(Array.isArray(config.allowedHosts) ? config.allowedHosts : []),
@@ -2681,7 +2752,13 @@ function buildLocalModelConfig(local, config, normalized) {
     };
   }
   next.lab.gatewayProfiles = upsertGatewayProfileEntries(local, config, normalized, next);
-  next.lab.activeGatewayProfile = gatewayProfileIdFromParts(normalized.gatewayProtocol, normalized.gatewayUrl);
+  next.lab.activeGatewayProfile = targetProfileId;
+  next.allowedHosts = removeUnusedGatewayHosts(
+    next.allowedHosts,
+    [config.lab?.gatewayHealthUrl, local.lab?.gatewayHealthUrl],
+    next.lab.gatewayProfiles,
+    next.lab
+  );
   return next;
 }
 
@@ -2745,17 +2822,20 @@ function shouldReplaceModelEntries(config, normalized) {
   return !currentApiKey || currentApiKey !== nextApiKey;
 }
 
+/** @param {Record<string, any>} config @param {Record<string, any>} normalized */
+function sameGatewayConfig(config, normalized) {
+  return String(config.lab?.gatewayUrl ?? "").trim() === normalized.gatewayUrl
+    && String(config.lab?.gatewayProtocol ?? "lab-agent-gateway").trim() === normalized.gatewayProtocol;
+}
+
 function buildGatewayProfileSwitchConfig(local, config, profileId) {
   const profiles = gatewayProfilesFromLocalAndConfig(local, config);
   const profile = profiles.find((item) => item.id === profileId);
   if (!profile) {
     return { ok: false, error: "网关配置不存在" };
   }
-  const currentProfile = gatewayProfileFromConfig(config, {
-    id: activeGatewayProfileId(config) || gatewayProfileIdFromParts(config.lab?.gatewayProtocol, config.lab?.gatewayUrl)
-  });
-  const updatedProfiles = upsertGatewayProfile(profiles, currentProfile);
-  return { ok: true, config: buildConfigForGatewayProfile(local, config, profile, updatedProfiles) };
+  const persistedProfiles = gatewayProfilesForPersistence(local, config);
+  return { ok: true, config: buildConfigForGatewayProfile(local, config, profile, persistedProfiles) };
 }
 
 function buildConfigForGatewayProfile(local, config, profile, profiles = []) {
@@ -2766,10 +2846,11 @@ function buildConfigForGatewayProfile(local, config, profile, profiles = []) {
     gatewayHealthUrl: activeProfile.gatewayHealthUrl || null,
     gatewayProtocol: activeProfile.gatewayProtocol,
     activeGatewayProfile: activeProfile.id,
-    gatewayProfiles: upsertGatewayProfile(profiles, activeProfile)
+    gatewayProfiles: upsertGatewayProfileForPersistence(profiles, activeProfile, local)
   };
-  if (activeProfile.gatewayApiKey) {
-    lab.gatewayApiKey = activeProfile.gatewayApiKey;
+  const credential = gatewayProfileCredentialState(local, activeProfile.id);
+  if (credential.explicit) {
+    lab.gatewayApiKey = credential.value;
   } else {
     delete lab.gatewayApiKey;
   }
@@ -2787,6 +2868,8 @@ function buildConfigForGatewayProfile(local, config, profile, profiles = []) {
   };
   if (isPlainObject(activeProfile.agents)) {
     next.agents = clonePlainObject(activeProfile.agents);
+  } else {
+    next.agents = clearGatewayAgentModels(local, config);
   }
   return next;
 }
@@ -2829,8 +2912,9 @@ function buildLocalDeleteModelConfig(local, config, modelId) {
       activeGatewayProfile: activeGatewayProfileId(config)
     }
   };
-  if (config.lab?.gatewayApiKey ?? local.lab?.gatewayApiKey) {
-    next.lab.gatewayApiKey = config.lab?.gatewayApiKey ?? local.lab?.gatewayApiKey;
+  const credential = gatewayProfileCredentialState(local, activeGatewayProfileId(config));
+  if (credential.explicit) {
+    next.lab.gatewayApiKey = credential.value;
   } else {
     delete next.lab.gatewayApiKey;
   }
@@ -2845,28 +2929,9 @@ function buildLocalDeleteModelConfig(local, config, modelId) {
 
 function buildLocalConfigAfterFinalModelDelete(local, config, modelId) {
   const activeId = activeGatewayProfileId(config);
-  const profiles = gatewayProfilesFromLocalAndConfig(local, config)
+  const profiles = gatewayProfilesForPersistence(local, config)
     .filter((profile) => profile.id !== activeId);
-  const fallbackProfile = profiles.find((profile) => Array.isArray(profile.models) && profile.models.length > 0) ?? null;
-  if (fallbackProfile) {
-    const next = buildConfigForGatewayProfile(local, config, fallbackProfile, profiles);
-    return {
-      ...next,
-      lab: {
-        ...(next.lab ?? {}),
-        gatewayProfiles: profiles
-      }
-    };
-  }
-
-  const agents = removeModelFromAgentConfig(
-    {
-      ...(isPlainObject(config.agents) ? config.agents : {}),
-      ...(isPlainObject(local.agents) ? local.agents : {})
-    },
-    modelId,
-    []
-  );
+  const agents = clearGatewayAgentModels(local, config);
   const next = {
     ...local,
     modelAlias: "",
@@ -2877,12 +2942,78 @@ function buildLocalConfigAfterFinalModelDelete(local, config, modelId) {
       gatewayUrl: null,
       gatewayHealthUrl: null,
       gatewayProtocol: config.lab?.gatewayProtocol ?? local.lab?.gatewayProtocol ?? "lab-agent-gateway",
+      gatewayApiKey: null,
       activeGatewayProfile: "",
       gatewayProfiles: profiles
     }
   };
-  delete next.lab.gatewayApiKey;
   return next;
+}
+
+/**
+ * @param {Record<string, any>} local
+ * @param {Record<string, any>} config
+ * @param {string} profileId
+ */
+function buildGatewayProfileDeleteConfig(local, config, profileId) {
+  const profiles = gatewayProfilesFromLocalAndConfig(local, config);
+  const deletedProfile = profiles.find((profile) => profile.id === profileId);
+  if (!deletedProfile) {
+    return { ok: false, error: "网关配置不存在" };
+  }
+  const remaining = gatewayProfilesForPersistence(local, config)
+    .filter((profile) => profile.id !== profileId && !sameGatewayProfileEndpoint(profile, deletedProfile));
+  const allowedHosts = removeDeletedGatewayHosts(local.allowedHosts, deletedProfile, remaining);
+  if (activeGatewayProfileId(config) !== profileId) {
+    return {
+      ok: true,
+      clearedGateway: false,
+      config: {
+        ...local,
+        allowedHosts,
+        lab: {
+          ...(isPlainObject(local.lab) ? local.lab : {}),
+          gatewayProfiles: remaining
+        }
+      }
+    };
+  }
+  return {
+    ok: true,
+    clearedGateway: true,
+    config: {
+      ...local,
+      modelAlias: "",
+      models: [],
+      allowedHosts,
+      agents: clearGatewayAgentModels(local, config),
+      lab: {
+        ...(isPlainObject(local.lab) ? local.lab : {}),
+        gatewayUrl: null,
+        gatewayHealthUrl: null,
+        gatewayProtocol: config.lab?.gatewayProtocol ?? local.lab?.gatewayProtocol ?? "lab-agent-gateway",
+        gatewayApiKey: null,
+        activeGatewayProfile: "",
+        gatewayProfiles: remaining
+      }
+    }
+  };
+}
+
+/** @param {Record<string, any>} local @param {Record<string, any>} config */
+function clearGatewayAgentModels(local, config) {
+  const agents = {
+    ...(isPlainObject(config.agents) ? config.agents : {}),
+    ...(isPlainObject(local.agents) ? local.agents : {})
+  };
+  delete agents.modelTiers;
+  agents.vision = {
+    ...(isPlainObject(agents.vision) ? agents.vision : {}),
+    enabled: false,
+    model: null,
+    autoUseWhenMainModelTextOnly: agents.vision?.autoUseWhenMainModelTextOnly !== false
+  };
+  return agents;
 }
 
 function updateActiveGatewayProfileAfterModelDelete(local, config, replacement) {
@@ -2894,7 +3025,11 @@ function updateActiveGatewayProfileAfterModelDelete(local, config, replacement) 
     models: replacement.models,
     agents: replacement.agents
   });
-  return upsertGatewayProfile(gatewayProfilesFromLocalAndConfig(local, config), updatedCurrent);
+  return upsertGatewayProfileForPersistence(
+    gatewayProfilesForPersistence(local, config),
+    updatedCurrent,
+    local
+  );
 }
 
 function removeModelFromAgentConfig(agents, modelId, remainingModels = []) {
@@ -2930,14 +3065,11 @@ function removeModelFromAgentConfig(agents, modelId, remainingModels = []) {
 }
 
 function upsertGatewayProfileEntries(local, config, normalized, nextConfig) {
-  const profiles = gatewayProfilesFromLocalAndConfig(local, config);
-  const currentProfile = gatewayProfileFromConfig(config, {
-    id: activeGatewayProfileId(config) || gatewayProfileIdFromParts(config.lab?.gatewayProtocol, config.lab?.gatewayUrl)
-  });
+  const profiles = gatewayProfilesForPersistence(local, config);
   const nextProfile = gatewayProfileFromConfig(nextConfig, {
     id: gatewayProfileIdFromParts(normalized.gatewayProtocol, normalized.gatewayUrl)
   });
-  return upsertGatewayProfile(upsertGatewayProfile(profiles, currentProfile), nextProfile);
+  return upsertGatewayProfileForPersistence(profiles, nextProfile, nextConfig);
 }
 
 function gatewayProfilesFromLocalAndConfig(local, config) {
@@ -2946,6 +3078,162 @@ function gatewayProfilesFromLocalAndConfig(local, config) {
     ...gatewayProfilesFromConfig(local)
   ];
   return dedupeGatewayProfiles(profiles);
+}
+
+/** @param {Record<string, any>} config */
+function gatewayProfilesOwnedByConfig(config) {
+  const profiles = gatewayProfilesFromConfig(config);
+  const gatewayUrl = String(config?.lab?.gatewayUrl ?? "").trim();
+  if (!gatewayUrl) {
+    return profiles;
+  }
+  return upsertGatewayProfile(profiles, normalizeGatewayProfile({
+    id: activeGatewayProfileId(config),
+    gatewayUrl,
+    gatewayHealthUrl: config?.lab?.gatewayHealthUrl ?? "",
+    gatewayProtocol: config?.lab?.gatewayProtocol ?? "lab-agent-gateway",
+    gatewayApiKey: config?.lab?.gatewayApiKey ?? "",
+    modelAlias: config?.modelAlias ?? "",
+    models: Array.isArray(config?.models) ? config.models : [],
+    agents: profileAgentConfig(config)
+  }));
+}
+
+/** @param {Record<string, any>} local @param {Record<string, any>} config */
+function gatewayProfilesForPersistence(local, config) {
+  const byId = new Map();
+  for (const profile of [
+    ...gatewayProfilesOwnedByConfig(config),
+    ...gatewayProfilesOwnedByConfig(local)
+  ]) {
+    const persisted = gatewayProfileForPersistence(profile, local);
+    if (persisted) {
+      byId.set(persisted.id, persisted);
+    }
+  }
+  return Array.from(byId.values());
+}
+
+/**
+ * @param {Array<Record<string, any>>} profiles
+ * @param {Record<string, any> | null} profile
+ * @param {Record<string, any>} ownerConfig
+ */
+function upsertGatewayProfileForPersistence(profiles, profile, ownerConfig) {
+  const normalized = normalizeGatewayProfile(profile);
+  const existing = normalized
+    ? gatewayProfileForEndpoint(profiles, normalized.gatewayProtocol, normalized.gatewayUrl)
+    : null;
+  const candidate = normalized && existing
+    ? { ...normalized, id: preferredGatewayProfileId(existing, normalized) }
+    : normalized;
+  const persisted = gatewayProfileForPersistence(candidate, ownerConfig);
+  const next = profiles.filter((item) => item.id !== persisted?.id && !sameGatewayProfileEndpoint(item, persisted));
+  if (persisted) {
+    next.push(persisted);
+  }
+  return next;
+}
+
+/** @param {Record<string, any> | null} profile @param {Record<string, any>} ownerConfig */
+function gatewayProfileForPersistence(profile, ownerConfig) {
+  const normalized = normalizeGatewayProfile(profile);
+  if (!normalized) {
+    return null;
+  }
+  const credential = gatewayProfileCredentialState(ownerConfig, normalized.id);
+  if (credential.explicit) {
+    return { ...normalized, gatewayApiKey: credential.value };
+  }
+  const persisted = /** @type {Record<string, any>} */ ({ ...normalized });
+  delete persisted.gatewayApiKey;
+  return persisted;
+}
+
+/** @param {Record<string, any>} config @param {string} profileId */
+function gatewayProfileCredentialState(config, profileId) {
+  const lab = isPlainObject(config?.lab) ? config.lab : {};
+  const topId = activeGatewayProfileId(config);
+  if (topId === profileId && Object.prototype.hasOwnProperty.call(lab, "gatewayApiKey")) {
+    return { explicit: true, value: explicitGatewayApiKeyValue(lab.gatewayApiKey) };
+  }
+  const configured = Array.isArray(lab.gatewayProfiles) ? lab.gatewayProfiles : [];
+  for (let index = configured.length - 1; index >= 0; index -= 1) {
+    const raw = configured[index];
+    const normalized = normalizeGatewayProfile(raw);
+    if (normalized?.id === profileId && Object.prototype.hasOwnProperty.call(raw, "gatewayApiKey")) {
+      return { explicit: true, value: explicitGatewayApiKeyValue(raw.gatewayApiKey) };
+    }
+  }
+  return { explicit: false, value: undefined };
+}
+
+/** @param {unknown} value */
+function explicitGatewayApiKeyValue(value) {
+  const key = String(value ?? "").trim();
+  return key || null;
+}
+
+/**
+ * @param {unknown} allowedHosts
+ * @param {Record<string, any>} deletedProfile
+ * @param {Array<Record<string, any>>} remainingProfiles
+ */
+function removeDeletedGatewayHosts(allowedHosts, deletedProfile, remainingProfiles) {
+  return removeUnusedGatewayHosts(
+    allowedHosts,
+    [deletedProfile?.gatewayUrl, deletedProfile?.gatewayHealthUrl],
+    remainingProfiles
+  );
+}
+
+/**
+ * @param {unknown} allowedHosts
+ * @param {Array<unknown>} removedUrls
+ * @param {Array<Record<string, any>>} remainingProfiles
+ * @param {Record<string, any>} [activeLab]
+ */
+function removeUnusedGatewayHosts(allowedHosts, removedUrls, remainingProfiles, activeLab = {}) {
+  const deletedHosts = new Set(removedUrls.map(urlHost).filter(Boolean));
+  const retainedHosts = new Set([
+    ...remainingProfiles.flatMap((profile) => [
+      urlHost(profile.gatewayUrl),
+      urlHost(profile.gatewayHealthUrl)
+    ]),
+    urlHost(activeLab.gatewayUrl),
+    urlHost(activeLab.gatewayHealthUrl)
+  ].filter(Boolean));
+  return (Array.isArray(allowedHosts) ? allowedHosts : [])
+    .filter((host) => !deletedHosts.has(host) || retainedHosts.has(host));
+}
+
+/** @param {Array<Record<string, any>>} profiles @param {string} protocol @param {string} gatewayUrl */
+function gatewayProfileForEndpoint(profiles, protocol, gatewayUrl) {
+  const matches = profiles.filter((profile) => sameGatewayProfileEndpoint(profile, { gatewayProtocol: protocol, gatewayUrl }));
+  return matches.find((profile) => !isGeneratedGatewayProfileId(profile)) ?? matches[0] ?? null;
+}
+
+/** @param {Record<string, any> | null} left @param {Record<string, any> | null} right */
+function sameGatewayProfileEndpoint(left, right) {
+  if (!left || !right) {
+    return false;
+  }
+  return String(left.gatewayUrl ?? "").trim() === String(right.gatewayUrl ?? "").trim()
+    && String(left.gatewayProtocol ?? "lab-agent-gateway").trim()
+      === String(right.gatewayProtocol ?? "lab-agent-gateway").trim();
+}
+
+/** @param {Record<string, any>} profile */
+function isGeneratedGatewayProfileId(profile) {
+  return String(profile.id ?? "").trim()
+    === gatewayProfileIdFromParts(profile.gatewayProtocol, profile.gatewayUrl);
+}
+
+/** @param {Record<string, any>} existing @param {Record<string, any>} incoming */
+function preferredGatewayProfileId(existing, incoming) {
+  return isGeneratedGatewayProfileId(existing) && !isGeneratedGatewayProfileId(incoming)
+    ? incoming.id
+    : existing.id;
 }
 
 function gatewayProfilesFromConfig(config) {

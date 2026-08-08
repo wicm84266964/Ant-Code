@@ -76,6 +76,8 @@ const state = {
   modelSwitching: false,
   deletingModelId: "",
   deleteConfirmModelId: "",
+  deletingGatewayProfileId: "",
+  deleteConfirmGatewayProfileId: "",
   assistantDrafts: new Map(),
   transcriptPaging: {
     cursor: null,
@@ -3200,6 +3202,7 @@ function toggleModelPanel() {
 function hideModelPanel() {
   state.modelPanelOpen = false;
   state.deleteConfirmModelId = "";
+  state.deleteConfirmGatewayProfileId = "";
   renderModelPanel();
   renderComposerStatus();
 }
@@ -3252,7 +3255,7 @@ function renderModelPanel() {
       <input type="checkbox" data-action="toggle-agent-defaults"${state.applyAgentDefaultsOnSwitch ? " checked" : ""}${syncable ? "" : " disabled"} />
       <span>切换时同步子智能体默认模型</span>
     </label>
-    ${profiles.length > 1 ? `
+    ${profiles.length > 0 ? `
       <div class="gateway-profile-list" aria-label="切换网关">
         ${profiles.map((profile) => gatewayProfileOptionHtml(profile)).join("")}
       </div>
@@ -3266,11 +3269,17 @@ function renderModelPanel() {
 function gatewayProfileOptionHtml(profile) {
   const keyLabel = profile.apiKeyConfigured ? "Key" : "无 Key";
   const count = Number.isFinite(profile.modelCount) ? `${profile.modelCount} 模型` : "";
+  const confirmingDelete = state.deleteConfirmGatewayProfileId === profile.id;
+  const deleting = state.deletingGatewayProfileId === profile.id;
   return `
-    <button type="button" class="gateway-profile-option${profile.current ? " active" : ""}" data-profile-id="${escapeAttribute(profile.id)}">
-      <span class="gateway-profile-main">${escapeHtml(profile.label || profile.gatewayUrl || profile.id)}</span>
-      <span class="gateway-profile-meta">${escapeHtml([profile.gatewayProtocol, keyLabel, count].filter(Boolean).join(" · "))}</span>
-    </button>
+    <div class="gateway-profile-row${confirmingDelete ? " confirming-delete" : ""}">
+      <button type="button" class="gateway-profile-option${profile.current ? " active" : ""}" data-profile-id="${escapeAttribute(profile.id)}" ${state.running || deleting ? "disabled" : ""}>
+        <span class="gateway-profile-main">${escapeHtml(profile.label || profile.gatewayUrl || profile.id)}</span>
+        <span class="gateway-profile-meta">${escapeHtml([profile.gatewayProtocol, keyLabel, count].filter(Boolean).join(" · "))}</span>
+      </button>
+      <button type="button" class="gateway-profile-delete${confirmingDelete ? " confirm" : ""}" data-action="delete-gateway-profile" data-profile-id="${escapeAttribute(profile.id)}" ${state.running || Boolean(state.deletingGatewayProfileId) ? "disabled" : ""}>${deleting ? "删除中" : confirmingDelete ? "确认" : "删除"}</button>
+      ${confirmingDelete ? `<div class="gateway-profile-delete-copy">再次点击确认删除；删除当前网关后不会自动切换到其他网关。</div>` : ""}
+    </div>
   `;
 }
 
@@ -3338,6 +3347,10 @@ async function handleModelPanelClick(event) {
   }
   if (action?.dataset.action === "delete-model") {
     await deleteModel(action.dataset.modelId);
+    return;
+  }
+  if (action?.dataset.action === "delete-gateway-profile") {
+    await deleteGatewayProfile(action.dataset.profileId);
     return;
   }
   const toggle = event.target.closest("input[data-action='toggle-agent-defaults']");
@@ -3584,6 +3597,46 @@ async function switchGatewayProfile(profileId) {
     showError(error.message ?? "切换网关失败");
   } finally {
     state.modelSwitching = false;
+    renderComposerStatus();
+  }
+}
+
+/** @param {string} profileId */
+async function deleteGatewayProfile(profileId) {
+  if (!profileId || state.deletingGatewayProfileId || state.modelSwitching) {
+    return;
+  }
+  if (state.deleteConfirmGatewayProfileId !== profileId) {
+    state.deleteConfirmGatewayProfileId = profileId;
+    renderModelPanel();
+    return;
+  }
+  state.deletingGatewayProfileId = profileId;
+  renderModelPanel();
+  try {
+    const result = await deleteJson(`/api/gateway-profile/${encodeURIComponent(profileId)}`, {
+      sessionId: state.currentSessionId
+    });
+    if (!result.ok) {
+      throw new Error(result.error ?? "删除网关失败");
+    }
+    // @ts-ignore Historical Dashboard state inference treats initialized arrays as never[].
+    state.models = normalizeModels(result.models);
+    mergeGatewayConfig(result.gatewayConfig);
+    // @ts-ignore Historical Dashboard state inference treats initialized arrays as never[].
+    state.gatewayProfiles = normalizeGatewayProfiles(result.gatewayProfiles);
+    state.agentModelTiers = normalizeAgentModelTiers(result.agentModelTiers);
+    // @ts-ignore Historical Dashboard state inference treats the initial null as permanent.
+    state.visionAgent = normalizeVisionAgent(result.visionAgent);
+    updateSessionStatus(result.sessionStatus);
+    state.deleteConfirmGatewayProfileId = "";
+    renderModelPanel();
+    showNotice(result.clearedGateway ? "当前网关已删除" : "网关档案已删除");
+  } catch (error) {
+    showError(error instanceof Error ? error.message : "删除网关失败");
+  } finally {
+    state.deletingGatewayProfileId = "";
+    renderModelPanel();
     renderComposerStatus();
   }
 }
