@@ -90,6 +90,22 @@ test("dashboard maps gateway retry to visible live activity", () => {
   assert.doesNotMatch(JSON.stringify(events[0]), /secret token/);
 });
 
+test("dashboard maps final gateway failure to the retry live activity key", () => {
+  const events = mapSessionEventToDashboard({
+    type: "gateway_error",
+    error: {
+      code: "GATEWAY_HTTP_ERROR",
+      message: "Gateway returned HTTP 502"
+    }
+  });
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, "activity");
+  assert.equal(events[0].title, "模型请求失败");
+  assert.equal(events[0].status, "failed");
+  assert.equal(events[0].coalesceKey, "gateway");
+});
+
 test("dashboard maps context compaction to live status and transcript boundary", () => {
   const running = mapSessionEventToDashboard({
     type: "context_compacting",
