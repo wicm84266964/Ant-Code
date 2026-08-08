@@ -61,7 +61,17 @@ jobs:
           VERSION: ${{ inputs.version }}
           PRERELEASE: ${{ inputs.prerelease }}
         run: |
-          args=("$VERSION" --target "$GITHUB_SHA" --title "$VERSION" --generate-notes)
+          notes_file="$(mktemp)"
+          awk -v version="${VERSION#v}" '
+            $0 == "## " version || index($0, "## " version " - ") == 1 { capture=1; next }
+            capture && /^## / { exit }
+            capture { print }
+          ' CHANGELOG.md > "$notes_file"
+          if [[ ! -s "$notes_file" ]]; then
+            echo "CHANGELOG.md must contain a section for ${VERSION#v}." >&2
+            exit 1
+          fi
+          args=("$VERSION" --target "$GITHUB_SHA" --title "$VERSION" --notes-file "$notes_file")
           if [[ "$PRERELEASE" == "true" ]]; then
             args+=(--prerelease)
           fi
