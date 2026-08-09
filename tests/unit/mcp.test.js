@@ -408,6 +408,45 @@ test("MCP servers can configure request timeout", async (t) => {
   assert.equal(tools.ok, true);
 });
 
+test("MCP tool abort sends cancellation notification", async (t) => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "ant-code-mcp-cancel-"));
+  const logPath = path.join(cwd, "cancel.log");
+  const runtime = createMcpRuntime({
+    cwd,
+    config: {
+      mcp: {
+        servers: [{
+          name: "cancel-fixture",
+          transport: "stdio",
+          command: process.execPath,
+          args: [path.resolve("tests/fixtures/mcp-cancel-server.js")],
+          env: { MCP_CANCEL_LOG: logPath },
+          envAllowlist: ["MCP_CANCEL_LOG"],
+          requestTimeoutMs: 30_000,
+          toolRisks: { slow: "read" }
+        }]
+      }
+    },
+    policy: { networkMode: "offline" }
+  });
+  t.after(() => runtime.close());
+
+  await runtime.listTools("cancel-fixture");
+  const controller = new AbortController();
+  const pending = runtime.callTool("cancel-fixture", "slow", {}, controller.signal);
+  setTimeout(() => controller.abort(), 50);
+  const result = await pending;
+
+  assert.equal(result.ok, false);
+  assert.equal(result.interrupted, true);
+  assert.equal(result.error.code, "MCP_INTERRUPTED");
+  await waitFor(async () => {
+    const log = await fs.readFile(logPath, "utf8").catch(() => "");
+    assert.match(log, /"requestId":3/);
+    assert.match(log, /"reason":"aborted"/);
+  });
+});
+
 test("MCP stdio rejects an oversized JSON frame before parsing it", async (t) => {
   const runtime = createMcpRuntime({
     cwd: process.cwd(),
@@ -456,6 +495,21 @@ function createRuntime(serverOptions) {
       networkMode: "offline"
     }
   });
+}
+
+async function waitFor(assertion, timeoutMs = 1000) {
+  const startedAt = Date.now();
+  let lastError = null;
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      await assertion();
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+  throw lastError;
 }
 
 async function makeTempWorkspace() {

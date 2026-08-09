@@ -1818,6 +1818,10 @@ test("gateway failures persist streamed assistant draft for resume", async () =>
     assert.match(metadata.transcript.messages[1].content[0].text, /Phase 3 readonly review/);
     assert.equal(metadata.interruptedDraft.textBytes > 0, true);
     assert.match(metadata.interruptedDraft.reason, /gateway_error:GATEWAY_(RESPONSE_PARSE_ERROR|STREAM_INTERRUPTED)/);
+    assert.equal(metadata.transcript.modelArchive.totalMessages, 2);
+    const modelChunk = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "sessions", metadata.transcript.modelArchive.chunks[0].file), "utf8"));
+    assert.equal(modelChunk.messages[1].interruptedDraft, true);
+    assert.match(modelChunk.messages[1].content[0].text, /Phase 3 readonly review/);
 
     const resumed = await createSession({
       cwd,

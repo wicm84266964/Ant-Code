@@ -2888,9 +2888,12 @@ function appendInterruptedDraftMessages(session, prompt, displayPrompt, draft, r
     assistantMessage.thinking = thinking;
   }
   if (typeof prompt === "string" && prompt.trim()) {
-    session.messages.push(persistableUserTurnMessage(prompt));
+    const userMessage = persistableUserTurnMessage(prompt);
+    session.messages.push(userMessage);
+    appendModelContextArchiveMessages(session, [userMessage]);
   }
   session.messages.push(assistantMessage);
+  appendModelContextArchiveMessages(session, [assistantMessage]);
   appendTranscriptMessages(session, [
     ...(typeof displayPrompt === "string" && displayPrompt.trim() ? [{ role: "user", content: displayPrompt }] : []),
     assistantMessage
