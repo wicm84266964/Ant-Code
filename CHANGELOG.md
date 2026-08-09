@@ -39,6 +39,10 @@
 - Interrupted and failed gateway drafts now enter the model-context archive as
   explicitly marked non-final messages, keeping full-history resume consistent
   with the visible transcript.
+- Global and project model catalogs now merge when they refer to the same
+  gateway protocol and URL. A globally added model therefore remains available
+  after switching back to a project-default model, while different gateway
+  endpoints remain isolated.
 
 ### Added
 

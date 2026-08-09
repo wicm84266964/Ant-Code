@@ -164,7 +164,7 @@ test("dashboard runtime quarantines an interrupt that does not settle and never 
 
 test("dashboard runtime rejects malformed and oversized turn attachments before creating a session", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-images-"));
-  const runtime = createDashboardRuntime({ cwd, env: {} });
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
   const attachment = (data, mimeType = "image/png", size = 1) => ({
     type: "image",
     name: "image.bin",
@@ -366,7 +366,7 @@ test("dashboard runtime can apply model agent defaults when switching", async ()
       }
     }
   }), "utf8");
-  const runtime = createDashboardRuntime({ cwd, env: {} });
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
 
   const switched = await runtime.switchModel({ modelId: "vision-model", applyAgentDefaults: true });
 
@@ -393,7 +393,7 @@ test("dashboard runtime can apply model agent defaults when switching", async ()
 
 test("dashboard runtime saves local model gateway config", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
-  const runtime = createDashboardRuntime({ cwd, env: {} });
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
 
   const saved = await runtime.saveModelConfig({
     saveTarget: "project",
@@ -520,6 +520,40 @@ test("dashboard project model config overrides user global default", async () =>
   const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
   assert.equal(local.modelAlias, "project-model");
   assert.equal(local.lab.gatewayUrl, "https://project.gateway.example/v1/chat/completions");
+});
+
+test("dashboard keeps a global model visible when the project uses the same gateway", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-"));
+  const gatewayUrl = "https://shared.gateway.example/v1/chat/completions";
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: home } });
+
+  await runtime.saveModelConfig({
+    saveTarget: "project",
+    gatewayUrl,
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "shared-key",
+    modelId: "deepseek-v4-flash",
+    label: "DeepSeek V4 Flash",
+    modalities: ["text"],
+    switchToModel: true
+  });
+  const saved = await runtime.saveModelConfig({
+    saveTarget: "global",
+    gatewayUrl,
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "shared-key",
+    modelId: "deepseek-v4-pro",
+    label: "DeepSeek V4 Pro",
+    modalities: ["text"],
+    switchToModel: true
+  });
+
+  assert.deepEqual(saved.models.map((model) => model.id), ["deepseek-v4-flash", "deepseek-v4-pro"]);
+  const switched = await runtime.switchModel({ modelId: "deepseek-v4-flash" });
+  assert.deepEqual(switched.models.map((model) => model.id), ["deepseek-v4-flash", "deepseek-v4-pro"]);
+  const refreshed = await runtime.status();
+  assert.deepEqual(refreshed.models.map((model) => model.id), ["deepseek-v4-flash", "deepseek-v4-pro"]);
 });
 
 test("dashboard runtime refreshes idle active session after saving gateway key", async () => {
@@ -650,7 +684,7 @@ test("dashboard runtime switches gateway profiles without mixing previous provid
       }
     }
   }), "utf8");
-  const runtime = createDashboardRuntime({ cwd, env: {} });
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
 
   const saved = await runtime.saveModelConfig({
     saveTarget: "project",
@@ -725,7 +759,7 @@ test("dashboard runtime clears stale agent routes when an older gateway profile 
       ]
     }
   }), "utf8");
-  const runtime = createDashboardRuntime({ cwd, env: {} });
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
 
   const switched = await runtime.switchGatewayProfile({ profileId: "profile-beta" });
 
@@ -868,7 +902,7 @@ test("dashboard runtime keeps no-key profiles isolated across switches and model
 
 test("dashboard runtime clears a stale health URL when the field is blank", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-health-"));
-  const runtime = createDashboardRuntime({ cwd, env: {} });
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
 
   await runtime.saveModelConfig({
     saveTarget: "project",
@@ -924,7 +958,7 @@ test("dashboard runtime preserves custom gateway ids and collapses endpoint dupl
       ]
     }
   }), "utf8");
-  const runtime = createDashboardRuntime({ cwd, env: {} });
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
 
   const saved = await runtime.saveModelConfig({
     saveTarget: "project",
@@ -968,7 +1002,7 @@ test("dashboard runtime does not carry an expired project key into a new gateway
   const requests = [];
   const server = await listen(createHeaderRecordingGateway(requests, "new gateway answer"), "127.0.0.1", 0);
   const address = server.address();
-  const runtime = createDashboardRuntime({ cwd, env: {} });
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
 
   try {
     const saved = await runtime.saveModelConfig({
@@ -999,7 +1033,7 @@ test("dashboard runtime does not carry an expired project key into a new gateway
 
 test("dashboard runtime adds models to the active gateway when the same key is submitted again", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
-  const runtime = createDashboardRuntime({ cwd, env: {} });
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
 
   await runtime.saveModelConfig({
     saveTarget: "project",
@@ -1034,7 +1068,7 @@ test("dashboard runtime adds models to the active gateway when the same key is s
 
 test("dashboard runtime preserves concurrent model config updates through atomic mutations", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-config-"));
-  const runtime = createDashboardRuntime({ cwd, env: {} });
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
 
   const results = await Promise.all(Array.from({ length: 8 }, (_, index) => runtime.saveModelConfig({
     saveTarget: "project",
@@ -1058,7 +1092,7 @@ test("dashboard runtime preserves concurrent model config updates through atomic
 
 test("dashboard runtime deletes a registered model from the active gateway", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
-  const runtime = createDashboardRuntime({ cwd, env: {} });
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
 
   await runtime.saveModelConfig({
     saveTarget: "project",
@@ -1104,7 +1138,7 @@ test("dashboard runtime deletes a registered model from the active gateway", asy
 
 test("dashboard runtime clears the active gateway when deleting its final model", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
-  const runtime = createDashboardRuntime({ cwd, env: {} });
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
 
   await runtime.saveModelConfig({
     saveTarget: "project",
@@ -1137,7 +1171,7 @@ test("dashboard runtime clears the active gateway when deleting its final model"
 
 test("dashboard runtime deletes the active gateway profile without falling back to an expired profile", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-delete-gateway-"));
-  const runtime = createDashboardRuntime({ cwd, env: {} });
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
 
   await runtime.saveModelConfig({
     saveTarget: "project",
@@ -1182,7 +1216,7 @@ test("dashboard runtime deletes the active gateway profile without falling back 
 
 test("dashboard runtime replaces the edited model id instead of keeping the stale entry", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
-  const runtime = createDashboardRuntime({ cwd, env: {} });
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
 
   await runtime.saveModelConfig({
     saveTarget: "project",
@@ -1409,7 +1443,7 @@ test("dashboard runtime sends image attachments while persisting only metadata",
 
 test("dashboard runtime requires workspace trust before running a turn", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
-  const runtime = createDashboardRuntime({ cwd, env: {} });
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
   const blocked = await runtime.startTurn({ prompt: "first", permissionMode: "plan" });
 
   assert.equal(blocked.ok, false);
@@ -2303,7 +2337,7 @@ test("dashboard runtime shows starting background terminal tasks before pid is a
       gatewayUrl: null
     }
   }), "utf8");
-  const runtime = createDashboardRuntime({ cwd, env: {} });
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
   await runtime.trustWorkspace();
   const started = await runtime.startTurn({
     prompt: "seed session",
@@ -2397,7 +2431,7 @@ test("dashboard runtime deletes completed saved sessions", async () => {
 
 test("dashboard runtime pages archived transcript history for display", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
-  const runtime = createDashboardRuntime({ cwd, env: {} });
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
   const store = createSessionStore({ cwd });
   const messages = Array.from({ length: 155 }, (_, index) => ({
     role: index % 2 === 0 ? "user" : "assistant",
@@ -2940,7 +2974,7 @@ test("dashboard runtime refuses metadata cwd outside the dashboard workspace", a
   const store = createSessionStore({ cwd });
   await store.writeMetadata({ id: "inside-cwd", cwd: child, status: "completed" });
   await store.writeMetadata({ id: "outside-cwd", cwd: outside, status: "completed" });
-  const runtime = createDashboardRuntime({ cwd, env: {} });
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
 
   const inside = await runtime.sessionCwd("inside-cwd");
   assert.equal(inside.ok, true);
@@ -2966,7 +3000,7 @@ test("dashboard transcript endpoints page a 10k archive without materializing fu
     status: "completed",
     transcript: { archive, messages: messages.slice(-50) }
   });
-  const runtime = createDashboardRuntime({ cwd, env: {} });
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
 
   const opened = await runtime.readSession("dashboard-large-page");
   assert.equal(opened.ok, true);

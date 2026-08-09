@@ -339,6 +339,60 @@ test("project settings may inherit an environment key for the same gateway endpo
   assert.equal(config.configSources.lab.gatewayApiKey.type, "environment");
 });
 
+test("project and global models merge only for the same gateway endpoint", async () => {
+  const cwd = await makeTempWorkspace();
+  const home = await makeTempWorkspace();
+  const globalPath = globalConfigPath({ USERPROFILE: home });
+  const gatewayUrl = "https://shared.gateway.example/v1/chat/completions";
+  await fs.mkdir(path.dirname(globalPath), { recursive: true });
+  await fs.writeFile(globalPath, JSON.stringify({
+    modelAlias: "deepseek-v4-pro",
+    models: [
+      { id: "deepseek-v4-flash", label: "Global Flash" },
+      { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro" }
+    ],
+    lab: {
+      gatewayUrl,
+      gatewayProtocol: "openai-chat",
+      gatewayProfiles: [{
+        id: "global-shared",
+        gatewayUrl,
+        gatewayProtocol: "openai-chat",
+        modelAlias: "deepseek-v4-pro",
+        models: [
+          { id: "deepseek-v4-flash", label: "Global Flash" },
+          { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro" }
+        ]
+      }]
+    }
+  }), "utf8");
+  await writeJson(cwd, {
+    modelAlias: "deepseek-v4-flash",
+    models: [{ id: "deepseek-v4-flash", label: "Project Flash" }],
+    lab: {
+      gatewayUrl,
+      gatewayProtocol: "openai-chat",
+      gatewayProfiles: [{
+        id: "project-shared",
+        gatewayUrl,
+        gatewayProtocol: "openai-chat",
+        modelAlias: "deepseek-v4-flash",
+        models: [{ id: "deepseek-v4-flash", label: "Project Flash" }]
+      }]
+    }
+  });
+
+  const config = await loadConfig({ cwd, env: { USERPROFILE: home } });
+
+  assert.equal(config.modelAlias, "deepseek-v4-flash");
+  assert.deepEqual(config.models.map((model) => model.id), ["deepseek-v4-flash", "deepseek-v4-pro"]);
+  assert.equal(config.models[0].label, "Project Flash");
+  assert.deepEqual(config.lab.gatewayProfiles[0].models.map((model) => model.id), [
+    "deepseek-v4-flash",
+    "deepseek-v4-pro"
+  ]);
+});
+
 test("loads dashboard global model defaults from user config file", async () => {
   const cwd = await makeTempWorkspace();
   const home = await makeTempWorkspace();
