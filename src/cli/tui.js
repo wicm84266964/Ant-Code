@@ -2374,6 +2374,7 @@ function TuiApp(props) {
         workflowState: sessionRef.current.workflow,
         sessionInfo: summarizeInfo(),
         approvalCallback: askApproval,
+        signal,
         trusted
       });
       addEntry("output", "! 结果", outputText);
@@ -2555,6 +2556,7 @@ function TuiApp(props) {
         sessionInfo: summarizeInfo(),
         approvalCallback: askApproval,
         setModelCallback: switchModel,
+        signal,
         trusted
       });
       addEntry("output", `/${slashCommand.name} 结果`, outputText);

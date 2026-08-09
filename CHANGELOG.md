@@ -32,6 +32,13 @@
   disconnected activity entry.
 - `rg_files` is classified as a directory-scoped file-list operation by the
   delegation guard instead of being treated as a glob search.
+- TUI shell and slash commands now receive the active turn cancellation signal,
+  so interrupting a turn also stops command work launched from that turn.
+- Aborting an MCP tool request now sends the protocol cancellation notification
+  before the local call settles as interrupted.
+- Interrupted and failed gateway drafts now enter the model-context archive as
+  explicitly marked non-final messages, keeping full-history resume consistent
+  with the visible transcript.
 
 ### Added
 

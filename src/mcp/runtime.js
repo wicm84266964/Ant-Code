@@ -587,6 +587,7 @@ async function createStdioSession(server, cwd, config) {
           finish(reject, new Error(`MCP request timed out: ${method}${session.stderr ? `; stderr: ${summarizeStderr(session.stderr)}` : ""}`));
         }, server.requestTimeoutMs);
         const onAbort = () => {
+          sendCancellationNotification(session, id, "aborted");
           finish(reject, new Error("The operation was aborted"));
         };
         if (signal) {
@@ -749,6 +750,18 @@ function mcpTransportFrameTooLargeError(maxBytes, observedBytes) {
     observedBytes
   });
 }
+
+function sendCancellationNotification(session, requestId, reason) {
+  try {
+    session.notify("notifications/cancelled", {
+      requestId,
+      reason
+    });
+  } catch {
+    // The local abort still resolves promptly if the server cannot accept cancellation.
+  }
+}
+
 function closeStoredSession(session) {
   if (session && session.status !== "closed") {
     session.close();

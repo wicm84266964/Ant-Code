@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import path from "node:path";
 import test from "node:test";
 import {
   boundedIndex,
@@ -13,6 +15,13 @@ import {
   resolveTuiExitAction,
   takeQueuedPrompt
 } from "../../src/cli/tui/workflows.js";
+
+test("TUI forwards the active turn signal to shell and slash commands", async () => {
+  const source = await fs.readFile(path.resolve("src/cli/tui.js"), "utf8");
+
+  assert.match(source, /approvalCallback: askApproval,\s+signal,\s+trusted/);
+  assert.match(source, /setModelCallback: switchModel,\s+signal,\s+trusted/);
+});
 
 test("queue workflow helpers remove, promote, and take focused prompts", () => {
   const queue = ["first", "second", "third"];
