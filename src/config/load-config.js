@@ -549,6 +549,26 @@ function mergeConfig(base, overlay) {
 function mergeConfigWithGatewayCredentialScope(base, overlay) {
   const next = mergeConfig(base, overlay);
   const overlayLab = isPlainObject(overlay?.lab) ? overlay.lab : {};
+  if (hasGatewayEndpoint(next) && sameGatewayEndpoint(base, next)) {
+    if (Array.isArray(base?.models) && Array.isArray(overlay?.models)) {
+      next.models = mergeModelEntries(base.models, overlay.models);
+    }
+    if (Array.isArray(base?.lab?.gatewayProfiles) && Array.isArray(overlayLab.gatewayProfiles)) {
+      next.lab = {
+        ...(isPlainObject(next.lab) ? next.lab : {}),
+        gatewayProfiles: overlayLab.gatewayProfiles.map((profile) => {
+          const inherited = base.lab.gatewayProfiles.find((candidate) => sameGatewayProfileEndpoint(candidate, profile));
+          if (!inherited || !Array.isArray(inherited.models) || !Array.isArray(profile?.models)) {
+            return profile;
+          }
+          return {
+            ...profile,
+            models: mergeModelEntries(inherited.models, profile.models)
+          };
+        })
+      };
+    }
+  }
   const changesEndpoint = Object.prototype.hasOwnProperty.call(overlayLab, "gatewayUrl")
     || Object.prototype.hasOwnProperty.call(overlayLab, "gatewayProtocol");
   const declaresCredential = Object.prototype.hasOwnProperty.call(overlayLab, "gatewayApiKey");
@@ -562,6 +582,38 @@ function mergeConfigWithGatewayCredentialScope(base, overlay) {
     };
   }
   return next;
+}
+
+function mergeModelEntries(base, overlay) {
+  const merged = [...base];
+  const indexes = new Map(merged.map((model, index) => [modelEntryId(model), index]).filter(([id]) => id));
+  for (const model of overlay) {
+    const id = modelEntryId(model);
+    const index = id ? indexes.get(id) : undefined;
+    if (index === undefined) {
+      if (id) {
+        indexes.set(id, merged.length);
+      }
+      merged.push(model);
+    } else {
+      merged[index] = model;
+    }
+  }
+  return merged;
+}
+
+function modelEntryId(model) {
+  return String(typeof model === "string" ? model : model?.id ?? "").trim();
+}
+
+function sameGatewayProfileEndpoint(left, right) {
+  if (!String(left?.gatewayUrl ?? "").trim() || !String(right?.gatewayUrl ?? "").trim()) {
+    return false;
+  }
+  return sameGatewayEndpoint(
+    { lab: { gatewayUrl: left?.gatewayUrl, gatewayProtocol: left?.gatewayProtocol } },
+    { lab: { gatewayUrl: right?.gatewayUrl, gatewayProtocol: right?.gatewayProtocol } }
+  );
 }
 
 /** @param {Record<string, any>} config */
