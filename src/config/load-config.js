@@ -554,10 +554,11 @@ function mergeConfigWithGatewayCredentialScope(base, overlay) {
       next.models = mergeModelEntries(base.models, overlay.models);
     }
     if (Array.isArray(base?.lab?.gatewayProfiles) && Array.isArray(overlayLab.gatewayProfiles)) {
+      const inheritedProfiles = /** @type {Array<Record<string, any>>} */ (base.lab.gatewayProfiles);
       next.lab = {
         ...(isPlainObject(next.lab) ? next.lab : {}),
         gatewayProfiles: overlayLab.gatewayProfiles.map((profile) => {
-          const inherited = base.lab.gatewayProfiles.find((candidate) => sameGatewayProfileEndpoint(candidate, profile));
+          const inherited = inheritedProfiles.find((candidate) => sameGatewayProfileEndpoint(candidate, profile));
           if (!inherited || !Array.isArray(inherited.models) || !Array.isArray(profile?.models)) {
             return profile;
           }
@@ -584,9 +585,21 @@ function mergeConfigWithGatewayCredentialScope(base, overlay) {
   return next;
 }
 
+/**
+ * @param {Array<string | Record<string, any>>} base
+ * @param {Array<string | Record<string, any>>} overlay
+ * @returns {Array<string | Record<string, any>>}
+ */
 function mergeModelEntries(base, overlay) {
   const merged = [...base];
-  const indexes = new Map(merged.map((model, index) => [modelEntryId(model), index]).filter(([id]) => id));
+  /** @type {Map<string, number>} */
+  const indexes = new Map();
+  for (let index = 0; index < merged.length; index += 1) {
+    const id = modelEntryId(merged[index]);
+    if (id) {
+      indexes.set(id, index);
+    }
+  }
   for (const model of overlay) {
     const id = modelEntryId(model);
     const index = id ? indexes.get(id) : undefined;
@@ -602,10 +615,16 @@ function mergeModelEntries(base, overlay) {
   return merged;
 }
 
+/** @param {unknown} model */
 function modelEntryId(model) {
-  return String(typeof model === "string" ? model : model?.id ?? "").trim();
+  return String(typeof model === "string"
+    ? model
+    : model && typeof model === "object" && "id" in model
+      ? model.id
+      : "").trim();
 }
 
+/** @param {Record<string, any>} left @param {Record<string, any>} right */
 function sameGatewayProfileEndpoint(left, right) {
   if (!String(left?.gatewayUrl ?? "").trim() || !String(right?.gatewayUrl ?? "").trim()) {
     return false;
