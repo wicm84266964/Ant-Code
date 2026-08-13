@@ -209,6 +209,19 @@ export async function loadConfig(options = {}) {
   };
   validateLabConfig(finalLab);
   const configSources = buildConfigSources({ env, project, lab, bundled });
+  const projectData = /** @type {Record<string, any>} */ (project?.data ?? {});
+  const projectLab = isPlainObject(projectData.lab) ? projectData.lab : {};
+  if (finalLab.gatewayApiKey
+    && Object.prototype.hasOwnProperty.call(projectLab, "gatewayApiKey")
+    && !String(projectLab.gatewayApiKey ?? "").trim()
+    && sameGatewayEndpoint(withEnvDefaults, projectData)) {
+    configSources.lab.gatewayApiKey = configSourceFor("lab.gatewayApiKey", {
+      env,
+      project: null,
+      lab,
+      bundled
+    });
+  }
   if (finalLab.gatewayApiKey === null
     && (configSources.lab.gatewayUrl.type === "project" || configSources.lab.gatewayProtocol.type === "project")
     && configSources.lab.gatewayApiKey.type !== "project") {
@@ -550,6 +563,12 @@ function mergeConfigWithGatewayCredentialScope(base, overlay) {
   const next = mergeConfig(base, overlay);
   const overlayLab = isPlainObject(overlay?.lab) ? overlay.lab : {};
   if (hasGatewayEndpoint(next) && sameGatewayEndpoint(base, next)) {
+    if (hasGatewayCredential(base) && !hasGatewayCredential(next)) {
+      next.lab = {
+        ...(isPlainObject(next.lab) ? next.lab : {}),
+        gatewayApiKey: base.lab.gatewayApiKey
+      };
+    }
     if (Array.isArray(base?.models) && Array.isArray(overlay?.models)) {
       next.models = mergeModelEntries(base.models, overlay.models);
     }
@@ -559,13 +578,19 @@ function mergeConfigWithGatewayCredentialScope(base, overlay) {
         ...(isPlainObject(next.lab) ? next.lab : {}),
         gatewayProfiles: overlayLab.gatewayProfiles.map((profile) => {
           const inherited = inheritedProfiles.find((candidate) => sameGatewayProfileEndpoint(candidate, profile));
-          if (!inherited || !Array.isArray(inherited.models) || !Array.isArray(profile?.models)) {
+          if (!inherited) {
             return profile;
           }
-          return {
+          const mergedProfile = {
             ...profile,
-            models: mergeModelEntries(inherited.models, profile.models)
+            ...(!String(profile?.gatewayApiKey ?? "").trim() && String(inherited.gatewayApiKey ?? "").trim()
+              ? { gatewayApiKey: inherited.gatewayApiKey }
+              : {})
           };
+          if (Array.isArray(inherited.models) && Array.isArray(profile?.models)) {
+            mergedProfile.models = mergeModelEntries(inherited.models, profile.models);
+          }
+          return mergedProfile;
         })
       };
     }

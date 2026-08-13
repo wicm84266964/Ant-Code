@@ -421,6 +421,73 @@ test("loads dashboard global model defaults from user config file", async () => 
   assert.equal(config.configSources.lab.gatewayUrl.type, "global");
 });
 
+test("same-endpoint project null credentials inherit the saved global key", async () => {
+  const cwd = await makeTempWorkspace();
+  const home = await makeTempWorkspace();
+  const gatewayUrl = "https://shared.gateway.example/v1/chat/completions";
+  const globalPath = globalConfigPath({ USERPROFILE: home });
+  await fs.mkdir(path.dirname(globalPath), { recursive: true });
+  await fs.writeFile(globalPath, JSON.stringify({
+    modelAlias: "global-model",
+    models: [{ id: "global-model" }],
+    lab: {
+      gatewayUrl,
+      gatewayProtocol: "openai-chat",
+      gatewayApiKey: "global-key",
+      gatewayProfiles: [{ id: "shared-profile", gatewayUrl, gatewayProtocol: "openai-chat", gatewayApiKey: "global-key", modelAlias: "global-model", models: [{ id: "global-model" }] }]
+    }
+  }), "utf8");
+  await writeJson(cwd, {
+    modelAlias: "project-model",
+    models: [{ id: "project-model" }],
+    lab: {
+      gatewayUrl,
+      gatewayProtocol: "openai-chat",
+      gatewayApiKey: null,
+      activeGatewayProfile: "shared-profile",
+      gatewayProfiles: [{ id: "shared-profile", gatewayUrl, gatewayProtocol: "openai-chat", gatewayApiKey: null, modelAlias: "project-model", models: [{ id: "project-model" }] }]
+    }
+  });
+
+  const config = await loadConfig({ cwd, env: { USERPROFILE: home } });
+
+  assert.equal(config.lab.gatewayApiKey, "global-key");
+  assert.equal(config.lab.gatewayProfiles[0].gatewayApiKey, "global-key");
+  assert.equal(config.configSources.lab.gatewayApiKey.type, "global");
+});
+
+test("same-endpoint profiles inherit global credentials without model arrays", async () => {
+  const cwd = await makeTempWorkspace();
+  const home = await makeTempWorkspace();
+  const gatewayUrl = "https://shared.gateway.example/v1/chat/completions";
+  const globalPath = globalConfigPath({ USERPROFILE: home });
+  await fs.mkdir(path.dirname(globalPath), { recursive: true });
+  await fs.writeFile(globalPath, JSON.stringify({
+    modelAlias: "shared-model",
+    models: [{ id: "shared-model" }],
+    lab: {
+      gatewayUrl,
+      gatewayProtocol: "openai-chat",
+      gatewayApiKey: "global-key",
+      gatewayProfiles: [{ id: "shared-profile", gatewayUrl, gatewayProtocol: "openai-chat", gatewayApiKey: "global-key" }]
+    }
+  }), "utf8");
+  await writeJson(cwd, {
+    modelAlias: "shared-model",
+    models: [{ id: "shared-model" }],
+    lab: {
+      gatewayUrl,
+      gatewayProtocol: "openai-chat",
+      gatewayApiKey: null,
+      gatewayProfiles: [{ id: "shared-profile", gatewayUrl, gatewayProtocol: "openai-chat", gatewayApiKey: null }]
+    }
+  });
+
+  const config = await loadConfig({ cwd, env: { USERPROFILE: home } });
+
+  assert.equal(config.lab.gatewayProfiles[0].gatewayApiKey, "global-key");
+});
+
 test("model gateway environment defaults override global config and hide stale global profiles", async () => {
   const cwd = await makeTempWorkspace();
   const home = await makeTempWorkspace();

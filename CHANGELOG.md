@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.3.5 - 2026-08-13
+
+### Fixed
+
+- A saved global gateway API key now remains effective when a project has a
+  stale empty credential for the same protocol and URL. Switching that profile
+  removes the empty project override without copying the secret into the
+  project file, while different endpoints and intentional no-key profiles stay
+  isolated.
+- Same-endpoint profiles inherit their saved global credential even when an
+  older profile omits its model list, so profile switching and real requests
+  agree with the Dashboard's configured-key status.
+- The Dashboard model configuration dialog now defaults its save scope to the
+  current gateway source instead of always selecting the global user config.
+
 ## 1.3.4 - 2026-08-08
 
 ### Fixed
