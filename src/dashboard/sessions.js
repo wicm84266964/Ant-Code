@@ -2640,7 +2640,36 @@ function dashboardConfigResultError(result) {
 }
 
 async function dashboardConfigEnv(cwd, env) {
-  return env;
+  if (!env?.LAB_AGENT_CONFIG && !env?.USERPROFILE && !env?.HOME) {
+    return env;
+  }
+  const localPath = localProjectConfigPath(cwd);
+  const userConfigPath = globalConfigPath(env);
+  try {
+    await Promise.all([fs.access(localPath), fs.access(userConfigPath)]);
+    return withoutGatewayEnvOverrides(env);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return env;
+    }
+    throw error;
+  }
+}
+
+function withoutGatewayEnvOverrides(env = {}) {
+  const next = /** @type {Record<string, any>} */ ({ ...env });
+  for (const key of [
+    "LAB_MODEL_GATEWAY_URL",
+    "LAB_MODEL_GATEWAY_HEALTH_URL",
+    "LAB_MODEL_GATEWAY_PROTOCOL",
+    "LAB_MODEL_GATEWAY_API_KEY",
+    "LAB_MODEL_GATEWAY_MAX_RETRIES",
+    "LAB_AGENT_MODEL",
+    "LAB_AGENT_MODELS"
+  ]) {
+    delete next[key];
+  }
+  return next;
 }
 
 function modelConfigTargetPath(cwd, env, saveTarget = "project") {
@@ -2830,7 +2859,8 @@ function sameGatewayConfig(config, normalized) {
 
 function buildGatewayProfileSwitchConfig(local, config, profileId) {
   const profiles = gatewayProfilesFromLocalAndConfig(local, config);
-  const profile = profiles.find((item) => item.id === profileId);
+  const profile = gatewayProfilesFromConfig(config).find((item) => item.id === profileId)
+    ?? profiles.find((item) => item.id === profileId);
   if (!profile) {
     return { ok: false, error: "网关配置不存在" };
   }
@@ -2839,7 +2869,7 @@ function buildGatewayProfileSwitchConfig(local, config, profileId) {
 }
 
 function buildConfigForGatewayProfile(local, config, profile, profiles = []) {
-  const activeProfile = normalizeGatewayProfile(profile);
+  const activeProfile = /** @type {Record<string, any>} */ (normalizeGatewayProfile(profile));
   const lab = {
     ...(isPlainObject(local.lab) ? local.lab : {}),
     gatewayUrl: activeProfile.gatewayUrl || null,
@@ -2849,10 +2879,20 @@ function buildConfigForGatewayProfile(local, config, profile, profiles = []) {
     gatewayProfiles: upsertGatewayProfileForPersistence(profiles, activeProfile, local)
   };
   const credential = gatewayProfileCredentialState(local, activeProfile.id);
-  if (credential.explicit) {
+  if (credential.explicit && credential.value) {
     lab.gatewayApiKey = credential.value;
   } else {
     delete lab.gatewayApiKey;
+  }
+  if (activeProfile.gatewayApiKey && !credential.value) {
+    lab.gatewayProfiles = lab.gatewayProfiles.map((item) => {
+      if (item.id !== activeProfile.id || String(item.gatewayApiKey ?? "").trim()) {
+        return item;
+      }
+      const inherited = { ...item };
+      delete inherited.gatewayApiKey;
+      return inherited;
+    });
   }
   const next = {
     ...local,

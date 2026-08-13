@@ -3393,7 +3393,7 @@ function renderModelConfigPanel() {
   const sourceNote = gatewaySourceNote(gateway);
   const keySource = sourceLabel(gateway.sources?.apiKey);
   const gatewayDefaultNote = environmentGatewayDefaultNote(gateway);
-  const saveTarget = /** @type {string} */ ("global");
+  const saveTarget = gateway.sources?.gatewayUrl?.type === "project" ? "project" : "global";
   const currentAgentTiers = {
     cheap: current.agentModelTiers?.cheap ?? state.agentModelTiers?.cheap ?? "",
     default: current.agentModelTiers?.default ?? state.agentModelTiers?.default ?? "",

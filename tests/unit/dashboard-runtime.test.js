@@ -485,6 +485,111 @@ test("dashboard runtime defaults model gateway config to the user global store",
   assert.equal(status.gatewayConfig.sources.gatewayUrl.type, "global");
 });
 
+test("dashboard keeps a global key effective when the same project profile stored null", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-"));
+  const gatewayUrl = "https://shared.gateway.example/v1/chat/completions";
+  const profileId = "shared-profile";
+  await fs.mkdir(path.join(home, ".ant-code"), { recursive: true });
+  await fs.writeFile(path.join(home, ".ant-code", "lab-agent.config.json"), JSON.stringify({
+    modelAlias: "shared-model",
+    models: [{ id: "shared-model" }],
+    lab: {
+      gatewayUrl,
+      gatewayProtocol: "openai-chat",
+      gatewayApiKey: "global-key",
+      activeGatewayProfile: profileId,
+      gatewayProfiles: [{ id: profileId, gatewayUrl, gatewayProtocol: "openai-chat", gatewayApiKey: "global-key", modelAlias: "shared-model", models: [{ id: "shared-model" }] }]
+    }
+  }), "utf8");
+  await fs.mkdir(path.join(cwd, ".lab-agent"), { recursive: true });
+  await fs.writeFile(path.join(cwd, ".lab-agent", "config.json"), JSON.stringify({
+    modelAlias: "shared-model",
+    models: [{ id: "shared-model" }],
+    lab: {
+      gatewayUrl,
+      gatewayProtocol: "openai-chat",
+      gatewayApiKey: null,
+      activeGatewayProfile: profileId,
+      gatewayProfiles: [{ id: profileId, gatewayUrl, gatewayProtocol: "openai-chat", gatewayApiKey: null, modelAlias: "shared-model", models: [{ id: "shared-model" }] }]
+    }
+  }), "utf8");
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: {
+      USERPROFILE: home,
+      LAB_MODEL_GATEWAY_URL: "https://stale-process.gateway.example/v1/chat/completions",
+      LAB_MODEL_GATEWAY_PROTOCOL: "openai-chat",
+      LAB_MODEL_GATEWAY_API_KEY: "stale-process-key"
+    }
+  });
+
+  const status = await runtime.status();
+  assert.equal(status.gatewayConfig.apiKeyConfigured, true);
+  assert.equal(status.gatewayConfig.sources.apiKey.type, "global");
+  const switched = await runtime.switchGatewayProfile({ profileId });
+  assert.equal(switched.gatewayConfig.apiKeyConfigured, true);
+
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.equal(Object.prototype.hasOwnProperty.call(local.lab, "gatewayApiKey"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(local.lab.gatewayProfiles[0], "gatewayApiKey"), false);
+});
+
+test("dashboard sends an inherited global key after ignoring stale process gateway defaults", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-inherited-key-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-inherited-key-"));
+  const requests = [];
+  const server = await listen(createAuthRecordingGateway(requests, "authorized answer", "global-key"), "127.0.0.1", 0);
+  const gatewayUrl = `http://127.0.0.1:${server.address().port}`;
+  const profileId = "shared-profile";
+  try {
+    await fs.mkdir(path.join(home, ".ant-code"), { recursive: true });
+    await fs.writeFile(path.join(home, ".ant-code", "lab-agent.config.json"), JSON.stringify({
+      modelAlias: "shared-model",
+      models: [{ id: "shared-model" }],
+      allowedHosts: ["127.0.0.1"],
+      lab: {
+        gatewayUrl,
+        gatewayProtocol: "lab-agent-gateway",
+        gatewayApiKey: "global-key",
+        activeGatewayProfile: profileId,
+        gatewayProfiles: [{ id: profileId, gatewayUrl, gatewayProtocol: "lab-agent-gateway", gatewayApiKey: "global-key", modelAlias: "shared-model", models: [{ id: "shared-model" }] }]
+      }
+    }), "utf8");
+    await fs.mkdir(path.join(cwd, ".lab-agent"), { recursive: true });
+    await fs.writeFile(path.join(cwd, ".lab-agent", "config.json"), JSON.stringify({
+      modelAlias: "shared-model",
+      models: [{ id: "shared-model" }],
+      allowedHosts: ["127.0.0.1"],
+      lab: {
+        gatewayUrl,
+        gatewayProtocol: "lab-agent-gateway",
+        gatewayApiKey: null,
+        activeGatewayProfile: profileId,
+        gatewayProfiles: [{ id: profileId, gatewayUrl, gatewayProtocol: "lab-agent-gateway", gatewayApiKey: null, modelAlias: "shared-model", models: [{ id: "shared-model" }] }]
+      }
+    }), "utf8");
+    const runtime = createDashboardRuntime({
+      cwd,
+      env: {
+        USERPROFILE: home,
+        APPDATA: home,
+        LAB_MODEL_GATEWAY_URL: "https://stale-process.gateway.example/v1/chat/completions",
+        LAB_MODEL_GATEWAY_PROTOCOL: "openai-chat"
+      }
+    });
+
+    await runtime.trustWorkspace();
+    const started = await runtime.startTurn({ prompt: "verify inherited key", permissionMode: "plan" });
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].authorization, "Bearer global-key");
+  } finally {
+    await close(server);
+  }
+});
+
 test("dashboard project model config overrides user global default", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-"));
