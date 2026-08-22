@@ -755,7 +755,7 @@ function firstThinkingText(value) {
 }
 
 function agentGatewayProtocol(config = {}) {
-  return config.lab?.gatewayProtocol ?? "lab-agent-gateway";
+  return config.lab?.gatewayProtocol ?? "openai-chat";
 }
 
 function summarizeAgentOutput(result) {

@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.3.6 - 2026-08-22
+
+### Fixed
+
+- Deleting the final inherited global gateway in a project now remains deleted
+  after Dashboard refresh and restart instead of restoring the global profiles.
+- Unconfigured gateways now default to OpenAI Chat Completions. The Dashboard
+  exposes the two common provider protocols: OpenAI Chat Completions and
+  Anthropic Messages for Claude. The legacy private gateway protocol remains
+  available only for existing configurations.
+
+### Added
+
+- Anthropic Messages request, authentication, JSON response, streaming SSE,
+  image, and local tool-call adaptation.
+
 ## 1.3.5 - 2026-08-13
 
 ### Fixed

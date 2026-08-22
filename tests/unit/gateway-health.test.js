@@ -10,6 +10,47 @@ import { formatGatewayError, normalizeGatewayError } from "../../src/model-gatew
 import { formatGatewayHealthReport, runGatewayHealth } from "../../src/model-gateway/health.js";
 import { GATEWAY_MAX_STREAM_RECORD_BYTES } from "../../src/model-gateway/limits.js";
 
+test("gateway client can use Anthropic Messages protocol with Claude headers", async () => {
+  const requests = [];
+  const server = await listen(http.createServer(async (request, response) => {
+    const body = JSON.parse(await readRequestText(request));
+    requests.push({ headers: request.headers, body });
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      id: "msg-test",
+      model: body.model,
+      content: [{ type: "text", text: "anthropic-compatible hello" }],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 2, output_tokens: 3 }
+    }));
+  }), "127.0.0.1");
+  try {
+    const gateway = createLabModelGateway({
+      modelAlias: "claude-sonnet-4-5",
+      networkMode: "offline",
+      allowedHosts: [],
+      lab: {
+        gatewayUrl: `${serverUrl(server)}/v1/messages`,
+        gatewayProtocol: "anthropic-messages",
+        gatewayApiKey: "claude-secret"
+      }
+    });
+    const result = await gateway.sendChat({
+      messages: [{ role: "user", content: "hello" }],
+      tools: [{ name: "read_file", description: "Read", inputSchema: { type: "object" } }]
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.data.text, "anthropic-compatible hello");
+    assert.equal(requests[0].headers["x-api-key"], "claude-secret");
+    assert.equal(requests[0].headers["anthropic-version"], "2023-06-01");
+    assert.equal(requests[0].headers.authorization, undefined);
+    assert.equal(requests[0].body.tools[0].name, "read_file");
+    assert.equal(requests[0].body.max_tokens, 8192);
+  } finally {
+    await close(server);
+  }
+});
+
 test("normalizes gateway timeout errors", () => {
   const error = new Error("operation aborted");
   error.name = "AbortError";
@@ -487,6 +528,7 @@ test("gateway client retries transient fetch failures before response", async ()
       allowedHosts: [],
       lab: {
         gatewayUrl: "http://127.0.0.1/v1/chat",
+        gatewayProtocol: "lab-agent-gateway",
         gatewayMaxRetries: 1
       }
     });
@@ -585,6 +627,7 @@ test("gateway client retries configured transient HTTP 500 responses", async () 
       allowedHosts: [],
       lab: {
         gatewayUrl: "http://127.0.0.1/v1/chat",
+        gatewayProtocol: "lab-agent-gateway",
         gatewayMaxRetries: 1
       }
     });
@@ -802,6 +845,7 @@ test("gateway client retries transient parse errors", async () => {
       allowedHosts: [],
       lab: {
         gatewayUrl: `${serverUrl(server)}/v1/chat`,
+        gatewayProtocol: "lab-agent-gateway",
         gatewayMaxRetries: 1
       }
     });

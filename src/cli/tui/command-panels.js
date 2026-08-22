@@ -62,7 +62,7 @@ export function createStatusPanel(options) {
       line(""),
       line("网关", false, "magenta"),
       line(`状态：${activity.gateway ?? (session.config?.lab?.gatewayUrl ? "已配置" : "缺失")}`),
-      line(`协议：${session.config?.lab?.gatewayProtocol ?? "lab-agent-gateway"}`),
+      line(`协议：${session.config?.lab?.gatewayProtocol ?? "openai-chat"}`),
       line(`最近：${activity.lastGateway ?? "无"}`),
       line(""),
       line("活动", false, "green"),
@@ -237,7 +237,7 @@ export function createModelPanel(options) {
       line("当前", false, "cyan"),
       line(`模型：${session.model}`),
       line(`网关：${session.config?.lab?.gatewayUrl ? "已配置" : "缺失"}`),
-      line(`协议：${session.config?.lab?.gatewayProtocol ?? "lab-agent-gateway"}`),
+      line(`协议：${session.config?.lab?.gatewayProtocol ?? "openai-chat"}`),
       line(""),
       line("别名", false, "green"),
       ...models.map((model) => {

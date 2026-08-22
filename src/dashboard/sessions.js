@@ -373,13 +373,20 @@ export function createDashboardRuntime(options) {
       }
       let config = await loadConfig({ cwd: options.cwd, env: configEnv });
       const localPath = localProjectConfigPath(options.cwd);
-      let deletion = buildGatewayProfileDeleteConfig(await readJsonConfig(localPath), config, profileId);
+      const globalPath = globalConfigPath(configEnv);
+      const local = await readJsonConfig(localPath);
+      const global = await readJsonConfig(globalPath);
+      const target = gatewayProfileDeleteTarget({ local, localPath, global, globalPath, profileId });
+      if (!target) {
+        return { ok: false, status: 409, error: "该网关由外部环境提供，无法从 Dashboard 删除" };
+      }
+      let deletion = buildGatewayProfileDeleteConfig(target.config, target.config, profileId);
       if (!deletion.ok) {
         return { ok: false, status: 404, error: deletion.error };
       }
-      const mutation = await mutateDashboardConfig(localPath, async (/** @type {Record<string, any>} */ local) => {
+      const mutation = await mutateDashboardConfig(target.path, async (/** @type {Record<string, any>} */ stored) => {
         config = await loadConfig({ cwd: options.cwd, env: await resolveConfigEnv() });
-        deletion = buildGatewayProfileDeleteConfig(local, config, profileId);
+        deletion = buildGatewayProfileDeleteConfig(stored, stored, profileId);
         if (!deletion.ok) {
           throw dashboardConfigResultError(deletion);
         }
@@ -397,7 +404,9 @@ export function createDashboardRuntime(options) {
       return {
         ok: true,
         deletedProfile: profileId,
+        deletedFrom: target.scope,
         clearedGateway: deletion.clearedGateway,
+        configPath: target.path,
         configRevision: mutation.revision,
         sessionId: state?.session.id,
         sessionStatus: state ? sessionStatusSummary(state.session) : sessionStatusFromConfig(refreshed),
@@ -2473,7 +2482,7 @@ function publicGatewayConfig(config) {
   return {
     gatewayUrl: config.lab?.gatewayUrl ?? "",
     gatewayHealthUrl: config.lab?.gatewayHealthUrl ?? "",
-    gatewayProtocol: config.lab?.gatewayProtocol ?? "lab-agent-gateway",
+    gatewayProtocol: config.lab?.gatewayProtocol ?? "openai-chat",
     apiKeyConfigured: Boolean(config.lab?.gatewayApiKey),
     activeProfileId: activeGatewayProfileId(config),
     globalConfigPath: config.globalConfigPath ?? "",
@@ -2493,7 +2502,7 @@ function publicGatewayProfiles(config) {
     id: profile.id,
     label: profile.label || profile.id,
     gatewayUrl: profile.gatewayUrl || "",
-    gatewayProtocol: profile.gatewayProtocol || "lab-agent-gateway",
+    gatewayProtocol: profile.gatewayProtocol || "openai-chat",
     apiKeyConfigured: Boolean(profile.gatewayApiKey),
     modelAlias: profile.modelAlias || "",
     modelCount: Array.isArray(profile.models) ? profile.models.length : 0,
@@ -2839,7 +2848,7 @@ function shouldReplaceModelEntries(config, normalized) {
     return true;
   }
   const currentUrl = String(config.lab?.gatewayUrl ?? "").trim();
-  const currentProtocol = String(config.lab?.gatewayProtocol ?? "lab-agent-gateway").trim();
+  const currentProtocol = String(config.lab?.gatewayProtocol ?? "openai-chat").trim();
   if (currentUrl !== normalized.gatewayUrl || currentProtocol !== normalized.gatewayProtocol) {
     return true;
   }
@@ -2854,7 +2863,7 @@ function shouldReplaceModelEntries(config, normalized) {
 /** @param {Record<string, any>} config @param {Record<string, any>} normalized */
 function sameGatewayConfig(config, normalized) {
   return String(config.lab?.gatewayUrl ?? "").trim() === normalized.gatewayUrl
-    && String(config.lab?.gatewayProtocol ?? "lab-agent-gateway").trim() === normalized.gatewayProtocol;
+    && String(config.lab?.gatewayProtocol ?? "openai-chat").trim() === normalized.gatewayProtocol;
 }
 
 function buildGatewayProfileSwitchConfig(local, config, profileId) {
@@ -2948,7 +2957,7 @@ function buildLocalDeleteModelConfig(local, config, modelId) {
       ...(isPlainObject(local.lab) ? local.lab : {}),
       gatewayUrl: config.lab?.gatewayUrl ?? local.lab?.gatewayUrl ?? null,
       gatewayHealthUrl: config.lab?.gatewayHealthUrl ?? local.lab?.gatewayHealthUrl ?? null,
-      gatewayProtocol: config.lab?.gatewayProtocol ?? local.lab?.gatewayProtocol ?? "lab-agent-gateway",
+      gatewayProtocol: config.lab?.gatewayProtocol ?? local.lab?.gatewayProtocol ?? "openai-chat",
       activeGatewayProfile: activeGatewayProfileId(config)
     }
   };
@@ -2981,7 +2990,7 @@ function buildLocalConfigAfterFinalModelDelete(local, config, modelId) {
       ...(isPlainObject(local.lab) ? local.lab : {}),
       gatewayUrl: null,
       gatewayHealthUrl: null,
-      gatewayProtocol: config.lab?.gatewayProtocol ?? local.lab?.gatewayProtocol ?? "lab-agent-gateway",
+      gatewayProtocol: "openai-chat",
       gatewayApiKey: null,
       activeGatewayProfile: "",
       gatewayProfiles: profiles
@@ -3031,13 +3040,30 @@ function buildGatewayProfileDeleteConfig(local, config, profileId) {
         ...(isPlainObject(local.lab) ? local.lab : {}),
         gatewayUrl: null,
         gatewayHealthUrl: null,
-        gatewayProtocol: config.lab?.gatewayProtocol ?? local.lab?.gatewayProtocol ?? "lab-agent-gateway",
+        gatewayProtocol: "openai-chat",
         gatewayApiKey: null,
         activeGatewayProfile: "",
         gatewayProfiles: remaining
       }
     }
   };
+}
+
+/**
+ * @param {{ local: Record<string, any>; localPath: string; global: Record<string, any>; globalPath: string; profileId: string }} input
+ */
+function gatewayProfileDeleteTarget({ local, localPath, global, globalPath, profileId }) {
+  if (configOwnsGatewayProfile(local, profileId)) {
+    return { scope: "project", path: localPath, config: local };
+  }
+  if (configOwnsGatewayProfile(global, profileId)) {
+    return { scope: "global", path: globalPath, config: global };
+  }
+  return null;
+}
+
+function configOwnsGatewayProfile(config, profileId) {
+  return gatewayProfilesOwnedByConfig(config).some((profile) => profile.id === profileId);
 }
 
 /** @param {Record<string, any>} local @param {Record<string, any>} config */
@@ -3131,7 +3157,7 @@ function gatewayProfilesOwnedByConfig(config) {
     id: activeGatewayProfileId(config),
     gatewayUrl,
     gatewayHealthUrl: config?.lab?.gatewayHealthUrl ?? "",
-    gatewayProtocol: config?.lab?.gatewayProtocol ?? "lab-agent-gateway",
+    gatewayProtocol: config?.lab?.gatewayProtocol ?? "openai-chat",
     gatewayApiKey: config?.lab?.gatewayApiKey ?? "",
     modelAlias: config?.modelAlias ?? "",
     models: Array.isArray(config?.models) ? config.models : [],
@@ -3259,8 +3285,8 @@ function sameGatewayProfileEndpoint(left, right) {
     return false;
   }
   return String(left.gatewayUrl ?? "").trim() === String(right.gatewayUrl ?? "").trim()
-    && String(left.gatewayProtocol ?? "lab-agent-gateway").trim()
-      === String(right.gatewayProtocol ?? "lab-agent-gateway").trim();
+    && String(left.gatewayProtocol ?? "openai-chat").trim()
+      === String(right.gatewayProtocol ?? "openai-chat").trim();
 }
 
 /** @param {Record<string, any>} profile */
@@ -3289,7 +3315,7 @@ function gatewayProfileFromConfig(config, overrides = {}) {
     label: gatewayProfileLabel(config?.lab?.gatewayUrl, config?.lab?.gatewayProtocol),
     gatewayUrl: config?.lab?.gatewayUrl ?? "",
     gatewayHealthUrl: config?.lab?.gatewayHealthUrl ?? "",
-    gatewayProtocol: config?.lab?.gatewayProtocol ?? "lab-agent-gateway",
+    gatewayProtocol: config?.lab?.gatewayProtocol ?? "openai-chat",
     gatewayApiKey: config?.lab?.gatewayApiKey ?? "",
     modelAlias: config?.modelAlias ?? "",
     models: listConfiguredModels(config ?? {}).map(modelConfigEntry),
@@ -3318,7 +3344,7 @@ function normalizeGatewayProfile(value) {
     return null;
   }
   const gatewayUrl = String(value.gatewayUrl ?? "").trim();
-  const gatewayProtocol = String(value.gatewayProtocol ?? "lab-agent-gateway").trim();
+  const gatewayProtocol = String(value.gatewayProtocol ?? "openai-chat").trim();
   const id = String(value.id ?? "").trim() || gatewayProfileIdFromParts(gatewayProtocol, gatewayUrl);
   if (!id) {
     return null;
@@ -3385,7 +3411,7 @@ function activeGatewayProfileId(config) {
 }
 
 function gatewayProfileIdFromParts(protocol, gatewayUrl) {
-  const raw = `${String(protocol ?? "lab-agent-gateway").trim()}|${String(gatewayUrl ?? "").trim()}`;
+  const raw = `${String(protocol ?? "openai-chat").trim()}|${String(gatewayUrl ?? "").trim()}`;
   if (!String(gatewayUrl ?? "").trim()) {
     return "";
   }
@@ -3397,7 +3423,7 @@ function gatewayProfileLabel(gatewayUrl, protocol) {
   if (host) {
     return host;
   }
-  return String(protocol ?? "lab-agent-gateway");
+  return String(protocol ?? "openai-chat");
 }
 
 function buildReplacementAgentConfig(local, normalized) {

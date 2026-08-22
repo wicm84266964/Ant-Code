@@ -134,7 +134,7 @@ export function line(text, dim = false, color = undefined, metadata = undefined)
  */
 export function startupBannerLines(session) {
   const gateway = session.config.lab.gatewayUrl
-    ? `${session.config.lab.gatewayProtocol ?? "lab-agent-gateway"} 就绪`
+    ? `${session.config.lab.gatewayProtocol ?? "openai-chat"} 就绪`
     : "网关缺失";
   const workspaceWarning = session.workspaceDiagnostic?.warning;
   return [

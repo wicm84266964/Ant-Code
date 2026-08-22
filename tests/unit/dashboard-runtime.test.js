@@ -10,6 +10,35 @@ import { registerBackgroundTerminalTask } from "../../src/agents/background-term
 import { createDashboardRuntime } from "../../src/dashboard/sessions.js";
 import { createSessionStore } from "../../src/storage/session-store.js";
 
+test("dashboard keeps a deleted global gateway hidden after refresh and restart", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-delete-global-"));
+  const otherProject = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-delete-global-other-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-delete-global-"));
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: home } });
+  const saved = await runtime.saveModelConfig({
+    saveTarget: "global",
+    gatewayUrl: "https://global.gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "global-key",
+    modelId: "global-model",
+    switchToModel: true
+  });
+  const deleted = await runtime.deleteGatewayProfile({ profileId: saved.gatewayConfig.activeProfileId });
+  const refreshed = await runtime.status();
+  const restarted = await createDashboardRuntime({ cwd, env: { USERPROFILE: home } }).status();
+  const newProject = await createDashboardRuntime({ cwd: otherProject, env: { USERPROFILE: home } }).status();
+  assert.equal(deleted.ok, true);
+  assert.equal(deleted.deletedFrom, "global");
+  assert.deepEqual(deleted.gatewayProfiles, []);
+  assert.deepEqual(refreshed.gatewayProfiles, []);
+  assert.deepEqual(restarted.gatewayProfiles, []);
+  assert.deepEqual(newProject.gatewayProfiles, []);
+  assert.equal(restarted.gatewayConfig.gatewayProtocol, "openai-chat");
+  await assert.rejects(fs.access(path.join(cwd, ".lab-agent", "config.json")), /ENOENT/);
+  const global = JSON.parse(await fs.readFile(path.join(home, ".ant-code", "lab-agent.config.json"), "utf8"));
+  assert.deepEqual(global.lab.gatewayProfiles, []);
+});
+
 test("dashboard runtime runs a turn and writes shared session metadata", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
   const server = await listen(createGateway("dashboard answer"), "127.0.0.1", 0);
@@ -989,11 +1018,16 @@ test("dashboard runtime keeps no-key profiles isolated across switches and model
   });
   const environmentProfile = saved.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("env.gateway"));
   const noKeyProfile = saved.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("no-key.gateway"));
+  assert.equal(environmentProfile.apiKeyConfigured, true);
+  assert.equal(noKeyProfile.apiKeyConfigured, false);
 
   const environmentSwitch = await runtime.switchGatewayProfile({ profileId: environmentProfile.id });
   assert.equal(environmentSwitch.gatewayConfig.apiKeyConfigured, true);
+  assert.equal(environmentSwitch.gatewayProfiles.find((profile) => profile.id === environmentProfile.id).apiKeyConfigured, true);
   const noKeySwitch = await runtime.switchGatewayProfile({ profileId: noKeyProfile.id });
   assert.equal(noKeySwitch.gatewayConfig.apiKeyConfigured, false);
+  assert.equal(noKeySwitch.gatewayProfiles.find((profile) => profile.id === environmentProfile.id).apiKeyConfigured, true);
+  assert.equal(noKeySwitch.gatewayProfiles.find((profile) => profile.id === noKeyProfile.id).apiKeyConfigured, false);
 
   const deleted = await runtime.deleteModelConfig({ modelId: "no-key-a" });
   assert.deepEqual(deleted.models.map((model) => model.id), ["no-key-b"]);

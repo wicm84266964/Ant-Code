@@ -286,6 +286,7 @@ test("model context windows cap larger local token and byte budgets", () => {
 test("prompt payload estimates include tools and tool results shown to the model", () => {
   const toolResultText = "file content\n".repeat(200);
   const estimate = estimatePromptPayload({
+    gatewayProtocol: "lab-agent-gateway",
     messages: [
       { role: "system", content: [{ type: "text", text: "system prompt" }] },
       { role: "user", content: "read file" },
@@ -311,6 +312,7 @@ test("prompt payload estimates include tools and tool results shown to the model
 test("OpenAI-compatible prompt estimates do not double-count represented tool results", () => {
   const toolResultText = "file content\n".repeat(200);
   const base = {
+    gatewayProtocol: "lab-agent-gateway",
     messages: [
       { role: "system", content: [{ type: "text", text: "system prompt" }] },
       { role: "user", content: "read file" },

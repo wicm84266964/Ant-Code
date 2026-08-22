@@ -708,7 +708,7 @@ function formatModelCommand(config, options = {}) {
       ["current label", current?.label ?? config.modelAlias],
       ["current context window", Number.isFinite(current?.contextTokens) ? `${formatTokenCount(current.contextTokens)} tokens` : "unknown"],
       ["thinking support", current?.thinking ? "provider-exposed thinking when streamed by gateway" : "summary/status only"],
-      ["gateway protocol", config.lab?.gatewayProtocol ?? "lab-agent-gateway"],
+      ["gateway protocol", config.lab?.gatewayProtocol ?? "openai-chat"],
       ["gateway", config.lab?.gatewayUrl ? "configured" : "not configured"],
       ["health url", config.lab?.gatewayHealthUrl ? "configured" : "not configured"],
       ["network", config.networkMode],

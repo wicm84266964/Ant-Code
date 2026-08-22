@@ -3390,6 +3390,7 @@ function renderModelConfigPanel() {
   const editing = state.editingModelId ? currentModelInfo(state.editingModelId) : null;
   const current = editing ?? currentModelInfo(state.sessionStatus?.model) ?? state.models.find((model) => model.current) ?? {};
   const gateway = state.gatewayConfig ?? {};
+  const gatewayProtocol = gateway.gatewayUrl ? gateway.gatewayProtocol : "openai-chat";
   const sourceNote = gatewaySourceNote(gateway);
   const keySource = sourceLabel(gateway.sources?.apiKey);
   const gatewayDefaultNote = environmentGatewayDefaultNote(gateway);
@@ -3435,8 +3436,8 @@ function renderModelConfigPanel() {
         <label>
           <span>协议</span>
           <select name="gatewayProtocol">
-            <option value="openai-chat"${gateway.gatewayProtocol === "openai-chat" ? " selected" : ""}>OpenAI Chat Completions</option>
-            <option value="lab-agent-gateway"${gateway.gatewayProtocol === "lab-agent-gateway" ? " selected" : ""}>Ant Code Gateway</option>
+            <option value="openai-chat"${gatewayProtocol === "openai-chat" ? " selected" : ""}>OpenAI Chat Completions</option>
+            <option value="anthropic-messages"${gatewayProtocol === "anthropic-messages" ? " selected" : ""}>Anthropic Messages (Claude)</option>
           </select>
         </label>
         <label>
