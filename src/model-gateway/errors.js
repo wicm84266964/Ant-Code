@@ -88,7 +88,9 @@ export function gatewayTroubleshootingHints(code, status = null, protocol = unde
       return [
         protocol === "openai-chat"
           ? "Check that LAB_MODEL_GATEWAY_URL points to the OpenAI-compatible Chat Completions route, usually /v1/chat/completions."
-          : "Check that LAB_MODEL_GATEWAY_URL points to the Ant Code gateway chat route, usually /v1/chat."
+          : protocol === "anthropic-messages"
+            ? "Check that LAB_MODEL_GATEWAY_URL points to the Anthropic Messages route, usually /v1/messages."
+            : "Check that LAB_MODEL_GATEWAY_URL points to the Ant Code gateway chat route, usually /v1/chat."
       ];
     }
     if (status && status >= 500) {

@@ -1339,7 +1339,7 @@ function TuiApp(props) {
       `当前：${model.id}`,
       `标签：${model.label}`,
       `thinking：${model.thinking ? "网关流式返回时此别名支持；默认隐藏" : "无专用 thinking 流"}`,
-      `网关：${sessionRef.current.config.lab?.gatewayProtocol ?? "lab-agent-gateway"}`
+      `网关：${sessionRef.current.config.lab?.gatewayProtocol ?? "openai-chat"}`
     ].join("\n"), "context"), { focus: false });
   }, [addEntry, pushInspector]);
 

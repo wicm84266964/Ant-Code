@@ -262,7 +262,8 @@ Create `lab-agent.config.json` in each project that needs its own gateway:
 ```
 
 For OpenAI Chat Completions compatible gateways, use
-`"gatewayProtocol": "openai-chat"`. For the native Ant Code gateway protocol, use
+`"gatewayProtocol": "openai-chat"`. For Claude/Anthropic Messages routes, use
+`"gatewayProtocol": "anthropic-messages"`. For the legacy native Ant Code gateway protocol, use
 `"gatewayProtocol": "lab-agent-gateway"`.
 
 Store gateway bearer tokens outside the JSON:
@@ -299,7 +300,7 @@ Edit `C:\ant-code\lab-agent.config.json`, changing these fields:
 - `modelAlias`: default model used by the main agent.
 - `models`: visible model ids, labels, thinking mode, and context window.
 - `agents.modelTiers`: model ids used by subagents.
-- `lab.gatewayProtocol`: `openai-chat` or `lab-agent-gateway`.
+- `lab.gatewayProtocol`: `openai-chat` or `anthropic-messages`; legacy private adapters may continue using `lab-agent-gateway`.
 - `lab.gatewayUrl`: chat endpoint.
 - `lab.gatewayHealthUrl`: optional health endpoint for `ant-code gateway --live`.
 - `allowedHosts`: hostnames Ant Code may contact when network mode is

@@ -5,6 +5,34 @@ import path from "node:path";
 import test from "node:test";
 import { globalConfigPath, loadConfig } from "../../src/config/load-config.js";
 
+test("defaults an unconfigured model gateway to OpenAI Chat Completions", async () => {
+  const cwd = await makeTempWorkspace();
+  const config = await loadConfig({ cwd, env: { USERPROFILE: cwd } });
+  assert.equal(config.lab.gatewayUrl, null);
+  assert.equal(config.lab.gatewayProtocol, "openai-chat");
+});
+
+test("explicit empty project gateway profiles override inherited global profiles", async () => {
+  const cwd = await makeTempWorkspace();
+  const home = await makeTempWorkspace();
+  const globalPath = globalConfigPath({ USERPROFILE: home });
+  await fs.mkdir(path.dirname(globalPath), { recursive: true });
+  await fs.writeFile(globalPath, JSON.stringify({
+    lab: {
+      gatewayProfiles: [{
+        id: "global-profile",
+        gatewayUrl: "https://global.gateway.example/v1/chat/completions",
+        gatewayProtocol: "openai-chat",
+        modelAlias: "global-model",
+        models: [{ id: "global-model" }]
+      }]
+    }
+  }), "utf8");
+  await writeJson(cwd, { lab: { gatewayProfiles: [] } });
+  const config = await loadConfig({ cwd, env: { USERPROFILE: home } });
+  assert.deepEqual(config.lab.gatewayProfiles, []);
+});
+
 test("loads gateway and network mode from environment", async () => {
   const cwd = await makeTempWorkspace();
   const config = await loadConfig({

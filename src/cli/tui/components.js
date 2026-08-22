@@ -51,7 +51,7 @@ const COMPLETED_WORKFLOW_STATUSES = new Set(["completed"]);
 
 export function StatusBar({ session, cwd, activity, pulse = 0, detailMode = "compact", antState, width = 100, theme = DEFAULT_TUI_THEME }) {
   const gateway = session.config.lab.gatewayUrl
-    ? `${session.config.lab.gatewayProtocol ?? "lab-agent-gateway"} configured`
+    ? `${session.config.lab.gatewayProtocol ?? "openai-chat"} configured`
     : "gateway missing";
   const context = summarizeContextWindow(session);
   const inputBrief = Number.isFinite(context.promptTokens)

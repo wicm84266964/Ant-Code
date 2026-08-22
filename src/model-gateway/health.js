@@ -110,7 +110,7 @@ function result(config, checks, live) {
     live,
     config: {
       modelAlias: config.modelAlias,
-      gatewayProtocol: config.lab.gatewayProtocol ?? "lab-agent-gateway",
+      gatewayProtocol: config.lab.gatewayProtocol ?? "openai-chat",
       gatewayMaxRetries: config.lab.gatewayMaxRetries ?? 0,
       networkMode: config.networkMode,
       gatewayConfigured: Boolean(config.lab.gatewayUrl),

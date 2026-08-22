@@ -5,10 +5,65 @@ import {
   normalizeOpenAIChatCompletionResponse,
   parseOpenAIChatCompletionStream
 } from "../../src/model-gateway/openai-chat.js";
+import {
+  createAnthropicMessagesRequest,
+  normalizeAnthropicMessagesResponse,
+  parseAnthropicMessagesStream
+} from "../../src/model-gateway/anthropic-messages.js";
 import { DEFAULT_THINKING_PREVIEW_BYTES } from "../../src/model-gateway/thinking-budget.js";
 import { createGatewayRequest, normalizeGatewayResponse } from "../../src/model-gateway/protocol.js";
 import { parseGatewayStream } from "../../src/model-gateway/streaming.js";
 import { GATEWAY_MAX_STREAM_RECORD_BYTES } from "../../src/model-gateway/limits.js";
+
+test("creates Anthropic Messages requests with system prompts and local tools", () => {
+  const request = createAnthropicMessagesRequest({
+    model: "claude-sonnet-4-5",
+    messages: [
+      { role: "system", content: "Local tools only" },
+      { role: "user", content: "Read README" },
+      { role: "assistant", content: [], toolCalls: [{ id: "call-1", name: "read_file", input: { path: "README.md" } }] },
+      { role: "tool", toolCallId: "call-1", content: "{\"ok\":true}" }
+    ],
+    tools: [{ name: "read_file", description: "Read", inputSchema: { type: "object", required: ["path"] } }],
+    stream: true
+  });
+  assert.equal(request.system, "Local tools only");
+  assert.equal(request.max_tokens, 8192);
+  assert.equal(request.messages[1].content[0].type, "tool_use");
+  assert.equal(request.messages[2].content[0].type, "tool_result");
+  assert.equal(request.tools[0].input_schema.required[0], "path");
+});
+
+test("normalizes Anthropic Messages JSON responses", () => {
+  const response = normalizeAnthropicMessagesResponse({
+    id: "msg-1",
+    model: "claude-sonnet-4-5",
+    content: [
+      { type: "text", text: "I will read it." },
+      { type: "tool_use", id: "tool-1", name: "read_file", input: { path: "README.md" } }
+    ],
+    stop_reason: "tool_use",
+    usage: { input_tokens: 10, output_tokens: 8 }
+  });
+  assert.equal(response.text, "I will read it.");
+  assert.deepEqual(response.toolCalls[0], { id: "tool-1", name: "read_file", input: { path: "README.md" } });
+  assert.equal(response.stopReason, "tool_use");
+});
+
+test("parses Anthropic Messages SSE deltas", async () => {
+  const events = [];
+  const stream = streamFromText([
+    'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-1","model":"claude-sonnet-4-5","usage":{"input_tokens":3}}}\n\n',
+    'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}\n\n',
+    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}\n\n',
+    'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+  ].join(""));
+  const response = await parseAnthropicMessagesStream(stream, { onEvent: (event) => events.push(event) });
+  assert.equal(response.text, "hello");
+  assert.equal(response.stopReason, "end_turn");
+  assert.equal(response.usage.output_tokens, 1);
+  assert.deepEqual(events.map((event) => event.type), ["message_start", "text_delta", "message_stop"]);
+});
 
 test("creates provider-independent gateway requests", () => {
   const request = createGatewayRequest({

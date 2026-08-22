@@ -178,8 +178,8 @@ Write-Host "Ant Code gateway setup" -ForegroundColor Cyan
 Write-Host "Config file: $ConfigPath"
 Write-Host ""
 
-$Protocol = Read-Optional "Gateway protocol: openai-chat or lab-agent-gateway" $Protocol
-if ($Protocol -notin @("openai-chat", "lab-agent-gateway")) {
+$Protocol = Read-Optional "Gateway protocol: openai-chat or anthropic-messages" $Protocol
+if ($Protocol -notin @("openai-chat", "anthropic-messages", "lab-agent-gateway")) {
   throw "Unsupported gateway protocol: $Protocol"
 }
 

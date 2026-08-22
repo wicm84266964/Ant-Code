@@ -1,5 +1,6 @@
 import { resolveModelContextTokens } from "../model-gateway/models.js";
 import { createOpenAIChatCompletionRequest } from "../model-gateway/openai-chat.js";
+import { createAnthropicMessagesRequest } from "../model-gateway/anthropic-messages.js";
 import { createGatewayRequest } from "../model-gateway/protocol.js";
 import { createInternalAgentRequest } from "../agents/internal.js";
 import { runHooks } from "../hooks/runner.js";
@@ -755,8 +756,18 @@ export function estimatePromptPayload(input = {}) {
 }
 
 function estimateGatewayRequestBytes(input) {
-  if (String(input.gatewayProtocol ?? "").trim() === "openai-chat") {
+  const protocol = String(input.gatewayProtocol ?? "openai-chat").trim();
+  if (protocol === "openai-chat") {
     return Buffer.byteLength(JSON.stringify(createOpenAIChatCompletionRequest({
+      model: input.model ?? "",
+      messages: input.messages,
+      tools: input.tools,
+      toolResults: input.toolResults,
+      stream: false
+    })), "utf8");
+  }
+  if (protocol === "anthropic-messages") {
+    return Buffer.byteLength(JSON.stringify(createAnthropicMessagesRequest({
       model: input.model ?? "",
       messages: input.messages,
       tools: input.tools,
@@ -775,7 +786,7 @@ function estimateGatewayRequestBytes(input) {
 }
 
 function estimateToolResultBytes(input) {
-  if (String(input.gatewayProtocol ?? "").trim() === "openai-chat") {
+  if (["openai-chat", "anthropic-messages"].includes(String(input.gatewayProtocol ?? "openai-chat").trim())) {
     const missingToolResults = toolResultsNotRepresentedInMessages(input.messages, input.toolResults);
     return missingToolResults.length > 0 ? estimateJsonBytes(missingToolResults) : 0;
   }

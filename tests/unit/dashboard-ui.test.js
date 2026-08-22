@@ -464,6 +464,10 @@ test("dashboard composer controls keep confirmations reviewable and critical sta
   assert.match(app, /data-action="edit-model"/);
   assert.match(app, /previousModelId: state\.editingModelId/);
   assert.match(app, /name="saveTarget"/);
+  assert.match(app, /const gatewayProtocol = gateway\.gatewayUrl \? gateway\.gatewayProtocol : "openai-chat"/);
+  assert.match(app, /value="openai-chat"/);
+  assert.match(app, /value="anthropic-messages"/);
+  assert.doesNotMatch(app, /<option value="lab-agent-gateway"/);
   assert.match(app, /value="project"/);
   assert.match(app, /value="global"/);
   assert.match(app, /当前项目默认/);
