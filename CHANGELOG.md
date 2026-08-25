@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.7 - 2026-08-25
+
+### Fixed
+
+- Manual Dashboard context compaction no longer inherits the 15-second
+  frontend timeout used by ordinary API requests. The browser now waits for
+  the server-bounded model compaction to finish, avoiding a timeout error after
+  compaction succeeds. Other Dashboard requests retain their existing timeout.
+
 ## 1.3.6 - 2026-08-22
 
 ### Fixed
