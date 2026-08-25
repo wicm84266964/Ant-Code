@@ -4623,7 +4623,7 @@ async function runContextAction(action) {
   const result = await postJson(endpoint, {
     sessionId: state.currentSessionId,
     permissionMode: state.permissionMode
-  }).catch((error) => ({ ok: false, error: error.message }));
+  }, contextActionRequestOptions(action)).catch((error) => ({ ok: false, error: error.message }));
   if (!result.ok) {
     showError(result.error ?? "上下文操作失败");
     hideContextConfirm();
@@ -4638,6 +4638,11 @@ async function runContextAction(action) {
     collapsed: true
   });
   updateSessionStatus(result.sessionStatus);
+}
+
+/** @param {string} action */
+export function contextActionRequestOptions(action) {
+  return action === "compact" ? { timeoutMs: null } : {};
 }
 
 function contextSummaryLine(summary) {
@@ -5467,17 +5472,19 @@ async function deleteJson(url, body = {}, options = {}) {
 }
 
 /**
- * Fetch and decode Dashboard APIs within one bounded lifetime. Keeping the
- * response-body read inside this scope matters when a server sends headers but
- * never finishes the JSON body.
+ * Fetch and decode Dashboard APIs within one bounded lifetime by default.
+ * Server-bounded long operations can pass timeoutMs: null while retaining a
+ * caller-provided cancellation signal.
  * @param {string} url
  * @param {RequestInit} [init]
- * @param {{ timeoutMs?: number; signal?: AbortSignal }} [options]
+ * @param {{ timeoutMs?: number | null; signal?: AbortSignal }} [options]
  */
 export async function dashboardFetch(url, init = {}, options = {}) {
-  const timeoutMs = Number.isFinite(Number(options.timeoutMs))
-    ? Math.max(1, Number(options.timeoutMs))
-    : DASHBOARD_REQUEST_TIMEOUT_MS;
+  const timeoutMs = options.timeoutMs === null
+    ? null
+    : Number.isFinite(Number(options.timeoutMs))
+      ? Math.max(1, Number(options.timeoutMs))
+      : DASHBOARD_REQUEST_TIMEOUT_MS;
   const controller = new AbortController();
   let timedOut = false;
   let timer = null;
@@ -5488,10 +5495,12 @@ export async function dashboardFetch(url, init = {}, options = {}) {
   } else {
     callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
   }
-  timer = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, timeoutMs);
+  if (timeoutMs !== null) {
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+  }
   try {
     const response = await fetch(url, { ...init, signal: controller.signal });
     return await responseJson(response);
@@ -5504,7 +5513,7 @@ export async function dashboardFetch(url, init = {}, options = {}) {
     }
     throw error;
   } finally {
-    if (timer) clearTimeout(timer);
+    if (timer !== null) clearTimeout(timer);
     callerSignal?.removeEventListener("abort", abortFromCaller);
   }
 }

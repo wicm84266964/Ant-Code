@@ -555,10 +555,21 @@ test("dashboard responsive, composer, focus, and scroll helpers enforce UI behav
   const module = await import(`data:text/javascript,${encodeURIComponent(`${harness}\n${code}`)}`);
 
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (_url, init) => ({
+  globalThis.fetch = async (url, init) => ({
     ok: true,
     status: 200,
     text() {
+      if (url === "/slow-json") {
+        return new Promise((resolve, reject) => {
+          const timer = setTimeout(() => resolve('{"ok":true}'), 20);
+          init.signal.addEventListener("abort", () => {
+            clearTimeout(timer);
+            const error = new Error("aborted body");
+            error.name = "AbortError";
+            reject(error);
+          }, { once: true });
+        });
+      }
       return new Promise((_resolve, reject) => {
         init.signal.addEventListener("abort", () => {
           const error = new Error("aborted body");
@@ -573,6 +584,10 @@ test("dashboard responsive, composer, focus, and scroll helpers enforce UI behav
       module.dashboardFetch("/stalled-json", {}, { timeoutMs: 10 }),
       (error) => error.code === "DASHBOARD_REQUEST_TIMEOUT"
     );
+    assert.deepEqual(
+      await module.dashboardFetch("/slow-json", {}, { timeoutMs: null }),
+      { ok: true }
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -582,6 +597,8 @@ test("dashboard responsive, composer, focus, and scroll helpers enforce UI behav
   assert.equal(module.normalizedResponsiveView(768, "files"), "files");
   assert.equal(module.normalizedResponsiveView(390, "conversation"), "conversation");
   assert.equal(module.normalizedResponsiveView(320, "unknown"), "conversation");
+  assert.deepEqual(module.contextActionRequestOptions("compact"), { timeoutMs: null });
+  assert.deepEqual(module.contextActionRequestOptions("clear"), {});
 
   assert.equal(module.composerHeightFor(18), 52);
   assert.equal(module.composerHeightFor(104), 104);
