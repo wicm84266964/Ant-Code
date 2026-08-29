@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Ant Code Dashboard</title>
     <link rel="stylesheet" href="/assets/vendor/katex.min.css" />
-    <link rel="stylesheet" href="/assets/styles.css?v=dashboard-agent-models" />
+    <link rel="stylesheet" href="/assets/styles.css?v=dashboard-settings" />
   </head>
   <body data-dashboard-view="conversation">
     <div class="app-shell">
@@ -40,14 +40,14 @@
 
       <main class="workspace">
         <header class="workspace-header">
-          <div class="workspace-local" title="仅此电脑可打开，文件访问按当前权限执行">
-            <span class="local-dot" aria-hidden="true"></span>
-            <span>本地通用智能体</span>
-          </div>
+          <button class="connection-status" id="connection-status" type="button" data-state="idle" title="仅此电脑可打开。本地网关未连接。点击重新连接" aria-label="本地网关未连接，点击重新连接">
+            <span class="connection-dot" aria-hidden="true"></span>
+            <span class="connection-label">本地网关未连接</span>
+          </button>
           <div class="header-actions">
-            <button class="connection-status" id="connection-status" type="button" data-state="idle" title="连接状态：未连接">
-              <span class="connection-dot" aria-hidden="true"></span>
-              <span class="connection-label">未连接</span>
+            <button class="header-settings" id="settings-button" type="button" aria-label="打开设置" aria-controls="settings-view" aria-pressed="false" title="设置">
+              <span class="settings-icon" aria-hidden="true">&#9881;</span>
+              <span class="header-settings-label">设置</span>
             </button>
             <div class="status-pill" id="run-status">空闲</div>
             <button class="header-shutdown" id="header-shutdown-button" type="button">关闭</button>
@@ -55,6 +55,46 @@
         </header>
 
         <section class="workflow-strip hidden" id="workflow-strip" aria-live="polite"></section>
+
+        <section class="settings-view hidden" id="settings-view" aria-labelledby="settings-title">
+          <header class="settings-view-header">
+            <button class="settings-back" id="settings-back" type="button" aria-label="返回对话" title="返回对话">
+              <svg class="settings-back-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="m12 19-7-7 7-7"></path>
+                <path d="M19 12H5"></path>
+              </svg>
+            </button>
+            <div>
+              <div class="settings-kicker">Ant Code</div>
+              <h1 id="settings-title">设置</h1>
+            </div>
+          </header>
+          <div class="settings-layout">
+            <nav class="settings-rail" id="settings-rail" aria-label="设置分类">
+              <button type="button" class="active" aria-current="page" data-settings-section="models">
+                <span class="settings-rail-icon" aria-hidden="true">&#9678;</span>
+                <span>模型与网关</span>
+              </button>
+              <button type="button" data-settings-section="transcript">
+                <span class="settings-rail-icon" aria-hidden="true">&#9716;</span>
+                <span>隐私与历史</span>
+              </button>
+              <button type="button" data-settings-section="network">
+                <span class="settings-rail-icon" aria-hidden="true">&#8644;</span>
+                <span>网络边界</span>
+              </button>
+              <button type="button" data-settings-section="agents">
+                <span class="settings-rail-icon" aria-hidden="true">&#9671;</span>
+                <span>子智能体</span>
+              </button>
+              <button type="button" data-settings-section="reliability">
+                <span class="settings-rail-icon" aria-hidden="true">&#8635;</span>
+                <span>网关可靠性</span>
+              </button>
+            </nav>
+            <div class="settings-content" id="settings-content"></div>
+          </div>
+        </section>
 
         <div class="transcript-stage">
           <section class="transcript" id="transcript" role="log" aria-live="off" aria-label="对话记录" tabindex="0">
@@ -89,14 +129,18 @@
           </div>
           <div class="trust-panel hidden" id="trust-panel"></div>
           <div class="permission-confirm-panel hidden" id="permission-confirm-panel"></div>
+          <div class="permission-confirm-panel hidden" id="goal-confirm-panel"></div>
+          <div class="permission-confirm-panel hidden" id="goal-text-panel"></div>
           <div class="context-panel hidden" id="context-panel"></div>
           <div class="queue-panel hidden" id="queue-panel"></div>
+          <div class="goal-status-bar hidden" id="goal-status-bar"></div>
           <div class="mode-row">
             <div class="segmented" id="permission-mode" role="radiogroup" aria-label="权限模式" aria-describedby="mode-description">
               <button type="button" role="radio" aria-checked="true" tabindex="0" data-mode="plan" class="active">计划确认</button>
               <button type="button" role="radio" aria-checked="false" tabindex="-1" data-mode="workspace">工作区权限</button>
               <button type="button" role="radio" aria-checked="false" tabindex="-1" data-mode="fullAccess">完全访问</button>
             </div>
+            <button type="button" id="goal-mode" class="goal-mode-button" aria-pressed="false" aria-label="Goal 模式">Goal</button>
             <div class="mode-description" id="mode-description">写入和命令需确认</div>
             <div class="context-actions">
               <button type="button" id="context-clear" aria-describedby="context-action-hint" disabled>清空上下文</button>
@@ -119,8 +163,8 @@
             <span id="change-status" class="change-status hidden"></span>
           </div>
           <div class="model-panel hidden" id="model-panel"></div>
-          <div class="model-config-panel hidden" id="model-config-panel" role="dialog" aria-modal="true" aria-labelledby="model-config-title"></div>
         </section>
+        <div class="model-config-panel hidden" id="model-config-panel" role="dialog" aria-modal="true" aria-labelledby="model-config-title"></div>
       </main>
 
       <aside class="preview" id="file-panel" aria-label="文件预览">
@@ -142,6 +186,7 @@
         <button type="button" data-dashboard-view="sessions" aria-controls="session-panel">会话</button>
         <button type="button" data-dashboard-view="conversation" aria-controls="transcript" aria-current="page">对话</button>
         <button type="button" data-dashboard-view="files" aria-controls="file-panel">文件</button>
+        <button type="button" data-dashboard-view="settings" aria-controls="settings-view">设置</button>
       </nav>
     </div>
     <div class="dashboard-live-region visually-hidden" id="dashboard-live-region" role="status" aria-live="polite" aria-atomic="true"></div>
@@ -166,6 +211,6 @@
         </div>
       </div>
     </div>
-    <script src="/assets/app.js?v=dashboard-agent-models" type="module"></script>
+    <script src="/assets/app.js?v=dashboard-settings" type="module"></script>
   </body>
 </html>

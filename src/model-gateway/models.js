@@ -1,24 +1,24 @@
 export const DEFAULT_MODEL_OPTIONS = Object.freeze([
   {
-    id: "example-coding-model",
-    label: "Example Coding Model",
-    description: "Balanced coding model exposed by a local gateway.",
+    id: "claude-sonnet-4-5-20250929",
+    label: "Sonnet 4.5",
+    description: "Balanced coding model exposed by the local lab adapter.",
     thinking: false,
     modalities: ["text"],
     contextTokens: 200000
   },
   {
-    id: "example-thinking-model",
-    label: "Example Thinking Model",
-    description: "Gateway model with provider-exposed reasoning deltas when available.",
+    id: "claude-sonnet-4-5-20250929-thinking",
+    label: "Sonnet 4.5 Thinking",
+    description: "Adapter model with provider-exposed reasoning deltas when available.",
     thinking: true,
     modalities: ["text"],
     contextTokens: 200000
   },
   {
-    id: "example-fast-model",
-    label: "Example Fast Model",
-    description: "Lower-latency gateway model for lighter work.",
+    id: "claude-haiku-4-5-20251001",
+    label: "Haiku 4.5",
+    description: "Lower-latency local adapter model for lighter work.",
     thinking: false,
     modalities: ["text"],
     contextTokens: 200000
@@ -32,19 +32,59 @@ export function listConfiguredModels(config) {
   const configured = Array.isArray(config.models)
     ? config.models
     : DEFAULT_MODEL_OPTIONS;
-  const models = configured.map(normalizeModel).filter(Boolean);
+  const models = /** @type {Array<Record<string, any>>} */ (configured.map(normalizeModel).filter(Boolean));
   const current = String(config.modelAlias ?? "").trim();
-  if (current && !models.some((model) => model.id === current)) {
+  const routedCurrent = current && listRoutingModels(config).some((model) => model.id === current);
+  if (current && !routedCurrent && !models.some((model) => model.id === current)) {
     models.unshift({
       id: current,
       label: current,
       description: "Current model alias from environment or config.",
       thinking: /thinking|reason/i.test(current),
       modalities: inferModalities(current),
+      contextTokens: null,
+      reasoningContentMode: null,
+      reasoningEfforts: [],
+      defaultReasoningEffort: null,
+      openaiExtraBody: null,
       agentModelTiers: {}
     });
   }
   return dedupeModels(models);
+}
+
+/**
+ * Models reserved for provider-local agent routing. They are deliberately
+ * separate from listConfiguredModels() so they cannot become main-model UI
+ * options or fallback defaults.
+ *
+ * @param {Record<string, any>} config
+ */
+export function listRoutingModels(config) {
+  const configured = Array.isArray(config.routingModels) ? config.routingModels : [];
+  return dedupeModels(/** @type {Array<Record<string, any>>} */ (
+    configured.map(normalizeModel).filter(Boolean)
+  ));
+}
+
+/**
+ * Resolve request metadata while optionally allowing the current provider's
+ * private agent-routing registry.
+ *
+ * @param {Record<string, any>} config
+ * @param {unknown} modelId
+ * @param {{ includeRouting?: boolean }} [options]
+ */
+export function findModelMetadata(config, modelId, options = {}) {
+  const requested = String(modelId ?? "").trim();
+  if (!requested) return null;
+  const selectable = listConfiguredModels(config);
+  const routing = options.includeRouting === true ? listRoutingModels(config) : [];
+  return selectable.find((model) => model.id === requested)
+    ?? routing.find((model) => model.id === requested)
+    ?? selectable.find((model) => model.label.toLowerCase() === requested.toLowerCase())
+    ?? routing.find((model) => model.label.toLowerCase() === requested.toLowerCase())
+    ?? null;
 }
 
 /**
@@ -101,6 +141,8 @@ export function parseModelList(value) {
       modalities: inferModalities(id),
       contextTokens: null,
       reasoningContentMode: null,
+      reasoningEfforts: [],
+      defaultReasoningEffort: null,
       openaiExtraBody: null,
       agentModelTiers: {}
     }));
@@ -119,25 +161,88 @@ function normalizeModel(item) {
       modalities: inferModalities(item),
       contextTokens: null,
       reasoningContentMode: null,
+      reasoningEfforts: [],
+      defaultReasoningEffort: null,
       openaiExtraBody: null,
       agentModelTiers: {}
     };
   }
-  if (!item || typeof item !== "object" || !item.id) {
+  if (!item || typeof item !== "object") {
     return null;
   }
-  const id = String(item.id);
+  const value = /** @type {Record<string, any>} */ (item);
+  if (!value.id) {
+    return null;
+  }
+  const id = String(value.id);
+  const reasoningEfforts = normalizeReasoningEfforts(
+    value.reasoningEfforts
+      ?? value.supportedReasoningEfforts
+      ?? value.reasoning?.efforts
+      ?? (value.supportsReasoningEffort === true ? ["low", "medium", "high"] : [])
+  );
+  const requestedDefaultReasoningEffort = String(
+    value.defaultReasoningEffort ?? value.reasoning?.default ?? ""
+  ).trim().toLowerCase();
   return {
     id,
-    label: String(item.label ?? id),
-    description: String(item.description ?? "Configured model alias."),
-    thinking: Boolean(item.thinking ?? /thinking|reason/i.test(id)),
-    modalities: normalizeModalities(item.modalities ?? item.capabilities ?? item.inputs, item),
-    contextTokens: positiveIntegerOrNull(item.contextTokens ?? item.maxContextTokens ?? item.contextWindowTokens),
-    reasoningContentMode: normalizeReasoningContentMode(item.reasoningContentMode),
-    openaiExtraBody: isPlainObject(item.openaiExtraBody) ? cloneJsonObject(item.openaiExtraBody) : null,
-    agentModelTiers: normalizeAgentModelTiers(item.agentModelTiers ?? item.agentDefaults?.modelTiers)
+    label: String(value.label ?? id),
+    description: String(value.description ?? "Configured model alias."),
+    thinking: Boolean(value.thinking ?? /thinking|reason/i.test(id)),
+    modalities: normalizeModalities(value.modalities ?? value.capabilities ?? value.inputs, value),
+    contextTokens: positiveIntegerOrNull(value.contextTokens ?? value.maxContextTokens ?? value.contextWindowTokens),
+    reasoningContentMode: normalizeReasoningContentMode(value.reasoningContentMode),
+    reasoningEfforts,
+    defaultReasoningEffort: reasoningEfforts.some((effort) => effort.id === requestedDefaultReasoningEffort)
+      ? requestedDefaultReasoningEffort
+      : null,
+    openaiExtraBody: isPlainObject(value.openaiExtraBody) ? cloneJsonObject(value.openaiExtraBody) : null,
+    agentModelTiers: normalizeAgentModelTiers(value.agentModelTiers ?? value.agentDefaults?.modelTiers)
   };
+}
+
+/**
+ * @param {unknown} value
+ */
+export function normalizeReasoningEfforts(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const seen = new Set();
+  const efforts = [];
+  for (const entry of value) {
+    const raw = typeof entry === "string" ? { id: entry } : entry;
+    if (!isPlainObject(raw)) {
+      continue;
+    }
+    const id = String(raw.id ?? raw.value ?? "").trim().toLowerCase();
+    if (!id || seen.has(id) || !/^[a-z0-9_-]{1,32}$/.test(id)) {
+      continue;
+    }
+    seen.add(id);
+    efforts.push({
+      id,
+      label: String(raw.label ?? raw.name ?? reasoningEffortLabel(id)).trim() || id,
+      description: String(raw.description ?? "").trim()
+    });
+  }
+  return efforts;
+}
+
+/** @param {string} id */
+function reasoningEffortLabel(id) {
+  const labels = /** @type {Record<string, string>} */ ({
+    none: "Off",
+    off: "Off",
+    minimal: "Minimal",
+    low: "Low",
+    medium: "Medium",
+    high: "High",
+    xhigh: "Extra high",
+    max: "Max",
+    ultra: "Ultra"
+  });
+  return labels[id] ?? id;
 }
 
 export function normalizeAgentModelTiers(value) {

@@ -1,5 +1,6 @@
 import { resolveModelContextTokens } from "../model-gateway/models.js";
 import { createOpenAIChatCompletionRequest } from "../model-gateway/openai-chat.js";
+import { createOpenAIResponsesRequest } from "../model-gateway/openai-responses.js";
 import { createAnthropicMessagesRequest } from "../model-gateway/anthropic-messages.js";
 import { createGatewayRequest } from "../model-gateway/protocol.js";
 import { createInternalAgentRequest } from "../agents/internal.js";
@@ -133,8 +134,8 @@ export function compactSessionContext(session, options = {}) {
 }
 
 /**
- * @param {{ config?: Record<string, any>; id?: string; messages?: Array<Record<string, any>>; contextWindow?: ReturnType<typeof createContextWindow> }} session
- * @param {{ force?: boolean; reason?: string; keepRecentMessages?: number; gateway?: { configured?: boolean; sendChat?: (request: Record<string, any>) => Promise<Record<string, any>> }; signal?: AbortSignal; onBeforeCompact?: (payload: Record<string, any>) => void | Promise<void> }} options
+ * @param {{ config?: Record<string, any>; id?: string; cwd?: string; env?: NodeJS.ProcessEnv; messages?: Array<Record<string, any>>; contextWindow?: ReturnType<typeof createContextWindow>; lastPromptEstimate?: Record<string, any>; usage?: Record<string, any>; goal?: Record<string, any> }} session
+ * @param {{ force?: boolean; reason?: string; keepRecentMessages?: number; env?: NodeJS.ProcessEnv; hooksTrusted?: boolean; gateway?: { configured?: boolean; sendChat?: (request: Record<string, any>) => Promise<Record<string, any>> }; signal?: AbortSignal; onBeforeCompact?: (payload: Record<string, any>) => void | Promise<void> }} options
  */
 export async function compactSessionContextWithModel(session, options = {}) {
   session.contextWindow ??= createContextWindow(session.config ?? {});
@@ -397,7 +398,7 @@ function createCompactionPlan(session, options, metrics) {
 }
 
 /**
- * @param {{ contextWindow?: ReturnType<typeof createContextWindow> }} session
+ * @param {{ contextWindow?: ReturnType<typeof createContextWindow>; goal?: Record<string, any>; config?: Record<string, any>; cwd?: string }} session
  * @param {ReturnType<typeof createCompactionPlan>} plan
  */
 function buildModelCompactionRequest(session, plan) {
@@ -424,6 +425,10 @@ function buildModelCompactionRequest(session, plan) {
     "## Open questions and next steps",
     "",
     previousSummary ? `Previous compacted summary:\n${previousSummary}` : "Previous compacted summary: none",
+    "",
+    session.goal?.text
+      ? `Active Goal: status=${session.goal.status ?? "active"}\ntext=${String(session.goal.text).trim()}`
+      : "",
     "",
     "Conversation spine to preserve:",
     plan.conversationSpine || "[no older user/assistant conversation spine]",
@@ -766,6 +771,15 @@ function estimateGatewayRequestBytes(input) {
       stream: false
     })), "utf8");
   }
+  if (protocol === "openai-responses") {
+    return Buffer.byteLength(JSON.stringify(createOpenAIResponsesRequest({
+      model: input.model ?? "",
+      messages: input.messages,
+      tools: input.tools,
+      toolResults: input.toolResults,
+      stream: false
+    })), "utf8");
+  }
   if (protocol === "anthropic-messages") {
     return Buffer.byteLength(JSON.stringify(createAnthropicMessagesRequest({
       model: input.model ?? "",
@@ -786,7 +800,7 @@ function estimateGatewayRequestBytes(input) {
 }
 
 function estimateToolResultBytes(input) {
-  if (["openai-chat", "anthropic-messages"].includes(String(input.gatewayProtocol ?? "openai-chat").trim())) {
+  if (["openai-chat", "openai-responses", "anthropic-messages"].includes(String(input.gatewayProtocol ?? "openai-chat").trim())) {
     const missingToolResults = toolResultsNotRepresentedInMessages(input.messages, input.toolResults);
     return missingToolResults.length > 0 ? estimateJsonBytes(missingToolResults) : 0;
   }

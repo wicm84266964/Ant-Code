@@ -305,4 +305,3 @@ function positiveInteger(value) {
 function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
-

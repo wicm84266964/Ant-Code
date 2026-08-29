@@ -722,7 +722,9 @@ function createBoundedJsonLineReader(input, options) {
         chunks.push(buffer.subarray(offset, end));
         frameBytes += segmentBytes;
       }
-      if (newline < 0) return;
+      if (newline < 0) {
+        return;
+      }
       emitLine();
       offset = newline + 1;
     }
@@ -730,7 +732,9 @@ function createBoundedJsonLineReader(input, options) {
 
   function onEnd() {
     if (closed) return;
-    if (frameBytes > 0) emitLine();
+    if (frameBytes > 0) {
+      emitLine();
+    }
     close();
   }
 
@@ -744,7 +748,7 @@ function createBoundedJsonLineReader(input, options) {
  * @param {number} observedBytes
  */
 function mcpTransportFrameTooLargeError(maxBytes, observedBytes) {
-  return Object.assign(new Error("MCP stdio response frame exceeds the " + maxBytes + "-byte safety limit"), {
+  return Object.assign(new Error(`MCP stdio response frame exceeds the ${maxBytes}-byte safety limit`), {
     code: "MCP_TRANSPORT_FRAME_TOO_LARGE",
     maxBytes,
     observedBytes
@@ -758,7 +762,8 @@ function sendCancellationNotification(session, requestId, reason) {
       reason
     });
   } catch {
-    // The local abort still resolves promptly if the server cannot accept cancellation.
+    // The client-side abort still resolves promptly even if the server cannot
+    // accept cancellation notifications.
   }
 }
 

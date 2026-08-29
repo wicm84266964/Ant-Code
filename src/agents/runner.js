@@ -519,7 +519,10 @@ async function runModelSubagent(options) {
       role: "assistant",
       content: response.data.content,
       toolCalls: response.data.toolCalls,
-      thinking: thinkingFromGatewayResponse(response.data)
+      thinking: thinkingFromGatewayResponse(response.data),
+      ...(Array.isArray(response.data.responseItems) && response.data.responseItems.length > 0
+        ? { responseItems: response.data.responseItems }
+        : {})
     });
 
     toolResults = [];

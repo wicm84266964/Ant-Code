@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import crypto from "node:crypto";
+import path from "node:path";
 import { parseArgs } from "./args.js";
 import { runInteractiveChat } from "./interactive.js";
 import { createPrintEventCollector } from "./print-output.js";
@@ -13,6 +14,7 @@ import { runDoctor, formatDoctorReport } from "../diagnostics/doctor.js";
 import { runGatewayHealth, formatGatewayHealthReport } from "../model-gateway/health.js";
 import { helpText } from "../ui/output.js";
 import { getAntCodeVersion, resolvePackageRoot } from "../version.js";
+import { ensureConfigV2 } from "../config-v2/activate.js";
 
 const ROOT_DIR = resolvePackageRoot();
 
@@ -74,6 +76,8 @@ async function main() {
   }
 
   if (args.command === "dashboard") {
+    const dashboardCwd = path.resolve(process.cwd(), args.dashboard.project ?? ".");
+    await ensureConfigV2({ cwd: dashboardCwd, env: process.env });
     const result = await startDashboard({
       cwd: process.cwd(),
       env: process.env,

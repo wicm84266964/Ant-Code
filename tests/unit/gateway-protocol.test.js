@@ -6,6 +6,11 @@ import {
   parseOpenAIChatCompletionStream
 } from "../../src/model-gateway/openai-chat.js";
 import {
+  createOpenAIResponsesRequest,
+  normalizeOpenAIResponsesResponse,
+  parseOpenAIResponsesStream
+} from "../../src/model-gateway/openai-responses.js";
+import {
   createAnthropicMessagesRequest,
   normalizeAnthropicMessagesResponse,
   parseAnthropicMessagesStream
@@ -14,56 +19,6 @@ import { DEFAULT_THINKING_PREVIEW_BYTES } from "../../src/model-gateway/thinking
 import { createGatewayRequest, normalizeGatewayResponse } from "../../src/model-gateway/protocol.js";
 import { parseGatewayStream } from "../../src/model-gateway/streaming.js";
 import { GATEWAY_MAX_STREAM_RECORD_BYTES } from "../../src/model-gateway/limits.js";
-
-test("creates Anthropic Messages requests with system prompts and local tools", () => {
-  const request = createAnthropicMessagesRequest({
-    model: "claude-sonnet-4-5",
-    messages: [
-      { role: "system", content: "Local tools only" },
-      { role: "user", content: "Read README" },
-      { role: "assistant", content: [], toolCalls: [{ id: "call-1", name: "read_file", input: { path: "README.md" } }] },
-      { role: "tool", toolCallId: "call-1", content: "{\"ok\":true}" }
-    ],
-    tools: [{ name: "read_file", description: "Read", inputSchema: { type: "object", required: ["path"] } }],
-    stream: true
-  });
-  assert.equal(request.system, "Local tools only");
-  assert.equal(request.max_tokens, 8192);
-  assert.equal(request.messages[1].content[0].type, "tool_use");
-  assert.equal(request.messages[2].content[0].type, "tool_result");
-  assert.equal(request.tools[0].input_schema.required[0], "path");
-});
-
-test("normalizes Anthropic Messages JSON responses", () => {
-  const response = normalizeAnthropicMessagesResponse({
-    id: "msg-1",
-    model: "claude-sonnet-4-5",
-    content: [
-      { type: "text", text: "I will read it." },
-      { type: "tool_use", id: "tool-1", name: "read_file", input: { path: "README.md" } }
-    ],
-    stop_reason: "tool_use",
-    usage: { input_tokens: 10, output_tokens: 8 }
-  });
-  assert.equal(response.text, "I will read it.");
-  assert.deepEqual(response.toolCalls[0], { id: "tool-1", name: "read_file", input: { path: "README.md" } });
-  assert.equal(response.stopReason, "tool_use");
-});
-
-test("parses Anthropic Messages SSE deltas", async () => {
-  const events = [];
-  const stream = streamFromText([
-    'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-1","model":"claude-sonnet-4-5","usage":{"input_tokens":3}}}\n\n',
-    'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}\n\n',
-    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}\n\n',
-    'event: message_stop\ndata: {"type":"message_stop"}\n\n'
-  ].join(""));
-  const response = await parseAnthropicMessagesStream(stream, { onEvent: (event) => events.push(event) });
-  assert.equal(response.text, "hello");
-  assert.equal(response.stopReason, "end_turn");
-  assert.equal(response.usage.output_tokens, 1);
-  assert.deepEqual(events.map((event) => event.type), ["message_start", "text_delta", "message_stop"]);
-});
 
 test("creates provider-independent gateway requests", () => {
   const request = createGatewayRequest({
@@ -115,7 +70,7 @@ test("normalizes JSON gateway responses", () => {
 
 test("creates OpenAI-compatible chat completion requests", () => {
   const request = createOpenAIChatCompletionRequest({
-    model: "example-fast-model",
+    model: "claude-haiku",
     messages: [
       { role: "system", content: [{ type: "text", text: "local tools only" }] },
       { role: "user", content: "read README.md" },
@@ -147,7 +102,7 @@ test("creates OpenAI-compatible chat completion requests", () => {
     ]
   });
 
-  assert.equal(request.model, "example-fast-model");
+  assert.equal(request.model, "claude-haiku");
   assert.equal(request.messages[0].content, "local tools only");
   assert.equal(request.messages[2].tool_calls[0].function.name, "read_file");
   assert.equal(request.messages[2].tool_calls[0].function.arguments, "{\"path\":\"README.md\"}");
@@ -158,7 +113,7 @@ test("creates OpenAI-compatible chat completion requests", () => {
   assert.equal(request.tool_choice, undefined);
 
   const forcedToolChoiceRequest = createOpenAIChatCompletionRequest({
-    model: "example-fast-model",
+    model: "claude-haiku",
     messages: [{ role: "user", content: "read README.md" }],
     toolChoice: "required",
     tools: [
@@ -171,16 +126,300 @@ test("creates OpenAI-compatible chat completion requests", () => {
   assert.equal(forcedToolChoiceRequest.tool_choice, "required");
 
   const streamRequest = createOpenAIChatCompletionRequest({
-    model: "example-fast-model",
+    model: "claude-haiku",
     messages: [{ role: "user", content: "hello" }],
     stream: true
   });
   assert.deepEqual(streamRequest.stream_options, { include_usage: true });
 });
 
+test("maps DeepSeek max reasoning effort to OpenAI Chat Completions", () => {
+  const request = createOpenAIChatCompletionRequest({
+    model: "deepseek-v4-pro",
+    messages: [{ role: "user", content: "Solve carefully." }],
+    reasoningEffort: "max"
+  });
+
+  assert.equal(request.model, "deepseek-v4-pro");
+  assert.equal(request.reasoning_effort, "max");
+});
+
+test("creates OpenAI Responses requests with local tools and reasoning effort", () => {
+  const request = createOpenAIResponsesRequest({
+    model: "grok-4.6",
+    messages: [
+      { role: "developer", content: "Use local tools." },
+      { role: "user", content: "Read the file." },
+      { role: "assistant", content: "Checking.", toolCalls: [{ id: "call-1", name: "read_file", input: { path: "README.md" } }] },
+      { role: "tool", toolCallId: "call-1", content: "contents" }
+    ],
+    tools: [{ name: "read_file", description: "Read a file", inputSchema: { type: "object", properties: { path: { type: "string" } } } }],
+    reasoningEffort: "xhigh",
+    stream: true
+  });
+
+  assert.equal(request.model, "grok-4.6");
+  assert.deepEqual(request.reasoning, { effort: "xhigh" });
+  assert.equal(request.stream, true);
+  assert.equal(request.tools[0].name, "read_file");
+  assert.ok(request.input.some((item) => item.type === "function_call" && item.call_id === "call-1"));
+  assert.ok(request.input.some((item) => item.type === "function_call_output" && item.output === "contents"));
+});
+
+test("maps max reasoning effort to OpenAI Responses", () => {
+  const request = createOpenAIResponsesRequest({
+    model: "reasoning-max-model",
+    messages: [{ role: "user", content: "Solve carefully." }],
+    reasoningEffort: "max"
+  });
+
+  assert.equal(request.model, "reasoning-max-model");
+  assert.deepEqual(request.reasoning, { effort: "max" });
+});
+
+test("normalizes OpenAI Responses text, reasoning summaries, and tool calls", () => {
+  const response = normalizeOpenAIResponsesResponse({
+    id: "resp-1",
+    model: "grok-4.6",
+    status: "completed",
+    output: [
+      { type: "reasoning", summary: [{ type: "summary_text", text: "brief summary" }] },
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "Done." }] },
+      { type: "function_call", call_id: "call-2", name: "write_file", arguments: '{"path":"a.txt"}' }
+    ],
+    usage: { input_tokens: 10, output_tokens: 4 }
+  });
+
+  assert.equal(response.text, "Done.");
+  assert.equal(response.thinkingText, "brief summary");
+  assert.deepEqual(response.toolCalls, [{ id: "call-2", name: "write_file", input: { path: "a.txt" } }]);
+  assert.equal(response.stopReason, "tool_calls");
+  assert.equal(response.raw.protocol, "openai-responses");
+});
+
+test("parses OpenAI Responses SSE deltas", async () => {
+  const events = [];
+  const body = streamFromText([
+    'data: {"type":"response.created","response":{"id":"resp-live","model":"grok-4.6"}}',
+    '',
+    'data: {"type":"response.reasoning_summary_text.delta","delta":"summary"}',
+    '',
+    'data: {"type":"response.output_text.delta","delta":"Hello"}',
+    '',
+    'data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc-1","call_id":"call-1","name":"read_file","arguments":""}}',
+    '',
+    'data: {"type":"response.function_call_arguments.delta","output_index":1,"item_id":"fc-1","delta":"{\\"path\\":\\"README.md\\"}"}',
+    '',
+    'data: {"type":"response.completed","response":{"id":"resp-live","model":"grok-4.6","status":"completed","usage":{"input_tokens":3},"output":[]}}',
+    '',
+    'data: [DONE]',
+    ''
+  ].join("\n"));
+  const response = await parseOpenAIResponsesStream(body, { onEvent: (event) => events.push(event) });
+
+  assert.equal(response.text, "Hello");
+  assert.equal(response.thinkingText, "summary");
+  assert.deepEqual(response.toolCalls[0], { id: "call-1", name: "read_file", input: { path: "README.md" } });
+  assert.ok(events.some((event) => event.type === "text_delta" && event.text === "Hello"));
+  assert.ok(events.some((event) => event.type === "thinking_delta" && event.text === "summary"));
+  assert.ok(events.some((event) => event.type === "message_stop"));
+});
+
+test("OpenAI Responses requests replay native reasoning items without duplicating tool calls", () => {
+  const reasoningItem = {
+    type: "reasoning",
+    id: "rs-1",
+    summary: [],
+    encrypted_content: "opaque-provider-state"
+  };
+  const functionItem = {
+    type: "function_call",
+    id: "fc-1",
+    call_id: "call-1",
+    name: "read_file",
+    arguments: '{"path":"README.md"}'
+  };
+  const request = createOpenAIResponsesRequest({
+    model: "grok-4.6",
+    messages: [
+      { role: "user", content: "Read the file." },
+      {
+        role: "assistant",
+        content: [],
+        toolCalls: [{ id: "call-1", name: "read_file", input: { path: "README.md" } }],
+        responseItems: [reasoningItem, functionItem]
+      },
+      { role: "tool", toolCallId: "call-1", content: "contents" }
+    ]
+  });
+
+  assert.deepEqual(request.input.find((item) => item.type === "reasoning"), reasoningItem);
+  assert.equal(request.input.filter((item) => item.type === "function_call").length, 1);
+  assert.equal(request.input.find((item) => item.type === "function_call_output")?.call_id, "call-1");
+});
+
+test("OpenAI Responses rejects failed and incomplete terminal responses", async () => {
+  assert.throws(
+    () => normalizeOpenAIResponsesResponse({
+      id: "resp-failed",
+      status: "failed",
+      error: { code: "server_error", message: "provider failed" },
+      output: []
+    }),
+    (error) => error?.code === "GATEWAY_RESPONSE_FAILED"
+      && error?.retryable === true
+      && error?.details?.providerCode === "server_error"
+      && /provider failed/.test(error.message)
+  );
+  assert.throws(
+    () => normalizeOpenAIResponsesResponse({
+      id: "resp-incomplete",
+      status: "incomplete",
+      incomplete_details: { reason: "max_output_tokens" },
+      output: [{ type: "function_call", call_id: "call-1", name: "write_file", arguments: "" }]
+    }),
+    (error) => error?.code === "GATEWAY_RESPONSE_INCOMPLETE"
+      && error?.retryable === false
+      && error?.details?.reason === "max_output_tokens"
+  );
+
+  const failedStream = streamFromText([
+    'data: {"type":"response.created","response":{"id":"resp-live"}}',
+    "",
+    'data: {"type":"response.failed","response":{"id":"resp-live","status":"failed","error":{"code":"server_error","message":"stream failed"}}}',
+    ""
+  ].join("\n"));
+  await assert.rejects(
+    parseOpenAIResponsesStream(failedStream),
+    (error) => error?.code === "GATEWAY_RESPONSE_FAILED" && error?.retryable === true
+  );
+});
+
+test("OpenAI Responses classifies transient provider codes and statuses as retryable", () => {
+  const transientErrors = [
+    { code: "rate_limit", message: "retry later" },
+    { code: "overloaded", message: "retry later" },
+    { code: "upstream_failure", status_code: 503, message: "retry later" }
+  ];
+  for (const [index, providerError] of transientErrors.entries()) {
+    assert.throws(
+      () => normalizeOpenAIResponsesResponse({
+        id: `resp-transient-${index}`,
+        status: "failed",
+        error: providerError,
+        output: []
+      }),
+      (error) => error?.code === "GATEWAY_RESPONSE_FAILED"
+        && error?.retryable === true
+        && error?.details?.retryable === true
+    );
+  }
+});
+
+test("OpenAI Responses maps provider output indexes to dense tool indexes", async () => {
+  const events = [];
+  const body = streamFromText([
+    'data: {"type":"response.created","response":{"id":"resp-tool","model":"grok-4.6"}}',
+    "",
+    'data: {"type":"response.output_item.added","output_index":2,"item":{"type":"function_call","id":"fc-1","call_id":"call-1","name":"read_file","arguments":""}}',
+    "",
+    'data: {"type":"response.function_call_arguments.done","output_index":2,"item_id":"fc-1","arguments":"{\\"path\\":\\"README.md\\"}"}',
+    "",
+    'data: {"type":"response.completed","response":{"id":"resp-tool","model":"grok-4.6","status":"completed","output":[]}}',
+    "",
+    "data: [DONE]",
+    ""
+  ].join("\n"));
+
+  const response = await parseOpenAIResponsesStream(body, { onEvent: (event) => events.push(event) });
+
+  assert.deepEqual(response.toolCalls, [{ id: "call-1", name: "read_file", input: { path: "README.md" } }]);
+  assert.equal(events.find((event) => event.type === "tool_call_delta")?.index, 0);
+  assert.equal(response.responseItems.find((item) => item.type === "function_call")?.arguments, '{"path":"README.md"}');
+});
+
+test("OpenAI Responses accepts JSON returned with a stream content type", async () => {
+  const body = streamFromText(JSON.stringify({
+    id: "resp-json",
+    model: "grok-4.6",
+    status: "completed",
+    output: [{ type: "message", content: [{ type: "output_text", text: "JSON fallback" }] }]
+  }));
+
+  const response = await parseOpenAIResponsesStream(body);
+  assert.equal(response.text, "JSON fallback");
+  assert.equal(response.stopReason, "stop");
+});
+
+test("OpenAI Responses rejects invalid completed tool arguments", () => {
+  assert.throws(
+    () => normalizeOpenAIResponsesResponse({
+      id: "resp-invalid-tool",
+      status: "completed",
+      output: [{ type: "function_call", call_id: "call-1", name: "write_file", arguments: '{"path":' }]
+    }),
+    (error) => error?.code === "INCOMPLETE_TOOL_CALL" && error?.details?.toolName === "write_file"
+  );
+});
+
+test("creates Anthropic Messages requests with system prompts and local tools", () => {
+  const request = createAnthropicMessagesRequest({
+    model: "claude-sonnet-4-5",
+    messages: [
+      { role: "system", content: "Local tools only" },
+      { role: "user", content: "Read README" },
+      { role: "assistant", content: [], toolCalls: [{ id: "call-1", name: "read_file", input: { path: "README.md" } }] },
+      { role: "tool", toolCallId: "call-1", content: "{\"ok\":true}" }
+    ],
+    tools: [{ name: "read_file", description: "Read", inputSchema: { type: "object", required: ["path"] } }],
+    stream: true
+  });
+
+  assert.equal(request.system, "Local tools only");
+  assert.equal(request.max_tokens, 8192);
+  assert.equal(request.stream, true);
+  assert.equal(request.messages[1].content[0].type, "tool_use");
+  assert.equal(request.messages[2].content[0].type, "tool_result");
+  assert.equal(request.tools[0].input_schema.required[0], "path");
+});
+
+test("normalizes Anthropic Messages JSON responses", () => {
+  const response = normalizeAnthropicMessagesResponse({
+    id: "msg-1",
+    model: "claude-sonnet-4-5",
+    content: [
+      { type: "text", text: "I will read it." },
+      { type: "tool_use", id: "tool-1", name: "read_file", input: { path: "README.md" } }
+    ],
+    stop_reason: "tool_use",
+    usage: { input_tokens: 10, output_tokens: 8 }
+  });
+
+  assert.equal(response.text, "I will read it.");
+  assert.deepEqual(response.toolCalls[0], { id: "tool-1", name: "read_file", input: { path: "README.md" } });
+  assert.equal(response.stopReason, "tool_use");
+});
+
+test("parses Anthropic Messages SSE deltas", async () => {
+  const events = [];
+  const stream = streamFromText([
+    'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-1","model":"claude-sonnet-4-5","usage":{"input_tokens":3}}}\n\n',
+    'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}\n\n',
+    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}\n\n',
+    'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+  ].join(""));
+
+  const response = await parseAnthropicMessagesStream(stream, { onEvent: (event) => events.push(event) });
+
+  assert.equal(response.text, "hello");
+  assert.equal(response.stopReason, "end_turn");
+  assert.equal(response.usage.output_tokens, 1);
+  assert.deepEqual(events.map((event) => event.type), ["message_start", "text_delta", "message_stop"]);
+});
+
 test("OpenAI-compatible requests preserve assistant reasoning_content for tool call continuations", () => {
   const request = createOpenAIChatCompletionRequest({
-    model: "example-reasoner",
+    model: "deepseek-reasoner",
     messages: [
       { role: "user", content: "inspect" },
       {
@@ -210,7 +449,7 @@ test("OpenAI-compatible requests preserve assistant reasoning_content for tool c
 test("OpenAI-compatible requests include configured provider extra_body", () => {
   const extraBody = { thinking: { type: "enabled" } };
   const request = createOpenAIChatCompletionRequest({
-    model: "example-coding-model",
+    model: "mimo-v2.5-pro",
     messages: [{ role: "user", content: "use thinking" }],
     extraBody
   });
@@ -222,7 +461,7 @@ test("OpenAI-compatible requests include configured provider extra_body", () => 
 
 test("OpenAI-compatible requests map user image blocks to image_url content", () => {
   const request = createOpenAIChatCompletionRequest({
-    model: "example-coding-model",
+    model: "mimo-v2.5-pro",
     messages: [{
       role: "user",
       content: [
@@ -242,7 +481,7 @@ test("OpenAI-compatible requests keep only the latest oversized assistant reason
   const prefix = "old-".repeat(80_000);
   const suffix = "LATEST_REASONING_TAIL";
   const request = createOpenAIChatCompletionRequest({
-    model: "example-reasoner",
+    model: "deepseek-reasoner",
     messages: [
       { role: "user", content: "inspect" },
       {
@@ -450,7 +689,7 @@ test("OpenAI-compatible streams keep latest thinking preview while counting tota
 
 test("OpenAI-compatible streams can explicitly treat reasoning-only chunks as visible text", async () => {
   const body = streamFromText([
-    'data: {"id":"chatcmpl-reasoning","model":"example-coding-model","choices":[{"delta":{"reasoning_content":"正常中文报告"}}]}',
+    'data: {"id":"chatcmpl-mimo","model":"mimo-v2.5-pro","choices":[{"delta":{"reasoning_content":"正常中文报告"}}]}',
     "",
     'data: {"choices":[{"delta":{"content":""},"finish_reason":"stop"}]}',
     "",

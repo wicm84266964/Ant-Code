@@ -190,7 +190,7 @@ if ($NetworkMode -notin @("offline", "lab-only", "approved-web", "open-dev")) {
 
 $GatewayUrl = Read-Required "Gateway Chat URL, e.g. https://gateway.example.com/v1/chat/completions" $GatewayUrl
 $HealthUrl = Read-Optional "Gateway health URL, optional" $HealthUrl
-$Model = Read-Required "Model id or alias, e.g. example-vision-model" $Model
+$Model = Read-Required "Model id or alias, e.g. mimo-v2.5" $Model
 $Label = Read-Optional "Display label" $(if ($Label) { $Label } else { $Model })
 
 $contextInput = Read-Optional "Context token limit" "$ContextTokens"

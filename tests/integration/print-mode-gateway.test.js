@@ -7,7 +7,7 @@ import test from "node:test";
 import { createMockGatewayServer } from "../../scripts/mock-gateway.js";
 import { runPrintTurn } from "../../src/core/session.js";
 
-test("print mode completes one turn through mock gateway", async () => {
+test("print mode completes one turn through mock lab gateway", async () => {
   const cwd = await makeTempWorkspace();
   const server = await listen(createMockGatewayServer(), "127.0.0.1");
   try {
@@ -72,7 +72,7 @@ test("print mode validates required metadata encryption before model work", asyn
   );
 });
 
-test("print mode accepts streaming mock gateway responses", async () => {
+test("print mode accepts streaming mock lab gateway responses", async () => {
   const cwd = await makeTempWorkspace();
   const server = await listen(createMockGatewayServer({ stream: true }), "127.0.0.1");
   try {
@@ -91,7 +91,7 @@ test("print mode accepts streaming mock gateway responses", async () => {
   }
 });
 
-test("print mode executes read_file tool calls through mock gateway", async () => {
+test("print mode executes read_file tool calls through mock lab gateway", async () => {
   const cwd = await makeTempWorkspace();
   await fs.writeFile(path.join(cwd, "README.md"), "Ant Code temp readme", "utf8");
   const server = await listen(createMockGatewayServer(), "127.0.0.1");
@@ -136,7 +136,7 @@ test("print mode executes local tools through an OpenAI-compatible gateway", asy
   }
 });
 
-test("print mode executes glob tool calls through mock gateway", async () => {
+test("print mode executes glob tool calls through mock lab gateway", async () => {
   const cwd = await makeTempWorkspace();
   await fs.mkdir(path.join(cwd, "src", "cli"), { recursive: true });
   await fs.writeFile(path.join(cwd, "src", "cli", "index.js"), "export {};\n", "utf8");
@@ -156,7 +156,7 @@ test("print mode executes glob tool calls through mock gateway", async () => {
   }
 });
 
-test("print mode executes git_status tool calls through mock gateway", async () => {
+test("print mode executes git_status tool calls through mock lab gateway", async () => {
   const cwd = await makeTempWorkspace();
   const server = await listen(createMockGatewayServer(), "127.0.0.1");
   try {
@@ -257,7 +257,7 @@ test("print mode edits files with explicit approval", async () => {
   }
 });
 
-test("print mode executes readonly powershell commands through mock gateway", { skip: process.platform !== "win32" ? "PowerShell executable is only assumed in Windows CI for now" : false }, async () => {
+test("print mode executes readonly powershell commands through mock lab gateway", { skip: process.platform !== "win32" ? "PowerShell executable is only assumed in Windows CI for now" : false }, async () => {
   const cwd = await makeTempWorkspace();
   const server = await listen(createMockGatewayServer(), "127.0.0.1");
   try {
@@ -312,7 +312,7 @@ test("print mode executes mutating powershell commands with approval", { skip: p
   }
 });
 
-test("print mode executes configured MCP calls through mock gateway", async () => {
+test("print mode executes configured MCP calls through mock lab gateway", async () => {
   const cwd = await makeTempWorkspace();
   await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
     mcp: {
@@ -422,7 +422,7 @@ test("print mode routes MCP approval requests through the callback", async () =>
   }
 });
 
-test("print mode executes session-local workflow tools through mock gateway", async () => {
+test("print mode executes session-local workflow tools through mock lab gateway", async () => {
   const cwd = await makeTempWorkspace();
   const server = await listen(createMockGatewayServer(), "127.0.0.1");
   try {

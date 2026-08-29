@@ -7,37 +7,11 @@ import test from "node:test";
 import { createAgentTaskGroupStore } from "../../src/agents/task-group-store.js";
 import { createAgentTaskStore } from "../../src/agents/task-store.js";
 import { registerBackgroundTerminalTask } from "../../src/agents/background-terminal-registry.js";
+import { createFileRepository } from "../../src/config-v2/file-repository.js";
+import { createCredentialStore } from "../../src/credentials/store.js";
+import { withConfigMutationLock } from "../../src/dashboard/config-store.js";
 import { createDashboardRuntime } from "../../src/dashboard/sessions.js";
 import { createSessionStore } from "../../src/storage/session-store.js";
-
-test("dashboard keeps a deleted global gateway hidden after refresh and restart", async () => {
-  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-delete-global-"));
-  const otherProject = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-delete-global-other-"));
-  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-delete-global-"));
-  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: home } });
-  const saved = await runtime.saveModelConfig({
-    saveTarget: "global",
-    gatewayUrl: "https://global.gateway.example/v1/chat/completions",
-    gatewayProtocol: "openai-chat",
-    gatewayApiKey: "global-key",
-    modelId: "global-model",
-    switchToModel: true
-  });
-  const deleted = await runtime.deleteGatewayProfile({ profileId: saved.gatewayConfig.activeProfileId });
-  const refreshed = await runtime.status();
-  const restarted = await createDashboardRuntime({ cwd, env: { USERPROFILE: home } }).status();
-  const newProject = await createDashboardRuntime({ cwd: otherProject, env: { USERPROFILE: home } }).status();
-  assert.equal(deleted.ok, true);
-  assert.equal(deleted.deletedFrom, "global");
-  assert.deepEqual(deleted.gatewayProfiles, []);
-  assert.deepEqual(refreshed.gatewayProfiles, []);
-  assert.deepEqual(restarted.gatewayProfiles, []);
-  assert.deepEqual(newProject.gatewayProfiles, []);
-  assert.equal(restarted.gatewayConfig.gatewayProtocol, "openai-chat");
-  await assert.rejects(fs.access(path.join(cwd, ".lab-agent", "config.json")), /ENOENT/);
-  const global = JSON.parse(await fs.readFile(path.join(home, ".ant-code", "lab-agent.config.json"), "utf8"));
-  assert.deepEqual(global.lab.gatewayProfiles, []);
-});
 
 test("dashboard runtime runs a turn and writes shared session metadata", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
@@ -359,6 +333,2067 @@ test("dashboard runtime can switch registered model for the current session", as
   }
 });
 
+test("dashboard runtime switches model sources and reasoning effort in one request", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-source-switch-"));
+  const requests = [];
+  const server = await listen(createRecordingGateway(requests, "first source answer"), "127.0.0.1", 0);
+  const localUrl = `http://127.0.0.1:${server.address().port}`;
+  const grokUrl = "https://grok.gateway.example/sub2api/v1/responses";
+  await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
+    modelAlias: "local-model",
+    models: [{ id: "local-model", label: "Local Model" }],
+    networkMode: "open-dev",
+    allowedHosts: ["127.0.0.1", "grok.gateway.example"],
+    lab: {
+      gatewayUrl: localUrl,
+      gatewayProtocol: "lab-agent-gateway",
+      activeGatewayProfile: "local-source",
+      gatewayProfiles: [
+        {
+          id: "local-source",
+          label: "Local",
+          gatewayUrl: localUrl,
+          gatewayProtocol: "lab-agent-gateway",
+          modelAlias: "local-model",
+          models: [{ id: "local-model", label: "Local Model" }]
+        },
+        {
+          id: "grok-source",
+          label: "Grok",
+          gatewayUrl: grokUrl,
+          gatewayProtocol: "openai-responses",
+          modelAlias: "grok-4.6",
+          models: [{
+            id: "grok-4.6",
+            label: "Grok 4.6",
+            reasoningEfforts: ["low", "medium", "high"],
+            defaultReasoningEffort: "high"
+          }]
+        }
+      ]
+    }
+  }), "utf8");
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+
+  try {
+    await runtime.trustWorkspace();
+    const started = await runtime.startTurn({ prompt: "open a session", permissionMode: "plan" });
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "files_updated");
+
+    const switched = await runtime.switchModel({
+      sessionId: started.sessionId,
+      profileId: "grok-source",
+      modelId: "grok-4.6",
+      reasoningEffort: "medium"
+    });
+
+    assert.equal(switched.ok, true);
+    assert.equal(switched.sessionStatus.model, "grok-4.6");
+    assert.equal(switched.sessionStatus.reasoningEffort, "medium");
+    assert.equal(switched.gatewayConfig.gatewayUrl, grokUrl);
+    assert.equal(switched.gatewayConfig.gatewayProtocol, "openai-responses");
+    assert.deepEqual(switched.models.map((model) => model.id), ["grok-4.6"]);
+    assert.equal(runtime.active.get(started.sessionId).session.config.lab.gatewayUrl, grokUrl);
+    assert.equal(runtime.active.get(started.sessionId).session.config.lab.gatewayProtocol, "openai-responses");
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime clears an explicit reasoning override without resolving it to the model default", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-reasoning-"));
+  await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
+    modelAlias: "grok-4.6",
+    models: [{
+      id: "grok-4.6",
+      reasoningEfforts: ["low", "medium", "high"],
+      defaultReasoningEffort: "high"
+    }]
+  }), "utf8");
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+
+  const medium = await runtime.switchReasoningEffort({ reasoningEffort: "medium" });
+  assert.equal(medium.ok, true);
+  assert.equal(medium.sessionStatus.reasoningEffort, "medium");
+
+  const reset = await runtime.switchReasoningEffort({ reasoningEffort: null });
+  assert.equal(reset.ok, true);
+  assert.equal(reset.sessionStatus.reasoningEffort, null);
+
+  const refreshed = await runtime.status();
+  assert.equal(refreshed.sessionStatus.reasoningEffort, null);
+
+  const invalid = await runtime.switchReasoningEffort({ reasoningEffort: "ultra" });
+  assert.equal(invalid.ok, false);
+  assert.equal(invalid.status, 400);
+});
+
+test("dashboard keeps a cleared legacy session effort across the next turn", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-reasoning-next-turn-"));
+  const requests = [];
+  const server = await listen(createRecordingGateway(requests, "reasoning answer"), "127.0.0.1", 0);
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
+    modelAlias: "grok-4.6",
+    reasoningEffort: "high",
+    models: [{
+      id: "grok-4.6",
+      reasoningEfforts: ["low", "medium", "high"],
+      defaultReasoningEffort: "high"
+    }],
+    networkMode: "open-dev",
+    allowedHosts: ["127.0.0.1"],
+    lab: {
+      gatewayUrl: origin,
+      gatewayProtocol: "lab-agent-gateway"
+    }
+  }), "utf8");
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+
+  try {
+    await runtime.trustWorkspace();
+    const started = await runtime.startTurn({ prompt: "first turn", permissionMode: "plan" });
+    await waitForCondition(() => runtime.active.get(started.sessionId)?.running === false);
+
+    const reset = await runtime.switchReasoningEffort({
+      sessionId: started.sessionId,
+      reasoningEffort: null
+    });
+    assert.equal(reset.ok, true);
+    assert.equal(reset.sessionStatus.reasoningEffort, null);
+
+    const next = await runtime.startTurn({
+      sessionId: started.sessionId,
+      prompt: "second turn",
+      permissionMode: "plan"
+    });
+    assert.equal(next.ok, true);
+    assert.equal(next.sessionStatus.reasoningEffort, null);
+    assert.equal(runtime.active.get(started.sessionId).session.config.reasoningEffort, null);
+
+    await waitForCondition(() => runtime.active.get(started.sessionId)?.running === false);
+    assert.equal(runtime.active.get(started.sessionId).session.config.reasoningEffort, null);
+    assert.equal(requests.length, 2);
+  } finally {
+    await runtime.shutdown({ force: true, timeoutMs: 100 });
+    await close(server);
+  }
+});
+
+test("dashboard model switches distinguish omitted, cleared, and undeclared defaults", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-model-reasoning-defaults-"));
+  await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
+    modelAlias: "with-default",
+    reasoningEffort: "high",
+    models: [
+      {
+        id: "with-default",
+        reasoningEfforts: ["low", "high"],
+        defaultReasoningEffort: "high"
+      },
+      {
+        id: "without-default",
+        reasoningEfforts: ["low", "high"]
+      }
+    ]
+  }), "utf8");
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+
+  const cleared = await runtime.switchModel({
+    modelId: "with-default",
+    reasoningEffort: null
+  });
+  assert.equal(cleared.ok, true);
+  assert.equal(cleared.sessionStatus.reasoningEffort, null);
+
+  const clearedByKeyword = await runtime.switchModel({
+    modelId: "with-default",
+    reasoningEffort: "default"
+  });
+  assert.equal(clearedByKeyword.ok, true);
+  assert.equal(clearedByKeyword.sessionStatus.reasoningEffort, null);
+
+  const inherited = await runtime.switchModel({ modelId: "with-default" });
+  assert.equal(inherited.ok, true);
+  assert.equal(inherited.sessionStatus.reasoningEffort, "high");
+
+  const noDefault = await runtime.switchModel({ modelId: "without-default" });
+  assert.equal(noDefault.ok, true);
+  assert.equal(noDefault.sessionStatus.reasoningEffort, null);
+  assert.equal(noDefault.models.find((model) => model.id === "without-default")?.reasoningEffort, null);
+
+  await runtime.shutdown({ force: true, timeoutMs: 100 });
+});
+
+test("dashboard runtime throttles retention maintenance and immediately applies saved retention", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-retention-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-retention-"));
+  const configDir = path.join(cwd, ".lab-agent");
+  await fs.mkdir(configDir, { recursive: true });
+  await fs.writeFile(path.join(configDir, "config.json"), JSON.stringify({
+    transcript: { enabled: true, retentionDays: 1, encryption: "off" }
+  }), "utf8");
+  const transcript = { enabled: true, retentionDays: 1, encryption: "off" };
+  const store = createSessionStore({ cwd, transcript, env: { USERPROFILE: home } });
+  const oldArchive = await store.writeTranscriptChunks("old-session", [{ role: "user", content: "old" }]);
+  const oldPath = await store.writeMetadata({ id: "old-session", transcript: { archive: oldArchive } });
+  const freshArchive = await store.writeTranscriptChunks("fresh-session", [{ role: "user", content: "fresh" }]);
+  await store.writeMetadata({ id: "fresh-session", transcript: { archive: freshArchive } });
+  const oldTime = new Date("2020-01-01T00:00:00.000Z");
+  await fs.utimes(oldPath, oldTime, oldTime);
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: home } });
+
+  const status = await runtime.status();
+  assert.equal(status.ok, true);
+  assert.equal((await store.readMetadataExact("old-session")).ok, false);
+  await assert.rejects(fs.access(path.join(store.root, "old-session.transcript")), { code: "ENOENT" });
+  assert.equal((await store.readMetadataExact("fresh-session")).ok, true);
+
+  const lateArchive = await store.writeTranscriptChunks("late-session", [{ role: "user", content: "late" }]);
+  const latePath = await store.writeMetadata({ id: "late-session", transcript: { archive: lateArchive } });
+  await fs.utimes(latePath, oldTime, oldTime);
+  const listed = await runtime.listSessionRecords();
+  assert.equal(listed.some((record) => record.id === "late-session"), true);
+
+  runtime.active.set("fresh-session", { session: { id: "fresh-session" } });
+  const saved = await runtime.saveSettingsConfig({
+    section: "transcript",
+    saveTarget: "project",
+    settings: { enabled: true, retentionDays: 0, encryption: "off" }
+  });
+  assert.equal(saved.ok, true);
+  assert.equal(saved.settings.transcript.retentionDays, 0);
+  assert.equal((await store.readMetadataExact("late-session")).ok, false);
+  await assert.rejects(fs.access(path.join(store.root, "late-session.transcript")), { code: "ENOENT" });
+  assert.equal((await store.readMetadataExact("fresh-session")).ok, true);
+  assert.equal((await store.readTranscriptPage(freshArchive)).messages.length, 1);
+
+  runtime.active.delete("fresh-session");
+  const repeated = await runtime.saveSettingsConfig({
+    section: "transcript",
+    saveTarget: "project",
+    settings: { enabled: true, retentionDays: 0, encryption: "off" }
+  });
+  assert.equal(repeated.ok, true);
+  assert.equal((await store.readMetadataExact("fresh-session")).ok, false);
+  await assert.rejects(fs.access(path.join(store.root, "fresh-session.transcript")), { code: "ENOENT" });
+});
+
+test("dashboard runtime saves each settings section with whitelisted deep merges", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-settings-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-settings-"));
+  const configDir = path.join(cwd, ".lab-agent");
+  const configPath = path.join(configDir, "config.json");
+  const original = {
+    modelAlias: "kept-model",
+    models: [{ id: "kept-model" }],
+    customTopLevel: { keep: "top-level" },
+    networkMode: "approved-web",
+    allowedHosts: ["legacy.example"],
+    transcript: {
+      enabled: true,
+      retentionDays: 30,
+      encryption: "off",
+      customTranscript: "keep"
+    },
+    agents: {
+      customAgentSetting: "keep",
+      syncModelTiersOnSwitch: true,
+      orchestration: {
+        maxParallelReadonlyAgentRuns: 3,
+        customOrchestration: "keep"
+      },
+      backgroundWakeup: {
+        enabled: true,
+        defaultForModelAgentRun: false,
+        customBackground: "keep"
+      },
+      reviewGate: {
+        enabled: true,
+        customReview: "keep"
+      }
+    },
+    lab: {
+      gatewayUrl: "https://gateway.example/v1/responses",
+      gatewayProtocol: "openai-responses",
+      gatewayApiKey: "stored-secret",
+      gatewayApiKeyDisabled: true,
+      gatewayProfiles: [{
+        id: "kept-profile",
+        gatewayUrl: "https://gateway.example/v1/responses",
+        gatewayProtocol: "openai-responses",
+        gatewayApiKey: "profile-secret",
+        modelAlias: "kept-model",
+        models: [{ id: "kept-model" }]
+      }],
+      gatewayMaxRetries: 1,
+      gatewayTimeoutMs: 20000,
+      gatewayIdleTimeoutMs: 5000,
+      customLab: "keep"
+    }
+  };
+  await fs.mkdir(configDir, { recursive: true });
+  await fs.writeFile(configPath, JSON.stringify(original), "utf8");
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: { USERPROFILE: home, LAB_AGENT_TRANSCRIPT_KEY: "test-transcript-key" }
+  });
+
+  const transcript = await runtime.saveSettingsConfig({
+    section: "transcript",
+    saveTarget: "project",
+    settings: {
+      enabled: true,
+      retentionDays: 3650,
+      encryption: "required",
+      customTranscript: "replace-attempt",
+      gatewayApiKey: "replace-attempt"
+    }
+  });
+  assert.equal(transcript.ok, true);
+  assert.equal(transcript.settings.transcript.retentionDays, 3650);
+  assert.equal(transcript.settings.transcript.encryption, "required");
+
+  const permanentTranscript = await runtime.saveSettingsConfig({
+    section: "transcript",
+    saveTarget: "project",
+    settings: {
+      enabled: true,
+      retentionDays: null,
+      encryption: "required"
+    }
+  });
+  assert.equal(permanentTranscript.ok, true);
+  assert.equal(permanentTranscript.settings.transcript.retentionDays, null);
+
+  const network = await runtime.saveSettingsConfig({
+    section: "network",
+    saveTarget: "project",
+    settings: {
+      networkMode: "offline",
+      allowedHosts: ["API.EXAMPLE", "api.example.", "worker.example"]
+    }
+  });
+  assert.equal(network.ok, true);
+  assert.equal(network.settings.network.mode, "offline");
+  assert.deepEqual(network.settings.network.allowedHosts, ["api.example", "worker.example", "gateway.example"]);
+
+  const agents = await runtime.saveSettingsConfig({
+    section: "agents",
+    saveTarget: "project",
+    settings: {
+      maxParallelReadonlyAgentRuns: 8,
+      backgroundWakeupEnabled: false,
+      backgroundByDefault: true,
+      reviewGateEnabled: false,
+      syncModelTiersOnSwitch: false,
+      customAgentSetting: "replace-attempt"
+    }
+  });
+  assert.equal(agents.ok, true);
+  assert.deepEqual(agents.settings.agents, {
+    maxParallelReadonlyAgentRuns: 8,
+    backgroundWakeupEnabled: false,
+    backgroundByDefault: true,
+    reviewGateEnabled: false,
+    syncModelTiersOnSwitch: false,
+    goalMaxAutoContinues: 12
+  });
+
+  const reliability = await runtime.saveSettingsConfig({
+    section: "reliability",
+    saveTarget: "project",
+    settings: {
+      maxRetries: 5,
+      timeoutMs: 900000,
+      idleTimeoutMs: 300000,
+      gatewayProfiles: []
+    }
+  });
+  assert.equal(reliability.ok, true);
+  assert.deepEqual(reliability.settings.reliability, {
+    maxRetries: 5,
+    timeoutMs: 900000,
+    idleTimeoutMs: 300000
+  });
+
+  const saved = JSON.parse(await fs.readFile(configPath, "utf8"));
+  assert.deepEqual(saved.customTopLevel, original.customTopLevel);
+  assert.equal(saved.transcript.customTranscript, "keep");
+  assert.equal(saved.agents.customAgentSetting, "keep");
+  assert.equal(saved.agents.orchestration.customOrchestration, "keep");
+  assert.equal(saved.agents.backgroundWakeup.customBackground, "keep");
+  assert.equal(saved.agents.reviewGate.customReview, "keep");
+  assert.deepEqual(saved.lab.gatewayProfiles, original.lab.gatewayProfiles);
+  assert.equal(saved.lab.gatewayApiKey, "stored-secret");
+  assert.equal(saved.lab.gatewayApiKeyDisabled, true);
+  assert.equal(saved.lab.customLab, "keep");
+});
+
+test("dashboard runtime persists only changed settings fields and keeps legacy section writes", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-changed-settings-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-changed-settings-"));
+  const globalDir = path.join(home, ".ant-code");
+  const projectDir = path.join(cwd, ".lab-agent");
+  const projectPath = path.join(projectDir, "config.json");
+  await fs.mkdir(globalDir, { recursive: true });
+  await fs.mkdir(projectDir, { recursive: true });
+  await fs.writeFile(path.join(globalDir, "lab-agent.config.json"), JSON.stringify({
+    transcript: { enabled: true, retentionDays: 30, encryption: "optional" }
+  }), "utf8");
+  await fs.writeFile(projectPath, JSON.stringify({ marker: "keep" }), "utf8");
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: { USERPROFILE: home, LAB_AGENT_TRANSCRIPT_ENABLED: "false" }
+  });
+  const current = (await runtime.status()).settings.transcript;
+
+  const changed = await runtime.saveSettingsConfig({
+    section: "transcript",
+    saveTarget: "project",
+    changedFields: ["retentionDays"],
+    settings: { ...current, retentionDays: 45 }
+  });
+  assert.equal(changed.ok, true);
+  assert.deepEqual(JSON.parse(await fs.readFile(projectPath, "utf8")), {
+    marker: "keep",
+    transcript: { retentionDays: 45 }
+  });
+
+  const legacy = await runtime.saveSettingsConfig({
+    section: "transcript",
+    saveTarget: "project",
+    settings: { ...current, retentionDays: 60, encryption: "off" }
+  });
+  assert.equal(legacy.ok, true);
+  assert.deepEqual(JSON.parse(await fs.readFile(projectPath, "utf8")), {
+    marker: "keep",
+    transcript: { retentionDays: 60, encryption: "off" }
+  });
+});
+
+test("dashboard runtime omits environment-managed reliability fields while saving siblings", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-managed-reliability-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-managed-reliability-"));
+  const configDir = path.join(cwd, ".lab-agent");
+  const configPath = path.join(configDir, "config.json");
+  await fs.mkdir(configDir, { recursive: true });
+  await fs.writeFile(configPath, JSON.stringify({ lab: { customLab: "keep" } }), "utf8");
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: { USERPROFILE: home, LAB_MODEL_GATEWAY_MAX_RETRIES: "2" }
+  });
+  const current = (await runtime.status()).settings.reliability;
+
+  const saved = await runtime.saveSettingsConfig({
+    section: "reliability",
+    saveTarget: "project",
+    changedFields: ["maxRetries", "timeoutMs"],
+    settings: { ...current, timeoutMs: 6000 }
+  });
+
+  assert.equal(saved.ok, true);
+  assert.deepEqual(JSON.parse(await fs.readFile(configPath, "utf8")), {
+    lab: { customLab: "keep", gatewayTimeoutMs: 6000 }
+  });
+});
+
+test("dashboard runtime omits managed hosts and publishes sensitivity-specific network modes", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-network-settings-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-network-settings-"));
+  const configDir = path.join(cwd, ".lab-agent");
+  const configPath = path.join(configDir, "config.json");
+  await fs.mkdir(configDir, { recursive: true });
+  await fs.writeFile(configPath, JSON.stringify({
+    networkMode: "approved-web",
+    allowedHosts: ["existing.example"],
+    lab: {
+      gatewayUrl: "https://project.gateway.example/v1/chat/completions",
+      gatewayProtocol: "openai-chat"
+    }
+  }), "utf8");
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: {
+      USERPROFILE: home,
+      LAB_AGENT_ALLOWED_HOSTS: "managed.example,shared.example",
+      LAB_MODEL_GATEWAY_URL: "https://environment.gateway.example/v1/chat/completions"
+    }
+  });
+  const status = await runtime.status();
+  assert.equal(status.settings.network.sensitivity, "standard");
+  assert.deepEqual(status.settings.network.allowedModes, ["offline", "lab-only", "approved-web", "open-dev"]);
+
+  const saved = await runtime.saveSettingsConfig({
+    section: "network",
+    saveTarget: "project",
+    changedFields: ["allowedHosts"],
+    settings: {
+      mode: status.settings.network.mode,
+      allowedHosts: ["user.example", "managed.example", "environment.gateway.example"]
+    }
+  });
+  assert.equal(saved.ok, true);
+  const project = JSON.parse(await fs.readFile(configPath, "utf8"));
+  assert.ok(project.allowedHosts.includes("user.example"));
+  assert.ok(project.allowedHosts.includes("project.gateway.example"));
+  assert.equal(project.allowedHosts.includes("managed.example"), false);
+  assert.equal(project.allowedHosts.includes("shared.example"), false);
+  assert.equal(project.allowedHosts.includes("environment.gateway.example"), false);
+
+  const highCwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-high-sensitivity-settings-"));
+  await fs.writeFile(path.join(highCwd, "lab-agent.config.json"), JSON.stringify({
+    networkMode: "offline",
+    security: { sensitivity: "high" }
+  }), "utf8");
+  const highRuntime = createDashboardRuntime({ cwd: highCwd, env: {} });
+  const highStatus = await highRuntime.status();
+  assert.equal(highStatus.settings.network.sensitivity, "high");
+  assert.deepEqual(highStatus.settings.network.allowedModes, ["offline", "lab-only"]);
+});
+
+test("dashboard runtime rejects settings managed by environment variables", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-managed-settings-"));
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: {
+      USERPROFILE: cwd,
+      LAB_AGENT_NETWORK_MODE: "offline",
+      LAB_AGENT_TRANSCRIPT_ENABLED: "false",
+      LAB_AGENT_TRANSCRIPT_RETENTION_DAYS: "7",
+      LAB_AGENT_TRANSCRIPT_ENCRYPTION: "off",
+      LAB_MODEL_GATEWAY_MAX_RETRIES: "2",
+      LAB_MODEL_GATEWAY_TIMEOUT_MS: "5000",
+      LAB_MODEL_GATEWAY_IDLE_TIMEOUT_MS: "3000"
+    }
+  });
+  const current = (await runtime.status()).settings;
+  const cases = [
+    {
+      envName: "LAB_AGENT_TRANSCRIPT_ENABLED",
+      input: {
+        section: "transcript",
+        settings: { ...current.transcript, enabled: true }
+      }
+    },
+    {
+      envName: "LAB_AGENT_TRANSCRIPT_RETENTION_DAYS",
+      input: {
+        section: "transcript",
+        settings: { ...current.transcript, retentionDays: 8 }
+      }
+    },
+    {
+      envName: "LAB_AGENT_TRANSCRIPT_ENCRYPTION",
+      input: {
+        section: "transcript",
+        settings: { ...current.transcript, encryption: "optional" }
+      }
+    },
+    {
+      envName: "LAB_AGENT_NETWORK_MODE",
+      input: {
+        section: "network",
+        settings: { networkMode: "open-dev", allowedHosts: [] }
+      }
+    },
+    {
+      envName: "LAB_MODEL_GATEWAY_MAX_RETRIES",
+      input: {
+        section: "reliability",
+        settings: { ...current.reliability, maxRetries: 3 }
+      }
+    },
+    {
+      envName: "LAB_MODEL_GATEWAY_TIMEOUT_MS",
+      input: {
+        section: "reliability",
+        settings: { ...current.reliability, timeoutMs: 6000 }
+      }
+    },
+    {
+      envName: "LAB_MODEL_GATEWAY_IDLE_TIMEOUT_MS",
+      input: {
+        section: "reliability",
+        settings: { ...current.reliability, idleTimeoutMs: 4000 }
+      }
+    }
+  ];
+
+  for (const testCase of cases) {
+    const result = await runtime.saveSettingsConfig({
+      saveTarget: "project",
+      ...testCase.input
+    });
+    assert.equal(result.ok, false, testCase.envName);
+    assert.equal(result.status, 409, testCase.envName);
+    assert.match(result.error, new RegExp(testCase.envName), testCase.envName);
+  }
+});
+
+test("dashboard runtime validates settings boundaries and required transcript encryption", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-invalid-settings-"));
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+  const validAgents = {
+    maxParallelReadonlyAgentRuns: 3,
+    backgroundWakeupEnabled: true,
+    backgroundByDefault: false,
+    reviewGateEnabled: true,
+    syncModelTiersOnSwitch: true
+  };
+  const validReliability = { maxRetries: 2, timeoutMs: 5000, idleTimeoutMs: 3000 };
+  const cases = [
+    {
+      label: "retention below minimum",
+      section: "transcript",
+      settings: { enabled: true, retentionDays: -1, encryption: "off" },
+      error: /永久.*0.*3650/
+    },
+    {
+      label: "retention above maximum",
+      section: "transcript",
+      settings: { enabled: true, retentionDays: 3651, encryption: "off" },
+      error: /永久.*0.*3650/
+    },
+    {
+      label: "unsupported network mode",
+      section: "network",
+      settings: { networkMode: "tunneled", allowedHosts: [] },
+      error: /tunneled/
+    },
+    {
+      label: "invalid network host",
+      section: "network",
+      settings: { networkMode: "approved-web", allowedHosts: ["https://bad.example"] },
+      error: /bad\.example/
+    },
+    {
+      label: "agent count below minimum",
+      section: "agents",
+      settings: { ...validAgents, maxParallelReadonlyAgentRuns: 0 },
+      error: /1.*8/
+    },
+    {
+      label: "agent count above maximum",
+      section: "agents",
+      settings: { ...validAgents, maxParallelReadonlyAgentRuns: 9 },
+      error: /1.*8/
+    },
+    {
+      label: "goal continue cap below minimum",
+      section: "agents",
+      settings: { ...validAgents, goalMaxAutoContinues: 0 },
+      error: /1.*100/
+    },
+    {
+      label: "goal continue cap above maximum",
+      section: "agents",
+      settings: { ...validAgents, goalMaxAutoContinues: 101 },
+      error: /1.*100/
+    },
+    {
+      label: "retry count below minimum",
+      section: "reliability",
+      settings: { ...validReliability, maxRetries: -1 },
+      error: /0.*5/
+    },
+    {
+      label: "retry count above maximum",
+      section: "reliability",
+      settings: { ...validReliability, maxRetries: 6 },
+      error: /0.*5/
+    },
+    {
+      label: "total timeout below minimum",
+      section: "reliability",
+      settings: { ...validReliability, timeoutMs: 999 },
+      error: /1.*900/
+    },
+    {
+      label: "total timeout above maximum",
+      section: "reliability",
+      settings: { ...validReliability, timeoutMs: 900001 },
+      error: /1.*900/
+    },
+    {
+      label: "idle timeout below minimum",
+      section: "reliability",
+      settings: { ...validReliability, idleTimeoutMs: 999 },
+      error: /1.*300/
+    },
+    {
+      label: "idle timeout above maximum",
+      section: "reliability",
+      settings: { ...validReliability, idleTimeoutMs: 300001 },
+      error: /1.*300/
+    }
+  ];
+
+  for (const testCase of cases) {
+    const result = await runtime.saveSettingsConfig({
+      section: testCase.section,
+      saveTarget: "project",
+      settings: testCase.settings
+    });
+    assert.equal(result.ok, false, testCase.label);
+    assert.equal(result.status, 400, testCase.label);
+    assert.match(result.error, testCase.error, testCase.label);
+  }
+
+  const encryption = await runtime.saveSettingsConfig({
+    section: "transcript",
+    saveTarget: "project",
+    settings: { enabled: true, retentionDays: 1, encryption: "required" }
+  });
+  assert.equal(encryption.ok, false);
+  assert.equal(encryption.status, 400);
+  assert.match(encryption.error, /LAB_AGENT_TRANSCRIPT_KEY/);
+});
+
+test("dashboard runtime refuses settings writes for a running session", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-running-settings-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-running-settings-"));
+  const configDir = path.join(cwd, ".lab-agent");
+  const configPath = path.join(configDir, "config.json");
+  const originalText = JSON.stringify({
+    marker: "unchanged",
+    transcript: { enabled: true, retentionDays: 30, encryption: "off" }
+  });
+  const gate = deferred();
+  await fs.mkdir(configDir, { recursive: true });
+  await fs.writeFile(configPath, originalText, "utf8");
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: { USERPROFILE: home },
+    runTurn: async (_session, options) => {
+      await gate.promise;
+      await options.onEvent({ type: "turn_complete", status: "completed" });
+      return { output: "finished" };
+    }
+  });
+  let started;
+
+  try {
+    await runtime.trustWorkspace();
+    started = await runtime.startTurn({ prompt: "keep settings locked", permissionMode: "plan" });
+    assert.equal(runtime.active.get(started.sessionId).running, true);
+
+    const blocked = await runtime.saveSettingsConfig({
+      section: "transcript",
+      saveTarget: "project",
+      sessionId: started.sessionId,
+      settings: { enabled: false, retentionDays: 0, encryption: "off" }
+    });
+
+    assert.equal(blocked.ok, false);
+    assert.equal(blocked.status, 409);
+    assert.equal(await fs.readFile(configPath, "utf8"), originalText);
+  } finally {
+    gate.resolve();
+    if (started?.sessionId) {
+      await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+    }
+  }
+});
+
+test("dashboard runtime probes an OpenAI Responses model catalog", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-probe-"));
+  const requests = [];
+  const server = http.createServer((req, res) => {
+    requests.push({ url: req.url, authorization: req.headers.authorization });
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      data: [{
+        id: "grok-4.6",
+        owned_by: "xai",
+        supportsReasoningEffort: true,
+        reasoningEfforts: ["low", "medium", "high"],
+        defaultReasoningEffort: "high"
+      }]
+    }));
+  });
+  await listen(server, "127.0.0.1", 0);
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const baseUrl = `${origin}/sub2api/v1?tenant=alpha`;
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+
+  try {
+    const result = await runtime.probeGateway({
+      gatewayUrl: baseUrl,
+      gatewayProtocol: "openai-responses",
+      gatewayApiKey: "probe-secret",
+      credentialAction: "replace"
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.modelsUrl, `${origin}/sub2api/v1/models?tenant=alpha`);
+    assert.equal(result.suggestedGatewayUrl, `${origin}/sub2api/v1/responses?tenant=alpha`);
+    assert.equal(result.modelCount, 1);
+    assert.deepEqual(result.models[0].reasoningEfforts.map((effort) => effort.id), ["low", "medium", "high"]);
+    assert.equal(result.models[0].defaultReasoningEffort, "high");
+    assert.deepEqual(requests, [{ url: "/sub2api/v1/models?tenant=alpha", authorization: "Bearer probe-secret" }]);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard gateway discovery proof is opaque, bounded, context-bound, retryable, and consumed only after success", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-discovery-proof-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-discovery-proof-"));
+  const settingsPath = path.join(home, ".ant-code", "settings.json");
+  await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+  await fs.writeFile(settingsPath, JSON.stringify({ settingsVersion: 2, namespaces: {} }), "utf8");
+  const server = await listen(http.createServer((req, res) => {
+    assert.equal(req.url, "/v1/models");
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      data: [
+        { id: "catalog-main", display_name: "Catalog Main" },
+        {
+          id: "catalog-worker",
+          display_name: "Catalog Worker",
+          context_window: 131_072,
+          input_modalities: ["text", "image"]
+        }
+      ]
+    }));
+  }), "127.0.0.1", 0);
+  const gatewayUrl = `http://127.0.0.1:${server.address().port}/v1/responses`;
+  const now = 10_000;
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: { USERPROFILE: home },
+    gatewayDiscoveryTtlMs: Number.MAX_SAFE_INTEGER,
+    gatewayDiscoveryNow: () => now
+  });
+  const initialStatus = await runtime.status();
+  const identity = {
+    saveTarget: "global",
+    expectedRevision: initialStatus.configV2.revisions.global,
+    expectedCredentialsRevision: initialStatus.configV2.revisions.credentials,
+    clientId: "proof-client",
+    profileId: "",
+    gatewayUrl,
+    gatewayProtocol: "openai-responses",
+    gatewayApiKey: "proof-key",
+    credentialAction: "replace"
+  };
+
+  try {
+    const probe = await runtime.probeGateway(identity);
+    assert.equal(probe.ok, true);
+    assert.match(probe.discoveryToken, /^[A-Za-z0-9_-]{43}$/);
+    assert.equal(Date.parse(probe.discoveryExpiresAt), now + 5 * 60 * 1000);
+    assert.doesNotMatch(probe.discoveryToken, /proof|catalog|client|key/i);
+
+    const rejectedContexts = [
+      { gatewayDiscoveryToken: "forged-discovery-token" },
+      { gatewayDiscoveryToken: probe.discoveryToken, gatewayUrl: `${gatewayUrl}?changed=true` },
+      { gatewayDiscoveryToken: probe.discoveryToken, gatewayProtocol: "openai-chat" },
+      { gatewayDiscoveryToken: probe.discoveryToken, profileId: "foreign-provider" },
+      { gatewayDiscoveryToken: probe.discoveryToken, saveTarget: "project" },
+      { gatewayDiscoveryToken: probe.discoveryToken, clientId: "foreign-client" },
+      { gatewayDiscoveryToken: probe.discoveryToken, gatewayApiKey: "different-key" }
+    ];
+    for (const changed of rejectedContexts) {
+      const rejected = await runtime.saveModelConfig({
+        ...identity,
+        modelId: "catalog-main",
+        switchToModel: true,
+        ...changed
+      });
+      assert.equal(rejected.ok, false);
+      assert.equal(rejected.status, 409);
+      assert.equal(rejected.code, "GATEWAY_DISCOVERY_STALE");
+    }
+
+    const invalid = await runtime.saveModelConfig({
+      ...identity,
+      gatewayDiscoveryToken: probe.discoveryToken,
+      modelId: ""
+    });
+    assert.equal(invalid.ok, false);
+    assert.equal(invalid.status, 400);
+
+    const saved = await runtime.saveModelConfig({
+      ...identity,
+      gatewayDiscoveryToken: probe.discoveryToken,
+      modelId: "CATALOG-MAIN",
+      agentCheapModel: "CATALOG-WORKER",
+      agentDefaultModel: "catalog-main",
+      agentStrongModel: "GPT-5.6-SOL",
+      manualAgentModelIds: ["GPT-5.6-SOL"],
+      // Browser catalog fields are intentionally forged. Only the server-side
+      // proof catalog may canonicalize IDs or contribute metadata.
+      catalogModelIds: ["gpt-5.6-sol"],
+      catalogModels: [{
+        id: "gpt-5.6-sol",
+        reasoningEfforts: ["max"],
+        defaultReasoningEffort: "max",
+        contextTokens: 999_999
+      }],
+      switchToModel: true
+    });
+    assert.equal(saved.ok, true, `${saved.status}: ${saved.error}`);
+    const document = JSON.parse(await fs.readFile(settingsPath, "utf8"));
+    const provider = document.namespaces["model-providers"].providers[saved.providerId];
+    assert.equal(saved.modelId, "catalog-main");
+    assert.deepEqual(provider.agents.modelTiers, {
+      cheap: "catalog-worker",
+      default: "catalog-main",
+      strong: "GPT-5.6-SOL"
+    });
+    const worker = provider.models.find((model) => model.id === "catalog-worker");
+    assert.equal(worker.displayName, "Catalog Worker");
+    assert.equal(worker.contextWindow, 131_072);
+    assert.deepEqual(worker.inputModalities, ["text", "image"]);
+    const manual = provider.models.find((model) => model.id === "GPT-5.6-SOL");
+    assert.deepEqual(manual, {
+      id: "GPT-5.6-SOL",
+      displayName: "GPT-5.6-SOL",
+      compat: { routingOnly: true }
+    });
+
+    const replay = await runtime.saveModelConfig({
+      ...identity,
+      profileId: saved.providerId,
+      gatewayDiscoveryToken: probe.discoveryToken,
+      modelId: "catalog-main"
+    });
+    assert.equal(replay.ok, false);
+    assert.equal(replay.status, 409);
+    assert.equal(replay.code, "GATEWAY_DISCOVERY_STALE");
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard persists trusted upstream reasoning provenance and retains confirmed GPT ultra after restart", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-reasoning-proof-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-reasoning-proof-"));
+  const settingsPath = path.join(home, ".ant-code", "settings.json");
+  await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+  await fs.writeFile(settingsPath, JSON.stringify({ settingsVersion: 2, namespaces: {} }), "utf8");
+  const modelId = "gpt-5.6-terra";
+  const efforts = ["low", "medium", "high", "xhigh", "max", "ultra"];
+  const server = await listen(http.createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      data: [{
+        id: modelId,
+        reasoningEfforts: efforts,
+        defaultReasoningEffort: "ultra"
+      }]
+    }));
+  }), "127.0.0.1", 0);
+  const gatewayUrl = `http://127.0.0.1:${server.address().port}/v1/responses`;
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: home } });
+
+  try {
+    const initial = await runtime.status();
+    const identity = {
+      saveTarget: "global",
+      expectedRevision: initial.configV2.revisions.global,
+      expectedCredentialsRevision: initial.configV2.revisions.credentials,
+      clientId: "reasoning-proof-client",
+      gatewayUrl,
+      gatewayProtocol: "openai-responses",
+      credentialAction: "keep"
+    };
+    const discovery = await runtime.probeGateway(identity);
+    assert.equal(discovery.ok, true);
+    assert.equal(discovery.models[0].reasoningDiscovery.source, "upstream-metadata");
+
+    const saved = await runtime.saveModelConfig({
+      ...identity,
+      gatewayDiscoveryToken: discovery.discoveryToken,
+      modelId,
+      reasoningEfforts: efforts,
+      defaultReasoningEffort: "ultra",
+      reasoningDiscovery: { source: "active-probe", confidence: "browser-forged" },
+      catalogModels: [{
+        id: modelId,
+        reasoningEfforts: ["max"],
+        defaultReasoningEffort: "max",
+        reasoningDiscovery: { source: "active-probe", confidence: "browser-forged" }
+      }],
+      switchToModel: true
+    });
+    assert.equal(saved.ok, true, `${saved.status}: ${saved.error}`);
+
+    const document = JSON.parse(await fs.readFile(settingsPath, "utf8"));
+    const model = document.namespaces["model-providers"].providers[saved.providerId].models
+      .find((candidate) => candidate.id === modelId);
+    assert.deepEqual(model.compat?.reasoningDiscovery, {
+      source: "upstream-metadata",
+      confidence: "declared",
+      path: "reasoningEfforts",
+      presetId: null
+    });
+
+    const restarted = await createDashboardRuntime({ cwd, env: { USERPROFILE: home } }).status();
+    const restartedModel = restarted.models.find((candidate) => candidate.id === modelId);
+    assert.deepEqual(
+      restartedModel.reasoningEfforts.map((effort) => effort.id ?? effort),
+      ["low", "medium", "high", "xhigh", "max", "ultra"]
+    );
+    assert.equal(restartedModel.defaultReasoningEffort, "ultra");
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard turns a complete active reasoning probe into trusted restart-safe evidence", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-active-reasoning-proof-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-active-reasoning-proof-"));
+  const settingsPath = path.join(home, ".ant-code", "settings.json");
+  await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+  await fs.writeFile(settingsPath, JSON.stringify({ settingsVersion: 2, namespaces: {} }), "utf8");
+  const modelId = "grok-4.6";
+  const acceptedEfforts = ["none", "off", "low", "medium", "high", "xhigh", "max", "ultra"];
+  const persistedEfforts = ["off", "low", "medium", "high", "xhigh", "max", "ultra"];
+  const supported = new Set(acceptedEfforts);
+  const server = await listen(http.createServer(async (req, res) => {
+    if (req.method === "GET") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        data: [{
+          id: modelId,
+          reasoningEfforts: ["off", "xhigh"],
+          defaultReasoningEffort: "xhigh"
+        }]
+      }));
+      return;
+    }
+    const body = await readDashboardRequestJson(req);
+    const effort = String(body.reasoning?.effort ?? "");
+    if (!supported.has(effort)) {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "unsupported effort", param: "reasoning.effort" } }));
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ id: `probe-${effort}`, output: [] }));
+  }), "127.0.0.1", 0);
+  const gatewayUrl = `http://127.0.0.1:${server.address().port}/v1/responses`;
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: home } });
+
+  try {
+    const initial = await runtime.status();
+    const identity = {
+      saveTarget: "global",
+      expectedRevision: initial.configV2.revisions.global,
+      expectedCredentialsRevision: initial.configV2.revisions.credentials,
+      clientId: "active-reasoning-proof-client",
+      gatewayUrl,
+      gatewayProtocol: "openai-responses",
+      credentialAction: "keep"
+    };
+    const catalog = await runtime.probeGateway(identity);
+    assert.equal(catalog.ok, true);
+    assert.equal(catalog.models[0].reasoningDiscovery.source, "upstream-metadata");
+    const stale = await runtime.probeModelCapabilities({
+      ...identity,
+      gatewayDiscoveryToken: "forged-discovery-token",
+      modelId
+    });
+    assert.equal(stale.ok, false);
+    assert.equal(stale.code, "GATEWAY_DISCOVERY_STALE");
+
+    const probed = await runtime.probeModelCapabilities({
+      ...identity,
+      gatewayDiscoveryToken: catalog.discoveryToken,
+      modelId
+    });
+    assert.equal(probed.ok, true);
+    assert.equal(probed.outcome, "complete");
+    assert.deepEqual(probed.acceptedEfforts, acceptedEfforts);
+    assert.deepEqual(probed.reasoningEfforts.map((effort) => effort.id ?? effort), persistedEfforts);
+    assert.equal(probed.defaultReasoningEffort, "xhigh");
+    assert.match(probed.discoveryToken, /^[A-Za-z0-9_-]{32,}$/);
+
+    const saved = await runtime.saveModelConfig({
+      ...identity,
+      gatewayDiscoveryToken: probed.discoveryToken,
+      modelId,
+      reasoningEfforts: probed.reasoningEfforts,
+      defaultReasoningEffort: probed.defaultReasoningEffort,
+      switchToModel: true
+    });
+    assert.equal(saved.ok, true, `${saved.status}: ${saved.error}`);
+
+    const document = JSON.parse(await fs.readFile(settingsPath, "utf8"));
+    const model = document.namespaces["model-providers"].providers[saved.providerId].models
+      .find((candidate) => candidate.id === modelId);
+    assert.deepEqual(model.compat?.reasoningDiscovery, {
+      source: "active-probe",
+      confidence: "probed",
+      path: "reasoning.effort",
+      presetId: null
+    });
+
+    const restarted = await createDashboardRuntime({ cwd, env: { USERPROFILE: home } }).status();
+    const restartedModel = restarted.models.find((candidate) => candidate.id === modelId);
+    assert.deepEqual(restartedModel.reasoningEfforts.map((effort) => effort.id ?? effort), persistedEfforts);
+    assert.equal(restartedModel.defaultReasoningEffort, "xhigh");
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard gateway discovery proof expires and becomes stale after any bound config revision changes", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-discovery-stale-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-discovery-stale-"));
+  const settingsPath = path.join(home, ".ant-code", "settings.json");
+  await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+  await fs.writeFile(settingsPath, JSON.stringify({ settingsVersion: 2, namespaces: {} }), "utf8");
+  const server = await listen(http.createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ data: [{ id: "catalog-model" }] }));
+  }), "127.0.0.1", 0);
+  const gatewayUrl = `http://127.0.0.1:${server.address().port}/v1/responses`;
+  let now = 1_000;
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: { USERPROFILE: home },
+    gatewayDiscoveryTtlMs: 50,
+    gatewayDiscoveryNow: () => now
+  });
+  const initialStatus = await runtime.status();
+  const identity = {
+    saveTarget: "global",
+    expectedRevision: initialStatus.configV2.revisions.global,
+    expectedCredentialsRevision: initialStatus.configV2.revisions.credentials,
+    clientId: "stale-client",
+    gatewayUrl,
+    gatewayProtocol: "openai-responses",
+    credentialAction: "keep"
+  };
+
+  try {
+    const expiring = await runtime.probeGateway(identity);
+    now += 51;
+    const expired = await runtime.saveModelConfig({
+      ...identity,
+      gatewayDiscoveryToken: expiring.discoveryToken,
+      modelId: "catalog-model"
+    });
+    assert.equal(expired.status, 409);
+    assert.equal(expired.code, "GATEWAY_DISCOVERY_STALE");
+
+    const revisionBound = await runtime.probeGateway(identity);
+    const unrelated = await runtime.saveModelConfig({
+      saveTarget: "global",
+      expectedRevision: initialStatus.configV2.revisions.global,
+      expectedCredentialsRevision: initialStatus.configV2.revisions.credentials,
+      clientId: "other-client",
+      gatewayUrl: "https://other-proof.example/v1/responses",
+      gatewayProtocol: "openai-responses",
+      credentialAction: "keep",
+      modelId: "other-model",
+      switchToModel: true
+    });
+    assert.equal(unrelated.ok, true);
+    const staleRevision = await runtime.saveModelConfig({
+      ...identity,
+      gatewayDiscoveryToken: revisionBound.discoveryToken,
+      modelId: "catalog-model"
+    });
+    assert.equal(staleRevision.status, 409);
+    assert.equal(staleRevision.code, "GATEWAY_DISCOVERY_STALE");
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard revalidates discovery proof after waiting for the model transaction lock", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-discovery-lock-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-discovery-lock-"));
+  const settingsPath = path.join(home, ".ant-code", "settings.json");
+  const projectPath = path.join(cwd, ".lab-agent", "settings.json");
+  const credentialPath = path.join(home, ".ant-code", "credentials.json");
+  await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+  await fs.writeFile(settingsPath, JSON.stringify({ settingsVersion: 2, namespaces: {} }), "utf8");
+  const server = await listen(http.createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      data: [{ id: "catalog-main" }, {
+        id: "catalog-worker",
+        display_name: "Catalog Worker",
+        context_window: 262_144,
+        input_modalities: ["text", "image"]
+      }]
+    }));
+  }), "127.0.0.1", 0);
+  const gatewayUrl = `http://127.0.0.1:${server.address().port}/v1/responses`;
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: home } });
+  const lockTarget = path.join(home, ".ant-code", "model-settings-v2.transaction");
+  const heldLocks = [];
+
+  /** @returns {Promise<{ release: () => void; completion: Promise<any> }>} */
+  async function holdModelTransaction() {
+    const acquired = deferred();
+    const gate = deferred();
+    const completion = withConfigMutationLock(lockTarget, async () => {
+      acquired.resolve();
+      await gate.promise;
+    });
+    await acquired.promise;
+    const held = { release: gate.resolve, completion };
+    heldLocks.push(held);
+    return held;
+  }
+
+  /** @param {Record<string, any>} status @param {string} token */
+  function saveInput(status, token) {
+    return {
+      saveTarget: "global",
+      expectedRevision: status.configV2.revisions.global,
+      expectedCredentialsRevision: status.configV2.revisions.credentials,
+      clientId: "locked-proof-client",
+      gatewayUrl,
+      gatewayProtocol: "openai-responses",
+      credentialAction: "keep",
+      gatewayDiscoveryToken: token,
+      modelId: "CATALOG-MAIN",
+      agentCheapModel: "CATALOG-WORKER",
+      agentDefaultModel: "catalog-main",
+      agentStrongModel: "catalog-worker",
+      switchToModel: true
+    };
+  }
+
+  try {
+    const initial = await runtime.status();
+    const projectProof = await runtime.probeGateway({
+      saveTarget: "global",
+      clientId: "locked-proof-client",
+      gatewayUrl,
+      gatewayProtocol: "openai-responses",
+      credentialAction: "keep"
+    });
+    const firstLock = await holdModelTransaction();
+    let projectSaveSettled = false;
+    const projectSave = runtime.saveModelConfig(saveInput(initial, projectProof.discoveryToken))
+      .finally(() => { projectSaveSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(projectSaveSettled, false);
+    await createFileRepository({ filePath: projectPath }).replace(
+      { settingsVersion: 2, namespaces: {} },
+      { expectedRevision: "missing" }
+    );
+    firstLock.release();
+    await firstLock.completion;
+    const staleProject = await projectSave;
+    assert.equal(staleProject.ok, false);
+    assert.equal(staleProject.status, 409);
+    assert.equal(staleProject.code, "GATEWAY_DISCOVERY_STALE");
+    assert.doesNotMatch(await fs.readFile(settingsPath, "utf8"), /catalog-main|catalog-worker/i);
+
+    const afterProject = await runtime.status();
+    const credentialProof = await runtime.probeGateway({
+      saveTarget: "global",
+      clientId: "locked-proof-client",
+      gatewayUrl,
+      gatewayProtocol: "openai-responses",
+      credentialAction: "keep"
+    });
+    const secondLock = await holdModelTransaction();
+    let credentialSaveSettled = false;
+    const credentialSave = runtime.saveModelConfig(saveInput(afterProject, credentialProof.discoveryToken))
+      .finally(() => { credentialSaveSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(credentialSaveSettled, false);
+    await createCredentialStore({ filePath: credentialPath }).set(
+      "ANTCODE_CONCURRENT_DISCOVERY_TEST",
+      "concurrent-secret",
+      { expectedRevision: afterProject.configV2.revisions.credentials }
+    );
+    secondLock.release();
+    await secondLock.completion;
+    const staleCredential = await credentialSave;
+    assert.equal(staleCredential.ok, false);
+    assert.equal(staleCredential.status, 409);
+    assert.equal(staleCredential.code, "GATEWAY_DISCOVERY_STALE");
+    assert.doesNotMatch(await fs.readFile(settingsPath, "utf8"), /catalog-main|catalog-worker/i);
+  } finally {
+    for (const held of heldLocks) held.release();
+    await Promise.allSettled(heldLocks.map((held) => held.completion));
+    await close(server);
+  }
+});
+
+test("dashboard keeps explicit manual agent ids across an edited provider endpoint without treating browser catalogs as evidence", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-manual-endpoint-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-manual-endpoint-"));
+  const settingsPath = path.join(home, ".ant-code", "settings.json");
+  await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+  await fs.writeFile(settingsPath, JSON.stringify({ settingsVersion: 2, namespaces: {} }), "utf8");
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: home } });
+  const initialStatus = await runtime.status();
+  const created = await runtime.saveModelConfig({
+    saveTarget: "global",
+    expectedRevision: initialStatus.configV2.revisions.global,
+    expectedCredentialsRevision: initialStatus.configV2.revisions.credentials,
+    gatewayUrl: "https://old-manual.example/v1/responses",
+    gatewayProtocol: "openai-responses",
+    credentialAction: "keep",
+    modelId: "manual-main",
+    switchToModel: true
+  });
+  assert.equal(created.ok, true);
+
+  const changed = await runtime.saveModelConfig({
+    saveTarget: "global",
+    expectedRevision: created.configRevisions.global,
+    expectedCredentialsRevision: created.configRevisions.credentials,
+    profileId: created.providerId,
+    providerId: created.providerId,
+    previousModelId: "manual-main",
+    gatewayUrl: "https://new-manual.example/v1/responses",
+    gatewayProtocol: "openai-responses",
+    credentialAction: "keep",
+    modelId: "manual-main",
+    agentCheapModel: "gpt-5.6-sol",
+    agentDefaultModel: "manual-main",
+    agentStrongModel: "gpt-5.6-sol",
+    visionAgentModel: "manual-vision",
+    manualAgentModelIds: ["gpt-5.6-sol", "manual-vision"],
+    catalogModelIds: ["gpt-5.6-sol", "manual-vision"],
+    catalogModels: [{
+      id: "gpt-5.6-sol",
+      reasoningEfforts: ["max"],
+      defaultReasoningEffort: "max"
+    }, {
+      id: "manual-vision",
+      modalities: ["text", "image"],
+      contextTokens: 999_999
+    }],
+    switchToModel: false
+  });
+  assert.equal(changed.ok, true, `${changed.status}: ${changed.error}`);
+
+  const document = JSON.parse(await fs.readFile(settingsPath, "utf8"));
+  const provider = document.namespaces["model-providers"].providers[created.providerId];
+  assert.deepEqual(provider.agents.modelTiers, {
+    cheap: "gpt-5.6-sol",
+    default: "manual-main",
+    strong: "gpt-5.6-sol"
+  });
+  assert.equal(provider.agents.vision.model, "manual-vision");
+  assert.deepEqual(provider.models.find((model) => model.id === "gpt-5.6-sol"), {
+    id: "gpt-5.6-sol",
+    displayName: "gpt-5.6-sol",
+    compat: { routingOnly: true }
+  });
+  assert.deepEqual(provider.models.find((model) => model.id === "manual-vision"), {
+    id: "manual-vision",
+    displayName: "manual-vision",
+    compat: { routingOnly: true }
+  });
+});
+
+test("dashboard catalog discovery rejects redirects without forwarding credentials", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-catalog-redirect-"));
+  let redirectRequests = 0;
+  let targetRequests = 0;
+  const target = await listen(http.createServer((_req, res) => {
+    targetRequests += 1;
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ data: [{ id: "must-not-be-reached" }] }));
+  }), "127.0.0.1", 0);
+  const targetUrl = `http://127.0.0.1:${target.address().port}/v1/models`;
+  const redirect = await listen(http.createServer((req, res) => {
+    redirectRequests += 1;
+    assert.equal(req.headers.authorization, "Bearer catalog-secret");
+    res.writeHead(307, { location: targetUrl });
+    res.end();
+  }), "127.0.0.1", 0);
+  const origin = `http://127.0.0.1:${redirect.address().port}`;
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+
+  try {
+    const result = await runtime.probeGateway({
+      gatewayUrl: `${origin}/v1?access_token=query-secret&tenant=visible`,
+      gatewayProtocol: "openai-responses",
+      gatewayApiKey: "catalog-secret",
+      credentialAction: "replace"
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 502);
+    assert.match(result.error, /重定向/);
+    assert.equal(result.diagnostic.stage, "redirect");
+    assert.equal(result.diagnostic.httpStatus, 307);
+    assert.equal(
+      result.diagnostic.modelsUrl,
+      `${origin}/v1/models?access_token=%5Bredacted%5D&tenant=visible`
+    );
+    assert.equal(redirectRequests, 1);
+    assert.equal(targetRequests, 0);
+    assert.doesNotMatch(JSON.stringify(result), /query-secret|catalog-secret/);
+  } finally {
+    await close(redirect);
+    await close(target);
+  }
+});
+
+test("dashboard catalog inference combines declared metadata with exact Grok and DeepSeek presets using only GET", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-catalog-reasoning-"));
+  const requests = [];
+  const server = await listen(http.createServer((req, res) => {
+    requests.push({ method: req.method, url: req.url });
+    const catalog = new URL(req.url, "http://catalog.test").searchParams.get("catalog");
+    const data = catalog === "deepseek"
+      ? [
+          { id: "deepseek-v4-pro" },
+          { id: "deepseek-v4-pro-plus" }
+        ]
+      : [
+          {
+            id: "metadata-model",
+            capabilities: {
+              reasoning: { efforts: ["minimal", "high"], default: "high" }
+            }
+          },
+          { id: "grok-4.6" },
+          { id: "grok-4.6-preview" }
+        ];
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ data }));
+  }), "127.0.0.1", 0);
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+
+  try {
+    const grokCatalog = await runtime.probeGateway({
+      gatewayUrl: `${origin}/v1?catalog=grok`,
+      gatewayProtocol: "openai-responses"
+    });
+    const deepSeekCatalog = await runtime.probeGateway({
+      gatewayUrl: `${origin}/v1?catalog=deepseek`,
+      gatewayProtocol: "openai-chat"
+    });
+
+    assert.equal(grokCatalog.ok, true);
+    const metadata = grokCatalog.models.find((model) => model.id === "metadata-model");
+    assert.deepEqual(metadata.reasoningEfforts.map((effort) => effort.id), ["minimal", "high"]);
+    assert.equal(metadata.defaultReasoningEffort, "high");
+    assert.equal(metadata.reasoningDiscovery.source, "upstream-metadata");
+    const grok = grokCatalog.models.find((model) => model.id === "grok-4.6");
+    assert.deepEqual(grok.reasoningEfforts.map((effort) => effort.id), ["low", "medium", "high", "xhigh"]);
+    assert.equal(grok.reasoningDiscovery.presetId, "xai.grok-4.5-4.6");
+    assert.equal(grokCatalog.models.find((model) => model.id === "grok-4.6-preview").reasoningDiscovery.source, "unknown");
+
+    assert.equal(deepSeekCatalog.ok, true);
+    const deepSeek = deepSeekCatalog.models.find((model) => model.id === "deepseek-v4-pro");
+    assert.deepEqual(deepSeek.reasoningEfforts.map((effort) => effort.id), ["off", "high", "max"]);
+    assert.equal(deepSeek.defaultReasoningEffort, "high");
+    assert.equal(deepSeek.reasoningDiscovery.presetId, "deepseek.v4-pro");
+    assert.equal(deepSeekCatalog.models.find((model) => model.id === "deepseek-v4-pro-plus").reasoningDiscovery.source, "unknown");
+    assert.deepEqual(requests, [
+      { method: "GET", url: "/v1/models?catalog=grok" },
+      { method: "GET", url: "/v1/models?catalog=deepseek" }
+    ]);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard capability probe stops after one accepted invalid effort and discards generated text", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-capability-silent-ignore-"));
+  const requests = [];
+  const generatedText = "generated text that must never leave the probe";
+  const server = await listen(http.createServer(async (req, res) => {
+    requests.push(await readDashboardRequestJson(req));
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      id: "ignored-reasoning-field",
+      choices: [{ message: { role: "assistant", content: generatedText } }]
+    }));
+  }), "127.0.0.1", 0);
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+
+  try {
+    const result = await runtime.probeModelCapabilities({
+      gatewayUrl: `${origin}/v1/chat/completions`,
+      gatewayProtocol: "openai-chat",
+      modelId: "silent-ignore-model"
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.outcome, "indeterminate");
+    assert.equal(result.diagnostic.requestCount, 1);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].reasoning_effort, "antcode_invalid_effort_probe");
+    assert.deepEqual(result.reasoningEfforts, []);
+    assert.doesNotMatch(JSON.stringify(result), new RegExp(generatedText, "i"));
+    assert.equal(Object.prototype.hasOwnProperty.call(result, "raw"), false);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard chat capability probe requires a structured field then sends reasoning_effort candidates", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-capability-chat-"));
+  const requests = [];
+  const accepted = new Set(["off", "high", "max"]);
+  const server = await listen(http.createServer(async (req, res) => {
+    const body = await readDashboardRequestJson(req);
+    requests.push(body);
+    const effort = body.reasoning_effort;
+    if (effort === "antcode_invalid_effort_probe" || !accepted.has(effort)) {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { type: "invalid_request_error", param: "reasoning_effort" } }));
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "discard me" } }] }));
+  }), "127.0.0.1", 0);
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+
+  try {
+    const result = await runtime.probeModelCapabilities({
+      gatewayUrl: `${origin}/v1/chat/completions`,
+      gatewayProtocol: "openai-chat",
+      modelId: "deepseek-v4-pro"
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.outcome, "complete");
+    assert.deepEqual(result.acceptedEfforts, ["off", "high", "max"]);
+    assert.equal(result.defaultReasoningEffort, "high");
+    assert.equal(result.reasoningDiscovery.path, "reasoning_effort");
+    assert.equal(result.diagnostic.requestCount, 9);
+    assert.deepEqual(requests.map((body) => body.reasoning_effort), [
+      "antcode_invalid_effort_probe",
+      "none",
+      "off",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultra"
+    ]);
+    assert.equal(requests.every((body) => !Object.prototype.hasOwnProperty.call(body, "reasoning")), true);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard Responses capability probe sends reasoning.effort with bearer auth", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-capability-responses-"));
+  const requests = [];
+  const apiKey = "capability-probe-secret";
+  const accepted = new Set(["low", "high", "xhigh"]);
+  const server = await listen(http.createServer(async (req, res) => {
+    const body = await readDashboardRequestJson(req);
+    requests.push({ authorization: req.headers.authorization, body });
+    const effort = body.reasoning?.effort;
+    if (effort === "antcode_invalid_effort_probe" || !accepted.has(effort)) {
+      res.writeHead(422, { "content-type": "application/json" });
+      res.end(JSON.stringify({ detail: [{ loc: ["body", "reasoning", "effort"], type: "enum" }] }));
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ output_text: "discard generated probe output" }));
+  }), "127.0.0.1", 0);
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+
+  try {
+    const result = await runtime.probeModelCapabilities({
+      gatewayUrl: `${origin}/v1/responses`,
+      gatewayProtocol: "openai-responses",
+      gatewayApiKey: apiKey,
+      credentialAction: "replace",
+      modelId: "grok-4.6"
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.outcome, "complete");
+    assert.deepEqual(result.acceptedEfforts, ["low", "high", "xhigh"]);
+    assert.equal(result.defaultReasoningEffort, "high");
+    assert.equal(result.reasoningDiscovery.path, "reasoning.effort");
+    assert.equal(result.apiKeyUsed, true);
+    assert.equal(requests.length, 9);
+    assert.equal(requests.every((request) => request.authorization === `Bearer ${apiKey}`), true);
+    assert.deepEqual(requests.map((request) => request.body.reasoning.effort), [
+      "antcode_invalid_effort_probe",
+      "none",
+      "off",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultra"
+    ]);
+    assert.equal(requests.every((request) => !Object.prototype.hasOwnProperty.call(request.body, "reasoning_effort")), true);
+    assert.doesNotMatch(JSON.stringify(result), /capability-probe-secret|discard generated probe output/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard capability probe stops after a generic validation error", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-capability-generic-error-"));
+  let requestCount = 0;
+  const server = await listen(http.createServer(async (req, res) => {
+    requestCount += 1;
+    await readDashboardRequestJson(req);
+    res.writeHead(400, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: { message: "generic malformed request" } }));
+  }), "127.0.0.1", 0);
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+
+  try {
+    const result = await runtime.probeModelCapabilities({
+      gatewayUrl: `${origin}/v1/chat/completions`,
+      gatewayProtocol: "openai-chat",
+      modelId: "generic-error-model"
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.outcome, "indeterminate");
+    assert.equal(result.negativeControl.status, "indeterminate");
+    assert.equal(result.reasoningDiscovery.path, null);
+    assert.equal(result.diagnostic.requestCount, 1);
+    assert.equal(requestCount, 1);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard capability probe stops after auth and rate-limit responses", async () => {
+  for (const scenario of [
+    { status: 401, stage: "auth", error: "API Key 未通过验证" },
+    { status: 429, stage: "rate-limit", error: "模型来源限制了档位检测请求" }
+  ]) {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), `dashboard-runtime-capability-${scenario.stage}-`));
+    let requestCount = 0;
+    const server = await listen(http.createServer(async (req, res) => {
+      requestCount += 1;
+      await readDashboardRequestJson(req);
+      res.writeHead(scenario.status, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: scenario.error } }));
+    }), "127.0.0.1", 0);
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+
+    try {
+      const result = await runtime.probeModelCapabilities({
+        gatewayUrl: `${origin}/v1/chat/completions`,
+        gatewayProtocol: "openai-chat",
+        modelId: `${scenario.stage}-model`
+      });
+
+      assert.equal(result.ok, false, scenario.stage);
+      assert.equal(result.status, 502, scenario.stage);
+      assert.equal(result.error, scenario.error, scenario.stage);
+      assert.equal(result.diagnostic.stage, scenario.stage, scenario.stage);
+      assert.equal(result.diagnostic.requestCount, 1, scenario.stage);
+      assert.equal(requestCount, 1, scenario.stage);
+    } finally {
+      await close(server);
+    }
+  }
+});
+
+test("dashboard capability probe bounds timeout and oversized errors without retrying", { timeout: 3_000 }, async () => {
+  const timeoutCwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-capability-timeout-"));
+  let timeoutRequests = 0;
+  const timeoutServer = await listen(http.createServer(async (req) => {
+    timeoutRequests += 1;
+    await readDashboardRequestJson(req);
+    // Leave the response pending until the probe's bounded signal aborts it.
+  }), "127.0.0.1", 0);
+  const timeoutOrigin = `http://127.0.0.1:${timeoutServer.address().port}`;
+
+  try {
+    const runtime = createDashboardRuntime({ cwd: timeoutCwd, env: { USERPROFILE: timeoutCwd } });
+    const result = await runtime.probeModelCapabilities({
+      gatewayUrl: `${timeoutOrigin}/v1/chat/completions`,
+      gatewayProtocol: "openai-chat",
+      modelId: "timeout-model",
+      probeTimeoutMs: 25
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.diagnostic.stage, "timeout");
+    assert.equal(result.diagnostic.requestCount, 1);
+    assert.equal(timeoutRequests, 1);
+  } finally {
+    await close(timeoutServer);
+  }
+
+  const oversizedCwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-capability-oversized-"));
+  let oversizedRequests = 0;
+  const oversizedResponseClosed = deferred();
+  const oversizedBody = "x".repeat(2048);
+  const oversizedServer = await listen(http.createServer(async (req, res) => {
+    oversizedRequests += 1;
+    await readDashboardRequestJson(req);
+    res.once("close", () => oversizedResponseClosed.resolve());
+    res.writeHead(400, {
+      "content-type": "application/json",
+      "content-length": Buffer.byteLength(oversizedBody)
+    });
+    res.write(oversizedBody.slice(0, 16));
+    // Keep sending pending; the bounded reader must cancel this response.
+  }), "127.0.0.1", 0);
+  const oversizedOrigin = `http://127.0.0.1:${oversizedServer.address().port}`;
+
+  try {
+    const runtime = createDashboardRuntime({ cwd: oversizedCwd, env: { USERPROFILE: oversizedCwd } });
+    const result = await runtime.probeModelCapabilities({
+      gatewayUrl: `${oversizedOrigin}/v1/responses`,
+      gatewayProtocol: "openai-responses",
+      modelId: "oversized-model",
+      probeMaxResponseBytes: 1024
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.diagnostic.stage, "response-too-large");
+    assert.equal(result.diagnostic.requestCount, 1);
+    assert.equal(oversizedRequests, 1);
+    await oversizedResponseClosed.promise;
+  } finally {
+    oversizedServer.closeAllConnections?.();
+    await close(oversizedServer);
+  }
+});
+
+test("dashboard capability probe stops the upstream request when its caller aborts", { timeout: 3_000 }, async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-capability-cancel-"));
+  const requestStarted = deferred();
+  let requestCount = 0;
+  const server = await listen(http.createServer(async (req) => {
+    requestCount += 1;
+    await readDashboardRequestJson(req);
+    requestStarted.resolve();
+    // Keep the response pending until the caller's signal reaches fetch.
+  }), "127.0.0.1", 0);
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+  const controller = new AbortController();
+
+  try {
+    const probe = runtime.probeModelCapabilities({
+      gatewayUrl: `${origin}/v1/chat/completions`,
+      gatewayProtocol: "openai-chat",
+      modelId: "cancelled-model"
+    }, { signal: controller.signal });
+    await requestStarted.promise;
+    controller.abort(new Error("capability dialog closed"));
+    const result = await probe;
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error, "思考档位检测已取消");
+    assert.equal(result.diagnostic.stage, "cancelled");
+    assert.equal(result.diagnostic.requestCount, 1);
+    assert.equal(requestCount, 1);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard capability probe reports a truncated upstream response separately from size limits", { timeout: 3_000 }, async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-capability-truncated-"));
+  let requestCount = 0;
+  const server = await listen(http.createServer(async (req, res) => {
+    requestCount += 1;
+    await readDashboardRequestJson(req);
+    res.writeHead(400, {
+      "content-type": "application/json",
+      "content-length": 512
+    });
+    res.flushHeaders();
+    res.write('{"error":{"param":"reasoning_effort"');
+    setImmediate(() => res.destroy());
+  }), "127.0.0.1", 0);
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+
+  try {
+    const result = await runtime.probeModelCapabilities({
+      gatewayUrl: `${origin}/v1/chat/completions`,
+      gatewayProtocol: "openai-chat",
+      modelId: "truncated-response-model"
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error, "读取模型来源响应失败");
+    assert.equal(result.diagnostic.stage, "response");
+    assert.equal(result.diagnostic.requestCount, 1);
+    assert.equal(requestCount, 1);
+  } finally {
+    server.closeAllConnections?.();
+    await close(server);
+  }
+});
+
+test("dashboard runtime redacts credentials from public gateway URLs", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-public-gateway-url-"));
+  await fs.mkdir(path.join(cwd, ".lab-agent"), { recursive: true });
+  await fs.writeFile(path.join(cwd, ".lab-agent", "config.json"), JSON.stringify({
+    modelAlias: "safe-model",
+    models: [{ id: "safe-model" }],
+    lab: {
+      gatewayUrl: "https://alice:password@gateway.example/v1?access_token=one&api_key=two&key=three&token=four&authorization=five&tenant=visible",
+      gatewayHealthUrl: "https://health-user:health-password@gateway.example/health?TOKEN=health-secret&check=ready",
+      gatewayProtocol: "openai-responses",
+      activeGatewayProfile: "credential-profile",
+      gatewayProfiles: [{
+        id: "credential-profile",
+        label: "Credential profile",
+        gatewayUrl: "https://alice:password@gateway.example/v1?access_token=one&api_key=two&key=three&token=four&authorization=five&tenant=visible",
+        gatewayHealthUrl: "https://health-user:health-password@gateway.example/health?TOKEN=health-secret&check=ready",
+        gatewayProtocol: "openai-responses",
+        modelAlias: "safe-model",
+        models: [{ id: "safe-model" }]
+      }]
+    }
+  }), "utf8");
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+
+  const result = await runtime.status();
+  const expectedGatewayUrl = "https://gateway.example/v1/responses?access_token=%5Bredacted%5D&api_key=%5Bredacted%5D&key=%5Bredacted%5D&token=%5Bredacted%5D&authorization=%5Bredacted%5D&tenant=visible";
+  const expectedHealthUrl = "https://gateway.example/health?TOKEN=%5Bredacted%5D&check=ready";
+
+  assert.equal(result.gatewayConfig.gatewayUrl, expectedGatewayUrl);
+  assert.equal(result.gatewayConfig.gatewayHealthUrl, expectedHealthUrl);
+  assert.equal(result.gatewayProfiles[0].gatewayUrl, expectedGatewayUrl);
+  assert.equal(result.gatewayProfiles[0].gatewayHealthUrl, expectedHealthUrl);
+  assert.doesNotMatch(JSON.stringify(result.gatewayConfig), /alice|password|health-user|health-password|health-secret|access_token=one/);
+});
+
+test("dashboard gateway probe redacts credential query values from success and diagnostic URLs", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-public-probe-url-"));
+  const requests = [];
+  const server = await listen(http.createServer((req, res) => {
+    requests.push(req.url);
+    if (req.url.includes("fail=true")) {
+      res.writeHead(401, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ data: [{ id: "safe-model" }] }));
+  }), "127.0.0.1", 0);
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+
+  try {
+    const success = await runtime.probeGateway({
+      gatewayUrl: `${origin}/v1?token=probe-secret&tenant=visible`,
+      gatewayProtocol: "openai-responses"
+    });
+    const failure = await runtime.probeGateway({
+      gatewayUrl: `${origin}/v1?authorization=query-secret&fail=true`,
+      gatewayProtocol: "openai-responses"
+    });
+
+    assert.equal(success.ok, true);
+    assert.equal(success.modelsUrl, `${origin}/v1/models?token=%5Bredacted%5D&tenant=visible`);
+    assert.equal(success.suggestedGatewayUrl, `${origin}/v1/responses?token=%5Bredacted%5D&tenant=visible`);
+    assert.equal(failure.ok, false);
+    assert.equal(failure.diagnostic.modelsUrl, `${origin}/v1/models?authorization=%5Bredacted%5D&fail=true`);
+    assert.doesNotMatch(JSON.stringify({ success, failure }), /probe-secret|query-secret/);
+    assert.deepEqual(requests, [
+      "/v1/models?token=probe-secret&tenant=visible",
+      "/v1/models?authorization=query-secret&fail=true"
+    ]);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard gateway probe never sends a selected profile key to a different endpoint", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-probe-key-scope-"));
+  await fs.mkdir(path.join(cwd, ".lab-agent"), { recursive: true });
+  await fs.writeFile(path.join(cwd, ".lab-agent", "config.json"), JSON.stringify({
+    modelAlias: "old-model",
+    models: [{ id: "old-model" }],
+    lab: {
+      gatewayUrl: "https://old.gateway.example/v1/chat/completions",
+      gatewayProtocol: "openai-chat",
+      gatewayApiKey: "old-secret",
+      activeGatewayProfile: "old-profile",
+      gatewayProfiles: [{
+        id: "old-profile",
+        gatewayUrl: "https://old.gateway.example/v1/chat/completions",
+        gatewayProtocol: "openai-chat",
+        gatewayApiKey: "old-secret",
+        modelAlias: "old-model",
+        models: [{ id: "old-model" }]
+      }]
+    }
+  }), "utf8");
+  const requests = [];
+  const server = await listen(http.createServer((req, res) => {
+    requests.push({ url: req.url, authorization: req.headers.authorization });
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ data: [{ id: "new-model" }] }));
+  }), "127.0.0.1", 0);
+  const baseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+
+  try {
+    const result = await runtime.probeGateway({
+      profileId: "old-profile",
+      gatewayUrl: baseUrl,
+      gatewayProtocol: "openai-chat",
+      previousGatewayUrl: "https://old.gateway.example/v1/chat/completions",
+      previousGatewayProtocol: "openai-chat",
+      credentialAction: "keep"
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.apiKeyUsed, false);
+    assert.deepEqual(requests, [{ url: "/v1/models", authorization: undefined }]);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard gateway probe reuses the selected key for a same-origin endpoint migration", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-probe-key-migration-"));
+  const requests = [];
+  const server = await listen(http.createServer((req, res) => {
+    requests.push({ url: req.url, authorization: req.headers.authorization });
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ data: [{ id: "responses-model" }] }));
+  }), "127.0.0.1", 0);
+  const baseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+  await fs.mkdir(path.join(cwd, ".lab-agent"), { recursive: true });
+  await fs.writeFile(path.join(cwd, ".lab-agent", "config.json"), JSON.stringify({
+    modelAlias: "chat-model",
+    models: [{ id: "chat-model" }],
+    lab: {
+      gatewayUrl: baseUrl,
+      gatewayProtocol: "openai-chat",
+      gatewayApiKey: "stored-secret",
+      activeGatewayProfile: "chat-profile",
+      gatewayProfiles: [{
+        id: "chat-profile",
+        gatewayUrl: baseUrl,
+        gatewayProtocol: "openai-chat",
+        gatewayApiKey: "stored-secret",
+        modelAlias: "chat-model",
+        models: [{ id: "chat-model" }]
+      }]
+    }
+  }), "utf8");
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+
+  try {
+    const result = await runtime.probeGateway({
+      profileId: "chat-profile",
+      gatewayUrl: `${baseUrl}/responses`,
+      gatewayProtocol: "openai-responses",
+      previousGatewayUrl: baseUrl,
+      previousGatewayProtocol: "openai-chat",
+      credentialAction: "keep"
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.apiKeyUsed, true);
+    assert.deepEqual(requests, [{ url: "/v1/models", authorization: "Bearer stored-secret" }]);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard gateway probe reuses a key for the exact stored base endpoint", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-probe-base-key-"));
+  const requests = [];
+  const server = await listen(http.createServer((req, res) => {
+    requests.push({ url: req.url, authorization: req.headers.authorization });
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ data: [{ id: "responses-model" }] }));
+  }), "127.0.0.1", 0);
+  const baseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+  await fs.mkdir(path.join(cwd, ".lab-agent"), { recursive: true });
+  await fs.writeFile(path.join(cwd, ".lab-agent", "config.json"), JSON.stringify({
+    modelAlias: "responses-model",
+    models: [{ id: "responses-model" }],
+    lab: {
+      gatewayUrl: baseUrl,
+      gatewayProtocol: "openai-responses",
+      gatewayApiKey: "stored-secret",
+      activeGatewayProfile: "responses-profile",
+      gatewayProfiles: [{
+        id: "responses-profile",
+        gatewayUrl: baseUrl,
+        gatewayProtocol: "openai-responses",
+        gatewayApiKey: "stored-secret",
+        modelAlias: "responses-model",
+        models: [{ id: "responses-model" }]
+      }]
+    }
+  }), "utf8");
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+
+  try {
+    const result = await runtime.probeGateway({
+      profileId: "responses-profile",
+      gatewayUrl: baseUrl,
+      gatewayProtocol: "openai-responses",
+      credentialAction: "keep"
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.apiKeyUsed, true);
+    assert.equal(result.suggestedGatewayUrl, `${baseUrl}/responses`);
+    assert.deepEqual(requests, [{ url: "/v1/models", authorization: "Bearer stored-secret" }]);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard gateway probe uses Anthropic headers and suggests the Messages endpoint", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-probe-anthropic-"));
+  const requests = [];
+  const server = await listen(http.createServer((req, res) => {
+    requests.push({
+      url: req.url,
+      authorization: req.headers.authorization,
+      apiKey: req.headers["x-api-key"],
+      version: req.headers["anthropic-version"]
+    });
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ data: [{ id: "claude-test" }] }));
+  }), "127.0.0.1", 0);
+  const baseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+
+  try {
+    const result = await runtime.probeGateway({
+      gatewayUrl: baseUrl,
+      gatewayProtocol: "anthropic-messages",
+      gatewayApiKey: "anthropic-secret",
+      credentialAction: "replace"
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.modelsUrl, `${baseUrl}/models`);
+    assert.equal(result.suggestedGatewayUrl, `${baseUrl}/messages`);
+    assert.deepEqual(requests, [{
+      url: "/v1/models",
+      authorization: undefined,
+      apiKey: "anthropic-secret",
+      version: "2023-06-01"
+    }]);
+  } finally {
+    await close(server);
+  }
+});
+
 test("dashboard runtime can apply model agent defaults when switching", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
   await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
@@ -500,6 +2535,10 @@ test("dashboard runtime defaults model gateway config to the user global store",
   assert.equal(saved.gatewayConfig.gatewayUrl, "https://global.gateway.example/v1/chat/completions");
   assert.equal(saved.gatewayConfig.sources.gatewayUrl.type, "global");
   assert.equal(saved.gatewayConfig.globalConfigPath, path.join(home, ".ant-code", "lab-agent.config.json"));
+  assert.equal(saved.gatewayProfiles.length, 1);
+  assert.equal(saved.gatewayProfiles[0].ownerScope, "global");
+  assert.equal(saved.gatewayProfiles[0].saveTarget, "global");
+  assert.equal(saved.gatewayProfiles[0].editable, true);
 
   const global = JSON.parse(await fs.readFile(path.join(home, ".ant-code", "lab-agent.config.json"), "utf8"));
   assert.equal(global.modelAlias, "global-model");
@@ -512,6 +2551,111 @@ test("dashboard runtime defaults model gateway config to the user global store",
   assert.equal(status.sessionStatus.model, "global-model");
   assert.equal(status.gatewayConfig.gatewayUrl, "https://global.gateway.example/v1/chat/completions");
   assert.equal(status.gatewayConfig.sources.gatewayUrl.type, "global");
+  assert.equal(status.gatewayProfiles[0].ownerScope, "global");
+  assert.equal(status.gatewayProfiles[0].saveTarget, "global");
+});
+
+test("dashboard preserves a global profile identity and credential when its URL is edited", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-edit-global-profile-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-edit-global-profile-"));
+  const globalPath = path.join(home, ".ant-code", "lab-agent.config.json");
+  const profileId = "stable-global-profile";
+  await fs.mkdir(path.dirname(globalPath), { recursive: true });
+  await fs.writeFile(globalPath, JSON.stringify({
+    modelAlias: "stable-model",
+    models: [{ id: "stable-model" }],
+    lab: {
+      gatewayUrl: "https://same-origin.gateway.example/v1/chat/completions",
+      gatewayProtocol: "openai-chat",
+      gatewayApiKey: "stable-global-key",
+      activeGatewayProfile: profileId,
+      gatewayProfiles: [{
+        id: profileId,
+        gatewayUrl: "https://same-origin.gateway.example/v1/chat/completions",
+        gatewayProtocol: "openai-chat",
+        gatewayApiKey: "stable-global-key",
+        modelAlias: "stable-model",
+        models: [{ id: "stable-model" }]
+      }]
+    }
+  }), "utf8");
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: home } });
+
+  const initial = await runtime.status();
+  assert.equal(initial.gatewayProfiles.find((profile) => profile.id === profileId)?.saveTarget, "global");
+
+  const saved = await runtime.saveModelConfig({
+    saveTarget: "global",
+    profileId,
+    gatewayUrl: "https://same-origin.gateway.example/v1/responses",
+    gatewayProtocol: "openai-responses",
+    credentialAction: "keep",
+    previousGatewayUrl: "https://incorrect-client-value.example/v1",
+    previousGatewayProtocol: "openai-chat",
+    modelId: "stable-model",
+    switchToModel: true
+  });
+
+  assert.equal(saved.ok, true);
+  assert.equal(saved.gatewayProfiles.length, 1);
+  assert.equal(saved.gatewayProfiles[0].id, profileId);
+  assert.equal(saved.gatewayProfiles[0].gatewayUrl, "https://same-origin.gateway.example/v1/responses");
+  assert.equal(saved.gatewayProfiles[0].gatewayProtocol, "openai-responses");
+  assert.equal(saved.gatewayProfiles[0].apiKeyConfigured, true);
+  assert.equal(saved.gatewayProfiles[0].saveTarget, "global");
+
+  const global = JSON.parse(await fs.readFile(globalPath, "utf8"));
+  assert.equal(global.lab.activeGatewayProfile, profileId);
+  assert.equal(global.lab.gatewayProfiles.length, 1);
+  assert.equal(global.lab.gatewayProfiles[0].id, profileId);
+  assert.equal(global.lab.gatewayProfiles[0].gatewayUrl, "https://same-origin.gateway.example/v1/responses");
+  assert.equal(global.lab.gatewayProfiles[0].gatewayApiKey, "stable-global-key");
+  assert.equal(global.lab.gatewayProfiles.some((profile) => profile.gatewayUrl.includes("chat/completions")), false);
+});
+
+test("dashboard refuses to migrate a global profile credential into project scope", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-cross-scope-profile-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-cross-scope-profile-"));
+  const globalPath = path.join(home, ".ant-code", "lab-agent.config.json");
+  const profileId = "global-only-profile";
+  await fs.mkdir(path.dirname(globalPath), { recursive: true });
+  await fs.writeFile(globalPath, JSON.stringify({
+    modelAlias: "global-only-model",
+    models: [{ id: "global-only-model" }],
+    lab: {
+      gatewayUrl: "https://scope.gateway.example/v1/chat/completions",
+      gatewayProtocol: "openai-chat",
+      gatewayApiKey: "global-only-key",
+      activeGatewayProfile: profileId,
+      gatewayProfiles: [{
+        id: profileId,
+        gatewayUrl: "https://scope.gateway.example/v1/chat/completions",
+        gatewayProtocol: "openai-chat",
+        gatewayApiKey: "global-only-key",
+        modelAlias: "global-only-model",
+        models: [{ id: "global-only-model" }]
+      }]
+    }
+  }), "utf8");
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: home } });
+
+  const saved = await runtime.saveModelConfig({
+    saveTarget: "project",
+    profileId,
+    gatewayUrl: "https://scope.gateway.example/v1/responses",
+    gatewayProtocol: "openai-responses",
+    credentialAction: "keep",
+    modelId: "global-only-model",
+    switchToModel: true
+  });
+
+  assert.equal(saved.ok, false);
+  assert.equal(saved.status, 400);
+  assert.match(saved.error, /全局配置/);
+  await assert.rejects(fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"), /ENOENT/);
+  const global = JSON.parse(await fs.readFile(globalPath, "utf8"));
+  assert.equal(global.lab.gatewayProfiles[0].gatewayApiKey, "global-only-key");
+  assert.equal(global.lab.gatewayProfiles[0].gatewayUrl, "https://scope.gateway.example/v1/chat/completions");
 });
 
 test("dashboard keeps a global key effective when the same project profile stored null", async () => {
@@ -528,7 +2672,14 @@ test("dashboard keeps a global key effective when the same project profile store
       gatewayProtocol: "openai-chat",
       gatewayApiKey: "global-key",
       activeGatewayProfile: profileId,
-      gatewayProfiles: [{ id: profileId, gatewayUrl, gatewayProtocol: "openai-chat", gatewayApiKey: "global-key", modelAlias: "shared-model", models: [{ id: "shared-model" }] }]
+      gatewayProfiles: [{
+        id: profileId,
+        gatewayUrl,
+        gatewayProtocol: "openai-chat",
+        gatewayApiKey: "global-key",
+        modelAlias: "shared-model",
+        models: [{ id: "shared-model" }]
+      }]
     }
   }), "utf8");
   await fs.mkdir(path.join(cwd, ".lab-agent"), { recursive: true });
@@ -540,7 +2691,14 @@ test("dashboard keeps a global key effective when the same project profile store
       gatewayProtocol: "openai-chat",
       gatewayApiKey: null,
       activeGatewayProfile: profileId,
-      gatewayProfiles: [{ id: profileId, gatewayUrl, gatewayProtocol: "openai-chat", gatewayApiKey: null, modelAlias: "shared-model", models: [{ id: "shared-model" }] }]
+      gatewayProfiles: [{
+        id: profileId,
+        gatewayUrl,
+        gatewayProtocol: "openai-chat",
+        gatewayApiKey: null,
+        modelAlias: "shared-model",
+        models: [{ id: "shared-model" }]
+      }]
     }
   }), "utf8");
   const runtime = createDashboardRuntime({
@@ -556,6 +2714,8 @@ test("dashboard keeps a global key effective when the same project profile store
   const status = await runtime.status();
   assert.equal(status.gatewayConfig.apiKeyConfigured, true);
   assert.equal(status.gatewayConfig.sources.apiKey.type, "global");
+  assert.equal(status.gatewayProfiles.find((profile) => profile.id === profileId)?.ownerScope, "project");
+  assert.equal(status.gatewayProfiles.find((profile) => profile.id === profileId)?.saveTarget, "project");
   const switched = await runtime.switchGatewayProfile({ profileId });
   assert.equal(switched.gatewayConfig.apiKeyConfigured, true);
 
@@ -683,11 +2843,11 @@ test("dashboard keeps a global model visible when the project uses the same gate
     switchToModel: true
   });
 
-  assert.deepEqual(saved.models.map((model) => model.id), ["deepseek-v4-flash", "deepseek-v4-pro"]);
+  assert.deepEqual(saved.models.map((model) => model.id).sort(), ["deepseek-v4-flash", "deepseek-v4-pro"]);
   const switched = await runtime.switchModel({ modelId: "deepseek-v4-flash" });
-  assert.deepEqual(switched.models.map((model) => model.id), ["deepseek-v4-flash", "deepseek-v4-pro"]);
+  assert.deepEqual(switched.models.map((model) => model.id).sort(), ["deepseek-v4-flash", "deepseek-v4-pro"]);
   const refreshed = await runtime.status();
-  assert.deepEqual(refreshed.models.map((model) => model.id), ["deepseek-v4-flash", "deepseek-v4-pro"]);
+  assert.deepEqual(refreshed.models.map((model) => model.id).sort(), ["deepseek-v4-flash", "deepseek-v4-pro"]);
 });
 
 test("dashboard runtime refreshes idle active session after saving gateway key", async () => {
@@ -794,26 +2954,26 @@ test("dashboard runtime preserves running context usage when saving model window
 test("dashboard runtime switches gateway profiles without mixing previous provider models", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
   await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
-    modelAlias: "alpha-pro",
+    modelAlias: "mimo-pro",
     models: [
-      { id: "alpha-pro", label: "Alpha Pro", modalities: ["text"] },
-      { id: "alpha-vision", label: "Alpha Vision", modalities: ["text", "image"] }
+      { id: "mimo-pro", label: "MiMo Pro", modalities: ["text"] },
+      { id: "mimo-vision", label: "MiMo Vision", modalities: ["text", "image"] }
     ],
     lab: {
-      gatewayUrl: "https://alpha-gateway.example/v1/chat/completions",
+      gatewayUrl: "https://mimo.example/v1/chat/completions",
       gatewayProtocol: "openai-chat",
-      gatewayApiKey: "alpha-key"
+      gatewayApiKey: "mimo-key"
     },
     agents: {
       modelTiers: {
-        cheap: "alpha-vision",
-        default: "alpha-vision",
-        strong: "alpha-vision",
-        vision: "alpha-vision"
+        cheap: "mimo-vision",
+        default: "mimo-vision",
+        strong: "mimo-vision",
+        vision: "mimo-vision"
       },
       vision: {
         enabled: true,
-        model: "alpha-vision",
+        model: "mimo-vision",
         autoUseWhenMainModelTextOnly: true
       }
     }
@@ -822,87 +2982,40 @@ test("dashboard runtime switches gateway profiles without mixing previous provid
 
   const saved = await runtime.saveModelConfig({
     saveTarget: "project",
-    gatewayUrl: "https://beta-gateway.example/v1/chat/completions",
+    gatewayUrl: "https://deepseek.example/v1/chat/completions",
     gatewayProtocol: "openai-chat",
-    gatewayApiKey: "beta-key",
-    modelId: "beta-chat",
-    label: "Beta Chat",
+    gatewayApiKey: "deepseek-key",
+    modelId: "deepseek-chat",
+    label: "DeepSeek Chat",
     modalities: ["text"],
     switchToModel: true
   });
 
   assert.equal(saved.ok, true);
-  assert.equal(saved.sessionStatus.model, "beta-chat");
-  assert.deepEqual(saved.models.map((model) => model.id), ["beta-chat"]);
+  assert.equal(saved.sessionStatus.model, "deepseek-chat");
+  assert.deepEqual(saved.models.map((model) => model.id), ["deepseek-chat"]);
   assert.equal(saved.gatewayProfiles.length, 2);
-  assert.equal(saved.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("beta-gateway"))?.current, true);
-  assert.equal(saved.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("alpha-gateway"))?.modelCount, 2);
+  assert.equal(saved.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("deepseek"))?.current, true);
+  assert.equal(saved.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("mimo"))?.modelCount, 2);
 
   const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
-  assert.deepEqual(local.models.map((model) => model.id), ["beta-chat"]);
+  assert.deepEqual(local.models.map((model) => model.id), ["deepseek-chat"]);
   assert.equal(local.agents.vision.enabled, false);
   assert.equal(local.agents.vision.model, null);
   assert.equal(local.agents.modelTiers.vision, undefined);
 
-  const alphaProfile = saved.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("alpha-gateway"));
-  const switched = await runtime.switchGatewayProfile({ profileId: alphaProfile.id });
+  const mimoProfile = saved.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("mimo"));
+  const switched = await runtime.switchGatewayProfile({ profileId: mimoProfile.id });
 
   assert.equal(switched.ok, true);
-  assert.equal(switched.gatewayConfig.gatewayUrl, "https://alpha-gateway.example/v1/chat/completions");
-  assert.deepEqual(switched.models.map((model) => model.id), ["alpha-pro", "alpha-vision"]);
-  assert.equal(switched.sessionStatus.model, "alpha-pro");
+  assert.equal(switched.gatewayConfig.gatewayUrl, "https://mimo.example/v1/chat/completions");
+  assert.deepEqual(switched.models.map((model) => model.id), ["mimo-pro", "mimo-vision"]);
+  assert.equal(switched.sessionStatus.model, "mimo-pro");
   assert.deepEqual(switched.visionAgent, {
     enabled: true,
-    model: "alpha-vision",
+    model: "mimo-vision",
     autoUseWhenMainModelTextOnly: true
   });
-});
-
-test("dashboard runtime clears stale agent routes when an older gateway profile has no agent config", async () => {
-  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-profile-agents-"));
-  await fs.mkdir(path.join(cwd, ".lab-agent"), { recursive: true });
-  await fs.writeFile(path.join(cwd, ".lab-agent", "config.json"), JSON.stringify({
-    modelAlias: "alpha-main",
-    models: [{ id: "alpha-main" }, { id: "alpha-agent" }],
-    agents: {
-      modelTiers: { cheap: "alpha-agent", default: "alpha-agent", strong: "alpha-agent" },
-      vision: { enabled: false, model: null }
-    },
-    lab: {
-      gatewayUrl: "https://alpha.gateway.example/v1/chat/completions",
-      gatewayProtocol: "openai-chat",
-      gatewayApiKey: "alpha-key",
-      activeGatewayProfile: "profile-alpha",
-      gatewayProfiles: [
-        {
-          id: "profile-alpha",
-          gatewayUrl: "https://alpha.gateway.example/v1/chat/completions",
-          gatewayProtocol: "openai-chat",
-          gatewayApiKey: "alpha-key",
-          modelAlias: "alpha-main",
-          models: [{ id: "alpha-main" }, { id: "alpha-agent" }]
-        },
-        {
-          id: "profile-beta",
-          gatewayUrl: "https://beta.gateway.example/v1/chat/completions",
-          gatewayProtocol: "openai-chat",
-          gatewayApiKey: null,
-          modelAlias: "beta-main",
-          models: [{ id: "beta-main" }]
-        }
-      ]
-    }
-  }), "utf8");
-  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
-
-  const switched = await runtime.switchGatewayProfile({ profileId: "profile-beta" });
-
-  assert.deepEqual(switched.models.map((model) => model.id), ["beta-main"]);
-  assert.deepEqual(switched.agentModelTiers, {});
-  assert.equal(switched.visionAgent.enabled, false);
-  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
-  assert.equal(local.agents.modelTiers, undefined);
-  assert.equal(local.agents.vision.enabled, false);
 });
 
 test("dashboard model config ignores process gateway env overrides", async () => {
@@ -910,45 +3023,210 @@ test("dashboard model config ignores process gateway env overrides", async () =>
   const runtime = createDashboardRuntime({
     cwd,
     env: {
-      LAB_MODEL_GATEWAY_URL: "https://env-gateway.example/v1/chat/completions",
+      LAB_MODEL_GATEWAY_URL: "https://env-mimo.example/v1/chat/completions",
       LAB_MODEL_GATEWAY_PROTOCOL: "openai-chat",
       LAB_MODEL_GATEWAY_API_KEY: "env-key",
-      LAB_AGENT_MODEL: "env-model"
+      LAB_AGENT_MODEL: "env-mimo-model"
     }
   });
 
   const initial = await runtime.status();
-  assert.equal(initial.gatewayConfig.gatewayUrl, "https://env-gateway.example/v1/chat/completions");
-  assert.equal(initial.sessionStatus.model, "env-model");
-  assert.ok(initial.models.some((model) => model.id === "env-model"));
-  assert.equal(initial.models.find((model) => model.id === "env-model")?.sources.modelAlias.type, "environment");
-  assert.equal(initial.models.find((model) => model.id === "env-model")?.default, true);
+  assert.equal(initial.gatewayConfig.gatewayUrl, "https://env-mimo.example/v1/chat/completions");
+  assert.equal(initial.sessionStatus.model, "env-mimo-model");
+  assert.ok(initial.models.some((model) => model.id === "env-mimo-model"));
+  assert.equal(initial.models.find((model) => model.id === "env-mimo-model")?.sources.modelAlias.type, "environment");
+  assert.equal(initial.models.find((model) => model.id === "env-mimo-model")?.default, true);
   assert.equal(initial.gatewayConfig.sources.gatewayUrl.type, "environment");
   assert.equal(initial.gatewayConfig.sources.apiKey.type, "environment");
+  assert.equal(initial.gatewayProfiles.find((profile) => profile.current)?.ownerScope, "environment");
+  assert.equal(initial.gatewayProfiles.find((profile) => profile.current)?.saveTarget, "");
+  assert.equal(initial.gatewayProfiles.find((profile) => profile.current)?.editable, false);
 
   const saved = await runtime.saveModelConfig({
     saveTarget: "project",
-    gatewayUrl: "https://beta-gateway.example/v1/chat/completions",
+    gatewayUrl: "https://deepseek.example/v1/chat/completions",
     gatewayProtocol: "openai-chat",
-    gatewayApiKey: "beta-key",
-    modelId: "beta-chat",
-    label: "Beta Chat",
+    gatewayApiKey: "deepseek-key",
+    modelId: "deepseek-chat",
+    label: "DeepSeek Chat",
     modalities: ["text"],
     switchToModel: true
   });
 
   assert.equal(saved.ok, true);
-  assert.equal(saved.gatewayConfig.gatewayUrl, "https://beta-gateway.example/v1/chat/completions");
+  assert.equal(saved.gatewayConfig.gatewayUrl, "https://deepseek.example/v1/chat/completions");
   assert.equal(saved.gatewayConfig.sources.gatewayUrl.type, "project");
   assert.equal(saved.gatewayConfig.sources.apiKey.type, "project");
-  assert.deepEqual(saved.models.map((model) => model.id), ["beta-chat"]);
-  assert.equal(saved.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("beta-gateway"))?.current, true);
+  assert.deepEqual(saved.models.map((model) => model.id), ["deepseek-chat"]);
+  assert.equal(saved.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("deepseek"))?.current, true);
 
   const after = await runtime.status();
-  assert.equal(after.gatewayConfig.gatewayUrl, "https://beta-gateway.example/v1/chat/completions");
-  assert.deepEqual(after.models.map((model) => model.id), ["beta-chat"]);
+  assert.equal(after.gatewayConfig.gatewayUrl, "https://deepseek.example/v1/chat/completions");
+  assert.deepEqual(after.models.map((model) => model.id), ["deepseek-chat"]);
   assert.equal(after.gatewayConfig.sources.gatewayUrl.type, "project");
   assert.equal(after.gatewayConfig.sources.apiKey.type, "project");
+});
+
+test("dashboard keeps an inherited environment gateway authenticated without materializing it", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-env-profile-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-env-profile-"));
+  const globalPath = path.join(home, ".ant-code", "lab-agent.config.json");
+  await fs.mkdir(path.dirname(globalPath), { recursive: true });
+  await fs.writeFile(globalPath, JSON.stringify({
+    modelAlias: "global-model",
+    models: [{ id: "global-model" }],
+    lab: {
+      gatewayUrl: "https://global.gateway.example/v1/chat/completions",
+      gatewayProtocol: "openai-chat",
+      gatewayApiKey: "global-key"
+    }
+  }), "utf8");
+  const environmentUrl = "https://environment.gateway.example/v1/chat/completions";
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: {
+      USERPROFILE: home,
+      LAB_AGENT_MODEL: "environment-model",
+      LAB_MODEL_GATEWAY_URL: environmentUrl,
+      LAB_MODEL_GATEWAY_PROTOCOL: "openai-chat",
+      LAB_MODEL_GATEWAY_API_KEY: "environment-secret"
+    }
+  });
+
+  const initial = await runtime.status();
+  assert.equal(initial.gatewayConfig.gatewayUrl, environmentUrl);
+  assert.equal(initial.gatewayConfig.apiKeyConfigured, true);
+
+  const projectSaved = await runtime.saveModelConfig({
+    saveTarget: "project",
+    gatewayUrl: "https://project.gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "project-key",
+    modelId: "project-model",
+    switchToModel: true
+  });
+  const environmentProfile = projectSaved.gatewayProfiles.find((profile) => profile.gatewayUrl === environmentUrl);
+
+  assert.ok(environmentProfile);
+  assert.equal(environmentProfile.apiKeyConfigured, true);
+  const switched = await runtime.switchGatewayProfile({ profileId: environmentProfile.id });
+  assert.equal(switched.ok, true);
+  assert.equal(switched.gatewayConfig.gatewayUrl, environmentUrl);
+  assert.equal(switched.gatewayConfig.apiKeyConfigured, true);
+
+  const localText = await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8");
+  const local = JSON.parse(localText);
+  assert.equal(localText.includes("environment-secret"), false);
+  assert.equal(local.lab.gatewayProfiles.some((profile) => profile.gatewayUrl === environmentUrl), false);
+});
+
+test("dashboard keeps global credentials available beside materialized environment and project gateways", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-three-source-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-three-source-"));
+  const requests = [];
+  const server = await listen(
+    createOpenAIChatAuthRecordingGateway(requests, "global answer", "global-secret"),
+    "127.0.0.1",
+    0
+  );
+  const globalUrl = `http://127.0.0.1:${server.address().port}/v1/chat/completions`;
+  const environmentUrl = "https://environment.gateway.example/v1/chat/completions";
+  const projectUrl = "https://project.gateway.example/v1/chat/completions";
+  const globalPath = path.join(home, ".ant-code", "lab-agent.config.json");
+  const localPath = path.join(cwd, ".lab-agent", "config.json");
+
+  try {
+    await fs.mkdir(path.dirname(globalPath), { recursive: true });
+    await fs.writeFile(globalPath, JSON.stringify({
+      modelAlias: "global-model",
+      models: [{ id: "global-model" }],
+      allowedHosts: ["127.0.0.1"],
+      lab: {
+        gatewayUrl: globalUrl,
+        gatewayProtocol: "openai-chat",
+        gatewayApiKey: "global-secret",
+        activeGatewayProfile: "global-profile",
+        gatewayProfiles: [{
+          id: "global-profile",
+          gatewayUrl: globalUrl,
+          gatewayProtocol: "openai-chat",
+          gatewayApiKey: "global-secret",
+          modelAlias: "global-model",
+          models: [{ id: "global-model" }]
+        }]
+      }
+    }), "utf8");
+    await fs.mkdir(path.dirname(localPath), { recursive: true });
+    await fs.writeFile(localPath, JSON.stringify({
+      modelAlias: "project-model",
+      models: [{ id: "project-model" }],
+      allowedHosts: ["127.0.0.1", "environment.gateway.example", "project.gateway.example"],
+      lab: {
+        gatewayUrl: projectUrl,
+        gatewayProtocol: "openai-chat",
+        gatewayApiKey: "project-secret",
+        activeGatewayProfile: "project-profile",
+        gatewayProfiles: [
+          {
+            id: "global-profile",
+            gatewayUrl: globalUrl,
+            gatewayProtocol: "openai-chat",
+            modelAlias: "global-model",
+            models: [{ id: "global-model" }]
+          },
+          {
+            id: "environment-profile",
+            gatewayUrl: environmentUrl,
+            gatewayProtocol: "openai-chat",
+            modelAlias: "environment-model",
+            models: [{ id: "environment-model" }]
+          },
+          {
+            id: "project-profile",
+            gatewayUrl: projectUrl,
+            gatewayProtocol: "openai-chat",
+            gatewayApiKey: "project-secret",
+            modelAlias: "project-model",
+            models: [{ id: "project-model" }]
+          }
+        ]
+      }
+    }), "utf8");
+    const runtime = createDashboardRuntime({
+      cwd,
+      env: {
+        USERPROFILE: home,
+        APPDATA: home,
+        LAB_AGENT_MODEL: "environment-model",
+        LAB_MODEL_GATEWAY_URL: environmentUrl,
+        LAB_MODEL_GATEWAY_PROTOCOL: "openai-chat",
+        LAB_MODEL_GATEWAY_API_KEY: "environment-secret"
+      }
+    });
+    const initial = await runtime.status();
+    const globalProfile = initial.gatewayProfiles.find((profile) => profile.gatewayUrl === globalUrl);
+
+    assert.equal(initial.gatewayProfiles.length, 3);
+    assert.ok(globalProfile);
+    assert.equal(globalProfile.apiKeyConfigured, true);
+    const switched = await runtime.switchGatewayProfile({ profileId: globalProfile.id });
+    assert.equal(switched.ok, true);
+    assert.equal(switched.gatewayConfig.apiKeyConfigured, true);
+
+    await runtime.trustWorkspace();
+    const started = await runtime.startTurn({ prompt: "verify the global source", permissionMode: "plan" });
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].url, "/v1/chat/completions");
+    assert.equal(requests[0].authorization, "Bearer global-secret");
+    assert.equal(requests[0].body.model, "global-model");
+    const localText = await fs.readFile(localPath, "utf8");
+    assert.equal(localText.includes("global-secret"), false);
+    assert.equal(localText.includes("environment-secret"), false);
+  } finally {
+    await close(server);
+  }
 });
 
 test("dashboard runtime does not reuse an environment key after switching gateway URL", async () => {
@@ -980,10 +3258,342 @@ test("dashboard runtime does not reuse an environment key after switching gatewa
   assert.equal(saved.gatewayConfig.sources.apiKey.type, "project");
 
   const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
-  assert.equal(local.lab.gatewayApiKey, null);
+  assert.equal(Object.prototype.hasOwnProperty.call(local.lab, "gatewayApiKey"), false);
   const environmentProfile = local.lab.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("env.gateway"));
-  assert.ok(environmentProfile);
-  assert.equal(Object.prototype.hasOwnProperty.call(environmentProfile, "gatewayApiKey"), false);
+  assert.equal(environmentProfile, undefined);
+});
+
+test("dashboard keeps old credentials scoped when the real settings payload changes endpoint", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-key-scope-save-"));
+  await fs.mkdir(path.join(cwd, ".lab-agent"), { recursive: true });
+  await fs.writeFile(path.join(cwd, ".lab-agent", "config.json"), JSON.stringify({
+    modelAlias: "old-main",
+    models: [{ id: "old-main" }, { id: "old-worker" }],
+    agents: {
+      modelTiers: { cheap: "old-worker", default: "old-worker", strong: "old-worker" },
+      vision: { enabled: false, model: null }
+    },
+    lab: {
+      gatewayUrl: "https://old.gateway.example/v1/chat/completions",
+      gatewayProtocol: "openai-chat",
+      gatewayApiKey: "old-secret",
+      activeGatewayProfile: "old-profile",
+      gatewayProfiles: [{
+        id: "old-profile",
+        gatewayUrl: "https://old.gateway.example/v1/chat/completions",
+        gatewayProtocol: "openai-chat",
+        gatewayApiKey: "old-secret",
+        modelAlias: "old-main",
+        models: [{ id: "old-main" }, { id: "old-worker" }],
+        agents: { modelTiers: { cheap: "old-worker", default: "old-worker", strong: "old-worker" } }
+      }]
+    }
+  }), "utf8");
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+
+  const saved = await runtime.saveModelConfig({
+    saveTarget: "project",
+    gatewayUrl: "https://new.gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "",
+    credentialAction: "keep",
+    previousGatewayUrl: "https://old.gateway.example/v1/chat/completions",
+    previousGatewayProtocol: "openai-chat",
+    modelId: "new-main",
+    label: "New Main",
+    agentCheapModel: "old-worker",
+    agentDefaultModel: "old-worker",
+    agentStrongModel: "old-worker",
+    modalities: ["text"],
+    switchToModel: true
+  });
+
+  assert.equal(saved.ok, true);
+  assert.equal(saved.gatewayConfig.apiKeyConfigured, false);
+  assert.deepEqual(saved.models.map((model) => model.id), ["new-main"]);
+  assert.deepEqual(saved.agentModelTiers, { cheap: "new-main", default: "new-main", strong: "new-main" });
+  const oldProfile = saved.gatewayProfiles.find((profile) => profile.id === "old-profile");
+  const newProfile = saved.gatewayProfiles.find((profile) => profile.current);
+  assert.equal(oldProfile.apiKeyConfigured, true);
+  assert.equal(newProfile.apiKeyConfigured, false);
+
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.equal(Object.prototype.hasOwnProperty.call(local.lab, "gatewayApiKey"), false);
+  assert.equal(local.lab.gatewayProfiles.find((profile) => profile.id === "old-profile").gatewayApiKey, "old-secret");
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(local.lab.gatewayProfiles.find((profile) => profile.id === newProfile.id), "gatewayApiKey"),
+    false
+  );
+
+  const switchedBack = await runtime.switchGatewayProfile({ profileId: "old-profile" });
+  assert.equal(switchedBack.ok, true);
+  assert.equal(switchedBack.gatewayConfig.apiKeyConfigured, true);
+  assert.deepEqual(switchedBack.models.map((model) => model.id), ["old-main", "old-worker"]);
+});
+
+test("dashboard keeps an owned key when editing an endpoint path on the same origin", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-key-path-migration-"));
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+  await runtime.saveModelConfig({
+    saveTarget: "project",
+    gatewayUrl: "https://same-origin.gateway.example/v1",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "same-origin-key",
+    modelId: "same-origin-model",
+    switchToModel: true
+  });
+
+  const saved = await runtime.saveModelConfig({
+    saveTarget: "project",
+    gatewayUrl: "https://same-origin.gateway.example/v1/responses",
+    gatewayProtocol: "openai-responses",
+    gatewayApiKey: "",
+    credentialAction: "keep",
+    previousGatewayUrl: "https://same-origin.gateway.example/v1",
+    previousGatewayProtocol: "openai-chat",
+    previousModelId: "same-origin-model",
+    modelId: "same-origin-model",
+    switchToModel: true
+  });
+
+  assert.equal(saved.ok, true);
+  assert.equal(saved.gatewayConfig.gatewayUrl, "https://same-origin.gateway.example/v1/responses");
+  assert.equal(saved.gatewayConfig.gatewayProtocol, "openai-responses");
+  assert.equal(saved.gatewayConfig.apiKeyConfigured, true);
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.equal(local.lab.gatewayApiKey, "same-origin-key");
+  assert.equal(
+    local.lab.gatewayProfiles.find((profile) => profile.gatewayUrl.endsWith("/responses")).gatewayApiKey,
+    "same-origin-key"
+  );
+});
+
+test("dashboard keeps a same-origin migrated key after restart and sends it to OpenAI Chat", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-key-migration-restart-"));
+  const requests = [];
+  const server = await listen(
+    createOpenAIChatAuthRecordingGateway(requests, "migrated answer", "same-origin-key"),
+    "127.0.0.1",
+    0
+  );
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const previousUrl = `${origin}/legacy/chat/completions`;
+  const migratedUrl = `${origin}/v1/chat/completions`;
+
+  try {
+    const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd, APPDATA: cwd } });
+    await runtime.saveModelConfig({
+      saveTarget: "project",
+      gatewayUrl: previousUrl,
+      gatewayProtocol: "openai-chat",
+      gatewayApiKey: "same-origin-key",
+      modelId: "same-origin-model",
+      switchToModel: true
+    });
+    const saved = await runtime.saveModelConfig({
+      saveTarget: "project",
+      gatewayUrl: migratedUrl,
+      gatewayProtocol: "openai-chat",
+      gatewayApiKey: "",
+      credentialAction: "keep",
+      previousGatewayUrl: previousUrl,
+      previousGatewayProtocol: "openai-chat",
+      previousModelId: "same-origin-model",
+      modelId: "same-origin-model",
+      switchToModel: true
+    });
+
+    assert.equal(saved.ok, true);
+    assert.equal(saved.gatewayConfig.apiKeyConfigured, true);
+    const restarted = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd, APPDATA: cwd } });
+    const restartedStatus = await restarted.status();
+    assert.equal(restartedStatus.gatewayConfig.gatewayUrl, migratedUrl);
+    assert.equal(restartedStatus.gatewayConfig.apiKeyConfigured, true);
+
+    await restarted.trustWorkspace();
+    const started = await restarted.startTurn({ prompt: "verify the migrated source", permissionMode: "plan" });
+    await waitForEvent(restarted, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].url, "/v1/chat/completions");
+    assert.equal(requests[0].authorization, "Bearer same-origin-key");
+    assert.equal(requests[0].body.model, "same-origin-model");
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard requires re-entry before copying an inherited key to a migrated endpoint", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-inherited-key-migration-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-inherited-key-migration-"));
+  const globalPath = path.join(home, ".ant-code", "lab-agent.config.json");
+  const localPath = path.join(cwd, ".lab-agent", "config.json");
+  await fs.mkdir(path.dirname(globalPath), { recursive: true });
+  await fs.writeFile(globalPath, JSON.stringify({
+    modelAlias: "inherited-model",
+    models: [{ id: "inherited-model" }],
+    lab: {
+      gatewayUrl: "https://inherited.gateway.example/v1",
+      gatewayProtocol: "openai-chat",
+      gatewayApiKey: "global-secret"
+    }
+  }), "utf8");
+  await fs.mkdir(path.dirname(localPath), { recursive: true });
+  await fs.writeFile(localPath, JSON.stringify({
+    modelAlias: "inherited-model",
+    models: [{ id: "inherited-model" }],
+    lab: {
+      gatewayUrl: "https://inherited.gateway.example/v1",
+      gatewayProtocol: "openai-chat"
+    }
+  }), "utf8");
+  const before = await fs.readFile(localPath, "utf8");
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: home } });
+
+  const saved = await runtime.saveModelConfig({
+    saveTarget: "project",
+    gatewayUrl: "https://inherited.gateway.example/v1/responses",
+    gatewayProtocol: "openai-responses",
+    gatewayApiKey: "",
+    credentialAction: "keep",
+    previousGatewayUrl: "https://inherited.gateway.example/v1",
+    previousGatewayProtocol: "openai-chat",
+    previousModelId: "inherited-model",
+    modelId: "inherited-model",
+    switchToModel: true
+  });
+
+  assert.equal(saved.ok, false);
+  assert.equal(saved.status, 400);
+  assert.match(saved.error, /来自其他配置层/);
+  assert.equal(await fs.readFile(localPath, "utf8"), before);
+});
+
+test("dashboard API key rotation preserves every model on the same gateway", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-key-rotation-"));
+  const gatewayUrl = "https://shared.gateway.example/v1/chat/completions";
+  await fs.mkdir(path.join(cwd, ".lab-agent"), { recursive: true });
+  await fs.writeFile(path.join(cwd, ".lab-agent", "config.json"), JSON.stringify({
+    modelAlias: "main",
+    models: [{ id: "main" }, { id: "worker" }],
+    agents: { modelTiers: { cheap: "worker", default: "worker", strong: "worker" } },
+    lab: {
+      gatewayUrl,
+      gatewayProtocol: "openai-chat",
+      gatewayApiKey: "old-key",
+      activeGatewayProfile: "shared-profile",
+      gatewayProfiles: [{
+        id: "shared-profile",
+        gatewayUrl,
+        gatewayProtocol: "openai-chat",
+        gatewayApiKey: "old-key",
+        modelAlias: "main",
+        models: [{ id: "main" }, { id: "worker" }]
+      }]
+    }
+  }), "utf8");
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+
+  const saved = await runtime.saveModelConfig({
+    saveTarget: "project",
+    gatewayUrl,
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "new-key",
+    credentialAction: "replace",
+    previousModelId: "main",
+    modelId: "main",
+    label: "Main",
+    modalities: ["text"],
+    switchToModel: true
+  });
+
+  assert.equal(saved.ok, true);
+  assert.deepEqual(saved.models.map((model) => model.id), ["main", "worker"]);
+  assert.deepEqual(saved.agentModelTiers, { cheap: "worker", default: "worker", strong: "worker" });
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.deepEqual(local.models.map((model) => model.id), ["main", "worker"]);
+  assert.equal(local.lab.gatewayApiKey, "new-key");
+});
+
+test("dashboard project clear blocks an inherited key for the same endpoint", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-key-clear-project-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-key-clear-project-"));
+  const gatewayUrl = "https://shared.gateway.example/v1/chat/completions";
+  await fs.mkdir(path.join(home, ".ant-code"), { recursive: true });
+  await fs.writeFile(path.join(home, ".ant-code", "lab-agent.config.json"), JSON.stringify({
+    modelAlias: "shared-model",
+    models: [{ id: "shared-model" }],
+    lab: {
+      gatewayUrl,
+      gatewayProtocol: "openai-chat",
+      gatewayApiKey: "global-key",
+      activeGatewayProfile: "shared-profile",
+      gatewayProfiles: [{
+        id: "shared-profile",
+        gatewayUrl,
+        gatewayProtocol: "openai-chat",
+        gatewayApiKey: "global-key",
+        modelAlias: "shared-model",
+        models: [{ id: "shared-model" }]
+      }]
+    }
+  }), "utf8");
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: home } });
+
+  const cleared = await runtime.saveModelConfig({
+    saveTarget: "project",
+    gatewayUrl,
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "",
+    credentialAction: "clear",
+    previousModelId: "shared-model",
+    modelId: "shared-model",
+    modalities: ["text"],
+    switchToModel: true
+  });
+
+  assert.equal(cleared.ok, true);
+  assert.equal(cleared.gatewayConfig.apiKeyConfigured, false);
+  assert.equal((await runtime.status()).gatewayConfig.apiKeyConfigured, false);
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.equal(local.lab.gatewayApiKey, null);
+  assert.equal(local.lab.gatewayApiKeyDisabled, true);
+  assert.equal(local.lab.gatewayProfiles[0].gatewayApiKey, null);
+  assert.equal(local.lab.gatewayProfiles[0].gatewayApiKeyDisabled, true);
+});
+
+test("dashboard refuses incomplete legacy gateway profiles without mutating config", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-incomplete-profile-"));
+  const configPath = path.join(cwd, ".lab-agent", "config.json");
+  await fs.mkdir(path.dirname(configPath), { recursive: true });
+  await fs.writeFile(configPath, JSON.stringify({
+    modelAlias: "active-model",
+    models: [{ id: "active-model" }],
+    lab: {
+      gatewayUrl: "https://active.gateway.example/v1/chat/completions",
+      gatewayProtocol: "openai-chat",
+      activeGatewayProfile: "active-profile",
+      gatewayProfiles: [
+        {
+          id: "active-profile",
+          gatewayUrl: "https://active.gateway.example/v1/chat/completions",
+          gatewayProtocol: "openai-chat",
+          modelAlias: "active-model",
+          models: [{ id: "active-model" }]
+        },
+        { id: "legacy-profile", gatewayProtocol: "openai-chat", modelAlias: "legacy-model" }
+      ]
+    }
+  }), "utf8");
+  const before = await fs.readFile(configPath, "utf8");
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+
+  const switched = await runtime.switchGatewayProfile({ profileId: "legacy-profile" });
+
+  assert.equal(switched.ok, false);
+  assert.equal(switched.status, 400);
+  assert.match(switched.error, /API 地址或协议不完整/);
+  assert.equal(await fs.readFile(configPath, "utf8"), before);
 });
 
 test("dashboard runtime keeps no-key profiles isolated across switches and model deletion", async () => {
@@ -1034,9 +3644,15 @@ test("dashboard runtime keeps no-key profiles isolated across switches and model
   assert.equal(deleted.gatewayConfig.apiKeyConfigured, false);
 
   const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
-  assert.equal(local.lab.gatewayApiKey, null);
-  assert.equal(local.lab.gatewayProfiles.find((profile) => profile.id === noKeyProfile.id).gatewayApiKey, null);
-  assert.equal(local.lab.gatewayProfiles.find((profile) => profile.id === environmentProfile.id).gatewayApiKey, undefined);
+  assert.equal(Object.prototype.hasOwnProperty.call(local.lab, "gatewayApiKey"), false);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(
+      local.lab.gatewayProfiles.find((profile) => profile.id === noKeyProfile.id),
+      "gatewayApiKey"
+    ),
+    false
+  );
+  assert.equal(local.lab.gatewayProfiles.some((profile) => profile.id === environmentProfile.id), false);
 });
 
 test("dashboard runtime clears a stale health URL when the field is blank", async () => {
@@ -1044,14 +3660,12 @@ test("dashboard runtime clears a stale health URL when the field is blank", asyn
   const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
 
   await runtime.saveModelConfig({
-    saveTarget: "project",
     gatewayUrl: "https://old.gateway.example/v1/chat/completions",
     gatewayHealthUrl: "https://health-old.example/health",
     gatewayProtocol: "openai-chat",
     modelId: "old-model"
   });
   const saved = await runtime.saveModelConfig({
-    saveTarget: "project",
     gatewayUrl: "https://old.gateway.example/v1/chat/completions",
     gatewayHealthUrl: "",
     gatewayProtocol: "openai-chat",
@@ -1059,10 +3673,10 @@ test("dashboard runtime clears a stale health URL when the field is blank", asyn
   });
 
   assert.equal(saved.gatewayConfig.gatewayHealthUrl, "");
-  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
-  assert.equal(local.lab.gatewayHealthUrl, null);
-  assert.equal(local.allowedHosts.includes("health-old.example"), false);
-  assert.equal(local.allowedHosts.includes("old.gateway.example"), true);
+  const globalConfig = JSON.parse(await fs.readFile(saved.configPath, "utf8"));
+  assert.equal(globalConfig.lab.gatewayHealthUrl, null);
+  assert.equal(globalConfig.allowedHosts.includes("health-old.example"), false);
+  assert.equal(globalConfig.allowedHosts.includes("old.gateway.example"), true);
 });
 
 test("dashboard runtime preserves custom gateway ids and collapses endpoint duplicates", async () => {
@@ -1075,7 +3689,7 @@ test("dashboard runtime preserves custom gateway ids and collapses endpoint dupl
     lab: {
       gatewayUrl: "https://buddy.example/v1/chat/completions",
       gatewayProtocol: "openai-chat",
-      gatewayApiKey: "generated-key",
+      gatewayApiKey: "legacy-key",
       activeGatewayProfile: "gw-stale-generated",
       gatewayProfiles: [
         {
@@ -1123,6 +3737,52 @@ test("dashboard runtime preserves custom gateway ids and collapses endpoint dupl
   assert.deepEqual(localAfterDelete.lab.gatewayProfiles, []);
   assert.equal(localAfterDelete.lab.gatewayApiKey, null);
   assert.equal(localAfterDelete.allowedHosts.includes("buddy.example"), false);
+});
+
+test("dashboard runtime clears stale agent routes when an older gateway profile has no agent config", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-profile-agents-"));
+  await fs.mkdir(path.join(cwd, ".lab-agent"), { recursive: true });
+  await fs.writeFile(path.join(cwd, ".lab-agent", "config.json"), JSON.stringify({
+    modelAlias: "alpha-main",
+    models: [{ id: "alpha-main" }, { id: "alpha-agent" }],
+    agents: {
+      modelTiers: { cheap: "alpha-agent", default: "alpha-agent", strong: "alpha-agent" },
+      vision: { enabled: false, model: null }
+    },
+    lab: {
+      gatewayUrl: "https://alpha.gateway.example/v1/chat/completions",
+      gatewayProtocol: "openai-chat",
+      gatewayApiKey: "alpha-key",
+      activeGatewayProfile: "profile-alpha",
+      gatewayProfiles: [
+        {
+          id: "profile-alpha",
+          gatewayUrl: "https://alpha.gateway.example/v1/chat/completions",
+          gatewayProtocol: "openai-chat",
+          gatewayApiKey: "alpha-key",
+          modelAlias: "alpha-main",
+          models: [{ id: "alpha-main" }, { id: "alpha-agent" }]
+        },
+        {
+          id: "profile-beta",
+          gatewayUrl: "https://beta.gateway.example/v1/chat/completions",
+          gatewayProtocol: "openai-chat",
+          gatewayApiKey: null,
+          modelAlias: "beta-main",
+          models: [{ id: "beta-main" }]
+        }
+      ]
+    }
+  }), "utf8");
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+
+  const switched = await runtime.switchGatewayProfile({ profileId: "profile-beta" });
+
+  assert.deepEqual(switched.models.map((model) => model.id), ["beta-main"]);
+  assert.deepEqual(switched.agentModelTiers, {});
+  assert.equal(switched.visionAgent.enabled, false);
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.equal(local.agents, undefined);
 });
 
 test("dashboard runtime does not carry an expired project key into a new gateway across turns", async () => {
@@ -1176,33 +3836,33 @@ test("dashboard runtime adds models to the active gateway when the same key is s
 
   await runtime.saveModelConfig({
     saveTarget: "project",
-    gatewayUrl: "https://beta-gateway.example/v1/chat/completions",
+    gatewayUrl: "https://deepseek.example/v1/chat/completions",
     gatewayProtocol: "openai-chat",
-    gatewayApiKey: "beta-key",
-    modelId: "beta-chat",
-    label: "Beta Chat",
+    gatewayApiKey: "deepseek-key",
+    modelId: "deepseek-chat",
+    label: "DeepSeek Chat",
     modalities: ["text"],
     switchToModel: true
   });
   const saved = await runtime.saveModelConfig({
     saveTarget: "project",
-    gatewayUrl: "https://beta-gateway.example/v1/chat/completions",
+    gatewayUrl: "https://deepseek.example/v1/chat/completions",
     gatewayProtocol: "openai-chat",
-    gatewayApiKey: "beta-key",
-    modelId: "beta-reasoner",
-    label: "Beta Reasoner",
+    gatewayApiKey: "deepseek-key",
+    modelId: "deepseek-reasoner",
+    label: "DeepSeek Reasoner",
     modalities: ["text"],
     switchToModel: true
   });
 
   assert.equal(saved.ok, true);
-  assert.deepEqual(saved.models.map((model) => model.id), ["beta-chat", "beta-reasoner"]);
+  assert.deepEqual(saved.models.map((model) => model.id), ["deepseek-chat", "deepseek-reasoner"]);
   assert.equal(saved.gatewayProfiles.find((profile) => profile.current)?.modelCount, 2);
-  assert.ok(saved.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("beta-gateway")));
+  assert.ok(saved.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("deepseek")));
 
   const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
-  assert.deepEqual(local.models.map((model) => model.id), ["beta-chat", "beta-reasoner"]);
-  assert.equal(local.lab.gatewayApiKey, "beta-key");
+  assert.deepEqual(local.models.map((model) => model.id), ["deepseek-chat", "deepseek-reasoner"]);
+  assert.equal(local.lab.gatewayApiKey, "deepseek-key");
 });
 
 test("dashboard runtime preserves concurrent model config updates through atomic mutations", async () => {
@@ -1223,7 +3883,10 @@ test("dashboard runtime preserves concurrent model config updates through atomic
   assert.equal(results.every((result) => result.ok), true);
   assert.equal(new Set(results.map((result) => result.configRevision)).size, 8);
   const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
-  const savedModels = new Set(local.models.map((model) => model.id));
+  assert.equal(local.models, undefined);
+  const profile = local.lab.gatewayProfiles.find((item) => item.gatewayUrl.includes("concurrent-gateway.example"));
+  assert.ok(profile);
+  const savedModels = new Set(profile.models.map((model) => model.id));
   for (let index = 0; index < 8; index += 1) {
     assert.equal(savedModels.has(`concurrent-model-${index}`), true);
   }
@@ -1235,30 +3898,30 @@ test("dashboard runtime deletes a registered model from the active gateway", asy
 
   await runtime.saveModelConfig({
     saveTarget: "project",
-    gatewayUrl: "https://alpha-gateway.example/v1/chat/completions",
+    gatewayUrl: "https://mimo.example/v1/chat/completions",
     gatewayProtocol: "openai-chat",
-    gatewayApiKey: "alpha-key",
-    modelId: "alpha-pro",
-    label: "Alpha Pro",
+    gatewayApiKey: "mimo-key",
+    modelId: "mimo-pro",
+    label: "Mimo Pro",
     modalities: ["text"],
     switchToModel: true
   });
   await runtime.saveModelConfig({
     saveTarget: "project",
-    gatewayUrl: "https://alpha-gateway.example/v1/chat/completions",
+    gatewayUrl: "https://mimo.example/v1/chat/completions",
     gatewayProtocol: "openai-chat",
-    modelId: "alpha-vision",
-    label: "Alpha Vision",
+    modelId: "mimo-vision",
+    label: "Mimo Vision",
     modalities: ["text", "image"],
-    visionAgentModel: "alpha-vision",
+    visionAgentModel: "mimo-vision",
     switchToModel: true
   });
 
-  const deleted = await runtime.deleteModelConfig({ modelId: "alpha-vision" });
+  const deleted = await runtime.deleteModelConfig({ modelId: "mimo-vision" });
 
   assert.equal(deleted.ok, true);
-  assert.equal(deleted.deletedModel, "alpha-vision");
-  assert.deepEqual(deleted.models.map((model) => [model.id, model.current]), [["alpha-pro", true]]);
+  assert.equal(deleted.deletedModel, "mimo-vision");
+  assert.deepEqual(deleted.models.map((model) => [model.id, model.current]), [["mimo-pro", true]]);
   assert.deepEqual(deleted.visionAgent, {
     enabled: false,
     model: "",
@@ -1267,8 +3930,8 @@ test("dashboard runtime deletes a registered model from the active gateway", asy
   assert.equal(deleted.gatewayProfiles.find((profile) => profile.current)?.modelCount, 1);
 
   const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
-  assert.equal(local.modelAlias, "alpha-pro");
-  assert.deepEqual(local.models.map((model) => model.id), ["alpha-pro"]);
+  assert.equal(local.modelAlias, "mimo-pro");
+  assert.deepEqual(local.models.map((model) => model.id), ["mimo-pro"]);
   assert.equal(local.agents.vision.enabled, false);
   assert.equal(local.agents.vision.model, null);
   assert.equal(local.agents.modelTiers?.vision, undefined);
@@ -1281,19 +3944,19 @@ test("dashboard runtime clears the active gateway when deleting its final model"
 
   await runtime.saveModelConfig({
     saveTarget: "project",
-    gatewayUrl: "https://beta-gateway.example/v1/chat/completions",
+    gatewayUrl: "https://deepseek.example/v1/chat/completions",
     gatewayProtocol: "openai-chat",
-    gatewayApiKey: "beta-key",
-    modelId: "beta-chat",
-    label: "Beta Chat",
+    gatewayApiKey: "deepseek-key",
+    modelId: "deepseek-chat",
+    label: "DeepSeek Chat",
     modalities: ["text"],
     switchToModel: true
   });
 
-  const deleted = await runtime.deleteModelConfig({ modelId: "beta-chat" });
+  const deleted = await runtime.deleteModelConfig({ modelId: "deepseek-chat" });
 
   assert.equal(deleted.ok, true);
-  assert.equal(deleted.deletedModel, "beta-chat");
+  assert.equal(deleted.deletedModel, "deepseek-chat");
   assert.equal(deleted.clearedGateway, true);
   assert.equal(deleted.gatewayConfig.gatewayUrl, "");
   assert.equal(deleted.gatewayConfig.apiKeyConfigured, false);
@@ -1305,7 +3968,7 @@ test("dashboard runtime clears the active gateway when deleting its final model"
   assert.deepEqual(local.models, []);
   assert.equal(local.lab.gatewayUrl, null);
   assert.equal(local.lab.gatewayApiKey, null);
-  assert.equal(local.lab.gatewayProfiles.some((profile) => profile.gatewayUrl.includes("beta-gateway")), false);
+  assert.equal(local.lab.gatewayProfiles.some((profile) => profile.gatewayUrl.includes("deepseek")), false);
 });
 
 test("dashboard runtime deletes the active gateway profile without falling back to an expired profile", async () => {
@@ -1353,15 +4016,95 @@ test("dashboard runtime deletes the active gateway profile without falling back 
   assert.equal(local.allowedHosts.includes("old-gateway.example"), true);
 });
 
+test("dashboard keeps a deleted global gateway hidden after refresh and restart", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-delete-global-"));
+  const otherProject = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-delete-global-other-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-delete-global-"));
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: home } });
+  const saved = await runtime.saveModelConfig({
+    saveTarget: "global",
+    gatewayUrl: "https://global.gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "global-key",
+    modelId: "global-model",
+    switchToModel: true
+  });
+
+  const deleted = await runtime.deleteGatewayProfile({ profileId: saved.gatewayConfig.activeProfileId });
+  const refreshed = await runtime.status();
+  const restarted = await createDashboardRuntime({ cwd, env: { USERPROFILE: home } }).status();
+  const newProject = await createDashboardRuntime({ cwd: otherProject, env: { USERPROFILE: home } }).status();
+
+  assert.equal(deleted.ok, true);
+  assert.equal(deleted.deletedFrom, "global");
+  assert.deepEqual(deleted.gatewayProfiles, []);
+  assert.deepEqual(refreshed.gatewayProfiles, []);
+  assert.deepEqual(restarted.gatewayProfiles, []);
+  assert.deepEqual(newProject.gatewayProfiles, []);
+  assert.equal(restarted.gatewayConfig.gatewayProtocol, "openai-chat");
+  await assert.rejects(fs.access(path.join(cwd, ".lab-agent", "config.json")), /ENOENT/);
+  const global = JSON.parse(await fs.readFile(path.join(home, ".ant-code", "lab-agent.config.json"), "utf8"));
+  assert.deepEqual(global.lab.gatewayProfiles, []);
+});
+
+test("dashboard deletes a global gateway without creating or deleting a project copy", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-delete-copied-global-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-delete-copied-global-"));
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: home } });
+  const globalSaved = await runtime.saveModelConfig({
+    saveTarget: "global",
+    gatewayUrl: "https://global-a.gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "global-a-key",
+    modelId: "global-a-model",
+    switchToModel: true
+  });
+  const projectSaved = await runtime.saveModelConfig({
+    saveTarget: "project",
+    gatewayUrl: "https://project-b.gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "project-b-key",
+    modelId: "project-b-model",
+    switchToModel: true
+  });
+
+  assert.deepEqual(projectSaved.gatewayProfiles.map((profile) => profile.gatewayUrl), [
+    "https://global-a.gateway.example/v1/chat/completions",
+    "https://project-b.gateway.example/v1/chat/completions"
+  ]);
+
+  const deleted = await runtime.deleteGatewayProfile({ profileId: globalSaved.gatewayConfig.activeProfileId });
+  const refreshed = await runtime.status();
+  const restarted = await createDashboardRuntime({ cwd, env: { USERPROFILE: home } }).status();
+
+  assert.equal(deleted.ok, true);
+  assert.equal(deleted.deletedFrom, "global");
+  assert.deepEqual(deleted.deletedFromScopes, ["global"]);
+  assert.equal(deleted.clearedGateway, false);
+  assert.deepEqual(deleted.gatewayProfiles.map((profile) => profile.gatewayUrl), [
+    "https://project-b.gateway.example/v1/chat/completions"
+  ]);
+  assert.deepEqual(refreshed.gatewayProfiles, deleted.gatewayProfiles);
+  assert.deepEqual(restarted.gatewayProfiles, deleted.gatewayProfiles);
+  assert.equal(restarted.gatewayConfig.gatewayUrl, "https://project-b.gateway.example/v1/chat/completions");
+
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  const global = JSON.parse(await fs.readFile(path.join(home, ".ant-code", "lab-agent.config.json"), "utf8"));
+  assert.deepEqual(local.lab.gatewayProfiles.map((profile) => profile.gatewayUrl), [
+    "https://project-b.gateway.example/v1/chat/completions"
+  ]);
+  assert.deepEqual(global.lab.gatewayProfiles, []);
+});
+
 test("dashboard runtime replaces the edited model id instead of keeping the stale entry", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
   const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
 
   await runtime.saveModelConfig({
     saveTarget: "project",
-    gatewayUrl: "https://alpha-gateway.example/v1/chat/completions",
+    gatewayUrl: "https://mimo.example/v1/chat/completions",
     gatewayProtocol: "openai-chat",
-    gatewayApiKey: "alpha-key",
+    gatewayApiKey: "mimo-key",
     modelId: "wrong-model",
     label: "Wrong Model",
     modalities: ["text", "image"],
@@ -1373,27 +4116,27 @@ test("dashboard runtime replaces the edited model id instead of keeping the stal
 
   const saved = await runtime.saveModelConfig({
     saveTarget: "project",
-    gatewayUrl: "https://alpha-gateway.example/v1/chat/completions",
+    gatewayUrl: "https://mimo.example/v1/chat/completions",
     gatewayProtocol: "openai-chat",
     previousModelId: "wrong-model",
-    modelId: "alpha-correct",
-    label: "Alpha Correct",
+    modelId: "mimo-correct",
+    label: "Mimo Correct",
     modalities: ["text", "image"],
-    visionAgentModel: "alpha-correct",
-    agentDefaultModel: "alpha-correct",
+    visionAgentModel: "mimo-correct",
+    agentDefaultModel: "mimo-correct",
     switchToModel: true
   });
 
   assert.equal(saved.ok, true);
-  assert.deepEqual(saved.models.map((model) => model.id), ["alpha-correct"]);
-  assert.equal(saved.sessionStatus.model, "alpha-correct");
+  assert.deepEqual(saved.models.map((model) => model.id), ["mimo-correct"]);
+  assert.equal(saved.sessionStatus.model, "mimo-correct");
 
   const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
-  assert.deepEqual(local.models.map((model) => model.id), ["alpha-correct"]);
-  assert.equal(local.modelAlias, "alpha-correct");
-  assert.equal(local.agents.modelTiers.default, "alpha-correct");
-  assert.equal(local.agents.vision.model, "alpha-correct");
-  assert.equal(local.lab.gatewayProfiles.find((profile) => profile.id === local.lab.activeGatewayProfile)?.models[0]?.id, "alpha-correct");
+  assert.deepEqual(local.models.map((model) => model.id), ["mimo-correct"]);
+  assert.equal(local.modelAlias, "mimo-correct");
+  assert.equal(local.agents.modelTiers.default, "mimo-correct");
+  assert.equal(local.agents.vision.model, "mimo-correct");
+  assert.equal(local.lab.gatewayProfiles.find((profile) => profile.id === local.lab.activeGatewayProfile)?.models[0]?.id, "mimo-correct");
 });
 
 test("dashboard runtime accumulates per-turn change counters", async () => {
@@ -1538,10 +4281,8 @@ test("dashboard runtime sends WebUI client surface in model context", async () =
 test("dashboard runtime sends image attachments while persisting only metadata", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
   await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
-    modelAlias: "image-model",
-    models: [
-      { id: "image-model", label: "Image Model", modalities: ["text", "image"], contextTokens: 200000 }
-    ]
+    modelAlias: "vision-model",
+    models: [{ id: "vision-model", modalities: ["text", "image"] }]
   }), "utf8");
   const requests = [];
   const server = await listen(createRecordingGateway(requests, "image answer"), "127.0.0.1", 0);
@@ -1601,6 +4342,8 @@ test("dashboard runtime queues concurrent turns in same session", async () => {
   const second = await runtime.startTurn({ prompt: "second", sessionId: first.sessionId, permissionMode: "plan" });
 
   assert.equal(first.ok, true);
+    assert.equal(first.running, true);
+    assert.equal(first.current.preview, "first");
     assert.equal(second.ok, true);
     assert.equal(second.queued, true);
     assert.equal(second.queueLength, 1);
@@ -1718,7 +4461,7 @@ test("dashboard runtime coalesces repeated live status events", async () => {
       prompt: "coalesce live status",
       permissionMode: "workspace"
     });
-    await waitForEvent(runtime, result.sessionId, (event) => event.type === "files_updated");
+    await waitForEvent(runtime, result.sessionId, (event) => event.type === "activity" && event.coalesceKey === "thinking");
 
     const events = runtime.listActiveEvents(result.sessionId);
     assert.equal(events.filter((event) => event.type === "activity" && event.coalesceKey === "thinking").length, 1);
@@ -1858,7 +4601,7 @@ test("dashboard runtime exposes running active sessions for refresh recovery", a
     assert.equal(reopened.session.eventCursor, 0);
     assert.deepEqual(replayed.filter((event) => event.type === "user_message").map((event) => event.text), ["recover streaming draft"]);
     assert.equal(replayed.some((event) => event.type === "assistant_draft" && /partial draft/.test(event.text)), true);
-    runtime.interruptTurn(started.sessionId, "test-cleanup");
+    runtime.interruptTurn(started.sessionId, cleanupAbortError());
     await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
   } finally {
     await close(server);
@@ -2043,7 +4786,12 @@ test("dashboard runtime interrupts the current turn", async () => {
 
 test("dashboard runtime queues guide prompts and interrupts active work", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
-  const server = await listen(createDelayedGateway(["old answer", "guided answer"], 80), "127.0.0.1", 0);
+  const firstRequestReceived = deferred();
+  const server = await listen(createDelayedGateway(
+    ["old answer", "guided answer"],
+    80,
+    { onRequest: () => firstRequestReceived.resolve() }
+  ), "127.0.0.1", 0);
   const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
   await runtime.trustWorkspace();
 
@@ -2053,6 +4801,7 @@ test("dashboard runtime queues guide prompts and interrupts active work", async 
       permissionMode: "workspace"
     });
     assert.equal(started.ok, true);
+    await firstRequestReceived.promise;
 
     const guided = runtime.guideTurn({
       sessionId: started.sessionId,
@@ -2063,12 +4812,13 @@ test("dashboard runtime queues guide prompts and interrupts active work", async 
     assert.equal(guided.queued, true);
     assert.equal(guided.queue[0].kind, "guide");
 
-    const events = await waitForEvent(runtime, started.sessionId, () =>
-      runtime.listActiveEvents(started.sessionId).filter((event) => event.type === "files_updated").length >= 2
-    );
+    const events = await waitForEvent(runtime, started.sessionId, (event) => (
+      event.type === "assistant_final" && /guided answer/.test(String(event.text ?? ""))
+    ));
     assert.equal(events.some((event) => event.type === "guide_queued"), true);
     assert.equal(events.some((event) => event.type === "turn_interrupt_requested" && event.reason === "guided"), true);
     assert.match(events.filter((event) => event.type === "user_message").map((event) => event.text).join("\n"), /改成先检查测试/);
+    assert.match(events.filter((event) => event.type === "assistant_final").at(-1)?.text ?? "", /guided answer/);
   } finally {
     await close(server);
   }
@@ -2076,7 +4826,12 @@ test("dashboard runtime queues guide prompts and interrupts active work", async 
 
 test("dashboard runtime converts queued prompts into guides without duplicating them", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
-  const server = await listen(createDelayedGateway(["old answer", "guided answer"], 80), "127.0.0.1", 0);
+  const firstRequestReceived = deferred();
+  const server = await listen(createDelayedGateway(
+    ["old answer", "guided answer"],
+    80,
+    { onRequest: () => firstRequestReceived.resolve() }
+  ), "127.0.0.1", 0);
   const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
   await runtime.trustWorkspace();
 
@@ -2086,6 +4841,7 @@ test("dashboard runtime converts queued prompts into guides without duplicating 
       permissionMode: "workspace"
     });
     assert.equal(started.ok, true);
+    await firstRequestReceived.promise;
 
     const queued = await runtime.startTurn({
       sessionId: started.sessionId,
@@ -2108,15 +4864,16 @@ test("dashboard runtime converts queued prompts into guides without duplicating 
     assert.match(guided.queue[0].preview, /改成先检查测试/);
     assert.equal(guided.queue.some((item) => item.kind === "prompt" && /改成先检查测试/.test(item.preview)), false);
 
-    const events = await waitForEvent(runtime, started.sessionId, () =>
-      runtime.listActiveEvents(started.sessionId).filter((event) => event.type === "files_updated").length >= 2
-    );
+    const events = await waitForEvent(runtime, started.sessionId, (event) => (
+      event.type === "assistant_final" && /guided answer/.test(String(event.text ?? ""))
+    ));
     assert.equal(events.some((event) => event.type === "guide_queued"), true);
     assert.equal(events.some((event) => event.type === "turn_interrupt_requested" && event.reason === "guided"), true);
     assert.deepEqual(events.filter((event) => event.type === "user_message").map((event) => event.text), [
       "draft old plan",
       "改成先检查测试"
     ]);
+    assert.match(events.filter((event) => event.type === "assistant_final").at(-1)?.text ?? "", /guided answer/);
   } finally {
     await close(server);
   }
@@ -2124,7 +4881,12 @@ test("dashboard runtime converts queued prompts into guides without duplicating 
 
 test("dashboard runtime stores guide transcript using visible guidance only", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
-  const server = await listen(createDelayedGateway(["old answer", "guided answer"], 80), "127.0.0.1", 0);
+  const firstRequestReceived = deferred();
+  const server = await listen(createDelayedGateway(
+    ["old answer", "guided answer"],
+    80,
+    { onRequest: () => firstRequestReceived.resolve() }
+  ), "127.0.0.1", 0);
   const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
   await runtime.trustWorkspace();
 
@@ -2134,6 +4896,7 @@ test("dashboard runtime stores guide transcript using visible guidance only", as
       permissionMode: "workspace"
     });
     assert.equal(started.ok, true);
+    await firstRequestReceived.promise;
 
     const guided = runtime.guideTurn({
       sessionId: started.sessionId,
@@ -2174,7 +4937,7 @@ test("dashboard runtime consumes background subagent wake prompts", async () => 
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
   const requests = [];
   const server = await listen(createBackgroundWakeGateway(requests), "127.0.0.1", 0);
-  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server, { LAB_AGENT_MODEL: "mock-model" }) });
   await runtime.trustWorkspace();
 
   try {
@@ -2184,18 +4947,55 @@ test("dashboard runtime consumes background subagent wake prompts", async () => 
     });
     assert.equal(started.ok, true);
 
-    const events = await waitForEvent(runtime, started.sessionId, () =>
-      runtime.listActiveEvents(started.sessionId).filter((event) => event.type === "files_updated").length >= 2
-    );
+    try {
+      await waitForEvent(runtime, started.sessionId, (event) => (
+        event.type === "assistant_final" && /parent consumed wake prompt/.test(String(event.text ?? ""))
+      ), 3_000);
+    } catch (error) {
+      console.error(JSON.stringify({
+        events: runtime.listActiveEvents(started.sessionId).map((event) => ({
+          type: event.type,
+          rawType: event.rawType,
+          text: event.text,
+          running: event.running,
+          groups: event.groups,
+          queueLength: event.queueLength
+        })),
+        requests: requests.map((request) => ({
+          sessionId: request.sessionId,
+          lastMessage: request.messages?.at(-1)?.content
+        })),
+        state: {
+          running: runtime.active.get(started.sessionId)?.running,
+          queue: runtime.active.get(started.sessionId)?.queuedPrompts
+        }
+      }, null, 2));
+      throw error;
+    }
+    await waitForCondition(() => runtime.active.get(started.sessionId)?.running === false);
+    const groupPath = path.join(cwd, ".lab-agent", "task-groups", "group-dashboard-bg.json");
+    await waitForCondition(async () => {
+      try {
+        const group = JSON.parse(await fs.readFile(groupPath, "utf8"));
+        return Boolean(group.wakePromptConsumedAt);
+      } catch {
+        return false;
+      }
+    });
+    await waitForCondition(() => (
+      runtime.listActiveEvents(started.sessionId)
+        .filter((event) => event.type === "background_subagent_snapshot")
+        .at(-1)?.groups?.length === 0
+    ));
+    const events = runtime.listActiveEvents(started.sessionId);
     const parentRequests = requests.filter((item) => !String(item.sessionId ?? "").startsWith("agent-explorer-"));
+    const group = JSON.parse(await fs.readFile(groupPath, "utf8"));
 
     assert.equal(events.some((event) => event.rawType === "subagent_group_wakeup"), true);
     assert.equal(events.some((event) => event.type === "wakeup_queued"), true);
     assert.equal(events.some((event) => event.type === "background_subagent_snapshot"), true);
     assert.match(parentRequests.at(-1)?.messages?.at(-1)?.content ?? "", /Ant Code subagent group completed/);
     assert.match(events.filter((event) => event.type === "assistant_final").map((event) => event.text).join("\n"), /parent consumed wake prompt/);
-
-    const group = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "task-groups", "group-dashboard-bg.json"), "utf8"));
     assert.ok(group.wakePromptQueuedAt);
     assert.ok(group.wakePromptConsumedAt);
     const lastSnapshot = events.filter((event) => event.type === "background_subagent_snapshot").at(-1);
@@ -2283,39 +5083,50 @@ test("dashboard runtime keeps still-running background siblings visible after wa
     });
     assert.equal(started.ok, true);
 
-    const events = await waitForEvent(runtime, started.sessionId, (event) =>
-      event.type === "background_subagent_snapshot"
-      && event.groups.some((group) =>
-        group.groupId === "group-dashboard-any"
-        && group.status === "running"
-        && group.wakePromptQueued === false
-      )
-      && runtime.listActiveEvents(started.sessionId).filter((item) => item.type === "files_updated").length >= 2
-    );
+    await waitForEvent(runtime, started.sessionId, (event) => (
+      event.type === "assistant_final" && /parent consumed any wake prompt/.test(String(event.text ?? ""))
+    ), 15_000);
+    await waitForCondition(() => runtime.active.get(started.sessionId)?.running === false);
+    const groupPath = path.join(cwd, ".lab-agent", "task-groups", "group-dashboard-any.json");
+    await waitForCondition(async () => {
+      try {
+        const group = JSON.parse(await fs.readFile(groupPath, "utf8"));
+        return Boolean(group.wakePromptConsumedAt);
+      } catch {
+        return false;
+      }
+    });
+    await waitForCondition(() => {
+      const lastSnapshot = runtime.listActiveEvents(started.sessionId)
+        .filter((event) => event.type === "background_subagent_snapshot")
+        .at(-1);
+      return lastSnapshot?.groups?.length === 1
+        && lastSnapshot.groups[0].status === "running"
+        && lastSnapshot.groups[0].wakePromptQueued === false;
+    });
+    const events = runtime.listActiveEvents(started.sessionId);
+    const snapshots = events.filter((event) => event.type === "background_subagent_snapshot");
+    const lastSnapshot = snapshots.at(-1);
+    const reopened = await runtime.readSession(started.sessionId);
+    const records = await runtime.listSessionRecords();
+    const record = records.find((item) => item.id === started.sessionId);
+    const group = JSON.parse(await fs.readFile(groupPath, "utf8"));
 
     assert.equal(events.some((event) => event.rawType === "subagent_group_wakeup"), true);
-    const snapshots = events.filter((event) => event.type === "background_subagent_snapshot");
     assert.ok(snapshots.length >= 2);
-    const lastSnapshot = snapshots.at(-1);
     assert.equal(lastSnapshot.groups.length, 1);
     assert.equal(lastSnapshot.groups[0].groupId, "group-dashboard-any");
     assert.equal(lastSnapshot.groups[0].status, "running");
     assert.equal(lastSnapshot.groups[0].runningCount, 1);
     assert.equal(lastSnapshot.groups[0].wakePromptQueued, false);
-
-    const reopened = await runtime.readSession(started.sessionId);
     assert.equal(reopened.ok, true);
     assert.equal(reopened.session.active, true);
     assert.equal(reopened.session.running, false);
     assert.equal(reopened.session.backgroundSnapshot.groups.length, 1);
     assert.equal(reopened.session.backgroundSnapshot.groups[0].groupId, "group-dashboard-any");
     assert.equal(reopened.session.backgroundSnapshot.groups[0].status, "running");
-    const records = await runtime.listSessionRecords();
-    const record = records.find((item) => item.id === started.sessionId);
     assert.equal(record.backgroundVisible, true);
     assert.deepEqual(record.backgroundKinds, ["subagent"]);
-
-    const group = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "task-groups", "group-dashboard-any.json"), "utf8"));
     assert.ok(group.wakePromptConsumedAt);
   } finally {
     await close(server);
@@ -2471,11 +5282,6 @@ test("dashboard runtime starts cancellable background terminal tasks without blo
 
 test("dashboard runtime shows starting background terminal tasks before pid is available", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-terminal-starting-"));
-  await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
-    lab: {
-      gatewayUrl: null
-    }
-  }), "utf8");
   const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
   await runtime.trustWorkspace();
   const started = await runtime.startTurn({
@@ -2612,6 +5418,47 @@ test("dashboard runtime pages archived transcript history for display", async ()
   assert.equal(older.transcriptPage.hasMore, false);
 });
 
+test("dashboard runtime exposes a redacted gateway failure summary for archived sessions", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+  const store = createSessionStore({ cwd });
+  await store.writeMetadata({
+    id: "archived-gateway-failure",
+    prompt: "failed request",
+    title: "failed request",
+    status: "gateway_error",
+    gatewayRounds: [{
+      round: 1,
+      error: {
+        code: "GATEWAY_HTTP_ERROR",
+        message: "Gateway returned HTTP 502; Bearer archive-secret-value",
+        status: 502,
+        details: {
+          body: JSON.stringify({ error: { message: "Upstream service temporarily unavailable; api_key=archive-secret-value" } }),
+          attempts: 6,
+          retryHistory: [{ attempt: 1, body: "private retry detail" }]
+        }
+      }
+    }],
+    transcript: { messages: [] }
+  });
+
+  const reopened = await runtime.readSession("archived-gateway-failure");
+
+  assert.equal(reopened.ok, true);
+  assert.deepEqual(reopened.session.failure, {
+    kind: "gateway",
+    code: "GATEWAY_HTTP_ERROR",
+    message: "Gateway returned HTTP 502; Bearer [redacted]",
+    httpStatus: 502,
+    upstreamMessage: "Upstream service temporarily unavailable; api_key=[redacted]",
+    attempts: 6
+  });
+  assert.doesNotMatch(JSON.stringify(reopened.session.failure), /archive-secret-value/);
+  assert.equal("retryHistory" in reopened.session.failure, false);
+  assert.equal("body" in reopened.session.failure, false);
+});
+
 test("dashboard resume sends archived full context while display stays paged", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
   const requests = [];
@@ -2688,7 +5535,7 @@ test("dashboard runtime refuses deleting running sessions", async () => {
     assert.equal(deleted.ok, false);
     assert.equal(deleted.status, 409);
     assert.equal(runtime.active.has(started.sessionId), true);
-    runtime.interruptTurn(started.sessionId, "test-cleanup");
+    runtime.interruptTurn(started.sessionId, cleanupAbortError());
     await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
   } finally {
     await close(server);
@@ -3391,8 +6238,10 @@ async function waitForEvent(runtime, sessionId, predicate, timeoutMs = 5000) {
 
 async function waitForCondition(predicate, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error("Timed out waiting for dashboard condition");
+  while (!await predicate()) {
+    if (Date.now() >= deadline) {
+      throw new Error("Timed out waiting for dashboard condition");
+    }
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
@@ -3402,6 +6251,7 @@ function cleanupAbortError() {
   error.name = "AbortError";
   return error;
 }
+
 function transcriptText(message) {
   if (typeof message?.content === "string") {
     return message.content;
@@ -3460,6 +6310,14 @@ function createGateway(text, options = {}) {
       stopReason: "stop"
     }));
   });
+}
+
+async function readDashboardRequestJson(request) {
+  let body = "";
+  for await (const chunk of request) {
+    body += Buffer.from(chunk).toString("utf8");
+  }
+  return body ? JSON.parse(body) : {};
 }
 
 function createRecordingGateway(requests, text) {
@@ -3552,12 +6410,49 @@ function createAuthRecordingGateway(requests, text, validKey) {
   });
 }
 
-function createDelayedGateway(texts, delayMs) {
+function createOpenAIChatAuthRecordingGateway(requests, text, validKey) {
+  return http.createServer(async (req, res) => {
+    let body = "";
+    for await (const chunk of req) {
+      body += Buffer.from(chunk).toString("utf8");
+    }
+    requests.push({
+      url: req.url,
+      authorization: req.headers.authorization ?? "",
+      body: JSON.parse(body)
+    });
+    if (req.headers.authorization !== `Bearer ${validKey}`) {
+      res.writeHead(401, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        error: {
+          message: "Invalid API Key",
+          type: "invalid_key",
+          code: "401"
+        }
+      }));
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      id: `chat-auth-recording-${requests.length}`,
+      model: String(requests.at(-1)?.body?.model ?? "mock-model"),
+      choices: [{
+        index: 0,
+        message: { role: "assistant", content: text },
+        finish_reason: "stop"
+      }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }
+    }));
+  });
+}
+
+function createDelayedGateway(texts, delayMs, options = {}) {
   let calls = 0;
   return http.createServer(async (req, res) => {
     for await (const _ of req) {
       // Drain request body.
     }
+    options.onRequest?.(calls + 1);
     const text = texts[Math.min(calls, texts.length - 1)];
     calls += 1;
     await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -4081,3 +6976,1478 @@ function mockGatewayEnv(server, extra = {}) {
     ...extra
   };
 }
+
+test("dashboard global model saves do not regress capabilities from a stale project profile override", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-global-capability-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-global-capability-"));
+  const globalPath = path.join(home, ".ant-code", "lab-agent.config.json");
+  const localPath = path.join(cwd, ".lab-agent", "config.json");
+  const gatewayUrl = "https://shared-capability.gateway.example/v1/responses";
+  const profileId = "shared-capability-profile";
+  const staleModel = {
+    id: "deepseek-reasoner",
+    label: "Stale project copy",
+    reasoningEfforts: ["low", "high"],
+    defaultReasoningEffort: "high"
+  };
+
+  await fs.mkdir(path.dirname(globalPath), { recursive: true });
+  await fs.writeFile(globalPath, JSON.stringify({
+    modelAlias: staleModel.id,
+    models: [staleModel],
+    lab: {
+      gatewayUrl,
+      gatewayProtocol: "openai-responses",
+      activeGatewayProfile: profileId,
+      gatewayProfiles: [{
+        id: profileId,
+        gatewayUrl,
+        gatewayProtocol: "openai-responses",
+        modelAlias: staleModel.id,
+        models: [staleModel]
+      }]
+    }
+  }), "utf8");
+  await fs.mkdir(path.dirname(localPath), { recursive: true });
+  await fs.writeFile(localPath, JSON.stringify({
+    modelAlias: staleModel.id,
+    models: [staleModel],
+    lab: {
+      gatewayUrl,
+      gatewayProtocol: "openai-responses",
+      activeGatewayProfile: profileId,
+      gatewayProfiles: [{
+        id: profileId,
+        gatewayUrl,
+        gatewayProtocol: "openai-responses",
+        modelAlias: staleModel.id,
+        models: [staleModel]
+      }]
+    }
+  }), "utf8");
+
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: home } });
+  const upgraded = await runtime.saveModelConfig({
+    saveTarget: "global",
+    gatewayUrl,
+    gatewayProtocol: "openai-responses",
+    modelId: staleModel.id,
+    label: "DeepSeek Reasoner Max",
+    reasoningEfforts: ["low", "medium", "high", "max"],
+    defaultReasoningEffort: "max",
+    switchToModel: false
+  });
+  assert.equal(upgraded.ok, true);
+
+  const added = await runtime.saveModelConfig({
+    saveTarget: "global",
+    gatewayUrl,
+    gatewayProtocol: "openai-responses",
+    modelId: "deepseek-chat",
+    label: "DeepSeek Chat",
+    switchToModel: false
+  });
+  assert.equal(added.ok, true);
+
+  const global = JSON.parse(await fs.readFile(globalPath, "utf8"));
+  const reasoner = global.models.find((model) => model.id === staleModel.id);
+  assert.equal(reasoner.label, "DeepSeek Reasoner Max");
+  assert.deepEqual(reasoner.reasoningEfforts.map((effort) => effort.id ?? effort), ["low", "medium", "high", "max"]);
+  assert.equal(reasoner.defaultReasoningEffort, "max");
+
+  const status = await runtime.status();
+  const restarted = await createDashboardRuntime({ cwd, env: { USERPROFILE: home } }).status();
+  const capabilitySnapshot = (snapshot) => {
+    const model = snapshot.models.find((candidate) => candidate.id === staleModel.id);
+    const profile = snapshot.gatewayProfiles.find((candidate) => candidate.gatewayUrl === gatewayUrl);
+    const profileModel = profile?.models.find((candidate) => candidate.id === staleModel.id);
+    const capability = (candidate) => ({
+      label: candidate?.label,
+      reasoningEfforts: candidate?.reasoningEfforts?.map((effort) => effort.id ?? effort),
+      defaultReasoningEffort: candidate?.defaultReasoningEffort,
+      ownerScope: candidate?.source?.ownerScope
+    });
+    return {
+      effectiveModel: capability(model),
+      effectiveProfileModel: capability(profileModel)
+    };
+  };
+  const expectedCapability = () => ({
+    effectiveModel: {
+      label: "DeepSeek Reasoner Max",
+      reasoningEfforts: ["low", "medium", "high", "max"],
+      defaultReasoningEffort: "max",
+      ownerScope: "global"
+    },
+    effectiveProfileModel: {
+      label: "DeepSeek Reasoner Max",
+      reasoningEfforts: ["low", "medium", "high", "max"],
+      defaultReasoningEffort: "max",
+      ownerScope: "global"
+    }
+  });
+  assert.deepEqual({
+    afterUpgrade: capabilitySnapshot(upgraded),
+    afterAdditionalGlobalSave: capabilitySnapshot(added),
+    liveStatus: capabilitySnapshot(status),
+    restartedStatus: capabilitySnapshot(restarted)
+  }, {
+    afterUpgrade: expectedCapability(),
+    afterAdditionalGlobalSave: expectedCapability(),
+    liveStatus: expectedCapability(),
+    restartedStatus: expectedCapability()
+  });
+});
+
+test("dashboard migrates exact inherited clones from every project config path", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-all-project-configs-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-all-project-configs-"));
+  const globalPath = path.join(home, ".ant-code", "lab-agent.config.json");
+  const projectPaths = [
+    path.join(cwd, "lab-agent.config.json"),
+    path.join(cwd, ".lab-agent", "config.json")
+  ];
+  const gatewayUrl = "https://all-project-configs.gateway.example/v1/responses";
+  const profileId = "all-project-configs-profile";
+  const staleModel = {
+    id: "deepseek-reasoner",
+    label: "DeepSeek before max",
+    reasoningEfforts: ["low", "high"],
+    defaultReasoningEffort: "high"
+  };
+  const profile = {
+    id: profileId,
+    label: "Custom source label",
+    gatewayUrl,
+    gatewayProtocol: "openai-responses",
+    modelAlias: staleModel.id,
+    models: [staleModel]
+  };
+  const clone = {
+    modelAlias: staleModel.id,
+    models: [staleModel],
+    lab: {
+      gatewayUrl,
+      gatewayProtocol: "openai-responses",
+      activeGatewayProfile: profileId,
+      gatewayProfiles: [profile]
+    }
+  };
+
+  await fs.mkdir(path.dirname(globalPath), { recursive: true });
+  await fs.writeFile(globalPath, JSON.stringify(clone), "utf8");
+  for (const projectPath of projectPaths) {
+    await fs.mkdir(path.dirname(projectPath), { recursive: true });
+    await fs.writeFile(projectPath, JSON.stringify(clone), "utf8");
+  }
+
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: home } });
+  const saved = await runtime.saveModelConfig({
+    saveTarget: "global",
+    gatewayUrl,
+    gatewayProtocol: "openai-responses",
+    modelId: staleModel.id,
+    label: "DeepSeek with max",
+    reasoningEfforts: ["low", "high", "max"],
+    defaultReasoningEffort: "max",
+    switchToModel: false
+  });
+
+  assert.equal(saved.ok, true, `${saved.status}: ${saved.error}`);
+  for (const projectPath of projectPaths) {
+    const project = JSON.parse(await fs.readFile(projectPath, "utf8"));
+    assert.equal(project.modelAlias, undefined);
+    assert.equal(project.models, undefined);
+    assert.equal(project.lab.activeGatewayProfile, profileId);
+    assert.equal(project.lab.gatewayProfiles, undefined);
+  }
+  const restarted = await createDashboardRuntime({ cwd, env: { USERPROFILE: home } }).status();
+  const model = restarted.models.find((candidate) => candidate.id === staleModel.id);
+  assert.equal(model?.label, "DeepSeek with max");
+  assert.deepEqual(model?.reasoningEfforts.map((effort) => effort.id ?? effort), ["low", "high", "max"]);
+  assert.equal(model?.defaultReasoningEffort, "max");
+  assert.equal(model?.source?.ownerScope, "global");
+});
+
+test("dashboard preserves project health and agent overrides while saving a global model", async (t) => {
+  const scenarios = [
+    {
+      name: "health override",
+      project: {
+        lab: { gatewayHealthUrl: "https://project-health.gateway.example/health" }
+      }
+    },
+    {
+      name: "agent routes",
+      project: {
+        agents: {
+          modelTiers: { strong: "project-strong", vision: "project-vision" },
+          vision: {
+            enabled: true,
+            model: "project-vision",
+            autoUseWhenMainModelTextOnly: true
+          }
+        }
+      }
+    }
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, () => assertGlobalSavePreservesProjectProjection(scenario.project));
+  }
+});
+
+async function assertGlobalSavePreservesProjectProjection(projectProjection) {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-project-projection-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-project-projection-"));
+  const globalPath = path.join(home, ".ant-code", "lab-agent.config.json");
+  const localPath = path.join(cwd, ".lab-agent", "config.json");
+  const gatewayUrl = "https://project-projection.gateway.example/v1/responses";
+  const profileId = "project-projection-profile";
+  const profile = {
+    id: profileId,
+    gatewayUrl,
+    gatewayProtocol: "openai-responses",
+    modelAlias: "shared-model",
+    models: [
+      { id: "shared-model", reasoningEfforts: ["high"] },
+      { id: "project-strong" },
+      { id: "project-vision", modalities: ["text", "image"] }
+    ]
+  };
+  const global = {
+    modelAlias: profile.modelAlias,
+    models: profile.models,
+    lab: {
+      gatewayUrl,
+      gatewayProtocol: "openai-responses",
+      activeGatewayProfile: profileId,
+      gatewayProfiles: [profile]
+    }
+  };
+  const project = {
+    ...(projectProjection.agents ? { agents: projectProjection.agents } : {}),
+    lab: {
+      activeGatewayProfile: profileId,
+      gatewayProfiles: [profile],
+      ...(projectProjection.lab ?? {})
+    }
+  };
+
+  await fs.mkdir(path.dirname(globalPath), { recursive: true });
+  await fs.writeFile(globalPath, JSON.stringify(global), "utf8");
+  await fs.mkdir(path.dirname(localPath), { recursive: true });
+  await fs.writeFile(localPath, JSON.stringify(project), "utf8");
+  const before = await fs.readFile(localPath, "utf8");
+
+  const saved = await createDashboardRuntime({ cwd, env: { USERPROFILE: home } }).saveModelConfig({
+    saveTarget: "global",
+    gatewayUrl,
+    gatewayProtocol: "openai-responses",
+    modelId: "shared-model",
+    reasoningEfforts: ["high", "max"],
+    defaultReasoningEffort: "max",
+    switchToModel: false
+  });
+
+  assert.equal(saved.ok, true, `${saved.status}: ${saved.error}`);
+  assert.equal(await fs.readFile(localPath, "utf8"), before);
+  const storedGlobal = JSON.parse(await fs.readFile(globalPath, "utf8"));
+  const storedModel = storedGlobal.lab.gatewayProfiles[0].models
+    .find((model) => model.id === "shared-model");
+  assert.deepEqual(storedModel.reasoningEfforts.map((effort) => effort.id ?? effort), ["high", "max"]);
+  assert.equal(storedModel.defaultReasoningEffort, "max");
+}
+
+test("dashboard switching to an inherited global profile does not materialize that profile into project config", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-inherited-switch-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-inherited-switch-"));
+  const globalPath = path.join(home, ".ant-code", "lab-agent.config.json");
+  const localPath = path.join(cwd, ".lab-agent", "config.json");
+  const globalProfile = {
+    id: "inherited-global-profile",
+    gatewayUrl: "https://global-inherited.gateway.example/v1/responses",
+    gatewayProtocol: "openai-responses",
+    modelAlias: "global-model",
+    models: [{ id: "global-model" }]
+  };
+  const projectProfile = {
+    id: "owned-project-profile",
+    gatewayUrl: "https://project-owned.gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    modelAlias: "project-model",
+    models: [{ id: "project-model" }]
+  };
+
+  await fs.mkdir(path.dirname(globalPath), { recursive: true });
+  await fs.writeFile(globalPath, JSON.stringify({
+    modelAlias: globalProfile.modelAlias,
+    models: globalProfile.models,
+    lab: {
+      gatewayUrl: globalProfile.gatewayUrl,
+      gatewayProtocol: globalProfile.gatewayProtocol,
+      activeGatewayProfile: globalProfile.id,
+      gatewayProfiles: [globalProfile]
+    }
+  }), "utf8");
+  await fs.mkdir(path.dirname(localPath), { recursive: true });
+  await fs.writeFile(localPath, JSON.stringify({
+    modelAlias: projectProfile.modelAlias,
+    models: projectProfile.models,
+    lab: {
+      gatewayUrl: projectProfile.gatewayUrl,
+      gatewayProtocol: projectProfile.gatewayProtocol,
+      activeGatewayProfile: projectProfile.id,
+      gatewayProfiles: [projectProfile]
+    }
+  }), "utf8");
+
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: home } });
+  const switched = await runtime.switchGatewayProfile({ profileId: globalProfile.id });
+  assert.equal(switched.ok, true);
+  assert.equal(switched.gatewayConfig.activeProfileId, globalProfile.id);
+
+  const local = JSON.parse(await fs.readFile(localPath, "utf8"));
+  assert.equal(local.lab.activeGatewayProfile, globalProfile.id);
+  assert.equal(
+    local.lab.gatewayProfiles.some((profile) => profile.id === globalProfile.id),
+    false,
+    "an inherited global profile must remain owned by the global layer"
+  );
+  assert.deepEqual(local.lab.gatewayProfiles.map((profile) => profile.id), [projectProfile.id]);
+});
+
+test("dashboard deleting a project profile override reveals rather than deletes the same-id global profile", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-delete-override-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-delete-override-"));
+  const globalPath = path.join(home, ".ant-code", "lab-agent.config.json");
+  const localPath = path.join(cwd, ".lab-agent", "config.json");
+  const profileId = "same-id-profile";
+  const gatewayUrl = "https://same-id.gateway.example/v1/responses";
+  const globalProfile = {
+    id: profileId,
+    label: "Global profile",
+    gatewayUrl,
+    gatewayProtocol: "openai-responses",
+    modelAlias: "global-model",
+    models: [{ id: "global-model" }]
+  };
+  const projectProfile = {
+    ...globalProfile,
+    label: "Project override",
+    modelAlias: "project-model",
+    models: [{ id: "project-model" }]
+  };
+
+  await fs.mkdir(path.dirname(globalPath), { recursive: true });
+  await fs.writeFile(globalPath, JSON.stringify({
+    modelAlias: globalProfile.modelAlias,
+    models: globalProfile.models,
+    lab: {
+      gatewayUrl,
+      gatewayProtocol: "openai-responses",
+      activeGatewayProfile: profileId,
+      gatewayProfiles: [globalProfile]
+    }
+  }), "utf8");
+  await fs.mkdir(path.dirname(localPath), { recursive: true });
+  await fs.writeFile(localPath, JSON.stringify({
+    modelAlias: projectProfile.modelAlias,
+    models: projectProfile.models,
+    lab: {
+      gatewayUrl,
+      gatewayProtocol: "openai-responses",
+      activeGatewayProfile: profileId,
+      gatewayProfiles: [projectProfile]
+    }
+  }), "utf8");
+
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: home } });
+  const initial = await runtime.status();
+  assert.equal(initial.gatewayProfiles.find((profile) => profile.id === profileId)?.ownerScope, "project");
+
+  const deleted = await runtime.deleteGatewayProfile({ profileId });
+  assert.equal(deleted.ok, true);
+  assert.deepEqual(deleted.deletedFromScopes, ["project"]);
+
+  const global = JSON.parse(await fs.readFile(globalPath, "utf8"));
+  assert.equal(global.lab.gatewayProfiles.some((profile) => profile.id === profileId), true);
+  const refreshed = await runtime.status();
+  const revealed = refreshed.gatewayProfiles.find((profile) => profile.id === profileId);
+  assert.equal(revealed?.ownerScope, "global");
+  assert.equal(revealed?.current, true);
+  assert.deepEqual(revealed?.models.map((model) => model.id), ["global-model"]);
+});
+
+test("dashboard edits an inactive project profile without switching or mixing agent routes", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-edit-inactive-profile-"));
+  const localPath = path.join(cwd, ".lab-agent", "config.json");
+  const profileA = {
+    id: "project-profile-a",
+    gatewayUrl: "https://profile-a.acme.test/v1/responses",
+    gatewayProtocol: "openai-responses",
+    modelAlias: "a-main",
+    models: [
+      { id: "a-main", label: "A Main" },
+      { id: "a-worker", label: "A Worker" },
+      { id: "a-vision", label: "A Vision", modalities: ["text", "image"] }
+    ],
+    agents: {
+      modelTiers: { cheap: "a-worker", default: "a-main", strong: "a-main", vision: "a-vision" },
+      vision: { enabled: true, model: "a-vision", autoUseWhenMainModelTextOnly: true }
+    }
+  };
+  const profileB = {
+    id: "project-profile-b",
+    gatewayUrl: "https://profile-b.acme.test/v1/responses",
+    gatewayProtocol: "openai-responses",
+    modelAlias: "b-main",
+    models: [
+      { id: "b-main", label: "B Main" },
+      { id: "b-worker", label: "B Worker" },
+      { id: "b-vision", label: "B Vision", modalities: ["text", "image"] }
+    ],
+    agents: {
+      modelTiers: { cheap: "b-worker", default: "b-main", strong: "b-main", vision: "b-vision" },
+      vision: { enabled: true, model: "b-vision", autoUseWhenMainModelTextOnly: true }
+    }
+  };
+
+  await fs.mkdir(path.dirname(localPath), { recursive: true });
+  await fs.writeFile(localPath, JSON.stringify({
+    modelAlias: profileA.modelAlias,
+    models: profileA.models,
+    agents: profileA.agents,
+    lab: {
+      gatewayUrl: profileA.gatewayUrl,
+      gatewayProtocol: profileA.gatewayProtocol,
+      activeGatewayProfile: profileA.id,
+      gatewayProfiles: [profileA, profileB]
+    }
+  }), "utf8");
+
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+  const saved = await runtime.saveModelConfig({
+    saveTarget: "project",
+    profileId: profileB.id,
+    gatewayUrl: profileB.gatewayUrl,
+    gatewayProtocol: profileB.gatewayProtocol,
+    previousModelId: "b-main",
+    modelId: "b-main",
+    label: "B Main Edited",
+    modalities: ["text"],
+    switchToModel: false,
+    applyAgentDefaults: false
+  });
+
+  assert.equal(saved.ok, true);
+  assert.equal(saved.gatewayConfig.activeProfileId, profileA.id);
+  assert.equal(saved.sessionStatus.model, profileA.modelAlias);
+
+  const local = JSON.parse(await fs.readFile(localPath, "utf8"));
+  assert.equal(local.lab.activeGatewayProfile, profileA.id);
+  assert.equal(local.modelAlias, profileA.modelAlias);
+  assert.deepEqual(local.models.map((model) => model.id), profileA.models.map((model) => model.id));
+  assert.deepEqual(local.agents, profileA.agents);
+  const storedB = local.lab.gatewayProfiles.find((profile) => profile.id === profileB.id);
+  assert.deepEqual(storedB.models.map((model) => model.id), ["b-main", "b-worker", "b-vision"]);
+  assert.equal(storedB.models.find((model) => model.id === "b-main")?.label, "B Main Edited");
+  assert.deepEqual(storedB.agents, profileB.agents);
+  assert.equal(JSON.stringify(storedB).includes("a-main"), false);
+  assert.equal(JSON.stringify(storedB).includes("a-vision"), false);
+
+  const restarted = await createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } }).status();
+  assert.equal(restarted.gatewayConfig.activeProfileId, profileA.id);
+  assert.equal(restarted.sessionStatus.model, profileA.modelAlias);
+  assert.deepEqual(
+    restarted.gatewayProfiles.find((profile) => profile.id === profileB.id)?.models.map((model) => model.id),
+    ["b-main", "b-worker", "b-vision"]
+  );
+});
+
+test("dashboard deletes a model from its global owner without creating a project shadow", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-delete-global-model-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-delete-global-model-"));
+  const globalPath = path.join(home, ".ant-code", "lab-agent.config.json");
+  const localPath = path.join(cwd, ".lab-agent", "config.json");
+  const globalProfile = {
+    id: "global-model-profile",
+    gatewayUrl: "https://global-models.acme.test/v1/responses",
+    gatewayProtocol: "openai-responses",
+    modelAlias: "global-main",
+    models: [
+      { id: "global-main", label: "Global Main" },
+      { id: "global-remove", label: "Global Remove" },
+      { id: "global-vision", label: "Global Vision", modalities: ["text", "image"] }
+    ]
+  };
+
+  await fs.mkdir(path.dirname(globalPath), { recursive: true });
+  await fs.writeFile(globalPath, JSON.stringify({
+    modelAlias: globalProfile.modelAlias,
+    models: globalProfile.models,
+    lab: {
+      gatewayUrl: globalProfile.gatewayUrl,
+      gatewayProtocol: globalProfile.gatewayProtocol,
+      activeGatewayProfile: globalProfile.id,
+      gatewayProfiles: [globalProfile]
+    }
+  }), "utf8");
+
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: home } });
+  const deleted = await runtime.deleteModelConfig({
+    profileId: globalProfile.id,
+    modelId: "global-remove"
+  });
+
+  assert.equal(deleted.ok, true);
+  assert.equal(deleted.deletedFrom, "global");
+  assert.equal(deleted.gatewayConfig.activeProfileId, globalProfile.id);
+  assert.deepEqual(deleted.models.map((model) => model.id), ["global-main", "global-vision"]);
+
+  const global = JSON.parse(await fs.readFile(globalPath, "utf8"));
+  assert.equal(global.lab.activeGatewayProfile, globalProfile.id);
+  assert.deepEqual(global.models.map((model) => model.id), ["global-main", "global-vision"]);
+  assert.deepEqual(global.lab.gatewayProfiles[0].models.map((model) => model.id), ["global-main", "global-vision"]);
+  await assert.rejects(fs.access(localPath), /ENOENT/);
+
+  const restarted = await createDashboardRuntime({ cwd, env: { USERPROFILE: home } }).status();
+  assert.equal(restarted.gatewayConfig.activeProfileId, globalProfile.id);
+  assert.deepEqual(restarted.models.map((model) => model.id), ["global-main", "global-vision"]);
+});
+
+test("dashboard preserves a legacy project gateway as an owned profile before switching global", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-switch-legacy-project-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-switch-legacy-project-"));
+  const globalPath = path.join(home, ".ant-code", "lab-agent.config.json");
+  const localPath = path.join(cwd, ".lab-agent", "config.json");
+  const globalProfile = {
+    id: "global-switch-profile",
+    gatewayUrl: "https://global-switch.acme.test/v1/responses",
+    gatewayProtocol: "openai-responses",
+    modelAlias: "global-switch-model",
+    models: [{ id: "global-switch-model" }]
+  };
+  const legacyProjectUrl = "https://legacy-project.acme.test/v1/chat/completions";
+
+  await fs.mkdir(path.dirname(globalPath), { recursive: true });
+  await fs.writeFile(globalPath, JSON.stringify({
+    modelAlias: globalProfile.modelAlias,
+    models: globalProfile.models,
+    lab: {
+      gatewayUrl: globalProfile.gatewayUrl,
+      gatewayProtocol: globalProfile.gatewayProtocol,
+      activeGatewayProfile: globalProfile.id,
+      gatewayProfiles: [globalProfile]
+    }
+  }), "utf8");
+  await fs.mkdir(path.dirname(localPath), { recursive: true });
+  await fs.writeFile(localPath, JSON.stringify({
+    modelAlias: "legacy-project-main",
+    models: [
+      { id: "legacy-project-main" },
+      { id: "legacy-project-worker" }
+    ],
+    agents: {
+      modelTiers: {
+        cheap: "legacy-project-worker",
+        default: "legacy-project-main",
+        strong: "legacy-project-main"
+      }
+    },
+    lab: {
+      gatewayUrl: legacyProjectUrl,
+      gatewayProtocol: "openai-chat"
+    }
+  }), "utf8");
+
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: home } });
+  const initial = await runtime.status();
+  const legacyProfile = initial.gatewayProfiles.find((profile) => profile.gatewayUrl === legacyProjectUrl);
+  assert.ok(legacyProfile);
+  assert.equal(legacyProfile.ownerScope, "project");
+
+  const switched = await runtime.switchGatewayProfile({ profileId: globalProfile.id });
+  assert.equal(switched.ok, true);
+  assert.equal(switched.gatewayConfig.activeProfileId, globalProfile.id);
+
+  const local = JSON.parse(await fs.readFile(localPath, "utf8"));
+  assert.equal(local.lab.activeGatewayProfile, globalProfile.id);
+  assert.equal(local.lab.gatewayProfiles.some((profile) => profile.id === globalProfile.id), false);
+  const persistedLegacy = local.lab.gatewayProfiles.find((profile) => profile.id === legacyProfile.id);
+  assert.ok(persistedLegacy);
+  assert.equal(persistedLegacy.gatewayUrl, legacyProjectUrl);
+  assert.deepEqual(persistedLegacy.models.map((model) => model.id), [
+    "legacy-project-main",
+    "legacy-project-worker"
+  ]);
+
+  const restartedRuntime = createDashboardRuntime({ cwd, env: { USERPROFILE: home } });
+  const restarted = await restartedRuntime.status();
+  assert.equal(restarted.gatewayConfig.activeProfileId, globalProfile.id);
+  assert.ok(restarted.gatewayProfiles.some((profile) => profile.id === legacyProfile.id));
+  const switchedBack = await restartedRuntime.switchGatewayProfile({ profileId: legacyProfile.id });
+  assert.equal(switchedBack.ok, true);
+  assert.equal(switchedBack.gatewayConfig.activeProfileId, legacyProfile.id);
+  assert.equal(switchedBack.gatewayConfig.gatewayUrl, legacyProjectUrl);
+  assert.deepEqual(switchedBack.models.map((model) => model.id), [
+    "legacy-project-main",
+    "legacy-project-worker"
+  ]);
+});
+
+test("dashboard deletes a global-owned model through a same-endpoint project profile without shadowing", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-delete-mixed-owner-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-delete-mixed-owner-"));
+  const globalPath = path.join(home, ".ant-code", "lab-agent.config.json");
+  const localPath = path.join(cwd, ".lab-agent", "config.json");
+  const gatewayUrl = "https://mixed-owner.gateway.example/v1/responses";
+  const globalProfile = {
+    id: "global-shared",
+    gatewayUrl,
+    gatewayProtocol: "openai-responses",
+    modelAlias: "global-a",
+    models: [
+      { id: "global-a", label: "Global A" },
+      { id: "global-b", label: "Global B" }
+    ]
+  };
+  const projectProfile = {
+    id: "project-shared",
+    gatewayUrl,
+    gatewayProtocol: "openai-responses",
+    modelAlias: "project-a",
+    models: [{ id: "project-a", label: "Project A" }]
+  };
+
+  await fs.mkdir(path.dirname(globalPath), { recursive: true });
+  await fs.writeFile(globalPath, JSON.stringify({
+    modelAlias: globalProfile.modelAlias,
+    models: globalProfile.models,
+    lab: {
+      gatewayUrl,
+      gatewayProtocol: "openai-responses",
+      activeGatewayProfile: globalProfile.id,
+      gatewayProfiles: [globalProfile]
+    }
+  }), "utf8");
+  await fs.mkdir(path.dirname(localPath), { recursive: true });
+  await fs.writeFile(localPath, JSON.stringify({
+    modelAlias: projectProfile.modelAlias,
+    models: projectProfile.models,
+    lab: {
+      gatewayUrl,
+      gatewayProtocol: "openai-responses",
+      activeGatewayProfile: projectProfile.id,
+      gatewayProfiles: [projectProfile]
+    }
+  }), "utf8");
+
+  const projectBefore = await fs.readFile(localPath, "utf8");
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: home } });
+  const initial = await runtime.status();
+  const effectiveProfile = initial.gatewayProfiles.find((profile) => profile.gatewayUrl === gatewayUrl);
+  assert.equal(effectiveProfile?.id, projectProfile.id);
+  assert.deepEqual(Object.fromEntries(effectiveProfile.models.map((model) => [model.id, model.source?.ownerScope])), {
+    "global-a": "global",
+    "global-b": "global",
+    "project-a": "project"
+  });
+
+  const deleted = await runtime.deleteModelConfig({
+    profileId: effectiveProfile.id,
+    modelId: "global-b"
+  });
+
+  assert.equal(deleted.ok, true, `${deleted.status}: ${deleted.error}`);
+  assert.equal(deleted.deletedFrom, "global");
+  assert.equal(deleted.configPath, globalPath);
+  assert.equal(await fs.readFile(localPath, "utf8"), projectBefore);
+  const global = JSON.parse(await fs.readFile(globalPath, "utf8"));
+  assert.deepEqual(global.models.map((model) => model.id), ["global-a"]);
+  assert.deepEqual(global.lab.gatewayProfiles.find((profile) => profile.id === globalProfile.id).models.map((model) => model.id), ["global-a"]);
+  const project = JSON.parse(await fs.readFile(localPath, "utf8"));
+  assert.deepEqual(project.models.map((model) => model.id), ["project-a"]);
+  assert.deepEqual(project.lab.gatewayProfiles[0].models.map((model) => model.id), ["project-a"]);
+
+  const restarted = await createDashboardRuntime({ cwd, env: { USERPROFILE: home } }).status();
+  const restartedProfile = restarted.gatewayProfiles.find((profile) => profile.gatewayUrl === gatewayUrl);
+  assert.deepEqual(restartedProfile.models.map((model) => model.id).sort(), ["global-a", "project-a"]);
+  assert.equal(restartedProfile.models.find((model) => model.id === "global-a")?.source?.ownerScope, "global");
+  assert.equal(restartedProfile.models.find((model) => model.id === "project-a")?.source?.ownerScope, "project");
+});
+
+test("dashboard model edits can clear optional capabilities across restart", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-clear-model-options-"));
+  const localPath = path.join(cwd, ".lab-agent", "config.json");
+  const gatewayUrl = "https://clear-options.gateway.example/v1/chat/completions";
+  const profileId = "clear-options-profile";
+  const modelId = "optional-model";
+  const model = {
+    id: modelId,
+    label: "Optional Model",
+    thinking: true,
+    modalities: ["text", "image"],
+    contextTokens: 480000,
+    reasoningEfforts: ["low", "medium", "high"],
+    defaultReasoningEffort: "high",
+    agentModelTiers: {
+      cheap: "optional-cheap",
+      default: "optional-default",
+      strong: "optional-strong"
+    }
+  };
+  const agentRoutes = {
+    modelTiers: {
+      cheap: "optional-cheap",
+      default: "optional-default",
+      strong: "optional-strong",
+      vision: modelId
+    },
+    vision: { enabled: true, model: modelId, autoUseWhenMainModelTextOnly: true }
+  };
+
+  await fs.mkdir(path.dirname(localPath), { recursive: true });
+  await fs.writeFile(localPath, JSON.stringify({
+    modelAlias: modelId,
+    models: [model],
+    agents: agentRoutes,
+    lab: {
+      gatewayUrl,
+      gatewayProtocol: "openai-chat",
+      activeGatewayProfile: profileId,
+      gatewayProfiles: [{
+        id: profileId,
+        gatewayUrl,
+        gatewayProtocol: "openai-chat",
+        modelAlias: modelId,
+        models: [model],
+        agents: agentRoutes
+      }]
+    }
+  }), "utf8");
+
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+  const saved = await runtime.saveModelConfig({
+    saveTarget: "project",
+    profileId,
+    gatewayUrl,
+    gatewayProtocol: "openai-chat",
+    previousModelId: modelId,
+    modelId,
+    label: "Optional Model",
+    contextTokens: "",
+    reasoningEfforts: [],
+    defaultReasoningEffort: null,
+    agentCheapModel: "",
+    agentDefaultModel: "",
+    agentStrongModel: "",
+    visionAgentModel: "",
+    modalities: ["text"],
+    thinking: false,
+    applyAgentDefaults: true,
+    switchToModel: true
+  });
+
+  assert.equal(saved.ok, true);
+  const savedModel = saved.models.find((candidate) => candidate.id === modelId);
+  assert.equal(savedModel.contextTokens, null);
+  assert.deepEqual(savedModel.reasoningEfforts, []);
+  assert.equal(savedModel.defaultReasoningEffort, null);
+  assert.deepEqual(savedModel.agentModelTiers, {});
+  assert.equal(savedModel.thinking, false);
+  assert.deepEqual(savedModel.modalities, ["text"]);
+  assert.deepEqual(saved.agentModelTiers, {});
+  assert.equal(saved.visionAgent.enabled, false);
+  assert.equal(saved.visionAgent.model, "");
+
+  const local = JSON.parse(await fs.readFile(localPath, "utf8"));
+  const persistedModels = [
+    local.models.find((candidate) => candidate.id === modelId),
+    local.lab.gatewayProfiles.find((profile) => profile.id === profileId).models.find((candidate) => candidate.id === modelId)
+  ];
+  for (const persistedModel of persistedModels) {
+    assert.equal(Object.prototype.hasOwnProperty.call(persistedModel, "contextTokens"), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(persistedModel, "reasoningEfforts"), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(persistedModel, "defaultReasoningEffort"), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(persistedModel, "agentModelTiers"), false);
+  }
+  assert.equal(Object.prototype.hasOwnProperty.call(local.agents, "modelTiers"), false);
+  assert.deepEqual(local.agents.vision, {
+    enabled: false,
+    model: null,
+    autoUseWhenMainModelTextOnly: true
+  });
+  const persistedAgents = local.lab.gatewayProfiles.find((profile) => profile.id === profileId).agents;
+  assert.equal(Object.prototype.hasOwnProperty.call(persistedAgents, "modelTiers"), false);
+  assert.deepEqual(persistedAgents.vision, local.agents.vision);
+
+  const restarted = await createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } }).status();
+  const restartedModel = restarted.models.find((candidate) => candidate.id === modelId);
+  assert.equal(restartedModel.contextTokens, null);
+  assert.deepEqual(restartedModel.reasoningEfforts, []);
+  assert.equal(restartedModel.defaultReasoningEffort, null);
+  assert.deepEqual(restartedModel.agentModelTiers, {});
+  assert.equal(restartedModel.thinking, false);
+  assert.deepEqual(restartedModel.modalities, ["text"]);
+  assert.deepEqual(restarted.agentModelTiers, {});
+  assert.equal(restarted.visionAgent.enabled, false);
+  assert.equal(restarted.visionAgent.model, "");
+});
+
+test("dashboard preserves the largest persisted context budget regardless of model save order", async (t) => {
+  const cases = [
+    { name: "large then small", order: [["large-model", 480000], ["small-model", 120000]] },
+    { name: "small then large", order: [["small-model", 120000], ["large-model", 480000]] }
+  ];
+
+  for (const testCase of cases) {
+    await t.test(testCase.name, async () => {
+      const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-context-order-"));
+      const localPath = path.join(cwd, ".lab-agent", "config.json");
+      const gatewayUrl = `https://${testCase.name.startsWith("large") ? "large-first" : "small-first"}.context.gateway.example/v1/chat/completions`;
+      const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+      let profileId = "";
+
+      for (const [modelId, contextTokens] of testCase.order) {
+        const saved = await runtime.saveModelConfig({
+          saveTarget: "project",
+          ...(profileId ? { profileId } : {}),
+          gatewayUrl,
+          gatewayProtocol: "openai-chat",
+          modelId,
+          label: modelId,
+          contextTokens: String(contextTokens),
+          modalities: ["text"],
+          switchToModel: true
+        });
+        assert.equal(saved.ok, true);
+        profileId = saved.gatewayConfig.activeProfileId;
+      }
+
+      const local = JSON.parse(await fs.readFile(localPath, "utf8"));
+      assert.equal(local.context.maxTokens, 480000);
+      assert.equal(local.context.maxBytes, 1920000);
+      assert.ok(local.context.resumeMaxTokens >= 480000);
+      assert.ok(local.context.resumeMaxBytes >= 1920000);
+      const profile = local.lab.gatewayProfiles.find((candidate) => candidate.id === profileId);
+      assert.deepEqual(Object.fromEntries(profile.models.map((candidate) => [candidate.id, candidate.contextTokens])), {
+        "large-model": 480000,
+        "small-model": 120000
+      });
+
+      const restartedRuntime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+      const switched = await restartedRuntime.switchModel({ profileId, modelId: "large-model" });
+      assert.equal(switched.ok, true);
+      assert.equal(switched.sessionStatus.context.maxTokens, 480000);
+      assert.equal(switched.sessionStatus.context.modelMaxTokens, 480000);
+      const afterRestart = JSON.parse(await fs.readFile(localPath, "utf8"));
+      assert.equal(afterRestart.context.maxTokens, 480000);
+      assert.equal(afterRestart.context.maxBytes, 1920000);
+    });
+  }
+});
+
+test("dashboard edits a global-owned model through a same-endpoint project profile without shadowing", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-edit-mixed-owner-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-edit-mixed-owner-"));
+  const globalPath = path.join(home, ".ant-code", "lab-agent.config.json");
+  const localPath = path.join(cwd, ".lab-agent", "config.json");
+  const gatewayUrl = "https://mixed-edit.gateway.example/v1/responses";
+  const globalProfile = {
+    id: "global-edit-profile",
+    gatewayUrl,
+    gatewayProtocol: "openai-responses",
+    modelAlias: "global-a",
+    models: [
+      { id: "global-a", label: "Global A" },
+      { id: "global-b", label: "Global B" }
+    ]
+  };
+  const projectProfile = {
+    id: "project-edit-profile",
+    gatewayUrl,
+    gatewayProtocol: "openai-responses",
+    modelAlias: "project-a",
+    models: [{ id: "project-a", label: "Project A" }]
+  };
+
+  await fs.mkdir(path.dirname(globalPath), { recursive: true });
+  await fs.writeFile(globalPath, JSON.stringify({
+    modelAlias: globalProfile.modelAlias,
+    models: globalProfile.models,
+    lab: {
+      gatewayUrl,
+      gatewayProtocol: "openai-responses",
+      activeGatewayProfile: globalProfile.id,
+      gatewayProfiles: [globalProfile]
+    }
+  }), "utf8");
+  await fs.mkdir(path.dirname(localPath), { recursive: true });
+  await fs.writeFile(localPath, JSON.stringify({
+    modelAlias: projectProfile.modelAlias,
+    models: projectProfile.models,
+    lab: {
+      gatewayUrl,
+      gatewayProtocol: "openai-responses",
+      activeGatewayProfile: projectProfile.id,
+      gatewayProfiles: [projectProfile]
+    }
+  }), "utf8");
+
+  const projectBefore = await fs.readFile(localPath, "utf8");
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: home } });
+  const initial = await runtime.status();
+  const effectiveProfile = initial.gatewayProfiles.find((profile) => profile.gatewayUrl === gatewayUrl);
+  assert.equal(effectiveProfile?.id, projectProfile.id);
+  assert.equal(
+    effectiveProfile.models.find((model) => model.id === "global-b")?.source?.ownerScope,
+    "global"
+  );
+
+  const saved = await runtime.saveModelConfig({
+    saveTarget: "global",
+    profileId: effectiveProfile.id,
+    gatewayUrl,
+    gatewayProtocol: "openai-responses",
+    previousModelId: "global-b",
+    modelId: "global-b",
+    label: "Global B Edited",
+    modalities: ["text"],
+    switchToModel: false
+  });
+
+  assert.equal(saved.ok, true, `${saved.status}: ${saved.error}`);
+  assert.equal(saved.saveTarget, "global");
+  assert.equal(saved.configPath, globalPath);
+  assert.equal(saved.gatewayConfig.activeProfileId, projectProfile.id);
+  assert.equal(await fs.readFile(localPath, "utf8"), projectBefore);
+
+  const global = JSON.parse(await fs.readFile(globalPath, "utf8"));
+  assert.equal(global.models.find((model) => model.id === "global-b")?.label, "Global B Edited");
+  const storedGlobalProfile = global.lab.gatewayProfiles.find((profile) => profile.id === globalProfile.id);
+  assert.equal(storedGlobalProfile.models.find((model) => model.id === "global-b")?.label, "Global B Edited");
+  assert.equal(storedGlobalProfile.models.some((model) => model.id === "project-a"), false);
+
+  const restarted = await createDashboardRuntime({ cwd, env: { USERPROFILE: home } }).status();
+  const restartedProfile = restarted.gatewayProfiles.find((profile) => profile.gatewayUrl === gatewayUrl);
+  assert.equal(restarted.gatewayConfig.activeProfileId, projectProfile.id);
+  assert.equal(restartedProfile.models.find((model) => model.id === "global-b")?.label, "Global B Edited");
+  assert.equal(restartedProfile.models.find((model) => model.id === "global-b")?.source?.ownerScope, "global");
+  assert.equal(restartedProfile.models.find((model) => model.id === "project-a")?.source?.ownerScope, "project");
+});
+
+test("dashboard moves the owning global profile when editing its endpoint through a different effective id", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-move-mixed-owner-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-move-mixed-owner-"));
+  const globalPath = path.join(home, ".ant-code", "lab-agent.config.json");
+  const localPath = path.join(cwd, ".lab-agent", "config.json");
+  const oldUrl = "https://mixed-move.gateway.example/v1/responses";
+  const newUrl = "https://mixed-move.gateway.example/v2/responses";
+  const globalProfile = {
+    id: "global-move-profile",
+    gatewayUrl: oldUrl,
+    gatewayProtocol: "openai-responses",
+    gatewayApiKey: "global-move-key",
+    modelAlias: "global-a",
+    models: [
+      { id: "global-a", label: "Global A" },
+      { id: "global-b", label: "Global B" }
+    ]
+  };
+  const projectProfile = {
+    id: "project-move-profile",
+    gatewayUrl: oldUrl,
+    gatewayProtocol: "openai-responses",
+    modelAlias: "project-a",
+    models: [{ id: "project-a", label: "Project A" }]
+  };
+
+  await fs.mkdir(path.dirname(globalPath), { recursive: true });
+  await fs.writeFile(globalPath, JSON.stringify({
+    modelAlias: globalProfile.modelAlias,
+    models: globalProfile.models,
+    lab: {
+      gatewayUrl: oldUrl,
+      gatewayProtocol: "openai-responses",
+      gatewayApiKey: "global-move-key",
+      activeGatewayProfile: globalProfile.id,
+      gatewayProfiles: [globalProfile]
+    }
+  }), "utf8");
+  await fs.mkdir(path.dirname(localPath), { recursive: true });
+  await fs.writeFile(localPath, JSON.stringify({
+    modelAlias: projectProfile.modelAlias,
+    models: projectProfile.models,
+    lab: {
+      gatewayUrl: oldUrl,
+      gatewayProtocol: "openai-responses",
+      activeGatewayProfile: projectProfile.id,
+      gatewayProfiles: [projectProfile]
+    }
+  }), "utf8");
+
+  const projectBefore = await fs.readFile(localPath, "utf8");
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: home } });
+  const initial = await runtime.status();
+  const effectiveProfile = initial.gatewayProfiles.find((profile) => profile.gatewayUrl === oldUrl);
+  assert.equal(effectiveProfile?.id, projectProfile.id);
+  assert.equal(effectiveProfile.models.find((model) => model.id === "global-b")?.source?.ownerScope, "global");
+
+  const saved = await runtime.saveModelConfig({
+    saveTarget: "global",
+    profileId: effectiveProfile.id,
+    previousGatewayUrl: oldUrl,
+    previousGatewayProtocol: "openai-responses",
+    gatewayUrl: newUrl,
+    gatewayProtocol: "openai-responses",
+    previousModelId: "global-b",
+    modelId: "global-b",
+    label: "Global B Moved",
+    credentialAction: "keep",
+    switchToModel: false
+  });
+
+  assert.equal(saved.ok, true, `${saved.status}: ${saved.error}`);
+  assert.equal(await fs.readFile(localPath, "utf8"), projectBefore);
+  const global = JSON.parse(await fs.readFile(globalPath, "utf8"));
+  assert.equal(global.lab.gatewayProfiles.length, 1);
+  assert.equal(global.lab.gatewayProfiles[0].id, globalProfile.id);
+  assert.equal(global.lab.gatewayProfiles[0].gatewayUrl, newUrl);
+  assert.equal(global.lab.gatewayProfiles[0].gatewayApiKey, "global-move-key");
+  assert.deepEqual(global.lab.gatewayProfiles[0].models.map((model) => model.id), ["global-a", "global-b"]);
+  assert.equal(global.lab.gatewayProfiles[0].models.find((model) => model.id === "global-b")?.label, "Global B Moved");
+  assert.equal(global.lab.gatewayUrl, newUrl);
+  assert.equal(global.lab.gatewayApiKey, "global-move-key");
+
+  const restarted = await createDashboardRuntime({ cwd, env: { USERPROFILE: home } }).status();
+  assert.deepEqual(new Set(restarted.gatewayProfiles.map((profile) => profile.id)), new Set([
+    projectProfile.id,
+    globalProfile.id
+  ]));
+  assert.equal(restarted.gatewayProfiles.find((profile) => profile.id === globalProfile.id)?.gatewayUrl, newUrl);
+});
+
+test("dashboard deleting the final project model reveals a same-endpoint global profile with a different id", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-delete-final-project-model-"));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-delete-final-project-model-"));
+  const globalPath = path.join(home, ".ant-code", "lab-agent.config.json");
+  const localPath = path.join(cwd, ".lab-agent", "config.json");
+  const gatewayUrl = "https://mixed-final.gateway.example/v1/responses";
+  const globalProfile = {
+    id: "global-final-profile",
+    gatewayUrl,
+    gatewayProtocol: "openai-responses",
+    modelAlias: "global-only",
+    models: [{ id: "global-only", label: "Global Only" }]
+  };
+  const projectProfile = {
+    id: "project-final-profile",
+    gatewayUrl,
+    gatewayProtocol: "openai-responses",
+    modelAlias: "project-only",
+    models: [{ id: "project-only", label: "Project Only" }]
+  };
+
+  await fs.mkdir(path.dirname(globalPath), { recursive: true });
+  await fs.writeFile(globalPath, JSON.stringify({
+    modelAlias: globalProfile.modelAlias,
+    models: globalProfile.models,
+    lab: {
+      gatewayUrl,
+      gatewayProtocol: "openai-responses",
+      activeGatewayProfile: globalProfile.id,
+      gatewayProfiles: [globalProfile]
+    }
+  }), "utf8");
+  await fs.mkdir(path.dirname(localPath), { recursive: true });
+  await fs.writeFile(localPath, JSON.stringify({
+    modelAlias: projectProfile.modelAlias,
+    models: projectProfile.models,
+    lab: {
+      gatewayUrl,
+      gatewayProtocol: "openai-responses",
+      activeGatewayProfile: projectProfile.id,
+      gatewayProfiles: [projectProfile]
+    }
+  }), "utf8");
+
+  const globalBefore = await fs.readFile(globalPath, "utf8");
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: home } });
+  const deleted = await runtime.deleteModelConfig({
+    profileId: projectProfile.id,
+    modelId: projectProfile.modelAlias
+  });
+
+  assert.equal(deleted.ok, true, `${deleted.status}: ${deleted.error}`);
+  assert.equal(deleted.deletedFrom, "project");
+  assert.equal(deleted.restoredInherited, true);
+  assert.equal(deleted.clearedGateway, false);
+  assert.equal(deleted.gatewayConfig.activeProfileId, globalProfile.id);
+  assert.deepEqual(deleted.models.map((model) => model.id), [globalProfile.modelAlias]);
+  assert.equal(await fs.readFile(globalPath, "utf8"), globalBefore);
+
+  const local = JSON.parse(await fs.readFile(localPath, "utf8"));
+  assert.equal(local.modelAlias, undefined);
+  assert.equal(local.models, undefined);
+  assert.equal(local.lab.activeGatewayProfile, globalProfile.id);
+  assert.equal(Object.prototype.hasOwnProperty.call(local.lab, "gatewayProfiles"), false);
+  for (const key of [
+    "gatewayUrl",
+    "gatewayHealthUrl",
+    "gatewayProtocol",
+    "gatewayApiKey",
+    "gatewayApiKeyDisabled"
+  ]) {
+    assert.equal(Object.prototype.hasOwnProperty.call(local.lab, key), false);
+  }
+
+  const restarted = await createDashboardRuntime({ cwd, env: { USERPROFILE: home } }).status();
+  assert.equal(restarted.gatewayConfig.activeProfileId, globalProfile.id);
+  assert.deepEqual(restarted.models.map((model) => model.id), [globalProfile.modelAlias]);
+  assert.deepEqual(restarted.gatewayProfiles.map((profile) => profile.id), [globalProfile.id]);
+  assert.equal(restarted.models[0].source?.ownerScope, "global");
+});
+
+test("dashboard Goal enable requires objective, locks fullAccess, and restores prior mode", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-goal-entry-"));
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: {},
+    runTurn: async (_session, options) => {
+      await options.onEvent({ type: "turn_complete", status: "completed" });
+      return { output: "seeded" };
+    }
+  });
+  await runtime.trustWorkspace();
+  const started = await runtime.startTurn({ prompt: "seed session", permissionMode: "workspace" });
+  await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+
+  const rejected = await runtime.applyGoal({ sessionId: started.sessionId, action: "enable", objective: "   " });
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.status, 400);
+
+  const enabled = await runtime.applyGoal({
+    sessionId: started.sessionId,
+    action: "enable",
+    objective: "add running-state filters",
+    clientPreviousPermissionMode: "plan"
+  });
+  assert.equal(enabled.ok, true);
+  assert.equal(enabled.goal.enabled, true);
+  assert.equal(enabled.goal.text, "add running-state filters");
+  assert.equal(enabled.goal.previousPermissionMode, "workspace");
+  assert.equal(enabled.permission.mode, "fullAccess");
+  assert.equal(enabled.running, true);
+  await waitForEvent(runtime, started.sessionId, (event) => event.type === "user_message" && /add running-state filters/.test(String(event.text ?? "")));
+
+  const opened = await runtime.readSession(started.sessionId);
+  assert.equal(opened.session.goal.enabled, true);
+  assert.equal(opened.session.goal.text, "add running-state filters");
+
+  const disabled = await runtime.applyGoal({ sessionId: started.sessionId, action: "disable" });
+  assert.equal(disabled.ok, true);
+  assert.equal(disabled.goal.enabled, false);
+  assert.equal(disabled.permission.mode, "workspace");
+  await runtime.shutdown({ force: true, timeoutMs: 50 });
+});
+
+test("dashboard Goal host continues after a finished turn and honors skip rules", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-goal-continue-"));
+  let calls = 0;
+  const continueGate = deferred();
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: {},
+    runTurn: async (_session, options) => {
+      calls += 1;
+      if (calls === 1) {
+        await options.onEvent({ type: "turn_complete", status: "completed" });
+        return { output: "seeded" };
+      }
+      if (calls === 2) {
+        await options.onEvent({ type: "turn_complete", status: "completed" });
+        return { output: "working toward goal" };
+      }
+      await new Promise((_, reject) => {
+        const abort = () => reject(cleanupAbortError());
+        if (options.signal?.aborted) {
+          abort();
+          return;
+        }
+        options.signal?.addEventListener("abort", abort, { once: true });
+        continueGate.promise.then(() => reject(cleanupAbortError()));
+      });
+      return { output: "continued" };
+    }
+  });
+  await runtime.trustWorkspace();
+  const started = await runtime.startTurn({ prompt: "seed", permissionMode: "plan" });
+  await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+  const enabled = await runtime.applyGoal({
+    sessionId: started.sessionId,
+    action: "enable",
+    objective: "keep going until filters land"
+  });
+  assert.equal(enabled.ok, true);
+  assert.equal(enabled.running, true);
+  const continued = await waitForEvent(runtime, started.sessionId, (event) => event.type === "goal_continued");
+  assert.equal(continued.some((event) => event.type === "goal_continued"), true);
+  assert.equal(runtime.active.get(started.sessionId).queuedPrompts.some((item) => item.kind === "goal-continue") || calls >= 3, true);
+
+  assert.equal(runtime.listActiveEvents(started.sessionId).filter((event) => event.type === "goal_continued").length, 1);
+  runtime.interruptTurn(started.sessionId, "user");
+  continueGate.resolve();
+  await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+  assert.equal(runtime.listActiveEvents(started.sessionId).filter((event) => event.type === "goal_continued").length, 1);
+  await runtime.shutdown({ force: true, timeoutMs: 50 });
+});
+
+test("dashboard Goal skips ask_user and does not emit approval_required for queued writes", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-goal-skip-"));
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: {},
+    runTurn: async (session, options) => {
+      if (session.goal?.enabled) {
+        const asked = await options.userInputCallback({ question: "Which format?" });
+        assert.equal(asked.skipped, true);
+        assert.equal(asked.reason, "goal_unattended");
+        if (session.permissionMode !== "fullAccess") {
+          await options.approvalCallback({
+            toolName: "write_file",
+            input: { path: "filters.md", content: "x" },
+            definition: { risk: "write" },
+            decision: { reason: "write" }
+          });
+        }
+      }
+      await options.onEvent({ type: "turn_complete", status: "completed" });
+      return { output: "skipped question\nGOAL_STATUS: in_progress\nEVIDENCE:\nGAPS:\n" };
+    }
+  });
+  await runtime.trustWorkspace();
+  const started = await runtime.startTurn({ prompt: "seed", permissionMode: "plan" });
+  await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+  await runtime.applyGoal({
+    sessionId: started.sessionId,
+    action: "enable",
+    objective: "write filters without asking"
+  });
+  const events = await waitForEvent(runtime, started.sessionId, (event) => event.type === "goal_question_skipped");
+  assert.equal(events.some((event) => event.type === "question_required"), false);
+  assert.equal(events.some((event) => event.type === "approval_required"), false);
+  const finalEvents = await waitForEvent(runtime, started.sessionId, (event) => event.type === "assistant_final");
+  assert.doesNotMatch(finalEvents.find((event) => event.type === "assistant_final")?.text ?? "", /GOAL_STATUS:/);
+  await runtime.shutdown({ cancelActive: true, force: true, timeoutMs: 200 });
+});
+
+test("dashboard Goal continue does not consume the user queue cap and user items win", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-goal-queue-"));
+  const firstGate = deferred();
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: {},
+    runTurn: async (_session, options) => {
+      await firstGate.promise;
+      await options.onEvent({ type: "turn_complete", status: "completed" });
+      return { output: "held" };
+    }
+  });
+  await runtime.trustWorkspace();
+  const started = await runtime.startTurn({ prompt: "hold the turn", permissionMode: "plan" });
+  await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === true);
+  await runtime.applyGoal({
+    sessionId: started.sessionId,
+    action: "enable",
+    objective: "do not steal the user queue"
+  });
+  for (let index = 0; index < 20; index += 1) {
+    const queued = await runtime.startTurn({
+      prompt: `user ${index + 1}`,
+      sessionId: started.sessionId,
+      permissionMode: "plan"
+    });
+    assert.equal(queued.ok, true, queued.error);
+  }
+  const overflow = await runtime.startTurn({
+    prompt: "one too many",
+    sessionId: started.sessionId,
+    permissionMode: "plan"
+  });
+  assert.equal(overflow.ok, false);
+  assert.equal(overflow.status, 429);
+  firstGate.resolve();
+  await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false, 8000);
+  const state = runtime.active.get(started.sessionId);
+  assert.equal(state.queuedPrompts.filter((item) => item.kind === "goal-continue").length, 0);
+  await runtime.shutdown({ cancelActive: true, force: true, timeoutMs: 200 });
+});
+
+test("dashboard Goal stops auto-continue at the configured cap", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-goal-cap-config-"));
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: {},
+    runTurn: async (_session, options) => {
+      await options.onEvent({ type: "turn_complete", status: "completed" });
+      return { output: "still working" };
+    }
+  });
+  await runtime.trustWorkspace();
+  const saved = await runtime.saveSettingsConfig({
+    section: "agents",
+    saveTarget: "project",
+    changedFields: ["goalMaxAutoContinues"],
+    settings: {
+      maxParallelReadonlyAgentRuns: 3,
+      backgroundWakeupEnabled: true,
+      backgroundByDefault: false,
+      reviewGateEnabled: true,
+      syncModelTiersOnSwitch: true,
+      goalMaxAutoContinues: 2
+    }
+  });
+  assert.equal(saved.ok, true);
+  assert.equal(saved.settings.agents.goalMaxAutoContinues, 2);
+  const started = await runtime.startTurn({ prompt: "seed", permissionMode: "plan" });
+  await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+  await runtime.applyGoal({
+    sessionId: started.sessionId,
+    action: "enable",
+    objective: "hit the configured continue cap"
+  });
+  await waitForCondition(() => {
+    const goal = runtime.active.get(started.sessionId)?.session?.goal;
+    return goal?.lastBlockReason === "budget" || goal?.continueCount >= 2;
+  }, 8000);
+  const goal = runtime.active.get(started.sessionId).session.goal;
+  assert.equal(goal.continueCount, 2);
+  assert.equal(goal.status, "paused");
+  assert.equal(goal.lastBlockReason, "budget");
+  await runtime.shutdown({ cancelActive: true, force: true, timeoutMs: 200 });
+});
+
+test("dashboard Goal stops auto-continue at 12 continues", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-goal-cap-"));
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: {},
+    runTurn: async (_session, options) => {
+      await options.onEvent({ type: "turn_complete", status: "completed" });
+      return { output: "still working" };
+    }
+  });
+  await runtime.trustWorkspace();
+  const started = await runtime.startTurn({ prompt: "seed", permissionMode: "plan" });
+  await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+  await runtime.applyGoal({
+    sessionId: started.sessionId,
+    action: "enable",
+    objective: "hit the continue cap"
+  });
+  await waitForCondition(() => {
+    const goal = runtime.active.get(started.sessionId)?.session?.goal;
+    return goal?.lastBlockReason === "budget" || goal?.continueCount >= 12;
+  }, 8000);
+  const goal = runtime.active.get(started.sessionId).session.goal;
+  assert.equal(goal.continueCount, 12);
+  assert.equal(goal.status, "paused");
+  await runtime.shutdown({ cancelActive: true, force: true, timeoutMs: 200 });
+});
+
+test("mid-turn Goal enable without text never auto-continues", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-goal-empty-"));
+  const gate = deferred();
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: {},
+    runTurn: async (_session, options) => {
+      await gate.promise;
+      await options.onEvent({ type: "turn_complete", status: "completed" });
+      return { output: "done without goal text" };
+    }
+  });
+  await runtime.trustWorkspace();
+  const started = await runtime.startTurn({ prompt: "running", permissionMode: "plan" });
+  await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === true);
+  const rejected = await runtime.applyGoal({ sessionId: started.sessionId, action: "enable" });
+  assert.equal(rejected.ok, false);
+  gate.resolve();
+  await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+  assert.equal(runtime.listActiveEvents(started.sessionId).some((event) => event.type === "goal_continued"), false);
+  await runtime.shutdown({ force: true, timeoutMs: 50 });
+});
+
+test("first Goal turn stores client pre-Goal permission instead of upgraded fullAccess", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-goal-first-turn-"));
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: {},
+    runTurn: async (_session, options) => {
+      await options.onEvent({ type: "turn_complete", status: "completed" });
+      return { output: "first goal turn" };
+    }
+  });
+  await runtime.trustWorkspace();
+  const started = await runtime.startTurn({
+    prompt: "begin unattended work",
+    permissionMode: "fullAccess",
+    goalMode: true,
+    goalText: "add running-state filters",
+    clientPreviousPermissionMode: "workspace"
+  });
+  assert.equal(started.ok, true);
+  assert.equal(started.goal.enabled, true);
+  assert.equal(started.goal.previousPermissionMode, "workspace");
+  await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+  const disabled = await runtime.applyGoal({ sessionId: started.sessionId, action: "disable" });
+  assert.equal(disabled.ok, true);
+  assert.equal(disabled.goal.enabled, false);
+  assert.equal(disabled.permission.mode, "workspace");
+  const opened = await runtime.readSession(started.sessionId);
+  assert.equal(opened.session.permission.mode, "workspace");
+  await runtime.shutdown({ force: true, timeoutMs: 50 });
+});
+
+test("Goal disable while running restores previous permission after interrupt settles", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-goal-disable-running-"));
+  const gate = deferred();
+  let calls = 0;
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: { ANT_CODE_INTERRUPT_FORCE_SETTLE_MS: "50" },
+    runTurn: async (_session, options) => {
+      calls += 1;
+      if (calls === 1) {
+        await options.onEvent({ type: "turn_complete", status: "completed" });
+        return { output: "seeded" };
+      }
+      await gate.promise;
+      await options.onEvent({ type: "turn_complete", status: "completed" });
+      return { output: "finished after disable" };
+    }
+  });
+  await runtime.trustWorkspace();
+  const started = await runtime.startTurn({ prompt: "seed", permissionMode: "workspace" });
+  await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+  const enabled = await runtime.applyGoal({
+    sessionId: started.sessionId,
+    action: "enable",
+    objective: "keep going without a sitter"
+  });
+  assert.equal(enabled.ok, true);
+  assert.equal(enabled.permission.mode, "fullAccess");
+  assert.equal(enabled.running, true);
+  await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === true);
+  const disabled = await runtime.applyGoal({ sessionId: started.sessionId, action: "disable" });
+  assert.equal(disabled.ok, true);
+  assert.equal(disabled.goal.enabled, false);
+  assert.equal(disabled.permission.mode, "workspace");
+  gate.resolve();
+  await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+  const opened = await runtime.readSession(started.sessionId);
+  assert.equal(opened.session.goal.enabled, false);
+  assert.equal(opened.session.permission.mode, "workspace");
+  await runtime.shutdown({ force: true, timeoutMs: 50 });
+});

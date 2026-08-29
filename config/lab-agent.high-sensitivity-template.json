@@ -1,40 +1,38 @@
 {
   "appName": "lab-agent",
   "template": true,
-  "modelAlias": "example-coding-model",
+  "modelAlias": "claude-sonnet-4-5-20250929",
   "models": [
     {
-      "id": "example-coding-model",
-      "label": "Example Coding Model",
-      "description": "Replace with the model id exposed by your local gateway.",
+      "id": "claude-sonnet-4-5-20250929",
+      "label": "Sonnet 4.5",
+      "description": "Balanced coding model exposed by the local lab adapter.",
       "thinking": false,
-      "modalities": [
-        "text"
-      ],
-      "reasoningContentMode": "visible-when-no-content",
       "contextTokens": 200000
     },
     {
-      "id": "example-vision-model",
-      "label": "Example Vision Model",
-      "description": "Optional model id for image-capable workflows on the same gateway.",
+      "id": "claude-sonnet-4-5-20250929-thinking",
+      "label": "Sonnet 4.5 Thinking",
+      "description": "Adapter model with provider-exposed reasoning deltas when available.",
+      "thinking": true,
+      "contextTokens": 200000
+    },
+    {
+      "id": "claude-haiku-4-5-20251001",
+      "label": "Haiku 4.5",
+      "description": "Lower-latency local adapter model for lighter work.",
       "thinking": false,
-      "modalities": [
-        "text",
-        "image"
-      ],
-      "reasoningContentMode": "visible-when-no-content",
       "contextTokens": 200000
     }
   ],
   "networkMode": "lab-only",
   "allowedHosts": [
-    "gateway.example.com"
+    "gateway.lab.example"
   ],
   "lab": {
-    "gatewayUrl": "https://gateway.example.com/v1/chat/completions",
-    "gatewayHealthUrl": "https://gateway.example.com/health",
-    "gatewayProtocol": "openai-chat"
+    "gatewayUrl": "https://gateway.lab.example/v1/chat",
+    "gatewayHealthUrl": "https://gateway.lab.example/health",
+    "gatewayProtocol": "lab-agent-gateway"
   },
   "transcript": {
     "enabled": false,
@@ -77,17 +75,6 @@
       "todoThreshold": 4,
       "requireForWrites": false,
       "requireForHighRisk": false
-    },
-    "vision": {
-      "enabled": false,
-      "model": "example-vision-model",
-      "autoUseWhenMainModelTextOnly": true
-    },
-    "modelTiers": {
-      "cheap": "example-coding-model",
-      "default": "example-coding-model",
-      "strong": "example-coding-model",
-      "vision": "example-vision-model"
     },
     "budgets": {
       "defaults": {

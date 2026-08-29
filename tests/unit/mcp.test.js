@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import fs from "node:fs/promises";
-import os from "node:os";
 import test from "node:test";
 import path from "node:path";
+import fs from "node:fs/promises";
+import os from "node:os";
 import { createMcpRuntime } from "../../src/mcp/runtime.js";
 
 test("lists tools from a configured stdio MCP server", async (t) => {
@@ -367,7 +367,10 @@ test("MCP envAllowlist preserves explicitly allowed sensitive variables", async 
 });
 
 test("MCP package: args resolve bundled server scripts from any cwd", async (t) => {
-  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "ant-code-mcp-test-"));
+  const fs = await import("node:fs/promises");
+  const testRoot = path.join(process.cwd(), ".lab-agent");
+  await fs.mkdir(testRoot, { recursive: true });
+  const cwd = await fs.mkdtemp(path.join(testRoot, "mcp-test-"));
   const runtime = createMcpRuntime({
     cwd,
     config: {
@@ -409,25 +412,29 @@ test("MCP servers can configure request timeout", async (t) => {
 });
 
 test("MCP tool abort sends cancellation notification", async (t) => {
-  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "ant-code-mcp-cancel-"));
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-mcp-cancel-"));
   const logPath = path.join(cwd, "cancel.log");
   const runtime = createMcpRuntime({
     cwd,
     config: {
       mcp: {
-        servers: [{
-          name: "cancel-fixture",
-          transport: "stdio",
-          command: process.execPath,
-          args: [path.resolve("tests/fixtures/mcp-cancel-server.js")],
-          env: { MCP_CANCEL_LOG: logPath },
-          envAllowlist: ["MCP_CANCEL_LOG"],
-          requestTimeoutMs: 30_000,
-          toolRisks: { slow: "read" }
-        }]
+        servers: [
+          {
+            name: "cancel-fixture",
+            transport: "stdio",
+            command: process.execPath,
+            args: [path.resolve("tests/fixtures/mcp-cancel-server.js")],
+            env: { MCP_CANCEL_LOG: logPath },
+            envAllowlist: ["MCP_CANCEL_LOG"],
+            requestTimeoutMs: 30_000,
+            toolRisks: { slow: "read" }
+          }
+        ]
       }
     },
-    policy: { networkMode: "offline" }
+    policy: {
+      networkMode: "offline"
+    }
   });
   t.after(() => runtime.close());
 
@@ -440,6 +447,7 @@ test("MCP tool abort sends cancellation notification", async (t) => {
   assert.equal(result.ok, false);
   assert.equal(result.interrupted, true);
   assert.equal(result.error.code, "MCP_INTERRUPTED");
+
   await waitFor(async () => {
     const log = await fs.readFile(logPath, "utf8").catch(() => "");
     assert.match(log, /"requestId":3/);
@@ -475,6 +483,7 @@ test("MCP stdio rejects an oversized JSON frame before parsing it", async (t) =>
   assert.equal(result.error.code, "MCP_TRANSPORT_FRAME_TOO_LARGE");
   assert.equal(status.servers[0].lastError.code, "MCP_TRANSPORT_FRAME_TOO_LARGE");
 });
+
 function createRuntime(serverOptions) {
   return createMcpRuntime({
     cwd: process.cwd(),

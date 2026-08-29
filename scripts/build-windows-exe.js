@@ -20,8 +20,7 @@ const NODE_EXE = process.execPath;
 const RESOURCE_PATHS = [
   "README.md",
   "README.zh-CN.md",
-  "LICENSE",
-  "THIRD_PARTY_NOTICES.md",
+  "PROJECT_CHANGELOG.zh-CN.md",
   "lab-agent.config.json",
   "configure-gateway.ps1",
   "configure-gateway.cmd",
@@ -30,10 +29,14 @@ const RESOURCE_PATHS = [
   "config/lab-agent.lab-template.json",
   "config/skills",
   "src/dashboard/public",
-  "docs/deployment/local-installation.md",
-  "docs/deployment/model-adapter-gateway-readiness.md",
-  "docs/deployment/quickstart.md",
-  "docs/security/data-boundary.md"
+  "docs/audit",
+  "docs/branding",
+  "docs/deployment",
+  "docs/provenance",
+  "docs/security",
+  "docs/specs/lab-model-gateway-compatibility-matrix.md",
+  "docs/specs/lab-model-gateway-protocol.md",
+  "docs/specs/tool-and-permission-spec.md"
 ];
 
 const dashboardAssets = await verifyDashboardAssets({
@@ -122,9 +125,9 @@ const manifest = [
   `SHA256: ${sha256}`,
   "",
   "This external package is the Windows executable distribution. It includes",
-  "a bundled runtime executable plus configuration templates, public docs,",
-  "and skills. It does not include the repository src/ tree,",
-  "tests, npm tarball, node_modules, local sessions, logs, or temporary files.",
+  "a bundled runtime executable plus configuration templates, deployment docs,",
+  "skills, and audit evidence. It does not include the repository src/ tree,",
+  "tests, npm tarball, node_modules, handoff notes, or planning notes.",
   "",
   "Run:",
   "",

@@ -1,25 +1,28 @@
 #!/usr/bin/env node
 import fs from "node:fs/promises";
 import path from "node:path";
-import { AUDIT_DIR, ensureAuditDir, rel } from "./audit-common.js";
+import { AUDIT_DIR, ROOT, ensureAuditDir, rel } from "./audit-common.js";
 import {
   collectDeclaredDependencies,
   normalizeLicense,
+  readLockedPackage,
   readInstalledPackage,
   readPackageJson
 } from "./dependency-audit-common.js";
 
 const pkg = await readPackageJson();
+const lock = JSON.parse(await fs.readFile(path.join(ROOT, "package-lock.json"), "utf8"));
 const dependencies = collectDeclaredDependencies(pkg);
 const rows = [];
 
 for (const dependency of dependencies) {
   const installed = await readInstalledPackage(dependency.name);
+  const locked = readLockedPackage(lock, dependency.name);
   rows.push({
     name: dependency.name,
     scope: dependency.scope,
-    version: installed?.version ?? dependency.versionSpec,
-    license: normalizeLicense(installed)
+    version: installed?.version ?? locked?.version ?? dependency.versionSpec,
+    license: normalizeLicense(installed ?? locked)
   });
 }
 
@@ -32,7 +35,7 @@ const lines = [
   "Public name: Ant Code",
   "Public CLI: ant-code",
   "Internal codename: lab-agent",
-  `Root license: ${pkg.license ?? "missing"}`,
+  `Root license: ${pkg.license ?? (pkg.private ? "private-unlicensed" : "missing")}`,
   `External dependencies: ${rows.length}`,
   "",
   rows.length === 0

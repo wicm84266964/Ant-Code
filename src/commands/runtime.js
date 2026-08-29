@@ -1409,7 +1409,7 @@ async function runMcpCommand(options, config) {
         "当前没有配置 MCP 服务器。",
         "",
         "配置入口：lab-agent.config.json 的 mcp.servers。",
-        "边界：只支持显式配置的本地/受控 stdio MCP；不会自动发现第三方托管或 marketplace 后台。"
+        "边界：只支持显式本地/lab-approved stdio MCP；不会自动发现 Claude 或 marketplace 后台。"
       ].join("\n")
       : [
         "Ant Code MCP",
@@ -1712,7 +1712,7 @@ async function runAgentsCommand(options, config) {
       "- /agents review <task-id>",
       "- /agents cancel <task-id>",
       "",
-      "边界：子智能体使用同一个本地模型网关和本地权限引擎；写文件、执行命令、MCP 调用仍受父会话策略约束。"
+      "边界：子智能体使用同一个实验室模型网关和本地权限引擎；写文件、执行命令、MCP 调用仍受父会话策略约束。"
     ].join("\n");
   }
 
@@ -2241,7 +2241,9 @@ async function runSessionsCommand(options, config) {
   const [subcommand, selector] = options.command.args;
 
   if (subcommand === "cleanup") {
-    const result = await store.cleanupExpiredSessions(config.transcript?.retentionDays ?? 30);
+    const result = await store.cleanupExpiredSessions(
+      config.transcript?.retentionDays === undefined ? 30 : config.transcript.retentionDays
+    );
     return formatObject(result);
   }
 

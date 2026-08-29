@@ -26,23 +26,40 @@ export class ConfigRevisionConflictError extends Error {
  */
 export async function mutateJsonConfig(filePath, update) {
   const target = path.resolve(filePath);
+  return withConfigMutationLock(target, async () => {
+    const snapshot = await readJsonConfigSnapshot(target);
+    const next = await update(cloneConfig(snapshot.data), { revision: snapshot.revision });
+    if (!isPlainObject(next)) {
+      throw new TypeError("Configuration update must return a JSON object");
+    }
+    const written = await atomicWriteJsonConfig(target, next, {
+      expectedRevision: snapshot.revision
+    });
+    return {
+      data: next,
+      previousRevision: snapshot.revision,
+      revision: written.revision,
+      path: target
+    };
+  });
+}
+
+/**
+ * Serialize a configuration transaction in this process and across
+ * cooperating Ant Code processes. The target names the lock domain and does
+ * not need to be a file that is itself written by the operation.
+ *
+ * @template T
+ * @param {string} filePath
+ * @param {() => Promise<T>} operation
+ * @returns {Promise<T>}
+ */
+export function withConfigMutationLock(filePath, operation) {
+  const target = path.resolve(filePath);
   return withInProcessConfigLock(target, async () => {
     const releaseFileLock = await acquireConfigFileLock(target);
     try {
-      const snapshot = await readJsonConfigSnapshot(target);
-      const next = await update(cloneConfig(snapshot.data), { revision: snapshot.revision });
-      if (!isPlainObject(next)) {
-        throw new TypeError("Configuration update must return a JSON object");
-      }
-      const written = await atomicWriteJsonConfig(target, next, {
-        expectedRevision: snapshot.revision
-      });
-      return {
-        data: next,
-        previousRevision: snapshot.revision,
-        revision: written.revision,
-        path: target
-      };
+      return await operation();
     } finally {
       await releaseFileLock();
     }

@@ -9,7 +9,6 @@ const pkg = await readPackageJson();
 const dependencies = collectDeclaredDependencies(pkg);
 const failures = [];
 const reviewedBuildInstallScriptAllowlist = new Set(["esbuild"]);
-const reviewedOptionalPlatformPackages = [/^@vscode\/ripgrep-(?:darwin|linux|win32)-/];
 
 for (const scriptName of ["preinstall", "install", "postinstall"]) {
   if (pkg.scripts?.[scriptName]) {
@@ -68,9 +67,6 @@ async function verifyLockfileDependencyBoundaries(declaredDependencyCount) {
     if (metadata?.hasInstallScript && !isReviewedBuildInstallScript(name, pkg)) {
       failures.push(`${name} declares an install script in package-lock.json`);
     }
-    if (isReviewedOptionalPlatformPackage(name) && metadata?.optional !== true) {
-      failures.push(`${name} is a reviewed platform package but is not marked optional in package-lock.json`);
-    }
     if (!metadata?.integrity) {
       failures.push(`${name} is missing an integrity hash in package-lock.json`);
     }
@@ -88,11 +84,4 @@ function isReviewedBuildInstallScript(name, rootPackage) {
   return reviewedBuildInstallScriptAllowlist.has(name) &&
     Object.hasOwn(rootPackage.devDependencies ?? {}, name) &&
     !Object.hasOwn(rootPackage.dependencies ?? {}, name);
-}
-
-/**
- * @param {string} name
- */
-function isReviewedOptionalPlatformPackage(name) {
-  return reviewedOptionalPlatformPackages.some((pattern) => pattern.test(name));
 }

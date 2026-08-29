@@ -15,6 +15,7 @@ import { runSlashCommand } from "../commands/runtime.js";
 import { clearSessionContext, compactSessionContextWithModel, summarizeContextWindow } from "../core/context-window.js";
 import { createInitialEventState, reduceAntEvent } from "../core/event-reducer.js";
 import { createSession, runSessionTurn } from "../core/session.js";
+import { persistTuiPermissionCycle } from "./tui/permission-cycle.js";
 import { createLabModelGateway } from "../model-gateway/client.js";
 import { listConfiguredModels } from "../model-gateway/models.js";
 import { appendThinkingPreview, limitThinkingPreview } from "../model-gateway/thinking-budget.js";
@@ -1039,22 +1040,29 @@ function TuiApp(props) {
     openCommandPanel(panel);
   }, [inspectorFilter, inspectorIndex, inspectorItems, inspectorOffset, inspectorPatchFileIndex, openCommandPanel]);
 
-  const cyclePermissionMode = useCallback((current = stateRef.current, source = "key") => {
+  const cyclePermissionMode = useCallback(async (current = stateRef.current, source = "key") => {
     if (!current.startupConfirmed || !current.trusted) {
       return false;
     }
-    const nextMode = nextPermissionMode(sessionRef.current, current.permissionMode);
-    applyPermissionMode(sessionRef.current, nextMode);
+    const session = sessionRef.current;
+    const nextMode = nextPermissionMode(session, current.permissionMode);
+    try {
+      await persistTuiPermissionCycle(session, nextMode, { env: props.env });
+    } catch (error) {
+      addEntry("permission", "权限切换未保存", error instanceof Error ? error.message : String(error));
+      return false;
+    }
     sessionApprovals.current = new Set();
     setPermissionMode(nextMode);
     const effectNote = current.busy
       ? "当前运行中的轮次保留启动时权限；新模式从后续提示/命令生效；本会话同类批准已清空。"
       : "新模式从后续提示/命令生效；本会话同类批准已清空。";
     addEntry("permission", "模式已切换", [
-      `${permissionModeLabel(sessionRef.current)}: ${permissionModeDescription(nextMode)}`,
+      `${permissionModeLabel(session)}: ${permissionModeDescription(nextMode)}`,
+      session.goal?.clearedBy === "tui-permission-change" ? "已退出 Dashboard Goal 并写入会话。" : "",
       effectNote
-    ].join("\n"));
-    setActivity((value) => ({ ...value, status: `权限：${permissionModeLabel(sessionRef.current)}（后续生效）` }));
+    ].filter(Boolean).join("\n"));
+    setActivity((value) => ({ ...value, status: `权限：${permissionModeLabel(session)}（后续生效）` }));
     debugTuiInput(props.env, `permission_switch source=${source} mode=${nextMode}`);
     return true;
   }, [addEntry, props.env]);
@@ -3151,7 +3159,11 @@ function TuiApp(props) {
               transcript: sessionRef.current.config.transcript,
               env: props.env
             });
-            const result = await store.cleanupExpiredSessions(sessionRef.current.config.transcript?.retentionDays ?? 30);
+            const result = await store.cleanupExpiredSessions(
+              sessionRef.current.config.transcript?.retentionDays === undefined
+                ? 30
+                : sessionRef.current.config.transcript.retentionDays
+            );
             addEntry("session", "metadata 清理", `已删除 ${result.deleted.length} 条过期记录。`);
             await loadSessionRecords();
           })();

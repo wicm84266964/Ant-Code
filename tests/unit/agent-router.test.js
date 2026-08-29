@@ -67,7 +67,7 @@ test("agent router recommends reviewer for high-risk review prompts", () => {
 test("agent router recommends visual verifier for screenshot-heavy frontend review", () => {
   const route = routeAgentTask({
     cwd: process.cwd(),
-    config: { agents: { profiles: [], vision: { enabled: true, model: "example-vision-model" } } },
+    config: { agents: { profiles: [], vision: { enabled: true, model: "mimo-v2.5" } } },
     prompt: "请用截图复核前端页面布局，检查移动端是否有重叠、裁切和可读性问题"
   });
 

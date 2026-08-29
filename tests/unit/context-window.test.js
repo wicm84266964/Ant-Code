@@ -82,7 +82,7 @@ test("model compaction summarizes older messages through the configured gateway"
         ok: true,
         data: {
           model: "mock-summarizer",
-          text: "模型摘要：保留早期目标和早期结论，继续处理 new question。token=exposed path=C:\\private\\paper.txt"
+          text: "模型摘要：保留早期目标和早期结论，继续处理 new question。token=leaked path=C:\\private\\paper.txt"
         }
       };
     }
@@ -102,7 +102,7 @@ test("model compaction summarizes older messages through the configured gateway"
   assert.equal(session.contextWindow.lastStrategy, "agent:compaction");
   assert.equal(session.contextWindow.lastInternalAgent, "compaction");
   assert.match(session.contextWindow.summary, /模型摘要/);
-  assert.doesNotMatch(session.contextWindow.summary, /super-secret|exposed/);
+  assert.doesNotMatch(session.contextWindow.summary, /super-secret|leaked/);
   assert.match(session.contextWindow.summary, /token=\[redacted\]/);
   assert.match(session.contextWindow.summary, /path=C:\\private\\paper\.txt/);
   assert.equal(requests.length, 1);

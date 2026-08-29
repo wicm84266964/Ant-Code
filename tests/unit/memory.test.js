@@ -27,7 +27,7 @@ test("project memory loads one prioritized project rule and local memory", async
   const cwd = await makeTempWorkspace();
   await fs.writeFile(path.join(cwd, "AGENTS.md"), "OpenCode rules\n", "utf8");
   await fs.writeFile(path.join(cwd, "AGENT.md"), "Codex single agent rules\n", "utf8");
-  await fs.writeFile(path.join(cwd, "CLAUDE.md"), "Compatibility rules\n", "utf8");
+  await fs.writeFile(path.join(cwd, "CLAUDE.md"), "Claude rules\n", "utf8");
   await fs.mkdir(path.join(cwd, ".lab-agent"), { recursive: true });
   await fs.writeFile(path.join(cwd, ".lab-agent", "memory.md"), "# Project Memory\n\nLocal preference\n", "utf8");
 

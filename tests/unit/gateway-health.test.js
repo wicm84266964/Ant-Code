@@ -6,50 +6,9 @@ import path from "node:path";
 import test from "node:test";
 import { createMockGatewayServer } from "../../scripts/mock-gateway.js";
 import { createLabModelGateway } from "../../src/model-gateway/client.js";
-import { formatGatewayError, normalizeGatewayError } from "../../src/model-gateway/errors.js";
+import { formatGatewayError, normalizeGatewayError, redactGatewayText } from "../../src/model-gateway/errors.js";
 import { formatGatewayHealthReport, runGatewayHealth } from "../../src/model-gateway/health.js";
 import { GATEWAY_MAX_STREAM_RECORD_BYTES } from "../../src/model-gateway/limits.js";
-
-test("gateway client can use Anthropic Messages protocol with Claude headers", async () => {
-  const requests = [];
-  const server = await listen(http.createServer(async (request, response) => {
-    const body = JSON.parse(await readRequestText(request));
-    requests.push({ headers: request.headers, body });
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({
-      id: "msg-test",
-      model: body.model,
-      content: [{ type: "text", text: "anthropic-compatible hello" }],
-      stop_reason: "end_turn",
-      usage: { input_tokens: 2, output_tokens: 3 }
-    }));
-  }), "127.0.0.1");
-  try {
-    const gateway = createLabModelGateway({
-      modelAlias: "claude-sonnet-4-5",
-      networkMode: "offline",
-      allowedHosts: [],
-      lab: {
-        gatewayUrl: `${serverUrl(server)}/v1/messages`,
-        gatewayProtocol: "anthropic-messages",
-        gatewayApiKey: "claude-secret"
-      }
-    });
-    const result = await gateway.sendChat({
-      messages: [{ role: "user", content: "hello" }],
-      tools: [{ name: "read_file", description: "Read", inputSchema: { type: "object" } }]
-    });
-    assert.equal(result.ok, true);
-    assert.equal(result.data.text, "anthropic-compatible hello");
-    assert.equal(requests[0].headers["x-api-key"], "claude-secret");
-    assert.equal(requests[0].headers["anthropic-version"], "2023-06-01");
-    assert.equal(requests[0].headers.authorization, undefined);
-    assert.equal(requests[0].body.tools[0].name, "read_file");
-    assert.equal(requests[0].body.max_tokens, 8192);
-  } finally {
-    await close(server);
-  }
-});
 
 test("normalizes gateway timeout errors", () => {
   const error = new Error("operation aborted");
@@ -76,6 +35,33 @@ test("formats gateway errors with diagnostic hints", () => {
   assert.doesNotMatch(text, /token=secret/);
 });
 
+test("redacts labeled gateway credentials without changing ordinary prose", () => {
+  const sentinel = "CREDENTIAL_SENTINEL_VALUE";
+  const sensitive = [
+    JSON.stringify({ api_key: sentinel, "api-key": sentinel, access_token: sentinel }),
+    `X-API-Key: ${sentinel}`,
+    `token: ${sentinel}`,
+    `Authorization: Bearer ${sentinel}`,
+    `authorization: Basic ${sentinel}`,
+    `Authorization: Token ${sentinel}`,
+    `authorization: ApiKey ${sentinel}`,
+    `https://gateway.example/v1?access_token=${sentinel}&mode=test`,
+    `--api-key ${sentinel}`
+  ].join("\n");
+  const redacted = redactGatewayText(sensitive);
+
+  assert.doesNotMatch(redacted, new RegExp(sentinel));
+  assert.match(redacted, /"api_key":"\[redacted\]"/);
+  assert.match(redacted, /X-API-Key: \[redacted\]/);
+  assert.match(redacted, /mode=test/);
+  assert.equal(
+    redactGatewayText("Token budgets and authorization checks are ordinary diagnostics."),
+    "Token budgets and authorization checks are ordinary diagnostics."
+  );
+  assert.equal(redactGatewayText("not_api_key: visible"), "not_api_key: visible");
+  assert.equal(redactGatewayText("api-key support unavailable"), "api-key support unavailable");
+});
+
 test("gateway 404 hint matches OpenAI-compatible chat route", () => {
   const normalized = normalizeGatewayError(null, {
     code: "GATEWAY_HTTP_ERROR",
@@ -85,6 +71,18 @@ test("gateway 404 hint matches OpenAI-compatible chat route", () => {
   });
 
   assert.ok(normalized.diagnostics.some((hint) => /\/v1\/chat\/completions/.test(hint)));
+  assert.equal(normalized.diagnostics.some((hint) => /usually \/v1\/chat\./.test(hint)), false);
+});
+
+test("gateway 404 hint matches OpenAI Responses route", () => {
+  const normalized = normalizeGatewayError(null, {
+    code: "GATEWAY_HTTP_ERROR",
+    message: "Gateway returned HTTP 404",
+    status: 404,
+    protocol: "openai-responses"
+  });
+
+  assert.ok(normalized.diagnostics.some((hint) => /\/v1\/responses/.test(hint)));
   assert.equal(normalized.diagnostics.some((hint) => /usually \/v1\/chat\./.test(hint)), false);
 });
 
@@ -112,8 +110,9 @@ test("gateway image-input 404 reports unsupported vision route", () => {
 });
 
 test("gateway health dry run validates config and network policy", async () => {
+  const cwd = await makeTempWorkspace();
   const report = await runGatewayHealth({
-    cwd: process.cwd(),
+    cwd,
     env: {
       LAB_MODEL_GATEWAY_URL: "https://gateway.lab.example/v1/chat",
       LAB_MODEL_GATEWAY_HEALTH_URL: "https://gateway.lab.example/health",
@@ -192,6 +191,170 @@ test("gateway client normalizes HTTP errors with bounded response body", async (
     assert.match(result.error.details.body, /service unavailable/);
     assert.doesNotMatch(result.error.details.body, /token=secret/);
     assert.ok(result.error.diagnostics.some((hint) => /server logs/i.test(hint)));
+  } finally {
+    await close(server);
+  }
+});
+
+test("gateway client does not retry permanent OpenAI Responses terminal failures", async () => {
+  let calls = 0;
+  const server = await listen(http.createServer((_request, response) => {
+    calls += 1;
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      id: "resp-failed",
+      status: "failed",
+      error: { code: "invalid_request_error", message: "provider rejected request" },
+      output: []
+    }));
+  }), "127.0.0.1");
+  try {
+    const gateway = createLabModelGateway({
+      modelAlias: "grok-4.6",
+      models: [{ id: "grok-4.6" }],
+      networkMode: "offline",
+      allowedHosts: [],
+      lab: {
+        gatewayUrl: `${serverUrl(server)}/v1/responses`,
+        gatewayProtocol: "openai-responses",
+        gatewayMaxRetries: 2
+      }
+    });
+
+    const result = await gateway.sendChat({ messages: [{ role: "user", content: "hello" }] });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error.code, "GATEWAY_RESPONSE_FAILED");
+    assert.match(result.error.message, /provider rejected request/);
+    assert.equal(calls, 1);
+  } finally {
+    await close(server);
+  }
+});
+
+test("gateway client retries transient OpenAI Responses failures returned in HTTP 200 JSON", async () => {
+  let calls = 0;
+  const server = await listen(http.createServer((_request, response) => {
+    calls += 1;
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify(calls === 1
+      ? {
+          id: "resp-transient",
+          status: "failed",
+          error: { code: "server_error", message: "provider temporarily failed" },
+          output: []
+        }
+      : {
+          id: "resp-recovered",
+          model: "grok-4.6",
+          status: "completed",
+          output: [{ type: "message", content: [{ type: "output_text", text: "recovered" }] }]
+        }));
+  }), "127.0.0.1");
+  try {
+    const gateway = createLabModelGateway({
+      modelAlias: "grok-4.6",
+      models: [{ id: "grok-4.6" }],
+      networkMode: "offline",
+      allowedHosts: [],
+      lab: {
+        gatewayUrl: `${serverUrl(server)}/v1/responses`,
+        gatewayProtocol: "openai-responses",
+        gatewayMaxRetries: 1
+      }
+    });
+
+    const result = await gateway.sendChat({ messages: [{ role: "user", content: "hello" }] });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.data.text, "recovered");
+    assert.equal(calls, 2);
+  } finally {
+    await close(server);
+  }
+});
+
+test("gateway client retries transient OpenAI Responses stream failures", async () => {
+  let calls = 0;
+  const server = await listen(http.createServer((_request, response) => {
+    calls += 1;
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end((calls === 1
+      ? [
+          'data: {"type":"response.created","response":{"id":"resp-stream-transient"}}',
+          "",
+          'data: {"type":"response.failed","response":{"id":"resp-stream-transient","status":"failed","error":{"code":"temporarily_unavailable","message":"try later"}}}',
+          ""
+        ]
+      : [
+          'data: {"type":"response.created","response":{"id":"resp-stream-recovered","model":"grok-4.6"}}',
+          "",
+          'data: {"type":"response.output_text.delta","delta":"stream recovered"}',
+          "",
+          'data: {"type":"response.completed","response":{"id":"resp-stream-recovered","model":"grok-4.6","status":"completed","output":[]}}',
+          "",
+          "data: [DONE]",
+          ""
+        ]).join("\n"));
+  }), "127.0.0.1");
+  try {
+    const gateway = createLabModelGateway({
+      modelAlias: "grok-4.6",
+      models: [{ id: "grok-4.6" }],
+      networkMode: "offline",
+      allowedHosts: [],
+      lab: {
+        gatewayUrl: `${serverUrl(server)}/v1/responses`,
+        gatewayProtocol: "openai-responses",
+        gatewayMaxRetries: 1
+      }
+    });
+
+    const result = await gateway.sendChat({
+      messages: [{ role: "user", content: "hello" }],
+      stream: true
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.data.text, "stream recovered");
+    assert.equal(calls, 2);
+  } finally {
+    await close(server);
+  }
+});
+
+test("gateway client retries HTTP 429 responses", async () => {
+  let calls = 0;
+  const server = await listen(http.createServer((_request, response) => {
+    calls += 1;
+    response.writeHead(calls === 1 ? 429 : 200, { "content-type": "application/json" });
+    response.end(calls === 1
+      ? JSON.stringify({ error: { message: "rate limited" } })
+      : JSON.stringify({
+        id: "resp-ok",
+        model: "grok-4.6",
+        status: "completed",
+        output: [{ type: "message", content: [{ type: "output_text", text: "retried" }] }]
+      }));
+  }), "127.0.0.1");
+  try {
+    const gateway = createLabModelGateway({
+      modelAlias: "grok-4.6",
+      models: [{ id: "grok-4.6" }],
+      networkMode: "offline",
+      allowedHosts: [],
+      lab: {
+        gatewayUrl: `${serverUrl(server)}/v1/responses`,
+        gatewayProtocol: "openai-responses",
+        gatewayMaxRetries: 1
+      }
+    });
+
+    const result = await gateway.sendChat({ messages: [{ role: "user", content: "hello" }] });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.data.text, "retried");
+    assert.equal(calls, 2);
   } finally {
     await close(server);
   }
@@ -498,6 +661,49 @@ test("gateway client can use OpenAI-compatible chat protocol with bearer auth", 
   }
 });
 
+test("gateway client can use Anthropic Messages protocol with Claude headers", async () => {
+  const requests = [];
+  const server = await listen(http.createServer(async (request, response) => {
+    const body = JSON.parse(await readRequestText(request));
+    requests.push({ headers: request.headers, body });
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      id: "msg-test",
+      model: body.model,
+      content: [{ type: "text", text: "anthropic-compatible hello" }],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 2, output_tokens: 3 }
+    }));
+  }), "127.0.0.1");
+  try {
+    const gateway = createLabModelGateway({
+      modelAlias: "claude-sonnet-4-5",
+      networkMode: "offline",
+      allowedHosts: [],
+      lab: {
+        gatewayUrl: `${serverUrl(server)}/v1/messages`,
+        gatewayProtocol: "anthropic-messages",
+        gatewayApiKey: "claude-secret"
+      }
+    });
+
+    const result = await gateway.sendChat({
+      messages: [{ role: "user", content: "hello" }],
+      tools: [{ name: "read_file", description: "Read", inputSchema: { type: "object" } }]
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.data.text, "anthropic-compatible hello");
+    assert.equal(requests[0].headers["x-api-key"], "claude-secret");
+    assert.equal(requests[0].headers["anthropic-version"], "2023-06-01");
+    assert.equal(requests[0].headers.authorization, undefined);
+    assert.equal(requests[0].body.tools[0].name, "read_file");
+    assert.equal(requests[0].body.max_tokens, 8192);
+  } finally {
+    await close(server);
+  }
+});
+
 test("gateway client retries transient fetch failures before response", async () => {
   const originalFetch = globalThis.fetch;
   const events = [];
@@ -610,7 +816,7 @@ test("gateway client retries configured transient HTTP 500 responses", async () 
         });
       }
       return new Response(JSON.stringify({
-        id: "example-retry-ok",
+        id: "retry-ok",
         model: "example-retry-model",
         content: [{ type: "text", text: "recovered" }],
         toolCalls: [],

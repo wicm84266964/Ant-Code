@@ -1,5 +1,4 @@
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -7,6 +6,24 @@ import { parseModelList } from "../model-gateway/models.js";
 import { DEFAULT_GATEWAY_MAX_RESPONSE_BYTES } from "../model-gateway/limits.js";
 import { recommendedMcpServers } from "../mcp/recommended.js";
 import { validateHookConfig } from "../hooks/registry.js";
+import { createCredentialStore } from "../credentials/store.js";
+import { createFileRepository } from "../config-v2/file-repository.js";
+import { projectLegacyRuntimeConfig } from "../config-v2/legacy-projection.js";
+import { stripLegacyModelFields } from "../config-v2/migrate-v1.js";
+import {
+  credentialsPath,
+  globalLegacyConfigPath,
+  globalSettingsPath,
+  projectLegacyConfigPath,
+  projectSettingsPath
+} from "../config-v2/paths.js";
+import { resolveSettingsLayers } from "../config-v2/resolver.js";
+import { mergeRuntimeAgentRouting, replaceRuntimeAgentRouting } from "../config-v2/runtime-selection.js";
+import {
+  GOAL_ABS_MAX_AUTO_CONTINUES,
+  GOAL_MAX_AUTO_CONTINUES,
+  GOAL_MIN_AUTO_CONTINUES
+} from "../core/goal.js";
 
 export const NETWORK_MODES = Object.freeze([
   "offline",
@@ -18,6 +35,7 @@ export const NETWORK_MODES = Object.freeze([
 export const GATEWAY_PROTOCOLS = Object.freeze([
   "lab-agent-gateway",
   "openai-chat",
+  "openai-responses",
   "anthropic-messages"
 ]);
 
@@ -46,7 +64,9 @@ function resolvePackageRoot() {
 const DEFAULT_CONFIG = Object.freeze({
   appName: "lab-agent",
   modelAlias: "",
+  reasoningEffort: null,
   models: [],
+  routingModels: [],
   networkMode: "approved-web",
   allowedHosts: [],
   transcript: {
@@ -110,6 +130,9 @@ const DEFAULT_CONFIG = Object.freeze({
       requireForWrites: false,
       requireForHighRisk: false
     },
+    goal: {
+      maxAutoContinues: GOAL_MAX_AUTO_CONTINUES
+    },
     vision: {
       enabled: true,
       model: null,
@@ -152,6 +175,7 @@ const DEFAULT_CONFIG = Object.freeze({
  * @typedef {typeof DEFAULT_CONFIG & {
  *   lab: { gatewayUrl: string | null; gatewayHealthUrl: string | null; gatewayProtocol: string; gatewayApiKey: string | null; gatewayMaxRetries: number; gatewayMaxResponseBytes: number; configPath: string | null };
  *   projectConfigPath: string | null;
+ *   projectConfigPaths: string[];
  *   globalConfigPath: string;
  *   defaultModelAlias: string;
  * }} LabAgentConfig
@@ -159,7 +183,7 @@ const DEFAULT_CONFIG = Object.freeze({
 
 /**
  * Load config from defaults, bundled JSON, optional global JSON, environment
- * model/gateway defaults, project JSON, and runtime environment controls.
+ * model/gateway defaults, global JSON, project JSON, and runtime environment controls.
  *
  * Precedence:
  * defaults < bundled config < global config < model/gateway env defaults
@@ -177,60 +201,151 @@ export async function loadConfig(options = {}) {
   const explicitLabConfigPath = hasNonEmptyEnv(env, "LAB_AGENT_CONFIG");
   const labConfigPath = globalConfigPath(env);
   const labConfigReadPath = explicitLabConfigPath || shouldReadDefaultGlobalConfig(env) ? labConfigPath : null;
+  const configV2 = await loadConfigV2Runtime({
+    cwd,
+    env,
+    readGlobal: Boolean(labConfigReadPath)
+  });
   const bundled = await readJsonIfExists(BUNDLED_CONFIG_PATH);
   const rawLab = labConfigReadPath ? await readJsonIfExists(labConfigReadPath) : null;
   const lab = rawLab ? {
     ...rawLab,
+    data: configV2.enabled
+      ? stripLegacyModelFields(materializeLayerGatewayProfile(rawLab.data))
+      : materializeLayerGatewayProfile(rawLab.data),
     path: labConfigReadPath,
-    label: explicitLabConfigPath ? "LAB_AGENT_CONFIG" : "user global config"
+    label: explicitLabConfigPath ? "LAB_AGENT_CONFIG" : "用户全局配置"
   } : null;
 
   const withBundled = mergeConfig(DEFAULT_CONFIG, bundled?.data ?? {});
   const withGlobalDefaults = mergeConfigWithGatewayCredentialScope(withBundled, lab?.data ?? {});
-  const withEnvDefaults = applyEnvDefaultConfig(withGlobalDefaults, env, {
-    preserveConfiguredModels: Boolean(bundled && !lab)
-  });
-  const withProject = mergeConfigWithGatewayCredentialScope(withEnvDefaults, project?.data ?? {});
-  const withEnv = applyRuntimeEnvConfig(withProject, env);
-  const normalized = normalizeContextConfig(withEnv, env);
+  const withLegacyEnvDefaults = configV2.enabled
+    ? withGlobalDefaults
+    : applyEnvDefaultConfig(withGlobalDefaults, env, {
+        preserveConfiguredModels: Boolean(bundled && !lab)
+      });
+  const projectData = /** @type {Record<string, any>} */ (
+    configV2.enabled ? stripLegacyModelFields(project?.data ?? {}) : project?.data ?? {}
+  );
+  const withProject = mergeConfigWithGatewayCredentialScope(withLegacyEnvDefaults, projectData);
+  const withProjectedModelSettings = configV2.enabled
+    ? {
+        ...mergeConfigWithGatewayCredentialScope(withProject, configV2.runtimeProjection, {
+          gatewayProfileIdentity: "id"
+        }),
+        allowedHosts: Array.from(new Set([
+          ...(Array.isArray(withProject.allowedHosts) ? withProject.allowedHosts : []),
+          ...configV2.gatewayHosts
+        ]))
+      }
+    : withProject;
+  const withModelSettings = configV2.enabled
+    ? applyLegacyReliabilityOverrides(withProjectedModelSettings, [bundled?.data, lab?.data, projectData])
+    : withProjectedModelSettings;
+  const withEnvDefaults = configV2.enabled
+    ? applyEnvDefaultConfig(withModelSettings, env, {
+        preserveConfiguredModels: true,
+        gatewayProfileIdentity: "id"
+      })
+    : withModelSettings;
+  const selectionLayer = configV2.enabled
+    ? hasModelGatewayEnvironmentControls(env) ? withEnvDefaults : configV2.runtimeProjection
+    : projectData;
+  const withSelectedProfile = shouldApplyActiveGatewayProfile(withEnvDefaults, selectionLayer)
+    ? applyActiveGatewayProfileConfig(withEnvDefaults, {
+        strictProfileId: configV2.enabled,
+        projectedAgentRouting: configV2.enabled ? configV2.runtimeProjection?.agents : undefined,
+        projectedAgentRoutingProviderId: configV2.enabled
+          ? configV2.runtimeProjection?.lab?.activeGatewayProfile
+          : undefined
+      })
+    : withEnvDefaults;
+  const withEnv = applyRuntimeEnvConfig(withSelectedProfile, env);
+  const normalized = normalizeAllowedHostsConfig(normalizeContextConfig(withEnv, env));
   const hardened = applySensitivityPolicy(normalized);
   validateConfig(hardened);
-  const finalLab = {
+  let resolvedProfiles = /** @type {Array<Record<string, any>>} */ (
+    Array.isArray(hardened.lab?.gatewayProfiles)
+      ? hardened.lab.gatewayProfiles.map((/** @type {Record<string, any>} */ profile) => cloneJsonObject(profile))
+      : []
+  );
+  const projectClearsGatewayProfiles = Array.isArray(projectData.lab?.gatewayProfiles)
+    && projectData.lab.gatewayProfiles.length === 0;
+  const activeEndpoint = { lab: hardened.lab };
+  const configuredActiveId = String(hardened.lab?.activeGatewayProfile ?? "").trim();
+  let activeProfile = configV2.enabled
+    ? resolvedProfiles.find((profile) => String(profile?.id ?? "") === configuredActiveId) ?? null
+    : resolvedProfiles.find((profile) => (
+        String(profile?.id ?? "") === configuredActiveId
+        && sameGatewayEndpoint({ lab: profile }, activeEndpoint)
+      )) ?? resolvedProfiles.find((profile) => sameGatewayEndpoint({ lab: profile }, activeEndpoint)) ?? null;
+  if (configV2.enabled && configuredActiveId && !activeProfile) {
+    throw new Error(`Configured Config V2 provider is unavailable: ${configuredActiveId}`);
+  }
+  const activeGatewayUrl = String(hardened.lab?.gatewayUrl ?? "").trim();
+  if (activeGatewayUrl && !projectClearsGatewayProfiles) {
+    const gatewayProtocol = String(hardened.lab?.gatewayProtocol ?? "openai-chat").trim();
+    const profileAgents = gatewayProfileAgentSnapshot(hardened.agents);
+    const synthesizedActiveProfile = {
+      id: activeProfile?.id ?? gatewayProfileIdFromParts(gatewayProtocol, activeGatewayUrl),
+      label: String(activeProfile?.label ?? "").trim() || parseHost(activeGatewayUrl) || activeGatewayUrl,
+      gatewayUrl: activeGatewayUrl,
+      gatewayHealthUrl: String(hardened.lab?.gatewayHealthUrl ?? "").trim(),
+      gatewayProtocol,
+      ...(String(hardened.lab?.gatewayApiKey ?? "").trim() ? { gatewayApiKey: hardened.lab.gatewayApiKey } : {}),
+      ...(hardened.lab?.gatewayApiKeyDisabled === true ? { gatewayApiKeyDisabled: true } : {}),
+      modelAlias: String(hardened.modelAlias ?? "").trim(),
+      models: Array.isArray(hardened.models) ? cloneJsonObject(hardened.models) : [],
+      routingModels: Array.isArray(hardened.routingModels) ? cloneJsonObject(hardened.routingModels) : [],
+      ...(profileAgents ? { agents: profileAgents } : {})
+    };
+    activeProfile = synthesizedActiveProfile;
+    resolvedProfiles = [
+      ...resolvedProfiles.filter((profile) => (
+        String(profile?.id ?? "") !== synthesizedActiveProfile.id
+        && (configV2.enabled || !sameGatewayEndpoint({ lab: profile }, activeEndpoint))
+      )),
+      synthesizedActiveProfile
+    ];
+  }
+  const gatewayApiKeyDisabled = hardened.lab?.gatewayApiKeyDisabled === true
+    || (!String(hardened.lab?.gatewayApiKey ?? "").trim() && activeProfile?.gatewayApiKeyDisabled === true);
+  const finalLab = /** @type {Record<string, any>} */ ({
     gatewayUrl: hardened.lab?.gatewayUrl ?? null,
     gatewayHealthUrl: hardened.lab?.gatewayHealthUrl ?? null,
     gatewayProtocol: hardened.lab?.gatewayProtocol ?? "openai-chat",
-    gatewayApiKey: hardened.lab?.gatewayApiKey ?? null,
+    gatewayApiKey: gatewayApiKeyDisabled
+      ? null
+      : hardened.lab?.gatewayApiKey ?? activeProfile?.gatewayApiKey ?? null,
+    gatewayApiKeyDisabled,
     gatewayMaxRetries: parseOptionalInteger(env.LAB_MODEL_GATEWAY_MAX_RETRIES, hardened.lab?.gatewayMaxRetries ?? DEFAULT_GATEWAY_MAX_RETRIES),
     gatewayTimeoutMs: parseOptionalInteger(env.LAB_MODEL_GATEWAY_TIMEOUT_MS, hardened.lab?.gatewayTimeoutMs ?? DEFAULT_GATEWAY_TIMEOUT_MS),
     gatewayIdleTimeoutMs: parseOptionalInteger(env.LAB_MODEL_GATEWAY_IDLE_TIMEOUT_MS, hardened.lab?.gatewayIdleTimeoutMs ?? DEFAULT_GATEWAY_IDLE_TIMEOUT_MS),
     gatewayMaxResponseBytes: parseOptionalInteger(env.LAB_MODEL_GATEWAY_MAX_RESPONSE_BYTES, hardened.lab?.gatewayMaxResponseBytes ?? DEFAULT_GATEWAY_MAX_RESPONSE_BYTES),
-    activeGatewayProfile: typeof hardened.lab?.activeGatewayProfile === "string" ? hardened.lab.activeGatewayProfile : "",
-    gatewayProfiles: Array.isArray(hardened.lab?.gatewayProfiles) ? hardened.lab.gatewayProfiles : [],
+    activeGatewayProfile: activeProfile?.id ?? "",
+    gatewayProfiles: resolvedProfiles,
     configPath: lab ? labConfigReadPath : explicitLabConfigPath ? labConfigPath : null
-  };
+  });
   validateLabConfig(finalLab);
-  const configSources = buildConfigSources({ env, project, lab, bundled });
-  const projectData = /** @type {Record<string, any>} */ (project?.data ?? {});
-  const projectLab = isPlainObject(projectData.lab) ? projectData.lab : {};
-  if (finalLab.gatewayApiKey
-    && Object.prototype.hasOwnProperty.call(projectLab, "gatewayApiKey")
-    && !String(projectLab.gatewayApiKey ?? "").trim()
-    && sameGatewayEndpoint(withEnvDefaults, projectData)) {
-    configSources.lab.gatewayApiKey = configSourceFor("lab.gatewayApiKey", {
-      env,
-      project: null,
-      lab,
-      bundled
-    });
-  }
-  if (finalLab.gatewayApiKey === null
-    && (configSources.lab.gatewayUrl.type === "project" || configSources.lab.gatewayProtocol.type === "project")
-    && configSources.lab.gatewayApiKey.type !== "project") {
-    configSources.lab.gatewayApiKey = {
-      type: "project",
-      label: ".lab-agent/config.json",
-      path: project?.path ?? null
-    };
+  /** @type {Record<string, any>} */
+  let configSources = buildConfigSources({
+    env,
+    project,
+    lab,
+    bundled,
+    profiles: resolvedProfiles,
+    environmentConfig: withEnvDefaults,
+    finalLab
+  });
+  configSources.lab.gatewayApiKey = activeGatewayCredentialSource({
+    env,
+    project,
+    lab,
+    bundled,
+    finalLab
+  });
+  if (configV2.enabled) {
+    configSources = applyConfigV2Sources(configSources, configV2, finalLab, env);
   }
 
   return {
@@ -244,7 +359,51 @@ export async function loadConfig(options = {}) {
     projectConfigPaths: project?.paths ?? [],
     bundledConfigPath: bundled ? BUNDLED_CONFIG_PATH : null,
     globalConfigPath: labConfigPath,
-    configSources
+    configSources,
+    configV2: configV2.enabled ? {
+      enabled: true,
+      settingsPaths: configV2.settingsPaths,
+      revisions: configV2.revisions,
+      defaultSelections: configV2.defaultSelections,
+      provenance: /** @type {Record<string, any>} */ (configV2.resolved).provenance,
+      resolved: configV2.resolved
+    } : {
+      enabled: false,
+      settingsPaths: configV2.settingsPaths,
+      revisions: configV2.revisions,
+      defaultSelections: configV2.defaultSelections,
+      provenance: null,
+      resolved: null
+    }
+  };
+}
+
+/**
+ * Gateway reliability remains part of the general composition settings UI.
+ * V2 provider values supply defaults, while explicit global/project fields
+ * continue to override them without reconstructing a provider document.
+ *
+ * @param {Record<string, any>} config
+ * @param {Array<Record<string, any> | null | undefined>} layers
+ */
+function applyLegacyReliabilityOverrides(config, layers) {
+  /** @type {Record<string, any>} */
+  const overrides = {};
+  for (const layer of layers) {
+    const lab = isPlainObject(layer?.lab) ? layer.lab : {};
+    for (const field of [
+      "gatewayMaxRetries",
+      "gatewayTimeoutMs",
+      "gatewayIdleTimeoutMs",
+      "gatewayMaxResponseBytes"
+    ]) {
+      if (Object.prototype.hasOwnProperty.call(lab, field)) overrides[field] = lab[field];
+    }
+  }
+  if (Object.keys(overrides).length === 0) return config;
+  return {
+    ...config,
+    lab: { ...(isPlainObject(config.lab) ? config.lab : {}), ...overrides }
   };
 }
 
@@ -275,6 +434,27 @@ function normalizeContextConfig(config, env) {
   };
 }
 
+/** @param {Record<string, any>} config */
+function normalizeAllowedHostsConfig(config) {
+  if (!Array.isArray(config.allowedHosts)) {
+    return config;
+  }
+  const allowedHosts = [];
+  const seen = new Set();
+  for (const value of config.allowedHosts) {
+    if (typeof value !== "string") {
+      allowedHosts.push(value);
+      continue;
+    }
+    const host = value.trim().replace(/\.$/, "").toLowerCase();
+    if (host && !seen.has(host)) {
+      seen.add(host);
+      allowedHosts.push(host);
+    }
+  }
+  return { ...config, allowedHosts };
+}
+
 function normalizeContextMaxBytes(context, env) {
   const maxTokens = Number.isInteger(context.maxTokens) && context.maxTokens > 0 ? context.maxTokens : null;
   const currentMaxBytes = Number.isInteger(context.maxBytes) && context.maxBytes > 0 ? context.maxBytes : null;
@@ -289,7 +469,7 @@ function normalizeContextMaxBytes(context, env) {
  * @param {string} cwd
  */
 export function localProjectConfigPath(cwd) {
-  return path.join(cwd, ".lab-agent", "config.json");
+  return projectLegacyConfigPath(cwd);
 }
 
 /**
@@ -298,15 +478,188 @@ export function localProjectConfigPath(cwd) {
  * @param {NodeJS.ProcessEnv} env
  */
 export function globalConfigPath(env = process.env) {
-  const explicit = String(env.LAB_AGENT_CONFIG ?? "").trim();
-  if (explicit) {
-    return path.resolve(explicit);
+  return globalLegacyConfigPath(env);
+}
+
+/**
+ * Read strict model settings independently from legacy composition files and
+ * materialize a one-way V1 runtime projection. Credential values are resolved
+ * only into that transient projection; the resolved V2 snapshot remains safe
+ * to expose to the Dashboard.
+ *
+ * @param {{ cwd: string; env: NodeJS.ProcessEnv; readGlobal: boolean }} options
+ */
+async function loadConfigV2Runtime({ cwd, env, readGlobal }) {
+  const settingsPaths = {
+    global: globalSettingsPath(env),
+    project: projectSettingsPath(cwd),
+    credentials: credentialsPath(env)
+  };
+  const missingGlobal = {
+    data: {},
+    revision: "missing",
+    exists: false,
+    path: settingsPaths.global
+  };
+  const [globalSnapshot, projectSnapshot] = await Promise.all([
+    readGlobal
+      ? createFileRepository({ filePath: settingsPaths.global }).read()
+      : Promise.resolve(missingGlobal),
+    createFileRepository({ filePath: settingsPaths.project }).read()
+  ]);
+  const credentialStore = createCredentialStore({ filePath: settingsPaths.credentials });
+  const credentialDescriptor = await credentialStore.describeAll();
+  const revisions = {
+    global: globalSnapshot.revision,
+    project: projectSnapshot.revision,
+    credentials: credentialDescriptor.revision
+  };
+  const enabled = globalSnapshot.exists || projectSnapshot.exists;
+  if (!enabled) {
+    return {
+      enabled: false,
+      settingsPaths,
+      revisions,
+      defaultSelections: { global: null, project: null },
+      resolved: null,
+      runtimeProjection: {},
+      gatewayHosts: []
+    };
   }
-  if (env.LAB_AGENT_HOME) {
-    return path.join(path.resolve(env.LAB_AGENT_HOME), "lab-agent.config.json");
+
+  const emptyDocument = { settingsVersion: 2, namespaces: {} };
+  const resolved = resolveSettingsLayers({
+    global: globalSnapshot.exists ? globalSnapshot.data : emptyDocument,
+    project: projectSnapshot.exists ? projectSnapshot.data : emptyDocument
+  });
+  const runtimeProjection = cloneJsonObject(projectLegacyRuntimeConfig(resolved));
+  const gatewayHosts = configV2GatewayHosts(resolved);
+  const profiles = Array.isArray(runtimeProjection.lab?.gatewayProfiles)
+    ? runtimeProjection.lab.gatewayProfiles
+    : [];
+  await Promise.all(/** @type {any[]} */ (profiles).map(async (profile) => {
+    if (profile.gatewayCredentialMode !== "credential" || !profile.gatewayCredentialRef) return;
+    const secret = await credentialStore.resolve(profile.gatewayCredentialRef);
+    if (secret) profile.gatewayApiKey = secret;
+  }));
+  const activeProfile = /** @type {any[]} */ (profiles).find((profile) => (
+    profile.id === runtimeProjection.lab?.activeGatewayProfile
+  ));
+  if (activeProfile?.gatewayApiKey) {
+    runtimeProjection.lab.gatewayApiKey = activeProfile.gatewayApiKey;
   }
-  const home = env.USERPROFILE || env.HOME || os.homedir();
-  return path.join(home, ".ant-code", "lab-agent.config.json");
+  return {
+    enabled: true,
+    settingsPaths,
+    revisions,
+    defaultSelections: {
+      global: globalSnapshot.data.namespaces?.["default-model"]?.selection
+        ? cloneJsonObject(globalSnapshot.data.namespaces["default-model"].selection)
+        : null,
+      project: projectSnapshot.data.namespaces?.["default-model"]?.selection
+        ? cloneJsonObject(projectSnapshot.data.namespaces["default-model"].selection)
+        : null
+    },
+    resolved,
+    runtimeProjection,
+    gatewayHosts
+  };
+}
+
+/** @param {Readonly<Record<string, any>>} resolved */
+function configV2GatewayHosts(resolved) {
+  /** @type {string[]} */
+  const hosts = [];
+  for (const provider of Object.values(resolved.namespaces?.["model-providers"]?.providers ?? {})) {
+    for (const candidate of [provider?.transport?.baseURL, provider?.transport?.healthURL]) {
+      const host = parseHost(String(candidate ?? ""));
+      if (host && !hosts.includes(host)) hosts.push(host);
+    }
+  }
+  return hosts;
+}
+
+/**
+ * Replace legacy owner inference with the provenance produced while resolving
+ * raw V2 layers. Effective values are never used to guess write ownership.
+ *
+ * @param {Record<string, any>} sources
+ * @param {Record<string, any>} configV2
+ * @param {Record<string, any>} finalLab
+ * @param {NodeJS.ProcessEnv} env
+ */
+function applyConfigV2Sources(sources, configV2, finalLab, env) {
+  const provenance = configV2.resolved.provenance ?? {};
+  const providerSources = provenance.providers ?? {};
+  const existingProfiles = new Map(
+    /** @type {any[]} */ (sources.lab?.gatewayProfiles ?? []).map((entry) => [entry.id, entry])
+  );
+  const gatewayProfiles = /** @type {any[]} */ (finalLab.gatewayProfiles ?? []).map((profile) => {
+    const scope = providerSources[profile.id];
+    if (!scope) return existingProfiles.get(profile.id) ?? { id: profile.id, type: "environment", label: "模型网关环境变量" };
+    const descriptor = configV2SourceDescriptor(scope, configV2.settingsPaths);
+    return {
+      id: profile.id,
+      ...descriptor,
+      modelScopes: Object.fromEntries(
+        /** @type {any[]} */ (profile.models ?? []).map((model) => [modelEntryId(model), scope])
+      )
+    };
+  });
+  if (hasModelGatewayEnvironmentControls(env)) {
+    return {
+      ...sources,
+      lab: { ...sources.lab, gatewayProfiles }
+    };
+  }
+  const activeId = String(finalLab.activeGatewayProfile ?? "").trim();
+  const providerScope = providerSources[activeId];
+  const selectionScope = provenance.defaultModel;
+  const providerSource = providerScope
+    ? configV2SourceDescriptor(providerScope, configV2.settingsPaths)
+    : sources.models;
+  const selectionSource = selectionScope
+    ? configV2SourceDescriptor(selectionScope, configV2.settingsPaths)
+    : sources.modelAlias;
+  return {
+    ...sources,
+    modelAlias: selectionSource,
+    models: providerSource,
+    lab: {
+      ...sources.lab,
+      gatewayUrl: providerSource,
+      gatewayHealthUrl: providerSource,
+      gatewayProtocol: providerSource,
+      gatewayApiKey: providerSource,
+      gatewayProfiles
+    }
+  };
+}
+
+/** @param {string} scope @param {Record<string, string>} settingsPaths */
+function configV2SourceDescriptor(scope, settingsPaths) {
+  if (scope === "global") {
+    return { type: "global", label: "全局模型设置", path: settingsPaths.global };
+  }
+  if (scope === "project") {
+    return { type: "project", label: ".lab-agent/settings.json", path: settingsPaths.project };
+  }
+  if (scope === "environment") {
+    return { type: "environment", label: "模型网关环境变量" };
+  }
+  return { type: "bundled", label: "bundled" };
+}
+
+/** @param {NodeJS.ProcessEnv} env */
+function hasModelGatewayEnvironmentControls(env) {
+  return [
+    "LAB_AGENT_MODEL",
+    "LAB_AGENT_MODELS",
+    "LAB_MODEL_GATEWAY_URL",
+    "LAB_MODEL_GATEWAY_HEALTH_URL",
+    "LAB_MODEL_GATEWAY_PROTOCOL",
+    "LAB_MODEL_GATEWAY_API_KEY"
+  ].some((name) => hasNonEmptyEnv(env, name));
 }
 
 function shouldReadDefaultGlobalConfig(env) {
@@ -325,7 +678,7 @@ async function loadProjectConfigs(cwd) {
     const candidate = path.join(cwd, name);
     const data = await readJsonIfExists(candidate);
     if (data) {
-      configs.push({ path: candidate, data: data.data });
+      configs.push({ path: candidate, data: materializeLayerGatewayProfile(data.data) });
     }
   }
   return configs;
@@ -344,6 +697,111 @@ function mergeProjectConfigs(configs) {
     paths: configs.map((item) => item.path),
     data: merged
   };
+}
+
+/**
+ * Convert a layer's legacy top-level gateway snapshot into an owned profile
+ * before layers are merged. This keeps older root project configs selectable
+ * after the Dashboard writes only a selector to .lab-agent/config.json.
+ *
+ * @param {Record<string, any>} value
+ */
+function materializeLayerGatewayProfile(value) {
+  const config = cloneJsonObject(value);
+  const lab = isPlainObject(config.lab) ? config.lab : {};
+  assertUniqueModelEntryIds(config.models, "models");
+  if (Array.isArray(lab.gatewayProfiles)) {
+    lab.gatewayProfiles = lab.gatewayProfiles.map((/** @type {Record<string, any>} */ profile) => {
+      if (!isPlainObject(profile)) return profile;
+      const gatewayProtocol = String(profile.gatewayProtocol ?? "openai-chat").trim() || "openai-chat";
+      return {
+        ...profile,
+        gatewayUrl: normalizeGatewayInferenceUrl(profile.gatewayUrl, gatewayProtocol)
+      };
+    });
+    assertUniqueLayerGatewayProfileIds(lab.gatewayProfiles);
+  }
+  const gatewayProtocol = String(lab.gatewayProtocol ?? "openai-chat").trim() || "openai-chat";
+  const gatewayUrl = normalizeGatewayInferenceUrl(lab.gatewayUrl, gatewayProtocol);
+  if (gatewayUrl) {
+    lab.gatewayUrl = gatewayUrl;
+  }
+  config.lab = lab;
+  if (!gatewayUrl || (Array.isArray(lab.gatewayProfiles) && lab.gatewayProfiles.length === 0)) {
+    return config;
+  }
+  const profiles = Array.isArray(lab.gatewayProfiles) ? lab.gatewayProfiles : [];
+  const existingProfile = profiles.find((/** @type {Record<string, any>} */ candidate) => (
+    sameGatewayProfileEndpoint(candidate, { gatewayUrl, gatewayProtocol })
+  ));
+  if (existingProfile) {
+    if (!String(lab.activeGatewayProfile ?? "").trim()) {
+      lab.activeGatewayProfile = String(existingProfile.id ?? "").trim();
+      config.lab = lab;
+    }
+    return config;
+  }
+  const profileId = gatewayProfileIdFromParts(gatewayProtocol, gatewayUrl);
+  const agents = gatewayProfileAgentSnapshot(config.agents);
+  const profile = {
+    id: profileId,
+    label: parseHost(gatewayUrl) || gatewayUrl,
+    gatewayUrl,
+    gatewayHealthUrl: String(lab.gatewayHealthUrl ?? "").trim(),
+    gatewayProtocol,
+    ...(String(lab.gatewayApiKey ?? "").trim() ? { gatewayApiKey: lab.gatewayApiKey } : {}),
+    ...(lab.gatewayApiKeyDisabled === true ? { gatewayApiKey: null, gatewayApiKeyDisabled: true } : {}),
+    modelAlias: String(config.modelAlias ?? "").trim(),
+    models: Array.isArray(config.models) ? cloneJsonObject(config.models) : [],
+    routingModels: Array.isArray(config.routingModels) ? cloneJsonObject(config.routingModels) : [],
+    ...(agents ? { agents } : {})
+  };
+  lab.gatewayProfiles = [
+    ...profiles.filter((/** @type {Record<string, any>} */ candidate) => (
+      String(candidate?.id ?? "").trim() !== profileId
+      && !sameGatewayProfileEndpoint(candidate, profile)
+    )),
+    profile
+  ];
+  if (!String(lab.activeGatewayProfile ?? "").trim()) {
+    lab.activeGatewayProfile = profileId;
+  }
+  config.lab = lab;
+  return config;
+}
+
+/** @param {Array<unknown>} profiles */
+function assertUniqueLayerGatewayProfileIds(profiles) {
+  const byId = new Map();
+  for (const profile of profiles) {
+    if (!isPlainObject(profile)) continue;
+    const id = String(profile.id ?? "").trim();
+    if (id) {
+      const previous = byId.get(id);
+      if (previous) {
+        if (!sameGatewayProfileEndpoint(previous, profile)) {
+          throw new Error(`Conflicting lab.gatewayProfiles id: ${id} points to multiple endpoints`);
+        }
+        throw new Error(`Duplicate lab.gatewayProfiles id: ${id}`);
+      }
+      byId.set(id, profile);
+    }
+    assertUniqueModelEntryIds(profile.models, `lab.gatewayProfiles[${id || "?"}].models`);
+    assertUniqueModelEntryIds(profile.routingModels, `lab.gatewayProfiles[${id || "?"}].routingModels`);
+  }
+}
+
+/** @param {unknown} value @param {string} keyPath */
+function assertUniqueModelEntryIds(value, keyPath) {
+  if (!Array.isArray(value)) return;
+  const ids = new Set();
+  for (const model of value) {
+    const id = modelEntryId(model);
+    if (id && ids.has(id)) {
+      throw new Error(`Duplicate ${keyPath} id: ${id}`);
+    }
+    if (id) ids.add(id);
+  }
 }
 
 /**
@@ -367,14 +825,13 @@ async function readJsonIfExists(filePath) {
  */
 function sanitizeLoadedConfig(raw, filePath) {
   const data = isPlainObject(raw) ? cloneJsonObject(raw) : {};
+  const bundled = path.resolve(filePath) === path.resolve(BUNDLED_CONFIG_PATH);
   const templateLike = isExampleConfig(data);
-  let ignoredModelGatewayTemplate = templateLike;
-  if (templateLike) {
-    if (path.resolve(filePath) === path.resolve(BUNDLED_CONFIG_PATH)) {
-      stripBundledTemplateModelGateway(data);
-    } else {
-      stripModelGatewayConfig(data);
-    }
+  let ignoredModelGatewayTemplate = templateLike || bundled;
+  if (bundled) {
+    stripBundledTemplateModelGateway(data);
+  } else if (templateLike) {
+    stripModelGatewayConfig(data);
   } else {
     ignoredModelGatewayTemplate = stripPlaceholderModelGatewayFields(data);
   }
@@ -505,11 +962,13 @@ function stripPlaceholderModelGatewayFields(config) {
 function stripModelGatewayConfig(config) {
   delete config.modelAlias;
   delete config.models;
+  delete config.routingModels;
   if (isPlainObject(config.lab)) {
     delete config.lab.gatewayUrl;
     delete config.lab.gatewayHealthUrl;
     delete config.lab.gatewayProtocol;
     delete config.lab.gatewayApiKey;
+    delete config.lab.gatewayApiKeyDisabled;
     delete config.lab.activeGatewayProfile;
     delete config.lab.gatewayProfiles;
   }
@@ -559,12 +1018,32 @@ function mergeConfig(base, overlay) {
   return result;
 }
 
-/** @param {Record<string, any>} base @param {Record<string, any>} overlay */
-function mergeConfigWithGatewayCredentialScope(base, overlay) {
+/**
+ * @param {Record<string, any>} base
+ * @param {Record<string, any>} overlay
+ * @param {{ gatewayProfileIdentity?: "endpoint" | "id" }} [options]
+ */
+function mergeConfigWithGatewayCredentialScope(base, overlay, options = {}) {
   const next = mergeConfig(base, overlay);
   const overlayLab = isPlainObject(overlay?.lab) ? overlay.lab : {};
+  const disablesCredential = overlayLab.gatewayApiKeyDisabled === true;
+  const overlayHasCredential = Boolean(String(overlayLab.gatewayApiKey ?? "").trim());
+  const changesEndpoint = Object.prototype.hasOwnProperty.call(overlayLab, "gatewayUrl")
+    || Object.prototype.hasOwnProperty.call(overlayLab, "gatewayProtocol");
+  const endpointChanged = changesEndpoint
+    && (!hasGatewayEndpoint(base) || !sameGatewayEndpoint(base, next));
+  if (!disablesCredential && (overlayHasCredential || endpointChanged) && isPlainObject(next.lab)) {
+    delete next.lab.gatewayApiKeyDisabled;
+  }
+  if (disablesCredential) {
+    next.lab = {
+      ...(isPlainObject(next.lab) ? next.lab : {}),
+      gatewayApiKey: null,
+      gatewayApiKeyDisabled: true
+    };
+  }
   if (hasGatewayEndpoint(next) && sameGatewayEndpoint(base, next)) {
-    if (hasGatewayCredential(base) && !hasGatewayCredential(next)) {
+    if (hasGatewayCredential(base) && !hasGatewayCredential(next) && !disablesCredential) {
       next.lab = {
         ...(isPlainObject(next.lab) ? next.lab : {}),
         gatewayApiKey: base.lab.gatewayApiKey
@@ -574,31 +1053,17 @@ function mergeConfigWithGatewayCredentialScope(base, overlay) {
       next.models = mergeModelEntries(base.models, overlay.models);
     }
   }
-  if (Array.isArray(base?.lab?.gatewayProfiles) && Array.isArray(overlayLab.gatewayProfiles)) {
-    const inheritedProfiles = /** @type {Array<Record<string, any>>} */ (base.lab.gatewayProfiles);
+  if (Array.isArray(overlayLab.gatewayProfiles)) {
     next.lab = {
       ...(isPlainObject(next.lab) ? next.lab : {}),
-      gatewayProfiles: overlayLab.gatewayProfiles.map((profile) => {
-        const inherited = inheritedProfiles.find((candidate) => sameGatewayProfileEndpoint(candidate, profile));
-        if (!inherited) {
-          return profile;
-        }
-        const mergedProfile = {
-          ...profile,
-          ...(!String(profile?.gatewayApiKey ?? "").trim() && String(inherited.gatewayApiKey ?? "").trim()
-            ? { gatewayApiKey: inherited.gatewayApiKey }
-            : {})
-        };
-        if (Array.isArray(inherited.models) && Array.isArray(profile?.models)) {
-          mergedProfile.models = mergeModelEntries(inherited.models, profile.models);
-        }
-        return mergedProfile;
-      })
+      gatewayProfiles: mergeGatewayProfileEntries(
+        Array.isArray(base?.lab?.gatewayProfiles) ? base.lab.gatewayProfiles : [],
+        overlayLab.gatewayProfiles,
+        { identity: options.gatewayProfileIdentity }
+      )
     };
   }
-  const changesEndpoint = Object.prototype.hasOwnProperty.call(overlayLab, "gatewayUrl")
-    || Object.prototype.hasOwnProperty.call(overlayLab, "gatewayProtocol");
-  const declaresCredential = Object.prototype.hasOwnProperty.call(overlayLab, "gatewayApiKey");
+  const declaresCredential = Object.prototype.hasOwnProperty.call(overlayLab, "gatewayApiKey") || disablesCredential;
   if (changesEndpoint
     && hasGatewayCredential(base)
     && !declaresCredential
@@ -609,6 +1074,206 @@ function mergeConfigWithGatewayCredentialScope(base, overlay) {
     };
   }
   return next;
+}
+
+/**
+ * A higher layer that explicitly selects a profile owns the selector. Legacy
+ * top-level model/gateway fields instead own the effective snapshot and must
+ * not be replaced by an inherited selector from a lower layer.
+ *
+ * @param {Record<string, any>} config
+ * @param {Record<string, any>} highestLayer
+ */
+function shouldApplyActiveGatewayProfile(config, highestLayer) {
+  const profileId = String(config?.lab?.activeGatewayProfile ?? "").trim();
+  if (!profileId) {
+    return false;
+  }
+  const layerLab = isPlainObject(highestLayer?.lab) ? highestLayer.lab : {};
+  if (Object.prototype.hasOwnProperty.call(layerLab, "activeGatewayProfile")) {
+    return true;
+  }
+  const ownsLegacySnapshot = ["modelAlias", "models", "reasoningEffort"]
+    .some((key) => Object.prototype.hasOwnProperty.call(highestLayer, key))
+    || [
+      "gatewayUrl",
+      "gatewayHealthUrl",
+      "gatewayProtocol",
+      "gatewayApiKey",
+      "gatewayApiKeyDisabled"
+    ].some((key) => Object.prototype.hasOwnProperty.call(layerLab, key));
+  return !ownsLegacySnapshot;
+}
+
+/**
+ * Resolve the selected profile into the effective runtime fields. Stored
+ * profile definitions remain the source of truth; a higher layer may switch
+ * profiles by writing only lab.activeGatewayProfile.
+ *
+ * @param {Record<string, any>} config
+ * @param {{ strictProfileId?: boolean; projectedAgentRouting?: unknown; projectedAgentRoutingProviderId?: unknown }} [options]
+ */
+function applyActiveGatewayProfileConfig(config, options = {}) {
+  const lab = isPlainObject(config?.lab) ? config.lab : {};
+  let profileId = String(lab.activeGatewayProfile ?? "").trim();
+  const profiles = Array.isArray(lab.gatewayProfiles) ? lab.gatewayProfiles : [];
+  if (!profileId || profiles.length === 0) {
+    return config;
+  }
+  let profile = profiles.find((candidate) => (
+    isPlainObject(candidate) && String(candidate.id ?? "").trim() === profileId
+  ));
+  if (!profile) {
+    if (options.strictProfileId === true) {
+      throw new Error(`Configured Config V2 provider is unavailable: ${profileId}`);
+    }
+    profile = profiles.find((candidate) => (
+      isPlainObject(candidate)
+      && sameGatewayProfileEndpoint(candidate, {
+        gatewayUrl: lab.gatewayUrl,
+        gatewayProtocol: lab.gatewayProtocol
+      })
+    ));
+    if (!profile) {
+      return config;
+    }
+    profileId = String(profile.id ?? "").trim();
+  }
+
+  const models = Array.isArray(profile.models) ? cloneJsonObject(profile.models) : [];
+  const routingModels = Array.isArray(profile.routingModels) ? cloneJsonObject(profile.routingModels) : [];
+  const modelAlias = String(profile.modelAlias ?? "").trim() || modelEntryId(models[0]);
+  const nextLab = /** @type {Record<string, any>} */ ({
+    ...lab,
+    gatewayUrl: String(profile.gatewayUrl ?? "").trim() || null,
+    gatewayHealthUrl: String(profile.gatewayHealthUrl ?? "").trim() || null,
+    gatewayProtocol: String(profile.gatewayProtocol ?? "openai-chat").trim() || "openai-chat",
+    activeGatewayProfile: profileId,
+    gatewayProfiles: profiles
+  });
+  if (profile.gatewayApiKeyDisabled === true) {
+    nextLab.gatewayApiKey = null;
+    nextLab.gatewayApiKeyDisabled = true;
+  } else if (String(profile.gatewayApiKey ?? "").trim()) {
+    nextLab.gatewayApiKey = profile.gatewayApiKey;
+    delete nextLab.gatewayApiKeyDisabled;
+  } else {
+    nextLab.gatewayApiKey = null;
+    delete nextLab.gatewayApiKeyDisabled;
+  }
+
+  const endpointChanged = !sameGatewayProfileEndpoint({
+    gatewayUrl: lab.gatewayUrl,
+    gatewayProtocol: lab.gatewayProtocol
+  }, profile);
+  const useProjectedRouting = String(options.projectedAgentRoutingProviderId ?? "").trim() === profileId;
+  const agents = useProjectedRouting
+    ? replaceRuntimeAgentRouting(
+        config.agents,
+        mergeRuntimeAgentRouting(profile.agents, options.projectedAgentRouting)
+      )
+    : applyGatewayProfileAgentSelection(config.agents, profile.agents, endpointChanged);
+  const gatewayHosts = [
+    parseHost(String(nextLab.gatewayUrl ?? "")),
+    parseHost(String(nextLab.gatewayHealthUrl ?? ""))
+  ].filter(Boolean);
+  return {
+    ...config,
+    modelAlias,
+    models,
+    routingModels,
+    allowedHosts: Array.from(new Set([...(Array.isArray(config.allowedHosts) ? config.allowedHosts : []), ...gatewayHosts])),
+    agents,
+    lab: nextLab
+  };
+}
+
+/** @param {unknown} current @param {unknown} selected @param {boolean} endpointChanged */
+function applyGatewayProfileAgentSelection(current, selected, endpointChanged) {
+  const agents = isPlainObject(current) ? cloneJsonObject(current) : {};
+  if (isPlainObject(selected)) {
+    if (isPlainObject(selected.modelTiers)) {
+      agents.modelTiers = cloneJsonObject(selected.modelTiers);
+    } else if (endpointChanged) {
+      delete agents.modelTiers;
+    }
+    if (isPlainObject(selected.vision)) {
+      agents.vision = cloneJsonObject(selected.vision);
+    } else if (endpointChanged) {
+      agents.vision = {
+        ...(isPlainObject(agents.vision) ? agents.vision : {}),
+        enabled: false,
+        model: null
+      };
+    }
+    return agents;
+  }
+  if (endpointChanged) {
+    delete agents.modelTiers;
+    agents.vision = {
+      ...(isPlainObject(agents.vision) ? agents.vision : {}),
+      enabled: false,
+      model: null
+    };
+  }
+  return agents;
+}
+
+/** @param {unknown} value */
+function gatewayProfileAgentSnapshot(value) {
+  if (!isPlainObject(value)) {
+    return null;
+  }
+  const agents = {};
+  if (isPlainObject(value.modelTiers)) {
+    agents.modelTiers = cloneJsonObject(value.modelTiers);
+  }
+  if (isPlainObject(value.vision)) {
+    agents.vision = cloneJsonObject(value.vision);
+  }
+  return Object.keys(agents).length > 0 ? agents : null;
+}
+
+/**
+ * @param {Array<Record<string, any>>} base
+ * @param {Array<Record<string, any>>} overlay
+ * @param {{ identity?: "endpoint" | "id" }} [options]
+ */
+function mergeGatewayProfileEntries(base, overlay, options = {}) {
+  if (overlay.length === 0) {
+    return [];
+  }
+  const merged = base.map((profile) => cloneJsonObject(profile));
+  for (const rawProfile of overlay) {
+    if (!isPlainObject(rawProfile)) {
+      continue;
+    }
+    const profile = cloneJsonObject(rawProfile);
+    const id = String(profile.id ?? "").trim();
+    const inherited = options.identity === "id"
+      ? merged.find((candidate) => id && String(candidate.id ?? "").trim() === id)
+      : merged.find((candidate) => sameGatewayProfileEndpoint(candidate, profile));
+    if (profile.gatewayApiKeyDisabled === true) {
+      profile.gatewayApiKey = null;
+    } else if (inherited
+      && !String(profile.gatewayApiKey ?? "").trim()
+      && String(inherited.gatewayApiKey ?? "").trim()) {
+      profile.gatewayApiKey = inherited.gatewayApiKey;
+    }
+    if (inherited && Array.isArray(inherited.models) && Array.isArray(profile.models)) {
+      profile.models = mergeModelEntries(inherited.models, profile.models);
+    }
+    if (inherited && Array.isArray(inherited.routingModels) && Array.isArray(profile.routingModels)) {
+      profile.routingModels = mergeModelEntries(inherited.routingModels, profile.routingModels);
+    }
+    const retained = merged.filter((candidate) => (
+      (options.identity === "id" || !sameGatewayProfileEndpoint(candidate, profile))
+      && (!id || String(candidate.id ?? "").trim() !== id)
+    ));
+    retained.push(profile);
+    merged.splice(0, merged.length, ...retained);
+  }
+  return merged;
 }
 
 /**
@@ -673,12 +1338,69 @@ function hasGatewayCredential(config) {
 
 /** @param {Record<string, any>} left @param {Record<string, any>} right */
 function sameGatewayEndpoint(left, right) {
-  return String(left?.lab?.gatewayUrl ?? "").trim() === String(right?.lab?.gatewayUrl ?? "").trim()
-    && String(left?.lab?.gatewayProtocol ?? "openai-chat").trim()
-      === String(right?.lab?.gatewayProtocol ?? "openai-chat").trim();
+  const leftProtocol = String(left?.lab?.gatewayProtocol ?? "openai-chat").trim();
+  const rightProtocol = String(right?.lab?.gatewayProtocol ?? "openai-chat").trim();
+  return canonicalGatewayEndpointUrl(left?.lab?.gatewayUrl, leftProtocol)
+      === canonicalGatewayEndpointUrl(right?.lab?.gatewayUrl, rightProtocol)
+    && leftProtocol === rightProtocol;
 }
 
-function buildConfigSources({ env, project, lab, bundled }) {
+/** @param {unknown} value @param {string} [protocol] */
+function canonicalGatewayEndpointUrl(value, protocol = "") {
+  const text = protocol ? normalizeGatewayInferenceUrl(value, protocol) : String(value ?? "").trim();
+  if (!text) {
+    return "";
+  }
+  try {
+    const url = new URL(text);
+    url.pathname = url.pathname.replace(/\/+$/, "") || "/";
+    url.hash = "";
+    return url.href;
+  } catch {
+    return text.replace(/\/+$/, "");
+  }
+}
+
+/** @param {unknown} value @param {string} protocol */
+function normalizeGatewayInferenceUrl(value, protocol) {
+  const text = String(value ?? "").trim();
+  if (!text) return "";
+  try {
+    const url = new URL(text);
+    const path = url.pathname.replace(/\/+$/, "");
+    const suffix = protocol === "openai-responses"
+      ? "/responses"
+      : protocol === "openai-chat"
+        ? "/chat/completions"
+        : protocol === "anthropic-messages" ? "/messages" : "";
+    const knownRoute = /\/(models|responses|messages|chat\/completions)$/i;
+    const knownBase = path === "" || /^\/$/.test(path) || /\/v\d+(?:beta\d*)?$/i.test(path);
+    if (suffix && !path.endsWith(suffix) && (knownRoute.test(path) || knownBase)) {
+      url.pathname = knownRoute.test(path)
+        ? path.replace(knownRoute, suffix)
+        : `${path}${suffix}`;
+    } else {
+      url.pathname = path || "/";
+    }
+    url.hash = "";
+    return url.href;
+  } catch {
+    return text;
+  }
+}
+
+/**
+ * @param {{
+ *   env: NodeJS.ProcessEnv;
+ *   project: any;
+ *   lab: any;
+ *   bundled: any;
+ *   profiles?: Array<Record<string, any>>;
+ *   environmentConfig?: Record<string, any>;
+ *   finalLab?: Record<string, any>;
+ * }} options
+ */
+function buildConfigSources({ env, project, lab, bundled, profiles = [], environmentConfig = {}, finalLab = {} }) {
   const source = {
     modelAlias: configSourceFor("modelAlias", { env, project, lab, bundled }),
     models: configSourceFor("models", { env, project, lab, bundled }),
@@ -686,10 +1408,206 @@ function buildConfigSources({ env, project, lab, bundled }) {
       gatewayUrl: configSourceFor("lab.gatewayUrl", { env, project, lab, bundled }),
       gatewayHealthUrl: configSourceFor("lab.gatewayHealthUrl", { env, project, lab, bundled }),
       gatewayProtocol: configSourceFor("lab.gatewayProtocol", { env, project, lab, bundled }),
-      gatewayApiKey: configSourceFor("lab.gatewayApiKey", { env, project, lab, bundled })
+      gatewayApiKey: configSourceFor("lab.gatewayApiKey", { env, project, lab, bundled }),
+      gatewayProfiles: gatewayProfileSources({
+        profiles,
+        env,
+        project,
+        lab,
+        bundled,
+        environmentConfig,
+        finalLab
+      })
     }
   };
   return source;
+}
+
+/**
+ * Resolve profile ownership from the original configuration layers. Profile
+ * contents in the merged config cannot identify whether an inherited entry is
+ * owned by the project or the user-global file.
+ *
+ * @param {{
+ *   profiles: Array<Record<string, any>>;
+ *   env: NodeJS.ProcessEnv;
+ *   project: any;
+ *   lab: any;
+ *   bundled: any;
+ *   environmentConfig: Record<string, any>;
+ *   finalLab: Record<string, any>;
+ * }} options
+ */
+function gatewayProfileSources({ profiles, env, project, lab, bundled, environmentConfig, finalLab }) {
+  const environmentControlsProfile = hasNonEmptyEnv(env, "LAB_AGENT_MODEL")
+    || hasNonEmptyEnv(env, "LAB_AGENT_MODELS")
+    || hasNonEmptyEnv(env, "LAB_MODEL_GATEWAY_URL")
+    || hasNonEmptyEnv(env, "LAB_MODEL_GATEWAY_HEALTH_URL")
+    || hasNonEmptyEnv(env, "LAB_MODEL_GATEWAY_PROTOCOL")
+    || hasNonEmptyEnv(env, "LAB_MODEL_GATEWAY_API_KEY");
+  const environmentProfileId = environmentControlsProfile
+    ? String(environmentConfig?.lab?.activeGatewayProfile ?? "").trim()
+    : "";
+  const environmentProfile = environmentProfileId
+    ? (Array.isArray(environmentConfig?.lab?.gatewayProfiles)
+      ? environmentConfig.lab.gatewayProfiles.find((/** @type {Record<string, any>} */ profile) => (
+          String(profile?.id ?? "").trim() === environmentProfileId
+        ))
+      : null)
+    : null;
+
+  return profiles.map((profile) => {
+    const id = String(profile?.id ?? "").trim();
+    const active = Boolean(id) && id === String(finalLab?.activeGatewayProfile ?? "").trim();
+    const modelScopes = gatewayProfileModelScopes({
+      profile,
+      active,
+      project: project?.data,
+      environmentProfile,
+      global: lab?.data,
+      bundled: bundled?.data
+    });
+    let owner;
+    if (layerOwnsGatewayProfile(project?.data, profile, active)) {
+      owner = { id, type: "project", label: ".lab-agent/config.json", path: project?.path ?? null };
+    } else if (environmentProfile && sameGatewayProfileIdentity(environmentProfile, profile)) {
+      owner = { id, type: "environment", label: "模型网关环境变量" };
+    } else if (layerOwnsGatewayProfile(lab?.data, profile, active)) {
+      owner = { id, type: "global", label: lab?.label ?? "全局配置", path: lab?.path ?? null };
+    } else if (layerOwnsGatewayProfile(bundled?.data, profile, active)) {
+      owner = { id, type: "bundled", label: "bundled", path: BUNDLED_CONFIG_PATH };
+    } else {
+      owner = { id, type: "default", label: "default" };
+    }
+    return { ...owner, modelScopes };
+  });
+}
+
+/**
+ * @param {{ profile: Record<string, any>; active: boolean; project?: Record<string, any>; environmentProfile?: Record<string, any> | null; global?: Record<string, any>; bundled?: Record<string, any> }} input
+ */
+function gatewayProfileModelScopes({ profile, active, project, environmentProfile, global, bundled }) {
+  const scopes = /** @type {Record<string, string>} */ ({});
+  const models = Array.isArray(profile.models) ? profile.models : [];
+  for (const model of models) {
+    const modelId = modelEntryId(model);
+    if (!modelId) continue;
+    if (layerOwnsGatewayProfileModel(project, profile, modelId, active)) {
+      scopes[modelId] = "project";
+    } else if (environmentProfile
+      && sameGatewayProfileIdentity(environmentProfile, profile)
+      && Array.isArray(environmentProfile.models)
+      && environmentProfile.models.some((entry) => modelEntryId(entry) === modelId)) {
+      scopes[modelId] = "environment";
+    } else if (layerOwnsGatewayProfileModel(global, profile, modelId, active)) {
+      scopes[modelId] = "global";
+    } else if (layerOwnsGatewayProfileModel(bundled, profile, modelId, active)) {
+      scopes[modelId] = "bundled";
+    } else {
+      scopes[modelId] = "default";
+    }
+  }
+  return scopes;
+}
+
+/** @param {Record<string, any> | null | undefined} layer @param {Record<string, any>} profile @param {string} modelId @param {boolean} active */
+function layerOwnsGatewayProfileModel(layer, profile, modelId, active) {
+  const layerLab = isPlainObject(layer?.lab) ? layer.lab : {};
+  const declaredProfiles = Array.isArray(layerLab.gatewayProfiles) ? layerLab.gatewayProfiles : [];
+  if (declaredProfiles.some((candidate) => (
+    isPlainObject(candidate)
+    && sameGatewayProfileIdentity(candidate, profile)
+    && Array.isArray(candidate.models)
+    && candidate.models.some((entry) => modelEntryId(entry) === modelId)
+  ))) {
+    return true;
+  }
+  return active
+    && sameGatewayEndpoint(layer ?? {}, { lab: profile })
+    && Array.isArray(layer?.models)
+    && layer.models.some((entry) => modelEntryId(entry) === modelId);
+}
+
+/** @param {Record<string, any> | null | undefined} layer @param {Record<string, any>} profile @param {boolean} active */
+function layerOwnsGatewayProfile(layer, profile, active) {
+  const layerLab = isPlainObject(layer?.lab) ? layer.lab : {};
+  const declaredProfiles = Array.isArray(layerLab.gatewayProfiles) ? layerLab.gatewayProfiles : [];
+  if (declaredProfiles.some((candidate) => isPlainObject(candidate) && sameGatewayProfileIdentity(candidate, profile))) {
+    return true;
+  }
+  const declaresTopLevelEndpoint = Object.prototype.hasOwnProperty.call(layerLab, "gatewayUrl")
+    || Object.prototype.hasOwnProperty.call(layerLab, "gatewayProtocol");
+  if (!active || !declaresTopLevelEndpoint) {
+    return false;
+  }
+  if (Object.prototype.hasOwnProperty.call(layerLab, "gatewayUrl")
+    && canonicalGatewayEndpointUrl(layerLab.gatewayUrl) !== canonicalGatewayEndpointUrl(profile?.gatewayUrl)) {
+    return false;
+  }
+  if (Object.prototype.hasOwnProperty.call(layerLab, "gatewayProtocol")
+    && String(layerLab.gatewayProtocol ?? "openai-chat").trim()
+      !== String(profile?.gatewayProtocol ?? "openai-chat").trim()) {
+    return false;
+  }
+  return true;
+}
+
+/** @param {Record<string, any>} left @param {Record<string, any>} right */
+function sameGatewayProfileIdentity(left, right) {
+  const leftId = String(left?.id ?? "").trim();
+  const rightId = String(right?.id ?? "").trim();
+  return Boolean(leftId && rightId && leftId === rightId) || sameGatewayProfileEndpoint(left, right);
+}
+
+/** @param {{ env: NodeJS.ProcessEnv; project: any; lab: any; bundled: any; finalLab: Record<string, any> }} options */
+function activeGatewayCredentialSource({ env, project, lab, bundled, finalLab }) {
+  const active = { lab: finalLab };
+  const projectCredential = explicitLayerGatewayCredential(project?.data, active);
+  if (projectCredential) {
+    return { type: "project", label: ".lab-agent/config.json", path: project?.path ?? null };
+  }
+  const projectLab = isPlainObject(project?.data?.lab) ? project.data.lab : {};
+  const projectSelectsActiveEndpoint = (
+    Object.prototype.hasOwnProperty.call(projectLab, "gatewayUrl")
+    || Object.prototype.hasOwnProperty.call(projectLab, "gatewayProtocol")
+  ) && sameGatewayEndpoint(project.data, active);
+  if (!String(finalLab?.gatewayApiKey ?? "").trim() && projectSelectsActiveEndpoint) {
+    return { type: "project", label: ".lab-agent/config.json", path: project?.path ?? null };
+  }
+  const environmentEndpoint = hasNonEmptyEnv(env, "LAB_MODEL_GATEWAY_URL")
+    ? { lab: { gatewayUrl: env.LAB_MODEL_GATEWAY_URL, gatewayProtocol: env.LAB_MODEL_GATEWAY_PROTOCOL ?? "openai-chat" } }
+    : null;
+  if (hasNonEmptyEnv(env, "LAB_MODEL_GATEWAY_API_KEY")
+    && (!environmentEndpoint || sameGatewayEndpoint(environmentEndpoint, active))
+    && String(finalLab?.gatewayApiKey ?? "") === String(env.LAB_MODEL_GATEWAY_API_KEY)) {
+    return { type: "environment", label: "LAB_MODEL_GATEWAY_API_KEY", env: "LAB_MODEL_GATEWAY_API_KEY" };
+  }
+  if (explicitLayerGatewayCredential(lab?.data, active)) {
+    return { type: "global", label: lab?.label ?? "全局配置", path: lab?.path ?? null };
+  }
+  if (explicitLayerGatewayCredential(bundled?.data, active)) {
+    return { type: "bundled", label: "bundled", path: BUNDLED_CONFIG_PATH };
+  }
+  return { type: "default", label: "default" };
+}
+
+/** @param {Record<string, any> | null | undefined} config @param {Record<string, any>} active */
+function explicitLayerGatewayCredential(config, active) {
+  if (!isPlainObject(config?.lab)) {
+    return false;
+  }
+  const lab = config.lab;
+  const topHasEndpoint = Boolean(String(lab.gatewayUrl ?? "").trim());
+  const topMatches = !topHasEndpoint || sameGatewayEndpoint(config, active);
+  if (topMatches && (lab.gatewayApiKeyDisabled === true || Boolean(String(lab.gatewayApiKey ?? "").trim()))) {
+    return true;
+  }
+  const profiles = Array.isArray(lab.gatewayProfiles) ? lab.gatewayProfiles : [];
+  return profiles.some((profile) => (
+    isPlainObject(profile)
+    && sameGatewayProfileEndpoint(profile, active.lab)
+    && (profile.gatewayApiKeyDisabled === true || Boolean(String(profile.gatewayApiKey ?? "").trim()))
+  ));
 }
 
 function configSourceFor(keyPath, { env, project, lab, bundled }) {
@@ -711,7 +1629,7 @@ function configSourceFor(keyPath, { env, project, lab, bundled }) {
   if (hasConfigPath(lab?.data, keyPath)) {
     return {
       type: "global",
-      label: lab?.label ?? "global config",
+      label: lab?.label ?? "全局配置",
       path: lab?.path ?? null
     };
   }
@@ -763,10 +1681,11 @@ function hasConfigPath(config, keyPath) {
 /**
  * @param {Record<string, any>} value
  * @param {NodeJS.ProcessEnv} env
- * @param {{ preserveConfiguredModels?: boolean }} [options]
+ * @param {{ preserveConfiguredModels?: boolean; gatewayProfileIdentity?: "endpoint" | "id" }} [options]
  */
 function applyEnvDefaultConfig(value, env, options = {}) {
   const next = { ...value };
+  const previousModelAlias = String(value.modelAlias ?? "").trim();
   const previousGateway = { lab: { ...(isPlainObject(value.lab) ? value.lab : {}) } };
   const envControlsModel = hasNonEmptyEnv(env, "LAB_AGENT_MODEL") || hasNonEmptyEnv(env, "LAB_AGENT_MODELS");
   const envControlsGateway = hasNonEmptyEnv(env, "LAB_MODEL_GATEWAY_URL")
@@ -776,6 +1695,9 @@ function applyEnvDefaultConfig(value, env, options = {}) {
 
   if (env.LAB_AGENT_MODEL) {
     next.modelAlias = env.LAB_AGENT_MODEL;
+    if (String(env.LAB_AGENT_MODEL).trim() !== previousModelAlias) {
+      next.reasoningEffort = null;
+    }
   }
 
   if (env.LAB_AGENT_MODELS) {
@@ -797,22 +1719,45 @@ function applyEnvDefaultConfig(value, env, options = {}) {
     }
     lab.gatewayProtocol = env.LAB_MODEL_GATEWAY_PROTOCOL;
   }
+  if (lab.gatewayUrl) {
+    lab.gatewayUrl = normalizeGatewayInferenceUrl(
+      lab.gatewayUrl,
+      String(lab.gatewayProtocol ?? "openai-chat").trim() || "openai-chat"
+    );
+  }
+  const environmentGatewayChanged = envControlsGateway
+    && !sameGatewayEndpoint(previousGateway, { lab });
   if (env.LAB_MODEL_GATEWAY_API_KEY) {
     lab.gatewayApiKey = env.LAB_MODEL_GATEWAY_API_KEY;
+    delete lab.gatewayApiKeyDisabled;
   } else if ((env.LAB_MODEL_GATEWAY_URL || env.LAB_MODEL_GATEWAY_PROTOCOL)
     && !sameGatewayEndpoint(previousGateway, { lab })) {
     lab.gatewayApiKey = null;
+    delete lab.gatewayApiKeyDisabled;
+  }
+  if (environmentGatewayChanged) {
+    next.routingModels = [];
+    next.agents = replaceRuntimeAgentRouting(next.agents, null);
   }
   if (envControlsModel || envControlsGateway) {
-    lab.gatewayProfiles = [
-      envGatewayProfile({
-        modelAlias: next.modelAlias,
-        models: next.models,
-        lab,
-        agents: next.agents
-      })
-    ].filter(Boolean);
-    lab.activeGatewayProfile = lab.gatewayProfiles[0]?.id ?? "";
+    const environmentProfile = envGatewayProfile({
+      modelAlias: next.modelAlias,
+      models: next.models,
+      routingModels: next.routingModels,
+      lab,
+      agents: next.agents
+    });
+    const environmentProfiles = /** @type {Array<Record<string, any>>} */ (
+      environmentProfile ? [environmentProfile] : []
+    );
+    if (environmentProfiles.length > 0) {
+      lab.gatewayProfiles = mergeGatewayProfileEntries(
+        Array.isArray(lab.gatewayProfiles) ? lab.gatewayProfiles : [],
+        environmentProfiles,
+        { identity: options.gatewayProfileIdentity }
+      );
+    }
+    lab.activeGatewayProfile = environmentProfiles[0]?.id ?? "";
   }
   next.lab = lab;
 
@@ -828,11 +1773,11 @@ function applyEnvDefaultConfig(value, env, options = {}) {
 }
 
 function envGatewayProfile(config) {
-  const gatewayUrl = String(config.lab?.gatewayUrl ?? "").trim();
+  const gatewayProtocol = String(config.lab?.gatewayProtocol ?? "openai-chat").trim() || "openai-chat";
+  const gatewayUrl = normalizeGatewayInferenceUrl(config.lab?.gatewayUrl, gatewayProtocol);
   if (!gatewayUrl) {
     return null;
   }
-  const gatewayProtocol = String(config.lab?.gatewayProtocol ?? "openai-chat").trim();
   return {
     id: gatewayProfileIdFromParts(gatewayProtocol, gatewayUrl),
     label: parseHost(gatewayUrl) || gatewayUrl,
@@ -842,6 +1787,7 @@ function envGatewayProfile(config) {
     ...(config.lab?.gatewayApiKey ? { gatewayApiKey: config.lab.gatewayApiKey } : {}),
     modelAlias: String(config.modelAlias ?? "").trim(),
     models: Array.isArray(config.models) ? config.models : [],
+    routingModels: Array.isArray(config.routingModels) ? config.routingModels : [],
     ...(isPlainObject(config.agents) ? { agents: cloneJsonObject(config.agents) } : {})
   };
 }
@@ -861,7 +1807,9 @@ function envModelList(models, modelAlias, preserveConfiguredModels = false) {
 }
 
 function gatewayProfileIdFromParts(protocol, gatewayUrl) {
-  const raw = `${String(protocol ?? "openai-chat").trim()}|${String(gatewayUrl ?? "").trim()}`;
+  const normalizedProtocol = String(protocol ?? "openai-chat").trim();
+  const normalizedUrl = canonicalGatewayEndpointUrl(gatewayUrl, normalizedProtocol);
+  const raw = `${normalizedProtocol}|${normalizedUrl}`;
   if (!String(gatewayUrl ?? "").trim()) {
     return "";
   }
@@ -903,9 +1851,12 @@ function applyRuntimeEnvConfig(value, env) {
   }
 
   if (env.LAB_AGENT_TRANSCRIPT_RETENTION_DAYS) {
+    const retentionValue = String(env.LAB_AGENT_TRANSCRIPT_RETENTION_DAYS).trim().toLowerCase();
     next.transcript = {
       ...(next.transcript ?? {}),
-      retentionDays: Number.parseInt(env.LAB_AGENT_TRANSCRIPT_RETENTION_DAYS, 10)
+      retentionDays: ["forever", "permanent", "unlimited"].includes(retentionValue)
+        ? null
+        : Number.parseInt(retentionValue, 10)
     };
   }
 
@@ -1004,13 +1955,31 @@ function validateConfig(config) {
     throw new Error("High-sensitivity mode requires networkMode offline or lab-only");
   }
 
+  if (!NETWORK_MODES.includes(config.networkMode)) {
+    throw new Error(`Unsupported networkMode: ${config.networkMode}`);
+  }
+  if (!Array.isArray(config.allowedHosts)) {
+    throw new Error("Unsupported allowedHosts: expected an array");
+  }
+  for (const host of config.allowedHosts) {
+    if (!validAllowedHost(host)) {
+      throw new Error(`Unsupported allowedHosts entry: ${host}`);
+    }
+  }
+
+  if (typeof config.transcript?.enabled !== "boolean") {
+    throw new Error("Unsupported transcript.enabled: expected boolean");
+  }
+
   const encryption = config.transcript?.encryption ?? "off";
   if (!["off", "optional", "required"].includes(encryption)) {
     throw new Error(`Unsupported transcript.encryption: ${encryption}`);
   }
 
-  const retentionDays = config.transcript?.retentionDays ?? 30;
-  if (!Number.isFinite(retentionDays) || retentionDays < 0) {
+  const retentionDays = config.transcript?.retentionDays === undefined
+    ? 30
+    : config.transcript.retentionDays;
+  if (retentionDays !== null && (!Number.isInteger(retentionDays) || retentionDays < 0 || retentionDays > 3650)) {
     throw new Error(`Unsupported transcript.retentionDays: ${retentionDays}`);
   }
 
@@ -1035,6 +2004,12 @@ function validateConfig(config) {
   if (config.models !== undefined && !Array.isArray(config.models)) {
     throw new Error("Unsupported models: expected an array");
   }
+  assertUniqueModelEntryIds(config.models, "models");
+  if (config.routingModels !== undefined && !Array.isArray(config.routingModels)) {
+    throw new Error("Unsupported routingModels: expected an array");
+  }
+  assertUniqueModelEntryIds(config.routingModels, "routingModels");
+  validateProfileModels(config.routingModels ?? []);
   for (const model of config.models ?? []) {
     if (typeof model === "string") {
       continue;
@@ -1057,6 +2032,16 @@ function validateConfig(config) {
       && !["hidden", "visible-when-no-content"].includes(model.reasoningContentMode)
     ) {
       throw new Error(`Unsupported models entry reasoningContentMode: ${model.reasoningContentMode}`);
+    }
+    if (model.reasoningEfforts !== undefined && model.reasoningEfforts !== null && !Array.isArray(model.reasoningEfforts)) {
+      throw new Error("Unsupported models entry reasoningEfforts: expected array");
+    }
+    if (
+      model.defaultReasoningEffort !== undefined
+      && model.defaultReasoningEffort !== null
+      && typeof model.defaultReasoningEffort !== "string"
+    ) {
+      throw new Error("Unsupported models entry defaultReasoningEffort: expected string");
     }
     if (
       model.openaiExtraBody !== undefined
@@ -1084,6 +2069,9 @@ function validateConfig(config) {
       }
     }
   }
+  if (config.reasoningEffort !== undefined && config.reasoningEffort !== null && typeof config.reasoningEffort !== "string") {
+    throw new Error("Unsupported reasoningEffort: expected string");
+  }
 
   if (config.skills !== undefined) {
     if (!isPlainObject(config.skills)) {
@@ -1108,6 +2096,9 @@ function validateConfig(config) {
     ) {
       throw new Error(`Unsupported agents.maxRounds: ${config.agents.maxRounds}`);
     }
+    if (config.agents.syncModelTiersOnSwitch !== undefined && typeof config.agents.syncModelTiersOnSwitch !== "boolean") {
+      throw new Error("Unsupported agents.syncModelTiersOnSwitch: expected boolean");
+    }
     if (config.agents.orchestration !== undefined && !isPlainObject(config.agents.orchestration)) {
       throw new Error("Unsupported agents.orchestration: expected an object");
     }
@@ -1122,6 +2113,9 @@ function validateConfig(config) {
     }
     if (config.agents.reviewGate !== undefined) {
       validateReviewGateConfig(config.agents.reviewGate);
+    }
+    if (config.agents.goal !== undefined) {
+      validateGoalConfig(config.agents.goal);
     }
     if (config.agents.vision !== undefined) {
       validateVisionAgentConfig(config.agents.vision);
@@ -1186,6 +2180,7 @@ function validateGatewayProfiles(value) {
   if (!Array.isArray(value)) {
     throw new Error("Unsupported lab.gatewayProfiles: expected an array");
   }
+  assertUniqueLayerGatewayProfileIds(value);
   for (const profile of value) {
     if (!isPlainObject(profile)) {
       throw new Error("Unsupported lab.gatewayProfiles entry: expected object");
@@ -1208,16 +2203,23 @@ function validateGatewayProfiles(value) {
     if (profile.gatewayApiKey !== undefined && profile.gatewayApiKey !== null && typeof profile.gatewayApiKey !== "string") {
       throw new Error("Unsupported lab.gatewayProfiles entry gatewayApiKey: expected string");
     }
+    if (profile.gatewayApiKeyDisabled !== undefined && typeof profile.gatewayApiKeyDisabled !== "boolean") {
+      throw new Error("Unsupported lab.gatewayProfiles entry gatewayApiKeyDisabled: expected boolean");
+    }
     if (profile.modelAlias !== undefined && typeof profile.modelAlias !== "string") {
       throw new Error("Unsupported lab.gatewayProfiles entry modelAlias: expected string");
     }
     if (profile.models !== undefined && !Array.isArray(profile.models)) {
       throw new Error("Unsupported lab.gatewayProfiles entry models: expected array");
     }
+    if (profile.routingModels !== undefined && !Array.isArray(profile.routingModels)) {
+      throw new Error("Unsupported lab.gatewayProfiles entry routingModels: expected array");
+    }
     if (profile.agents !== undefined && !isPlainObject(profile.agents)) {
       throw new Error("Unsupported lab.gatewayProfiles entry agents: expected object");
     }
     validateProfileModels(profile.models ?? []);
+    validateProfileModels(profile.routingModels ?? []);
     if (profile.agents?.vision !== undefined) {
       validateVisionAgentConfig(profile.agents.vision);
     }
@@ -1247,6 +2249,12 @@ function validateProfileModels(models) {
     }
     if (model.agentModelTiers !== undefined && model.agentModelTiers !== null && !isPlainObject(model.agentModelTiers)) {
       throw new Error("Unsupported lab.gatewayProfiles entry models item agentModelTiers: expected object");
+    }
+    if (model.reasoningEfforts !== undefined && model.reasoningEfforts !== null && !Array.isArray(model.reasoningEfforts)) {
+      throw new Error("Unsupported lab.gatewayProfiles entry models item reasoningEfforts: expected array");
+    }
+    if (model.defaultReasoningEffort !== undefined && model.defaultReasoningEffort !== null && typeof model.defaultReasoningEffort !== "string") {
+      throw new Error("Unsupported lab.gatewayProfiles entry models item defaultReasoningEffort: expected string");
     }
   }
 }
@@ -1311,6 +2319,23 @@ function validateBackgroundWakeupConfig(value) {
   }
 }
 
+/** @param {Record<string, any>} value */
+function validateGoalConfig(value) {
+  if (!isPlainObject(value)) {
+    throw new Error("Unsupported agents.goal: expected an object");
+  }
+  if (
+    value.maxAutoContinues !== undefined
+    && (
+      !Number.isInteger(value.maxAutoContinues)
+      || value.maxAutoContinues < GOAL_MIN_AUTO_CONTINUES
+      || value.maxAutoContinues > GOAL_ABS_MAX_AUTO_CONTINUES
+    )
+  ) {
+    throw new Error(`Unsupported agents.goal.maxAutoContinues: ${value.maxAutoContinues}`);
+  }
+}
+
 function validateReviewGateConfig(value) {
   if (!isPlainObject(value)) {
     throw new Error("Unsupported agents.reviewGate: expected an object");
@@ -1349,7 +2374,7 @@ function validateVisionAgentConfig(value) {
 }
 
 /**
- * @param {{ gatewayProtocol?: string; gatewayApiKey?: string | null; gatewayMaxRetries?: number; gatewayTimeoutMs?: number; gatewayIdleTimeoutMs?: number; gatewayMaxResponseBytes?: number }} lab
+ * @param {{ gatewayProtocol?: string; gatewayApiKey?: string | null; gatewayApiKeyDisabled?: boolean; gatewayMaxRetries?: number; gatewayTimeoutMs?: number; gatewayIdleTimeoutMs?: number; gatewayMaxResponseBytes?: number }} lab
  */
 function validateLabConfig(lab) {
   const protocol = lab.gatewayProtocol ?? "openai-chat";
@@ -1358,6 +2383,9 @@ function validateLabConfig(lab) {
   }
   if (lab.gatewayApiKey !== null && lab.gatewayApiKey !== undefined && typeof lab.gatewayApiKey !== "string") {
     throw new Error("Unsupported lab.gatewayApiKey: expected string");
+  }
+  if (lab.gatewayApiKeyDisabled !== undefined && typeof lab.gatewayApiKeyDisabled !== "boolean") {
+    throw new Error("Unsupported lab.gatewayApiKeyDisabled: expected boolean");
   }
   if (!Number.isInteger(lab.gatewayMaxRetries) || lab.gatewayMaxRetries < 0 || lab.gatewayMaxRetries > 5) {
     throw new Error(`Unsupported lab.gatewayMaxRetries: ${lab.gatewayMaxRetries}`);
@@ -1382,6 +2410,27 @@ function parseHostList(value) {
     return [];
   }
   return value.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+/** @param {unknown} value */
+function validAllowedHost(value) {
+  if (typeof value !== "string") {
+    return false;
+  }
+  const host = value.trim();
+  if (!host || /[\s/@]/.test(host) || host.includes("://")) {
+    return false;
+  }
+  try {
+    const parsed = new URL(`http://${host}`);
+    return parsed.hostname === host
+      && parsed.port === ""
+      && parsed.pathname === "/"
+      && parsed.search === ""
+      && parsed.hash === "";
+  } catch {
+    return false;
+  }
 }
 
 /**

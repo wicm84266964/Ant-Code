@@ -6,11 +6,16 @@ import {
   parseOpenAIChatCompletionStream
 } from "./openai-chat.js";
 import {
+  createOpenAIResponsesRequest,
+  normalizeOpenAIResponsesResponse,
+  parseOpenAIResponsesStream
+} from "./openai-responses.js";
+import {
   createAnthropicMessagesRequest,
   normalizeAnthropicMessagesResponse,
   parseAnthropicMessagesStream
 } from "./anthropic-messages.js";
-import { listConfiguredModels } from "./models.js";
+import { findModelMetadata } from "./models.js";
 import { createGatewayRequest, normalizeGatewayResponse } from "./protocol.js";
 import { parseGatewayStream } from "./streaming.js";
 import { emitGatewayEvent, isGatewayEventCallbackError } from "./event-callback.js";
@@ -30,6 +35,11 @@ const BASE_RETRY_DELAY_MS = 200;
 const MAX_RETRY_DELAY_MS = 30000;
 const GATEWAY_TRANSIENT_ERROR_PATTERN = /KVTransferError|WaitingForInput|Decode transfer failed|premature close|stream.*interrupted/i;
 const RETRYABLE_STREAM_PROTOCOL_CODES = new Set(["UPSTREAM_STREAM_ABORTED", "INCOMPLETE_TOOL_CALL"]);
+const GATEWAY_RESPONSE_PROTOCOL_CODES = new Set([
+  ...RETRYABLE_STREAM_PROTOCOL_CODES,
+  "GATEWAY_RESPONSE_FAILED",
+  "GATEWAY_RESPONSE_INCOMPLETE"
+]);
 
 /**
  * @param {import("../config/load-config.js").LabAgentConfig} config
@@ -77,10 +87,13 @@ export function createLabModelGateway(config) {
         toolResults: request.toolResults ?? [],
         stream: Boolean(request.stream),
         sessionId: request.sessionId,
-        extraBody: protocol === "openai-chat" ? resolveOpenAIExtraBody(config) : null
+        extraBody: protocol === "openai-chat" || protocol === "openai-responses" ? resolveOpenAIExtraBody(config) : null,
+        reasoningEffort: resolveReasoningEffort(config)
       };
       const gatewayRequest = protocol === "openai-chat"
         ? createOpenAIChatCompletionRequest(requestInput)
+        : protocol === "openai-responses"
+          ? createOpenAIResponsesRequest(requestInput)
         : protocol === "anthropic-messages"
           ? createAnthropicMessagesRequest(requestInput)
           : createGatewayRequest(requestInput);
@@ -566,7 +579,7 @@ function shouldRetryGatewayHttpError(error, options) {
   if (error?.details?.bodyTruncated === true) {
     return false;
   }
-  if (Number(error.status) >= 500) {
+  if ([408, 409, 429].includes(Number(error.status)) || Number(error.status) >= 500) {
     return true;
   }
   return isConfiguredGatewayRetryable(error, options.config);
@@ -580,7 +593,8 @@ function shouldRetryGatewayResponseError(error, options) {
   if (options.signal?.aborted || options.attempt >= options.maxAttempts) {
     return false;
   }
-  return error.code === "GATEWAY_STREAM_INTERRUPTED"
+  return error?.details?.retryable === true
+    || error.code === "GATEWAY_STREAM_INTERRUPTED"
     || RETRYABLE_STREAM_PROTOCOL_CODES.has(error.code)
     || isRetryableGatewayParseError(error)
     || isConfiguredGatewayRetryable(error, options.config);
@@ -588,7 +602,7 @@ function shouldRetryGatewayResponseError(error, options) {
 
 function gatewayStreamProtocolCode(error) {
   const code = error && typeof error === "object" && "code" in error ? String(error.code ?? "") : "";
-  return RETRYABLE_STREAM_PROTOCOL_CODES.has(code) ? code : null;
+  return GATEWAY_RESPONSE_PROTOCOL_CODES.has(code) ? code : null;
 }
 
 function isRetryableGatewayParseError(error) {
@@ -789,6 +803,9 @@ function parseStreamForProtocol(protocol, body, contentType, onEvent, config, op
   if (protocol === "openai-chat") {
     return parseOpenAIChatCompletionStream(body, { onEvent, reasoningContentMode: resolveReasoningContentMode(config), ...options });
   }
+  if (protocol === "openai-responses") {
+    return parseOpenAIResponsesStream(body, { onEvent, ...options });
+  }
   if (protocol === "anthropic-messages") {
     return parseAnthropicMessagesStream(body, { onEvent, ...options });
   }
@@ -825,7 +842,7 @@ function looksLikeStreamingResponseText(text, protocol) {
   if (trimmed.startsWith("data:")) {
     return true;
   }
-  if (protocol !== "openai-chat" && looksLikeNewlineDelimitedJson(trimmed)) {
+  if (!protocol.startsWith("openai-") && looksLikeNewlineDelimitedJson(trimmed)) {
     return true;
   }
   return false;
@@ -903,6 +920,9 @@ function normalizeResponseForProtocol(protocol, raw, config) {
   if (protocol === "openai-chat") {
     return normalizeOpenAIChatCompletionResponse(raw, { reasoningContentMode: resolveReasoningContentMode(config) });
   }
+  if (protocol === "openai-responses") {
+    return normalizeOpenAIResponsesResponse(raw);
+  }
   if (protocol === "anthropic-messages") {
     return normalizeAnthropicMessagesResponse(raw);
   }
@@ -917,7 +937,7 @@ function resolveReasoningContentMode(config) {
     return "hidden";
   }
   const current = String(config.modelAlias ?? "").trim();
-  const model = listConfiguredModels(config).find((item) => item.id === current);
+  const model = findModelMetadata(config, current, { includeRouting: true });
   return model?.reasoningContentMode ?? "hidden";
 }
 
@@ -929,8 +949,27 @@ function resolveOpenAIExtraBody(config) {
     return null;
   }
   const current = String(config.modelAlias ?? "").trim();
-  const model = listConfiguredModels(config).find((item) => item.id === current);
-  return isPlainObject(model?.openaiExtraBody) ? model.openaiExtraBody : null;
+  const model = findModelMetadata(config, current, { includeRouting: true });
+  const extraBody = model?.openaiExtraBody;
+  return isPlainObject(extraBody) ? extraBody : null;
+}
+
+/**
+ * @param {import("../config/load-config.js").LabAgentConfig | undefined} config
+ */
+function resolveReasoningEffort(config) {
+  if (!config) {
+    return null;
+  }
+  const current = String(config.modelAlias ?? "").trim();
+  const model = findModelMetadata(config, current, { includeRouting: true });
+  const efforts = Array.isArray(model?.reasoningEfforts) ? model.reasoningEfforts : [];
+  const requested = String(config.reasoningEffort ?? "").trim().toLowerCase();
+  if (requested && efforts.some((effort) => effort.id === requested)) {
+    return requested;
+  }
+  const fallback = String(model?.defaultReasoningEffort ?? "").trim().toLowerCase();
+  return efforts.some((effort) => effort.id === fallback) ? fallback : null;
 }
 
 /**

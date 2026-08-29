@@ -1,20 +1,23 @@
 #!/usr/bin/env node
 import fs from "node:fs/promises";
 import path from "node:path";
-import { AUDIT_DIR, ensureAuditDir, rel, stableJson } from "./audit-common.js";
+import { AUDIT_DIR, ROOT, ensureAuditDir, rel, stableJson } from "./audit-common.js";
 import {
   collectDeclaredDependencies,
   normalizeLicense,
+  readLockedPackage,
   readInstalledPackage,
   readPackageJson
 } from "./dependency-audit-common.js";
 
 const pkg = await readPackageJson();
+const lock = JSON.parse(await fs.readFile(path.join(ROOT, "package-lock.json"), "utf8"));
 const declared = collectDeclaredDependencies(pkg);
 const components = [];
 
 for (const dependency of declared) {
   const installed = await readInstalledPackage(dependency.name);
+  const locked = readLockedPackage(lock, dependency.name);
   components.push({
     type: "library",
     name: dependency.name,
@@ -22,7 +25,8 @@ for (const dependency of declared) {
     packageSection: dependency.section,
     versionSpec: dependency.versionSpec,
     installedVersion: installed?.version ?? null,
-    license: normalizeLicense(installed)
+    lockedVersion: locked?.version ?? null,
+    license: normalizeLicense(installed ?? locked)
   });
 }
 
@@ -37,7 +41,7 @@ const sbom = {
       name: pkg.name,
       version: pkg.version,
       private: Boolean(pkg.private),
-      license: pkg.license ?? "missing",
+      license: pkg.license ?? (pkg.private ? "private-unlicensed" : "missing"),
       properties: [
         { name: "publicName", value: "Ant Code" },
         { name: "publicCli", value: "ant-code" },
