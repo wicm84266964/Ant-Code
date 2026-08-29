@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.4.0 - 2026-08-29
+
+### Added
+
+- Dashboard Goal mode: an unattended full-access loop beside the permission
+  control. Enable it with a confirmation and a required objective. The host
+  continues finished turns until the goal is done, paused, failed, or the
+  auto-continue budget is reached. Goal is not a fourth permission mode.
+- Dashboard Settings can change the Goal auto-continue cap (default 12,
+  range 1–100) under Agents.
+- Config V2 model settings: durable provider identity, credential refs,
+  catalog-backed reasoning efforts, and provider-local subagent routing.
+- OpenAI Responses gateway adapter, including streaming and tool calls.
+- Isolated credential store so gateway keys are not written into settings
+  files.
+- Automatic model capability discovery for reasoning efforts.
+
+### Changed
+
+- Session list status is a color dot only; the chat header keeps the
+  idle/running pill.
+- The chat header local identity and connection lamp are one control:
+  "本地网关已连接" when the Dashboard event stream is live.
+
+### Fixed
+
+- Goal enable starts the first turn instead of only showing "in progress".
+- Exiting Goal restores the previous permission mode even if a turn is
+  still running.
+
 ## 1.3.7 - 2026-08-25
 
 ### Fixed

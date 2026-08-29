@@ -1,3 +1,10 @@
+const GATEWAY_CREDENTIAL_NAME_PATTERN = String.raw`(?:x[-_]?api[-_]?key|api[-_]?key|access[-_]?token|authorization|token|secret|password)`;
+const GATEWAY_CREDENTIAL_KEY_PATTERN = String.raw`(?:"${GATEWAY_CREDENTIAL_NAME_PATTERN}"|'${GATEWAY_CREDENTIAL_NAME_PATTERN}'|${GATEWAY_CREDENTIAL_NAME_PATTERN})`;
+const LABELED_GATEWAY_CREDENTIAL_PATTERN = new RegExp(
+  String.raw`(?<![A-Za-z0-9_-])(${GATEWAY_CREDENTIAL_KEY_PATTERN}\s*[:=]\s*)("(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|(?:(?:Bearer|Basic|Token|Api[-_]?Key)\s+)?(?:\[redacted\]|[^\s,;{}&\]#]+))`,
+  "gi"
+);
+
 /**
  * @param {unknown} error
  * @param {{ code?: string; message?: string; status?: number; details?: Record<string, any>; protocol?: string }} context
@@ -64,7 +71,7 @@ export function formatGatewayError(error) {
 export function gatewayTroubleshootingHints(code, status = null, protocol = undefined, options = {}) {
   if (code === "GATEWAY_NOT_CONFIGURED") {
     return [
-      "Set LAB_MODEL_GATEWAY_URL to the configured gateway chat endpoint.",
+      "Set LAB_MODEL_GATEWAY_URL to the lab gateway chat endpoint.",
       "Run /gateway or ant-code gateway before retrying the model turn."
     ];
   }
@@ -82,15 +89,17 @@ export function gatewayTroubleshootingHints(code, status = null, protocol = unde
       ];
     }
     if (status === 401 || status === 403) {
-      return ["Check gateway authentication and user authorization at the gateway service."];
+      return ["Check lab gateway authentication and user authorization at the gateway service."];
     }
     if (status === 404) {
       return [
         protocol === "openai-chat"
           ? "Check that LAB_MODEL_GATEWAY_URL points to the OpenAI-compatible Chat Completions route, usually /v1/chat/completions."
-          : protocol === "anthropic-messages"
-            ? "Check that LAB_MODEL_GATEWAY_URL points to the Anthropic Messages route, usually /v1/messages."
-            : "Check that LAB_MODEL_GATEWAY_URL points to the Ant Code gateway chat route, usually /v1/chat."
+          : protocol === "openai-responses"
+            ? "Check that LAB_MODEL_GATEWAY_URL points to the OpenAI-compatible Responses route, usually /v1/responses."
+            : protocol === "anthropic-messages"
+              ? "Check that LAB_MODEL_GATEWAY_URL points to the Anthropic Messages route, usually /v1/messages."
+              : "Check that LAB_MODEL_GATEWAY_URL points to the Ant Code lab gateway chat route, usually /v1/chat."
       ];
     }
     if (status && status >= 500) {
@@ -110,7 +119,7 @@ export function gatewayTroubleshootingHints(code, status = null, protocol = unde
       "Retry with a smaller prompt or after the gateway worker is healthy."
     ];
   }
-  return ["Run /gateway --live and verify the configured gateway endpoint."];
+  return ["Run /gateway --live and verify the configured lab gateway endpoint."];
 }
 
 /**
@@ -119,10 +128,17 @@ export function gatewayTroubleshootingHints(code, status = null, protocol = unde
 export function redactGatewayText(value) {
   return String(value)
     .replace(/(https?:\/\/)([^/\s:@]+):([^@\s/]+)@/gi, "$1[redacted]@")
-    .replace(/([?&](?:api_?key|token|secret|password)=)[^&\s]+/gi, "$1[redacted]")
-    .replace(/((?:api_?key|token|secret|password)\s*=\s*)\S+/gi, "$1[redacted]")
+    .replace(LABELED_GATEWAY_CREDENTIAL_PATTERN, redactLabeledGatewayCredential)
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[redacted]")
-    .replace(/(--?(?:api-?key|token|secret|password)(?:=|\s+))\S+/gi, "$1[redacted]");
+    .replace(/(--?(?:x[-_]?api[-_]?key|api[-_]?key|access[-_]?token|authorization|token|secret|password)(?:=|\s+))\S+/gi, "$1[redacted]");
+}
+
+/** @param {string} _match @param {string} prefix @param {string} credential */
+function redactLabeledGatewayCredential(_match, prefix, credential) {
+  const quote = credential[0];
+  return quote === '"' || quote === "'"
+    ? `${prefix}${quote}[redacted]${quote}`
+    : `${prefix}[redacted]`;
 }
 
 /**
@@ -182,6 +198,7 @@ function parseJsonObject(value) {
   }
 }
 
+/** @param {...unknown} values */
 function firstString(...values) {
   for (const value of values) {
     if (typeof value === "string" && value.trim()) {

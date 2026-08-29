@@ -34,6 +34,59 @@ test("session store cleanup removes expired metadata", async () => {
   assert.deepEqual(await store.listSessions(), []);
 });
 
+test("session store permanent retention skips cleanup without deleting old metadata", async () => {
+  const cwd = await makeTempWorkspace();
+  const store = createSessionStore({
+    cwd,
+    transcript: { enabled: true, retentionDays: null, encryption: "off" }
+  });
+  const filePath = await store.writeMetadata({ id: "permanent-session" });
+  const oldTime = new Date("2000-01-01T00:00:00.000Z");
+  await fs.utimes(filePath, oldTime, oldTime);
+
+  const result = await store.cleanupExpiredSessions(null, {
+    now: new Date("2026-08-28T00:00:00.000Z")
+  });
+
+  assert.deepEqual(result, { deleted: [], skipped: "forever" });
+  assert.equal((await store.readMetadataExact("permanent-session")).ok, true);
+});
+
+test("session store cleanup preserves explicitly excluded sessions", async () => {
+  const cwd = await makeTempWorkspace();
+  const store = createSessionStore({ cwd });
+  const excludedArchive = await store.writeTranscriptChunks("active-session", [
+    { role: "user", content: "keep active" }
+  ]);
+  const excludedPath = await store.writeMetadata({
+    id: "active-session",
+    transcript: { archive: excludedArchive }
+  });
+  const expiredArchive = await store.writeTranscriptChunks("expired-session", [
+    { role: "user", content: "remove expired" }
+  ]);
+  const expiredPath = await store.writeMetadata({
+    id: "expired-session",
+    transcript: { archive: expiredArchive }
+  });
+  const oldTime = new Date("2026-01-01T00:00:00.000Z");
+  await Promise.all([
+    fs.utimes(excludedPath, oldTime, oldTime),
+    fs.utimes(expiredPath, oldTime, oldTime)
+  ]);
+
+  const result = await store.cleanupExpiredSessions(0, {
+    now: new Date("2026-04-28T00:00:00.000Z"),
+    excludeSessionIds: ["active-session"]
+  });
+
+  assert.deepEqual(result.deleted, [expiredPath]);
+  assert.equal((await store.readMetadataExact("active-session")).ok, true);
+  assert.equal((await store.readTranscriptPage(excludedArchive)).messages.length, 1);
+  assert.equal((await store.readMetadataExact("expired-session")).ok, false);
+  await assert.rejects(fs.access(path.join(store.root, "expired-session.transcript")), { code: "ENOENT" });
+});
+
 test("session cleanup rechecks freshness after a concurrent metadata write", async () => {
   const cwd = await makeTempWorkspace();
   const store = createSessionStore({ cwd });

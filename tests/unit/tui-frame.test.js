@@ -24,10 +24,10 @@ import { makeExitFrame, makePermissionFrame, makePromptFrame, makeStartupFrame, 
 
 test("stage 1 startup frame harness enforces compact terminal bounds", () => {
   const frame = makeStartupFrame({
-    cwd: "C:\\workspace\\ant-code",
+    cwd: "C:\\saveproject\\LBJ-workspace\\lab-agent",
     trusted: true,
     session: {
-      model: "example-coding-model",
+      model: "claude-sonnet-4-5-20250929",
       networkMode: "restricted",
       readonly: false,
       allowWrite: false,
@@ -278,10 +278,10 @@ test("prompt layout falls back safely when width is missing", () => {
 
 test("stage 1 and 2 acceptance frames fit compact and wide resize targets", () => {
   const startup = makeStartupFrame({
-    cwd: "C:\\workspace\\ant-code",
+    cwd: "C:\\saveproject\\LBJ-workspace\\lab-agent",
     trusted: false,
     session: {
-      model: "example-fast-model",
+      model: "claude-haiku-4-5-20251001",
       networkMode: "restricted",
       readonly: true,
       allowWrite: false,
@@ -402,7 +402,7 @@ test("status side panel splits provider usage into readable rows", () => {
     session: {
       id: "session-provider",
       turnCount: 3,
-      model: "example-coding-model",
+      model: "mimo-v2.5-pro",
       networkMode: "online",
       sensitivity: "standard",
       permissionMode: "workspace",
@@ -501,7 +501,7 @@ test("tasks side panel exposes live tool and budget progress", () => {
         difficulty: "quick",
         risk: "low",
         modelTier: "cheap",
-        model: "example-vision-model",
+        model: "mimo-v2.5",
         budget: { maxRounds: 16 },
         budgetProgress: {
           toolCalls: 2,
@@ -536,7 +536,7 @@ test("tasks side panel exposes live tool and budget progress", () => {
   assert.match(text, /本会话任务：1\/1/);
   assert.match(text, /任务组：1\/1/);
   assert.match(text, /组 group-live 自动唤醒/);
-  assert.match(text, /cheap:example-vision-model/);
+  assert.match(text, /cheap:mimo-v2\.5/);
   assert.match(text, /工具 2 输出 128B/);
   assert.match(text, /模型输入（估算）/);
   assert.match(text, /输入：61.4k\/200k tokens/);

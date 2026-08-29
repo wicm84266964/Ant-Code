@@ -73,19 +73,28 @@ export function createSessionStore(options) {
     },
 
     /**
-     * @param {number} retentionDays
-     * @param {{ now?: Date }} cleanupOptions
+     * @param {number | null} retentionDays Null keeps sessions indefinitely.
+     * @param {{ now?: Date; excludeSessionIds?: Iterable<string> }} cleanupOptions
      */
     async cleanupExpiredSessions(retentionDays, cleanupOptions = {}) {
+      if (retentionDays === null) {
+        return { deleted: [], skipped: "forever" };
+      }
       await ensureRoot();
       const entries = await fs.readdir(root, { withFileTypes: true });
       const nowMs = (cleanupOptions.now ?? new Date()).getTime();
       const maxAgeMs = Math.max(0, retentionDays) * 24 * 60 * 60 * 1000;
+      const excludedSessionIds = new Set(
+        Array.from(cleanupOptions.excludeSessionIds ?? [], (sessionId) => String(sessionId))
+      );
       /** @type {string[]} */
       const deleted = [];
 
       const grouped = groupSessionEntries(entries);
       for (const [sessionId, sessionEntries] of grouped) {
+        if (excludedSessionIds.has(sessionId)) {
+          continue;
+        }
         const records = await Promise.all(sessionEntries.map(async (entry) => {
           const filePath = path.join(root, entry.name);
           return { filePath, stat: await fs.stat(filePath) };
@@ -588,7 +597,8 @@ async function readRecordSummary(filePath, encrypted, policy, env) {
       transcriptChunks: Array.isArray(metadata.transcript?.archive?.chunks) ? metadata.transcript.archive.chunks.length : 0,
       outputBytes: metadata.outputBytes,
       finishedAt: metadata.finishedAt,
-      encrypted
+      encrypted,
+      goal: metadata.goal ?? null
     };
   } catch (error) {
     return {
@@ -721,7 +731,7 @@ function truncateTitle(value) {
 }
 
 /**
- * @param {{ enabled: boolean; retentionDays: number; encryption: string }} policy
+ * @param {{ enabled: boolean; retentionDays: number | null; encryption: string }} policy
  * @param {NodeJS.ProcessEnv} env
  */
 function assertPolicyReady(policy, env) {
@@ -739,7 +749,9 @@ function assertPolicyReady(policy, env) {
 function normalizeTranscriptPolicy(transcript = {}) {
   return {
     enabled: transcript.enabled !== false,
-    retentionDays: Number.isFinite(transcript.retentionDays) ? transcript.retentionDays : 30,
+    retentionDays: transcript.retentionDays === null
+      ? null
+      : Number.isFinite(transcript.retentionDays) ? transcript.retentionDays : 30,
     encryption: transcript.encryption ?? "off"
   };
 }

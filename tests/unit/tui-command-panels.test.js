@@ -101,7 +101,7 @@ test("usage panel shows provider-reported token totals when available", () => {
     lastCompletionTokens: 40,
     lastTotalTokens: 740,
     lastRound: 2,
-    lastModel: "example-coding-model",
+    lastModel: "mimo-v2.5-pro",
     last: { prompt_tokens: 700, completion_tokens: 40, total_tokens: 740, prompt_tokens_details: { cached_tokens: 500 } }
   };
   const panel = createUsagePanel({ session, name: "usage" });
@@ -111,7 +111,7 @@ test("usage panel shows provider-reported token totals when available", () => {
   assert.match(text, /累计：输入 1.2k \/ 缓存 900\/1.2k \(75%\) \/ 输出 80 \/ 合计 1.3k tokens/);
   assert.match(text, /最近：输入 700 \/ 缓存 500\/700 \(71%\) \/ 输出 40 \/ 合计 740 tokens/);
   assert.match(text, /cached_tokens/);
-  assert.match(text, /example-coding-model/);
+  assert.match(text, /mimo-v2\.5-pro/);
 });
 
 test("/logs panel exposes process-local runtime records with filter tabs", () => {
@@ -144,10 +144,10 @@ test("/logs panel exposes process-local runtime records with filter tabs", () =>
 
 test("/compact panel reflects real context compaction result", () => {
   const session = fakeSession({
-    modelAlias: "example-coding-model",
+    modelAlias: "claude-sonnet-4-5-20250929",
     models: [
       {
-        id: "example-coding-model",
+        id: "claude-sonnet-4-5-20250929",
         contextTokens: 200000
       }
     ],
@@ -350,7 +350,7 @@ test("agent task excerpt panel exposes full persisted task details", () => {
     profile: "explorer",
     status: "partial",
     mode: "readonly",
-    model: "example-vision-model",
+    model: "mimo-v2.5",
     modelTier: "cheap",
     latestProgress: "grep 完成",
     prompt: "检查 src",
@@ -397,7 +397,7 @@ test("agent task live panel exposes refreshable progress and freeze hint", () =>
     profile: "explorer",
     status: "running",
     mode: "readonly",
-    model: "example-vision-model",
+    model: "mimo-v2.5",
     modelTier: "cheap",
     latestProgress: "运行工具 grep",
     prompt: "检查 src",
@@ -638,9 +638,9 @@ test("display clipboard formatter leaves user markdown untouched", () => {
 function fakeSession(config = {}) {
   return {
     id: "session-test",
-    cwd: "C:\\workspace\\ant-code",
+    cwd: "C:\\saveproject\\LBJ-workspace\\lab-agent",
     turnCount: 2,
-    model: "example-coding-model",
+    model: "claude-sonnet-4-5-20250929",
     networkMode: "offline",
     sensitivity: "standard",
     readonly: false,

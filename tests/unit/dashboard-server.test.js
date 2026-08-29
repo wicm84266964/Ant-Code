@@ -128,6 +128,7 @@ test("dashboard status route includes runtime session status", async () => {
     const response = await fetchJson(server, "/api/status");
 
     assert.equal(response.status, 200);
+    assert.equal(response.body.version, "dashboard.v2");
     assert.equal(response.body.cwd, process.cwd());
     assert.equal(response.body.sessionStatus.model, "mock-model");
     assert.equal(response.body.sessionStatus.context.maxTokens, 200000);
@@ -136,6 +137,183 @@ test("dashboard status route includes runtime session status", async () => {
     assert.deepEqual(response.body.visionAgent, { enabled: true, model: "vision-model", autoUseWhenMainModelTextOnly: true });
     assert.deepEqual(response.body.gatewayConfig, { gatewayUrl: "https://gateway.example/v1/chat/completions", apiKeyConfigured: true });
   } finally {
+    await close(server);
+  }
+});
+
+test("dashboard status forwards the tab client id and exposes V2 revisions", async () => {
+  const calls = [];
+  const server = createDashboardServer({
+    runtime: {
+      ...createRuntimeStub(),
+      status: async (input) => {
+        calls.push(input);
+        return {
+          ok: true,
+          configV2: {
+            enabled: true,
+            revisions: { global: "global-r1", project: "project-r1", credentials: "credentials-r1" }
+          }
+        };
+      }
+    },
+    cwd: process.cwd(),
+    host: "127.0.0.1"
+  });
+  await listen(server, "127.0.0.1", 0);
+  try {
+    const response = await fetchJson(server, "/api/status?clientId=tab-a");
+    assert.equal(response.status, 200);
+    assert.deepEqual(calls, [{ clientId: "tab-a" }]);
+    assert.deepEqual(response.body.configRevisions, {
+      global: "global-r1",
+      project: "project-r1",
+      credentials: "credentials-r1"
+    });
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard maps Config V2 load failures to diagnostic 4xx responses and recovers", async () => {
+  let statusCalls = 0;
+  const server = createDashboardServer({
+    cwd: process.cwd(),
+    runtime: {
+      ...createRuntimeStub(),
+      status: async () => {
+        statusCalls += 1;
+        if (statusCalls === 1) {
+          throw Object.assign(new Error(
+            '$.namespaces.agent-routing.modelTiers.cheap.provider: agent route provider "deepseek" must match active provider "grok"; https://gateway.example/v1?api_key=config-secret Bearer sk-config-secret'
+          ), {
+            name: "ConfigV2ResolutionError",
+            code: "CONFIG_V2_AGENT_PROVIDER_MISMATCH",
+            path: "$.namespaces.agent-routing.modelTiers.cheap.provider"
+          });
+        }
+        return { ok: true, models: [] };
+      }
+    }
+  });
+  await listen(server, "127.0.0.1", 0);
+
+  try {
+    const failed = await fetchJson(server, "/api/status?clientId=config-failure");
+    const recovered = await fetchJson(server, "/api/status?clientId=config-recovered");
+
+    assert.equal(failed.status, 422);
+    assert.equal(failed.body.ok, false);
+    assert.equal(failed.body.code, "CONFIG_V2_AGENT_PROVIDER_MISMATCH");
+    assert.equal(failed.body.configPath, "$.namespaces.agent-routing.modelTiers.cheap.provider");
+    assert.match(failed.body.error, /must match active provider/);
+    assert.match(failed.body.error, /\[REDACTED\]/);
+    assert.doesNotMatch(JSON.stringify(failed.body), /config-secret|api_key=/);
+    assert.match(failed.body.requestId, /^[A-Za-z0-9_-]{16}$/);
+    assert.equal(recovered.status, 200);
+    assert.equal(recovered.body.ok, true);
+    assert.equal(statusCalls, 2);
+    assert.equal(server.listening, true);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard logs unknown request failures as redacted structured diagnostics and recovers", async () => {
+  let statusCalls = 0;
+  const diagnostics = [];
+  const originalConsoleError = console.error;
+  const server = createDashboardServer({
+    cwd: process.cwd(),
+    runtime: {
+      ...createRuntimeStub(),
+      status: async () => {
+        statusCalls += 1;
+        if (statusCalls === 1) {
+          throw Object.assign(new Error(
+            "load failed for Bearer sk-dashboard-secret at https://gateway.example/v1/models?api_key=query-secret&tenant=private "
+              + '{"apiKey":"json-secret","accessToken":"access-secret"} gatewayApiKey=field-secret '
+              + 'XAI_API_KEY=xai-secret OPENAI_API_KEY="openai-secret" ANTHROPIC_ACCESS_TOKEN=anthropic-secret'
+          ), {
+            name: "ConfigReadError",
+            code: "EIO",
+            path: "$.namespaces.model-providers.providers.deepseek"
+          });
+        }
+        if (statusCalls === 2) {
+          const hostile = {};
+          Object.defineProperty(hostile, "code", {
+            get() {
+              throw new Error("diagnostic getter must stay contained");
+            }
+          });
+          throw hostile;
+        }
+        return { ok: true, models: [] };
+      }
+    }
+  });
+  await listen(server, "127.0.0.1", 0);
+  console.error = (line) => diagnostics.push(String(line));
+
+  try {
+    const failed = await fetchJson(
+      server,
+      "/api/status?clientId=unknown-failure&access_token=request-query-secret"
+    );
+    const hostile = await fetchJson(server, "/api/status?clientId=hostile-failure");
+    const recovered = await fetchJson(server, "/api/status?clientId=unknown-recovered");
+
+    assert.equal(failed.status, 500);
+    assert.deepEqual(
+      { ok: failed.body.ok, code: failed.body.code, error: failed.body.error },
+      { ok: false, code: "INTERNAL_ERROR", error: "Internal server error" }
+    );
+    assert.match(failed.body.requestId, /^[A-Za-z0-9_-]{16}$/);
+    assert.equal(hostile.status, 500);
+    assert.equal(hostile.body.code, "INTERNAL_ERROR");
+    assert.match(hostile.body.requestId, /^[A-Za-z0-9_-]{16}$/);
+    assert.equal(recovered.status, 200);
+    assert.equal(recovered.body.ok, true);
+    assert.equal(statusCalls, 3);
+    assert.equal(server.listening, true);
+    assert.equal(diagnostics.length, 2);
+
+    const diagnostic = JSON.parse(diagnostics[0]);
+    assert.deepEqual({
+      event: diagnostic.event,
+      requestId: diagnostic.requestId,
+      method: diagnostic.method,
+      path: diagnostic.path,
+      name: diagnostic.name,
+      code: diagnostic.code,
+      configPath: diagnostic.configPath
+    }, {
+      event: "dashboard_request_error",
+      requestId: failed.body.requestId,
+      method: "GET",
+      path: "/api/status",
+      name: "ConfigReadError",
+      code: "EIO",
+      configPath: "$.namespaces.model-providers.providers.deepseek"
+    });
+    assert.match(diagnostic.message, /\[REDACTED\]/);
+    assert.doesNotMatch(
+      diagnostics[0],
+      /dashboard-secret|query-secret|request-query-secret|tenant=private|json-secret|access-secret|field-secret|xai-secret|openai-secret|anthropic-secret/
+    );
+    assert.deepEqual(JSON.parse(diagnostics[1]), {
+      event: "dashboard_request_error",
+      requestId: hostile.body.requestId,
+      method: "UNKNOWN",
+      path: "/",
+      name: "Error",
+      code: "UNEXPECTED_ERROR",
+      configPath: "",
+      message: "Unexpected dashboard request error"
+    });
+  } finally {
+    console.error = originalConsoleError;
     await close(server);
   }
 });
@@ -195,6 +373,251 @@ test("dashboard model route forwards model switch requests", async () => {
     assert.equal(response.status, 200);
     assert.equal(response.body.sessionStatus.model, "vision-model");
     assert.deepEqual(calls, [{ modelId: "vision-model", sessionId: "s1" }]);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard reasoning effort route forwards selection requests", async () => {
+  const calls = [];
+  const server = createDashboardServer({
+    cwd: process.cwd(),
+    runtime: {
+      ...createRuntimeStub(),
+      switchReasoningEffort: async (body) => {
+        calls.push(body);
+        return { ok: true, sessionStatus: { model: "grok-4.6", reasoningEffort: "high" } };
+      }
+    }
+  });
+  await listen(server, "127.0.0.1", 0);
+
+  try {
+    const response = await fetchJson(server, "/api/reasoning-effort", {
+      method: "POST",
+      body: { reasoningEffort: null, sessionId: "s1" }
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.body.sessionStatus.reasoningEffort, "high");
+    assert.deepEqual(calls, [{ reasoningEffort: null, sessionId: "s1" }]);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard default model route forwards qualified revisioned selections", async () => {
+  const calls = [];
+  const server = createDashboardServer({
+    runtime: {
+      ...createRuntimeStub(),
+      saveDefaultModelSelection: async (body) => {
+        calls.push(body);
+        return { ok: true, selection: { provider: body.providerId, model: body.modelId } };
+      }
+    },
+    cwd: process.cwd(),
+    host: "127.0.0.1"
+  });
+  await listen(server, "127.0.0.1", 0);
+  try {
+    const body = {
+      scope: "project",
+      providerId: "grok",
+      modelId: "grok-4.6",
+      expectedRevision: "project-r1"
+    };
+    const response = await fetchJson(server, "/api/default-model", { method: "POST", body });
+    assert.equal(response.status, 200);
+    assert.deepEqual(calls, [body]);
+    assert.deepEqual(response.body.selection, { provider: "grok", model: "grok-4.6" });
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard settings config route forwards request bodies and maps runtime status", async () => {
+  const calls = [];
+  const server = createDashboardServer({
+    cwd: process.cwd(),
+    runtime: {
+      ...createRuntimeStub(),
+      saveSettingsConfig: async (body) => {
+        calls.push(body);
+        if (body.section === "network") {
+          return { ok: false, status: 409, error: "network mode is environment-managed" };
+        }
+        return {
+          ok: true,
+          saveTarget: body.saveTarget,
+          settings: { transcript: body.settings }
+        };
+      }
+    }
+  });
+  await listen(server, "127.0.0.1", 0);
+
+  try {
+    const transcriptBody = {
+      section: "transcript",
+      saveTarget: "project",
+      sessionId: "s1",
+      changedFields: ["retentionDays"],
+      settings: { enabled: true, retentionDays: 90, encryption: "optional" }
+    };
+    const saved = await fetchJson(server, "/api/settings-config", {
+      method: "POST",
+      body: transcriptBody
+    });
+    assert.equal(saved.status, 200);
+    assert.equal(saved.body.saveTarget, "project");
+    assert.deepEqual(saved.body.settings.transcript, transcriptBody.settings);
+
+    const networkBody = {
+      section: "network",
+      saveTarget: "global",
+      sessionId: "s2",
+      changedFields: ["mode"],
+      settings: { networkMode: "offline", allowedHosts: [] }
+    };
+    const rejected = await fetchJson(server, "/api/settings-config", {
+      method: "POST",
+      body: networkBody
+    });
+    assert.equal(rejected.status, 409);
+    assert.equal(rejected.body.ok, false);
+    assert.equal(rejected.body.error, "network mode is environment-managed");
+    assert.deepEqual(calls, [transcriptBody, networkBody]);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard gateway probe route forwards discovery requests", async () => {
+  const calls = [];
+  const server = createDashboardServer({
+    cwd: process.cwd(),
+    runtime: {
+      ...createRuntimeStub(),
+      probeGateway: async (body) => {
+        calls.push(body);
+        return {
+          ok: true,
+          models: [{ id: "grok-4.6" }],
+          suggestedGatewayUrl: "https://gateway.example/sub2api/v1/responses"
+        };
+      }
+    }
+  });
+  await listen(server, "127.0.0.1", 0);
+
+  try {
+    const body = {
+      gatewayUrl: "https://gateway.example/sub2api/v1",
+      gatewayProtocol: "openai-responses",
+      credentialAction: "keep"
+    };
+    const response = await fetchJson(server, "/api/gateway-probe", { method: "POST", body });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.body.models[0].id, "grok-4.6");
+    assert.deepEqual(calls, [body]);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard model capability probe route forwards requests and runtime status", async () => {
+  const calls = [];
+  const server = createDashboardServer({
+    cwd: process.cwd(),
+    runtime: {
+      ...createRuntimeStub(),
+      probeModelCapabilities: async (body) => {
+        calls.push(body);
+        return {
+          ok: false,
+          status: 502,
+          error: "capability probe timed out",
+          outcome: "failed",
+          modelId: body.modelId
+        };
+      }
+    }
+  });
+  await listen(server, "127.0.0.1", 0);
+
+  try {
+    const body = {
+      gatewayUrl: "https://gateway.example/v1/responses",
+      gatewayProtocol: "openai-responses",
+      modelId: "grok-4.6",
+      credentialAction: "keep"
+    };
+    const response = await fetchJson(server, "/api/model-capabilities/probe", { method: "POST", body });
+
+    assert.equal(response.status, 502);
+    assert.equal(response.body.outcome, "failed");
+    assert.equal(response.body.modelId, "grok-4.6");
+    assert.deepEqual(calls, [body]);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard model capability probe aborts runtime work after the client disconnects", { timeout: 3_000 }, async () => {
+  let markStarted;
+  let markAborted;
+  const started = new Promise((resolve) => {
+    markStarted = resolve;
+  });
+  const aborted = new Promise((resolve) => {
+    markAborted = resolve;
+  });
+  const server = createDashboardServer({
+    cwd: process.cwd(),
+    runtime: {
+      ...createRuntimeStub(),
+      probeModelCapabilities: async (_body, request) => {
+        markStarted();
+        return new Promise((resolve) => {
+          const onAbort = () => {
+            markAborted();
+            resolve({ ok: false, status: 502, error: "cancelled" });
+          };
+          if (request.signal.aborted) onAbort();
+          else request.signal.addEventListener("abort", onAbort, { once: true });
+        });
+      }
+    }
+  });
+  await listen(server, "127.0.0.1", 0);
+
+  try {
+    const auth = await dashboardAuth(server);
+    const payload = Buffer.from(JSON.stringify({
+      gatewayUrl: "https://gateway.example/v1/responses",
+      gatewayProtocol: "openai-responses",
+      modelId: "grok-4.6"
+    }));
+    const clientRequest = http.request({
+      hostname: "127.0.0.1",
+      port: server.address().port,
+      path: "/api/model-capabilities/probe",
+      method: "POST",
+      headers: {
+        connection: "close",
+        "content-type": "application/json",
+        "content-length": payload.length,
+        cookie: auth.cookie,
+        "x-antcode-csrf-token": auth.csrfToken
+      }
+    });
+    clientRequest.on("error", () => {});
+    clientRequest.end(payload);
+    await started;
+    clientRequest.destroy();
+    await aborted;
   } finally {
     await close(server);
   }
@@ -285,10 +708,10 @@ test("dashboard gateway profile route forwards switch requests", async () => {
         calls.push(body);
         return {
           ok: true,
-          gatewayConfig: { gatewayUrl: "https://alpha-gateway.example/v1/chat/completions", activeProfileId: body.profileId },
+          gatewayConfig: { gatewayUrl: "https://mimo.example/v1/chat/completions", activeProfileId: body.profileId },
           gatewayProfiles: [{ id: body.profileId, current: true }],
-          sessionStatus: { model: "alpha-pro", context: { maxTokens: 400000 } },
-          models: [{ id: "alpha-pro", current: true, modalities: ["text"] }]
+          sessionStatus: { model: "mimo-pro", context: { maxTokens: 400000 } },
+          models: [{ id: "mimo-pro", current: true, modalities: ["text"] }]
         };
       }
     }
@@ -298,12 +721,12 @@ test("dashboard gateway profile route forwards switch requests", async () => {
   try {
     const response = await fetchJson(server, "/api/gateway-profile", {
       method: "POST",
-      body: { profileId: "gw-alpha", sessionId: "s1" }
+      body: { profileId: "gw-mimo", sessionId: "s1" }
     });
 
     assert.equal(response.status, 200);
-    assert.equal(response.body.gatewayConfig.activeProfileId, "gw-alpha");
-    assert.deepEqual(calls, [{ profileId: "gw-alpha", sessionId: "s1" }]);
+    assert.equal(response.body.gatewayConfig.activeProfileId, "gw-mimo");
+    assert.deepEqual(calls, [{ profileId: "gw-mimo", sessionId: "s1" }]);
   } finally {
     await close(server);
   }
@@ -449,6 +872,10 @@ test("dashboard turn control and context routes forward to runtime", async () =>
     cwd: process.cwd(),
     runtime: {
       ...createRuntimeStub(),
+      applyGoal: async (body) => {
+        calls.push(["goal", body.sessionId, body.action, body.objective]);
+        return { ok: true, goal: { enabled: true, text: body.objective } };
+      },
       startTurn: async (body) => {
         calls.push(["start", body.sessionId, body.requestId, body.prompt]);
         return { ok: true };
@@ -486,6 +913,10 @@ test("dashboard turn control and context routes forward to runtime", async () =>
   await listen(server, "127.0.0.1", 0);
 
   try {
+    assert.equal((await fetchJson(server, "/api/goal", {
+      method: "POST",
+      body: { sessionId: "s1", action: "enable", objective: "ship goal mode" }
+    })).status, 200);
     assert.equal((await fetchJson(server, "/api/turns", {
       method: "POST",
       body: { sessionId: "s1", requestId: "request-1", prompt: "run once" }
@@ -520,6 +951,7 @@ test("dashboard turn control and context routes forward to runtime", async () =>
     })).status, 200);
 
     assert.deepEqual(calls, [
+      ["goal", "s1", "enable", "ship goal mode"],
       ["start", "s1", "request-1", "run once"],
       ["interrupt", "s1", "user"],
       ["guide", "s1", "focus tests", "q1"],
@@ -1001,6 +1433,7 @@ function close(server) {
 function createRuntimeStub() {
   return {
     trustStatus: async () => ({ ok: true, trust: { trusted: true } }),
+    applyGoal: async () => ({ ok: false }),
     trustWorkspace: async () => ({ ok: true, trust: { trusted: true } }),
     listSessionRecords: async () => [],
     readSession: async () => ({ ok: false }),

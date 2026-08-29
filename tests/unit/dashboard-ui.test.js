@@ -65,6 +65,43 @@ test("dashboard running send button exposes interrupt action", async () => {
   assert.match(source, /els\.sendButton\.title = "点击中断当前任务"/);
 });
 
+test("dashboard distinguishes configuration failures from service and network failures", async () => {
+  const appPath = path.resolve("src/dashboard/public/app.js");
+  const source = await fs.readFile(appPath, "utf8");
+  const code = source
+    .replace(/import[^\n]+\n/g, "")
+    .replace("await init();", "")
+    .replace(/export\s+/g, "");
+  const harness = `
+    const document = { querySelector() { return null; }, addEventListener() {} };
+    const window = {};
+    const navigator = {};
+    const requestAnimationFrame = () => {};
+    class EventSource {}
+    function renderMarkdown() { return ""; }
+    function hydrateRichContent() {}
+    function visibleTranscriptRole(role) { return role; }
+  `;
+  const module = await import(`data:text/javascript,${encodeURIComponent(`${harness}\n${code}\nexport { bootstrapFailurePresentation };`)}`);
+
+  const configError = Object.assign(new Error("路由引用无效"), {
+    code: "CONFIG_V2_REFERENCE_ERROR",
+    status: 422,
+    requestId: "request_12345678"
+  });
+  assert.deepEqual(module.bootstrapFailurePresentation(configError), {
+    connectionState: "error",
+    projectLabel: "配置错误",
+    title: "模型配置加载失败",
+    message: "路由引用无效（请求编号：request_12345678）"
+  });
+  assert.equal(module.bootstrapFailurePresentation(Object.assign(new Error("Internal server error"), {
+    code: "INTERNAL_ERROR",
+    status: 500
+  })).title, "本地服务响应异常");
+  assert.equal(module.bootstrapFailurePresentation(new TypeError("Failed to fetch"), true).title, "无法连接本地服务");
+});
+
 test("dashboard prioritizes transient gateway retry over background status", async () => {
   const appPath = path.resolve("src/dashboard/public/app.js");
   const source = await fs.readFile(appPath, "utf8");
@@ -245,17 +282,19 @@ test("dashboard app exposes session actions and reconnects active sessions", asy
   assert.match(source, /document\.body\.classList\.toggle\("sidebar-collapsed"/);
   assert.match(source, /function sessionStatusView\(session\)/);
   assert.match(source, /thread-status-dot/);
-  assert.match(source, /thread-status-badge/);
-  assert.match(source, /const showStatusBadge = \["running", "waiting", "warning", "error"\]\.includes\(status\.tone\)/);
+  assert.doesNotMatch(source, /thread-status-badge/);
+  assert.doesNotMatch(source, /showStatusBadge/);
+  assert.match(source, /tone: "background"/);
   assert.match(source, /function scheduleSessionsRefresh\(delayMs = 800\)/);
   assert.match(source, /sessionsNeedRefresh\(\)/);
   assert.match(source, /session\.backgroundVisible/);
   assert.match(source, /终端后台/);
   assert.match(source, /子智能体后台/);
   assert.match(css, /\.sidebar-collapsed \.app-shell\s*\{/);
-  assert.match(css, /\.thread-status-dot\s*\{[^}]*display: none;/s);
-  assert.match(css, /\.sidebar-collapsed \.thread-status-dot\s*\{[^}]*display: inline-block;/s);
-  assert.match(css, /\.thread-status-badge\[data-tone="running"\]\s*\{[^}]*background: rgba\(120, 160, 130, 0\.09\);[^}]*color: #b8c7bc;/s);
+  assert.match(css, /\.thread-status-dot\s*\{[^}]*display: inline-block;/s);
+  assert.match(css, /\.thread-item\[data-tone="running"\] \.thread-status-dot\s*\{[^}]*animation: pulse/s);
+  assert.match(css, /\.thread-item\[data-tone="background"\] \.thread-status-dot\s*\{/);
+  assert.doesNotMatch(css, /thread-status-badge/);
   assert.doesNotMatch(css, /@keyframes threadPulse/);
   assert.match(source, /thread-delete-confirm/);
   assert.match(source, /确认删除这个会话/);
@@ -300,12 +339,12 @@ test("dashboard app guards duplicate turn submission and scopes permission by se
   assert.match(sendPromptSource, /state\.turnSubmitting = true/);
   assert.match(sendPromptSource, /finally \{\s*state\.turnSubmitting = false;\s*updateSendButton\(\)/);
   assert.match(source, /if \(state\.turnSubmitting\) \{\s*els\.sendButton\.textContent = "提交中";[\s\S]*els\.sendButton\.disabled = true/);
-  assert.match(source, /setPermissionMode\(result\.session\.permission\?\.mode \?\? "plan"\)/);
+  assert.match(source, /applyGoalSnapshot\(result\.session\.goal, \{ permissionMode: result\.session\.permission\?\.mode \?\? "plan" \}\)/);
   assert.match(source, /state\.running = result\.session\.active === true && result\.session\.running === true/);
-  assert.match(newTaskSource, /setPermissionMode\("plan"\)/);
+  assert.match(newTaskSource, /applyGoalSnapshot\(null, \{ permissionMode: "plan" \}\)/);
   assert.match(newTaskSource, /state\.running = false/);
   assert.match(newTaskSource, /updateSendButton\(\)/);
-  assert.match(source, /if \(event\.permission\?\.mode\) \{\s*setPermissionMode\(event\.permission\.mode\)/);
+  assert.match(source, /applyGoalSnapshot\(event\.goal, \{ permissionMode: event\.permission\?\.mode \}\)/);
 });
 
 test("dashboard app labels approximate change stats when present", async () => {
@@ -313,6 +352,94 @@ test("dashboard app labels approximate change stats when present", async () => {
 
   assert.match(source, /approximate: false/);
   assert.match(source, /stats\.approximate \? "近似" : null/);
+});
+
+test("dashboard keeps max and ultra opt-in and renders one configured disabled effort alias", async () => {
+  const app = await fs.readFile(path.resolve("src/dashboard/public/app.js"), "utf8");
+  const modelStatus = app.slice(app.indexOf("function modelStatusHtml"), app.indexOf("function handleModelStatusActivate"));
+  const reasoningHelpers = app.slice(
+    app.indexOf("function normalizeReasoningEfforts"),
+    app.indexOf("function resolveAtomicModelSelection")
+  );
+  const reasoningEffortCatalog = new Function(`${reasoningHelpers}; return reasoningEffortCatalog;`)();
+
+  assert.match(modelStatus, /normalizeReasoningEfforts\(modelInfo\?\.reasoningEfforts\)/);
+  assert.match(modelStatus, /efforts\.map\(\(effort\) =>/);
+  assert.doesNotMatch(modelStatus, /reasoningEffortCatalog/);
+  assert.deepEqual(
+    reasoningEffortCatalog([{ id: "none" }, { id: "off" }]).map((effort) => effort.id),
+    ["none", "low", "medium", "high", "xhigh", "max", "ultra"]
+  );
+  assert.deepEqual(
+    reasoningEffortCatalog([{ id: "off" }, { id: "none" }]).map((effort) => effort.id),
+    ["off", "low", "medium", "high", "xhigh", "max", "ultra"]
+  );
+});
+
+test("dashboard resolves legacy model ids as atomic provider and model selections", async () => {
+  const app = await fs.readFile(path.resolve("src/dashboard/public/app.js"), "utf8");
+  const helperSource = app.slice(
+    app.indexOf("function resolveAtomicModelSelection"),
+    app.indexOf("function currentModelSelection")
+  );
+  const resolveAtomicModelSelection = new Function(`${helperSource}; return resolveAtomicModelSelection;`)();
+  const grok = {
+    id: "grok",
+    modelAlias: "grok-4.6",
+    current: true,
+    models: [{ id: "grok-4.6" }, { id: "shared-model" }]
+  };
+  const deepseek = {
+    id: "deepseek",
+    modelAlias: "deepseek-v4-pro",
+    models: [{ id: "deepseek-v4-pro" }, { id: "glm-5.2" }, { id: "shared-model" }]
+  };
+  const fallback = {
+    profiles: [grok, deepseek],
+    fallbackProviderId: "grok",
+    fallbackModelId: "grok-4.6"
+  };
+
+  const legacyUnique = resolveAtomicModelSelection({ ...fallback, modelId: "glm-5.2" });
+  assert.equal(legacyUnique.profile.id, "deepseek");
+  assert.equal(legacyUnique.model.id, "glm-5.2");
+
+  const ambiguous = resolveAtomicModelSelection({ ...fallback, modelId: "shared-model" });
+  assert.equal(ambiguous.resolved, false);
+  assert.equal(ambiguous.profile, null);
+  assert.equal(ambiguous.model, null);
+
+  const missing = resolveAtomicModelSelection({ ...fallback, modelId: "missing-model" });
+  assert.equal(missing.resolved, false);
+  assert.equal(missing.profile, null);
+  assert.equal(missing.model, null);
+
+  const invalidExplicitPair = resolveAtomicModelSelection({
+    ...fallback,
+    providerId: "grok",
+    modelId: "glm-5.2"
+  });
+  assert.equal(invalidExplicitPair.resolved, false);
+  assert.equal(invalidExplicitPair.profile, null);
+  assert.equal(invalidExplicitPair.model, null);
+
+  const newTaskFallback = resolveAtomicModelSelection({
+    ...fallback,
+    modelId: "shared-model",
+    allowFallback: true
+  });
+  assert.equal(newTaskFallback.resolved, true);
+  assert.equal(newTaskFallback.profile.id, "grok");
+  assert.equal(newTaskFallback.model.id, "grok-4.6");
+
+  const authoritativeUnresolved = resolveAtomicModelSelection({
+    ...fallback,
+    modelId: "glm-5.2",
+    selectionResolved: false,
+    selectionIssue: "legacy-provider-ambiguous"
+  });
+  assert.equal(authoritativeUnresolved.resolved, false);
+  assert.equal(authoritativeUnresolved.issue, "legacy-provider-ambiguous");
 });
 
 test("dashboard message surfaces constrain long draft and final content", async () => {
@@ -434,8 +561,8 @@ test("dashboard composer controls keep confirmations reviewable and critical sta
   assert.doesNotMatch(css, /\.question-panel\s*\{[^}]*overflow: auto;/s);
   assert.doesNotMatch(css, /\.question-choices\s*\{[^}]*overflow-y: auto;/s);
   assert.match(css, /\.context-actions #context-clear\s*\{[^}]*border-color: rgba\(255, 133, 133, 0\.42\);[^}]*color: var\(--danger\);/s);
-  assert.match(css, /\.model-status-caret-button\s*\{[^}]*background: rgba\(255, 255, 255, 0\.08\) !important;[^}]*border-color: rgba\(213, 215, 212, 0\.2\) !important;/s);
-  assert.match(css, /\.model-status-caret-button\[aria-expanded="true"\]\s*\{/);
+  assert.match(css, /\.composer-footer \.model-status-summary\s*\{/);
+  assert.match(css, /\.composer-footer \.model-status-summary:hover,[\s\S]*\[aria-expanded="true"\]/);
   assert.match(css, /\.composer-footer \.change-status \.change-add\s*\{[^}]*color: #8fce9c !important;/s);
   assert.match(css, /\.composer-footer \.change-status \.change-del\s*\{[^}]*color: #ff9b9b !important;/s);
   assert.match(html, /<div class="mode-row">[\s\S]*<div class="mode-description" id="mode-description">[\s\S]*<div class="context-actions">/);
@@ -453,42 +580,104 @@ test("dashboard composer controls keep confirmations reviewable and critical sta
   assert.match(app, /class="\$\{guideButtonVisible\(\) \? "" : "hidden"\}"/);
   assert.match(app, /return "引导对话"/);
   assert.doesNotMatch(app, /state\.queue\.find\(\(item\) => item\.kind !== "guide" && !state\.queueCancelling\.has\(item\.id\)\)/);
-  assert.match(app, /gatewayProfiles: \[\]/);
+  const modelPanelRender = app.slice(app.indexOf("function renderModelPanel()"), app.indexOf("function renderSettingsView()"));
+  const settingsRender = app.slice(app.indexOf("function renderSettingsView()"), app.indexOf("function renderModelConfigPanel()"));
+  const reasoningSwitch = app.slice(app.indexOf("async function switchReasoningEffort"), app.indexOf("async function deleteGatewayProfile"));
+  const capabilityProbe = app.slice(app.indexOf("async function probeModelCapabilities"), app.indexOf("function setFormControlsSaving"));
+  const credentialChange = app.slice(app.indexOf("function markModelConfigCredentialChanged"), app.indexOf("function markModelConfigEndpointChanged"));
+  const endpointChange = app.slice(app.indexOf("function markModelConfigEndpointChanged"), app.indexOf("function handleModelConfigModelIdChanged"));
+  assert.match(app, /gatewayProfiles: \/\*\* @type \{any\[\]\} \*\/ \(\[\]\)/);
   assert.match(app, /normalizeGatewayProfiles\(status\.gatewayProfiles\)/);
-  assert.match(app, /data-profile-id/);
-  assert.match(app, /postJson\("\/api\/gateway-profile"/);
-  assert.match(app, /data-action="delete-gateway-profile"/);
+  assert.match(html, /id="settings-button"[\s\S]*aria-controls="settings-view"/);
+  assert.match(html, /id="settings-view"[\s\S]*id="settings-content"/);
+  for (const section of ["models", "transcript", "network", "agents", "reliability"]) {
+    assert.match(html, new RegExp(`data-settings-section="${section}"`));
+  }
+  assert.match(html, /data-dashboard-view="settings"/);
+  assert.match(app, /function showSettingsWorkspace\(\)/);
+  assert.match(app, /function hideSettingsWorkspace\(options = \{\}\)/);
+  assert.match(app, /status\.version !== DASHBOARD_API_VERSION/);
+  assert.match(app, /Dashboard 前后端版本不一致，请重启 Dashboard 服务后刷新页面/);
+  assert.match(app, /if \(view !== "settings" && state\.settingsOpen\)/);
+  assert.match(modelPanelRender, /data-action="switch-source"/);
+  assert.match(modelPanelRender, /data-action="switch-model"/);
+  assert.doesNotMatch(modelPanelRender, /add-model|edit-model|delete-model|delete-gateway-profile/);
+  assert.match(settingsRender, /data-action="add-model"/);
+  assert.match(settingsRender, /data-action="add-source"/);
+  assert.match(settingsRender, /showModelConfigPanel\("", action\.dataset\.profileId \|\| settingsInspectedGatewayProfile\(\)\?\.id \|\| "", "add-model"\)/);
+  assert.match(settingsRender, /data-action="edit-model"/);
+  assert.match(settingsRender, /data-action="delete-gateway-profile"/);
+  assert.match(settingsRender, /data-action="delete-model"/);
+  assert.match(settingsRender, /data-settings-form="transcript"/);
+  assert.match(settingsRender, /data-settings-form="network"/);
+  assert.match(settingsRender, /data-settings-form="agents"/);
+  assert.match(settingsRender, /data-settings-form="reliability"/);
+  assert.match(settingsRender, /name="goalMaxAutoContinues"/);
+  assert.match(settingsRender, /Goal 模式/);
+  assert.match(settingsRender, /自动续跑上限/);
+  assert.match(settingsRender, /postJson\("\/api\/settings-config"/);
+  assert.match(settingsRender, /syncModelTiersOnSwitch/);
   assert.match(app, /deleteJson\(`\/api\/gateway-profile\/\$\{encodeURIComponent\(profileId\)\}`/);
-  assert.match(app, /data-action="delete-model"/);
-  assert.match(app, /data-action="edit-current-model"/);
-  assert.match(app, /data-action="edit-model"/);
   assert.match(app, /previousModelId: state\.editingModelId/);
+  assert.match(app, /previousGatewayUrl: state\.gatewayConfig\?\.gatewayUrl/);
+  assert.match(app, /credentialAction/);
+  assert.match(credentialChange, /state\.modelConfigCredentialRevision \+= 1/);
+  assert.doesNotMatch(credentialChange, /clearReasoningCapabilityControls|syncAgentModelPickersForEndpoint/);
+  assert.match(endpointChange, /state\.modelConfigEndpointRevision \+= 1/);
+  assert.match(endpointChange, /syncAgentModelPickersForEndpoint/);
+  assert.match(endpointChange, /clearReasoningCapabilityControls/);
   assert.match(app, /name="saveTarget"/);
   assert.match(app, /const gatewayProtocol = gateway\.gatewayUrl \? gateway\.gatewayProtocol : "openai-chat"/);
   assert.match(app, /value="openai-chat"/);
+  assert.match(app, /value="openai-responses"/);
   assert.match(app, /value="anthropic-messages"/);
   assert.doesNotMatch(app, /<option value="lab-agent-gateway"/);
-  assert.match(app, /value="project"/);
+  assert.match(app, /postJson\("\/api\/gateway-probe"/);
+  assert.doesNotMatch(app, /list="agent-model-candidates"/);
+  assert.match(app, /data-agent-model-select=/);
+  assert.match(app, /function renderAgentModelPickers\(form\)/);
+  assert.match(app, /function currentGatewayCatalogModels\(form\)/);
+  assert.match(app, /gatewayDiscoveryToken: discoveryToken/);
+  assert.match(app, /manualAgentModelIds: manualAgentModelIds\(form\)/);
+  assert.match(capabilityProbe, /postJson\("\/api\/model-capabilities\/probe"/);
+  assert.match(capabilityProbe, /\{ signal: request\.signal, timeoutMs: 25_000 \}/);
+  assert.match(app, /data-action="use-suggested-gateway-url"/);
+  assert.match(app, /填写完整请求地址，例如 \/v1\/responses/);
+  assert.match(app, /reasoningEfforts: data\.getAll\("reasoningEfforts"\)/);
+  assert.match(app, /defaultReasoningEffort: data\.get\("defaultReasoningEffort"\) \|\| null/);
+  assert.match(app, /postJson\("\/api\/reasoning-effort"/);
+  assert.match(app, /reasoningEffort: normalized \|\| null/);
+  assert.match(reasoningSwitch, /const selection = currentModelSelection\(\)/);
+  assert.match(reasoningSwitch, /providerId: selection\.profile\.id/);
+  assert.match(reasoningSwitch, /modelId: selection\.model\.id/);
+  assert.match(app, /providerId: providerId \|\| undefined/);
+  assert.match(app, /postJson\("\/api\/default-model"/);
+  assert.match(app, /expectedRevision: state\.configRevisions\[scope\] \|\| undefined/);
+  assert.match(app, /payload\?\.configV2\?\.revisions/);
+  assert.match(app, /clientId: state\.currentSessionId \? undefined : dashboardClientId\(\)/);
+  assert.match(app, /const DASHBOARD_CLIENT_STORAGE_KEY = "ant-code-dashboard-client-id"/);
   assert.match(app, /value="global"/);
   assert.match(app, /当前项目默认/);
   assert.match(app, /全局默认/);
-  assert.match(app, /saveTarget: data\.get\("saveTarget"\) \|\| "global"/);
+  assert.match(app, /const scope = configScope\(data\.get\("saveTarget"\), "global"\)/);
+  assert.match(app, /saveTarget: scope/);
   assert.match(app, /showNotice\(result\.clearedGateway \? "当前网关配置已清空" : "模型配置已删除"\)/);
-  assert.match(app, /这是当前网关最后一个模型，会清空当前网关配置/);
+  assert.match(app, /这是当前来源最后一个模型，会清空当前网关配置/);
   assert.match(app, /deleteJson\(`\/api\/model-config\/\$\{encodeURIComponent\(modelId\)\}`/);
-  assert.match(app, /event\.stopPropagation\(\);[\s\S]*const action = event\.target\.closest\("button\[data-action\]"\);/);
-  assert.match(app, /model-delete-confirm-copy/);
-  assert.match(css, /\.gateway-profile-list\s*\{/);
-  assert.match(css, /\.gateway-profile-row\s*\{/);
-  assert.match(css, /\.gateway-profile-delete\s*\{/);
-  assert.match(css, /\.model-panel-actions\s*\{/);
-  assert.match(css, /\.model-option-row\s*\{[^}]*grid-template-areas: "model edit delete";[^}]*grid-template-columns: minmax\(0, 1fr\) auto auto;/s);
-  assert.match(css, /\.model-option-row\.confirming-delete\s*\{[^}]*grid-template-areas:/s);
-  assert.match(css, /\.model-edit-button,\s*\.model-delete-button\s*\{/);
-  assert.match(css, /\.model-edit-button\s*\{[^}]*grid-area: edit;/s);
-  assert.match(css, /\.model-delete-button\s*\{[^}]*min-width: 62px;[^}]*white-space: nowrap;/s);
-  assert.match(css, /\.model-delete-button\.confirm\s*\{/);
-  assert.match(css, /\.model-delete-confirm-copy\s*\{/);
+  assert.match(css, /\.settings-open \.workspace\s*\{[^}]*grid-template-areas:[^}]*"settings";/s);
+  assert.match(css, /\.settings-layout\s*\{[^}]*grid-template-columns: 176px minmax\(0, 1fr\);/s);
+  assert.match(css, /\.settings-content\s*\{[^}]*max-width: 760px;/s);
+  assert.match(css, /\.settings-form\s*\{[^}]*max-width: 680px;/s);
+  assert.match(css, /\.settings-field-row select,\s*\.settings-form-actions select\s*\{[^}]*color-scheme: dark;/s);
+  assert.match(css, /\.settings-field-row select option,\s*\.settings-form-actions select option\s*\{[^}]*background-color: #1f1f1e;/s);
+  assert.match(css, /\.settings-profile-row,\s*\.settings-model-row\s*\{/);
+  assert.match(css, /\.settings-control-list\s*\{/);
+  assert.match(css, /\.settings-default-scope\s*\{/);
+  assert.match(css, /\.settings-form-actions\s*\{/);
+  assert.match(css, /\.settings-rail button\.active\s*\{/);
+  assert.match(css, /\.model-switch-fields\s*\{/);
+  assert.match(css, /\.reasoning-effort-control\s*\{/);
+  assert.match(css, /\.gateway-probe-result\.success strong\s*\{/);
 });
 
 test("dashboard renders lightweight office previews in the side panel", async () => {
@@ -715,15 +904,89 @@ test("dashboard responsive, composer, focus, and scroll helpers enforce UI behav
   assert.ok(removeFromNewerEnd[0].index > removeFromNewerEnd.at(-1).index);
 });
 
+test("dashboard qualifies model deletion state by provider and classifies only revision conflicts", async () => {
+  const source = await fs.readFile(path.resolve("src/dashboard/public/app.js"), "utf8");
+  const harness = `
+    const fakeElement = {
+      addEventListener() {},
+      classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+      dataset: {},
+      style: {},
+      textContent: "",
+      innerHTML: "",
+      append() {},
+      replaceChildren() {},
+      querySelectorAll() { return []; },
+      querySelector() { return null; },
+      setAttribute() {},
+      getAttribute() { return null; },
+      hasAttribute() { return false; },
+      removeAttribute() {}
+    };
+    const document = {
+      querySelector() { return { ...fakeElement }; },
+      addEventListener() {},
+      documentElement: { clientWidth: 1440, style: { setProperty() {} } },
+      body: { ...fakeElement, children: [] },
+      activeElement: null
+    };
+    const window = {};
+    const navigator = { clipboard: { writeText() {} } };
+    const requestAnimationFrame = () => {};
+    class EventSource {}
+  `;
+  const code = source
+    .replace(/import[^\n]+\n/g, "")
+    .replace("await init();", "");
+  const module = await import(`data:text/javascript,${encodeURIComponent(`${harness}\n${code}\nexport { state, settingsModelHtml, providerModelKey, isConfigRevisionConflict };`)}`);
+
+  assert.equal(module.isConfigRevisionConflict({ status: 409, code: "CONFIG_REVISION_CONFLICT" }), true);
+  assert.equal(module.isConfigRevisionConflict({ status: 409, code: "SESSION_RUNNING" }), false);
+  assert.equal(module.isConfigRevisionConflict({ status: 409, code: "SESSION_MODEL_SELECTION_CHANGED" }), false);
+
+  const sharedModel = { id: "shared-model", label: "Shared model", reasoningEfforts: [] };
+  const grok = { id: "grok", editable: true };
+  const deepseek = { id: "deepseek", editable: true };
+  module.state.deleteConfirmModelKey = module.providerModelKey(grok.id, sharedModel.id);
+
+  const grokHtml = module.settingsModelHtml(sharedModel, grok, 2);
+  const deepseekHtml = module.settingsModelHtml(sharedModel, deepseek, 2);
+  assert.match(grokHtml, /settings-model-row confirming-delete/);
+  assert.match(grokHtml, />确认删除<\/button>/);
+  assert.doesNotMatch(deepseekHtml, /confirming-delete/);
+  assert.match(deepseekHtml, />删除<\/button>/);
+});
+
 test("dashboard exposes responsive navigation and accessible interaction semantics", async () => {
   const app = await fs.readFile(path.resolve("src/dashboard/public/app.js"), "utf8");
   const html = await fs.readFile(path.resolve("src/dashboard/public/index.html"), "utf8");
   const css = await fs.readFile(path.resolve("src/dashboard/public/styles.css"), "utf8");
 
+  const header = html.slice(html.indexOf("workspace-header"), html.indexOf("workflow-strip"));
+  assert.match(header, /id="connection-status"/);
+  assert.match(header, /本地网关未连接/);
+  assert.doesNotMatch(header, /本地通用智能体|workspace-local|local-dot/);
+  assert.ok(header.indexOf("connection-status") < header.indexOf("header-actions"));
+  assert.doesNotMatch(header.slice(header.indexOf("header-actions")), /connection-status/);
+  assert.match(app, /本地网关已连接/);
   assert.match(html, /id="responsive-navigation"[\s\S]*data-dashboard-view="sessions"[\s\S]*data-dashboard-view="conversation"[\s\S]*data-dashboard-view="files"/);
   assert.match(html, /id="transcript" role="log" aria-live="off"/);
   assert.match(html, /id="dashboard-live-region" role="status" aria-live="polite"/);
   assert.match(html, /id="permission-mode" role="radiogroup"/);
+  assert.match(html, /id="goal-mode"[^>]*aria-label="Goal 模式"[^>]*>Goal</);
+  assert.match(html, /id="goal-confirm-panel"/);
+  assert.match(html, /id="goal-text-panel"/);
+  assert.doesNotMatch(html, /data-mode="goal"/);
+  const permissionBlock = html.slice(html.indexOf('id="permission-mode"'), html.indexOf('id="goal-mode"'));
+  assert.match(permissionBlock, /data-mode="plan"/);
+  assert.match(permissionBlock, /data-mode="workspace"/);
+  assert.match(permissionBlock, /data-mode="fullAccess"/);
+  assert.equal([...permissionBlock.matchAll(/data-mode="/g)].length, 3);
+  assert.match(app, /clientPreviousPermissionMode: state\.goal\.enabled \? state\.goal\.previousPermissionMode : undefined/);
+  assert.match(app, /function applyGoalSnapshot\(/);
+  assert.match(app, /启用 Goal 模式？/);
+  assert.match(app, /无人值守自动执行/);
+  assert.match(app, /请输入目标/);
   assert.match(html, /id="preview-resize-handle" role="separator"[^>]*aria-orientation="vertical"/);
   assert.match(html, /role="radio" aria-checked="true"/);
   assert.match(html, /<label class="visually-hidden" for="prompt-input">/);

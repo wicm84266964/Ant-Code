@@ -172,7 +172,7 @@ function formatStartupBanner(session) {
   ];
 
   if (!session.config.lab.gatewayUrl) {
-    lines.push("Set LAB_MODEL_GATEWAY_URL to enable model turns through the configured gateway.");
+    lines.push("Set LAB_MODEL_GATEWAY_URL to enable model turns through the lab gateway.");
   }
   if (session.resumedFrom) {
     lines.push(`Resumed from ${session.resumedFrom.metadataPath}; restored messages=${session.messages.length}.`);
@@ -268,6 +268,9 @@ function formatMetadataPolicy(transcript = {}) {
   }
   if (transcript.retentionDays === 0) {
     return "zero-retention";
+  }
+  if (transcript.retentionDays === null) {
+    return `forever, encryption=${transcript.encryption ?? "off"}`;
   }
   return `${transcript.retentionDays ?? 30}d, encryption=${transcript.encryption ?? "off"}`;
 }

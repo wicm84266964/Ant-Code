@@ -23,7 +23,7 @@ lines.on("line", (line) => {
 
   if (request.method === "initialize") {
     respond(request.id, {
-      protocolVersion: "ant-code-mcp.v1",
+      protocolVersion: "lab-agent-mcp.v1",
       capabilities: { tools: {} },
       serverInfo: { name: "mcp-cancel-fixture", version: "0.1.0" }
     });
@@ -31,11 +31,13 @@ lines.on("line", (line) => {
   }
   if (request.method === "tools/list") {
     respond(request.id, {
-      tools: [{
-        name: "slow",
-        description: "Slow tool for cancellation tests.",
-        inputSchema: { type: "object", properties: {} }
-      }]
+      tools: [
+        {
+          name: "slow",
+          description: "Slow tool for cancellation tests.",
+          inputSchema: { type: "object", properties: {} }
+        }
+      ]
     });
     return;
   }

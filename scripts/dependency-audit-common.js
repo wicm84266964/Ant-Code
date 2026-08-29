@@ -43,6 +43,14 @@ export async function readInstalledPackage(packageName) {
 }
 
 /**
+ * @param {Record<string, any>} lock
+ * @param {string} packageName
+ */
+export function readLockedPackage(lock, packageName) {
+  return lock?.packages?.[`node_modules/${packageName}`] ?? null;
+}
+
+/**
  * @param {Record<string, any> | null} installed
  */
 export function normalizeLicense(installed) {

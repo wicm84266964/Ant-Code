@@ -151,10 +151,10 @@ test("session uses same-gateway vision agent when main model is text-only", asyn
 test("session blocks image attachments when no same-gateway vision model exists", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
   await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
-    modelAlias: "text-only-model",
+    modelAlias: "deepseek-text",
     models: [
-      { id: "text-only-model", label: "Text Only Model", modalities: ["text"] },
-      { id: "text-fast-model", label: "Text Fast Model", modalities: ["text"] }
+      { id: "deepseek-text", label: "DeepSeek Text", modalities: ["text"] },
+      { id: "deepseek-flash", label: "DeepSeek Flash", modalities: ["text"] }
     ]
   }), "utf8");
   const requests = [];
@@ -1487,7 +1487,7 @@ test("OpenAI-compatible tool continuations include prior assistant reasoning_con
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
   await fs.writeFile(path.join(cwd, "notes.txt"), "hello notes", "utf8");
   const requests = [];
-  const server = await listen(createReasoningToolGateway(requests), "127.0.0.1");
+  const server = await listen(createDeepSeekReasoningToolGateway(requests), "127.0.0.1");
 
   try {
     const env = {
@@ -1512,6 +1512,34 @@ test("OpenAI-compatible tool continuations include prior assistant reasoning_con
     assert.equal(requests.length, 2);
     const assistant = requests[1].messages.find((message) => message.role === "assistant" && Array.isArray(message.tool_calls));
     assert.equal(assistant.reasoning_content, "Need to read notes before answering.");
+  } finally {
+    await close(server);
+  }
+});
+
+test("OpenAI Responses tool continuations replay native reasoning items", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
+  await fs.writeFile(path.join(cwd, "notes.txt"), "hello notes", "utf8");
+  const requests = [];
+  const server = await listen(createResponsesReasoningToolGateway(requests), "127.0.0.1");
+
+  try {
+    const env = {
+      LAB_MODEL_GATEWAY_URL: `${serverUrl(server)}/v1/responses`,
+      LAB_AGENT_MODEL: "grok-4.6",
+      LAB_AGENT_NETWORK_MODE: "offline",
+      LAB_AGENT_TRANSCRIPT_ENABLED: "false",
+      LAB_MODEL_GATEWAY_PROTOCOL: "openai-responses"
+    };
+    const session = await createSession({ cwd, mode: "interactive", env });
+
+    const result = await runSessionTurn(session, { prompt: "read notes", env });
+
+    assert.equal(result.output, "responses reasoning continuation accepted");
+    assert.equal(requests.length, 2);
+    assert.equal(requests[1].input.filter((item) => item.type === "reasoning").length, 1);
+    assert.equal(requests[1].input.filter((item) => item.type === "function_call").length, 1);
+    assert.equal(requests[1].input.some((item) => item.type === "function_call_output" && item.call_id === "call-read-notes"), true);
   } finally {
     await close(server);
   }
@@ -2505,7 +2533,7 @@ test("createSession keeps compacted context when restored full archive would exc
     prompt: "recent compacted prompt",
     title: "budget limited resume",
     status: "completed",
-    model: "example-coding-model",
+    model: "mock-model",
     transcript: {
       version: 2,
       messages: compactedContextMessages,
@@ -2542,7 +2570,7 @@ test("createSession cleans legacy raw OpenAI stream dumps on resume", async () =
   const store = createSessionStore({ cwd });
   const rawDump = JSON.stringify({
     id: "legacy-raw",
-    model: "example-coding-model",
+    model: "mimo-v2.5-pro",
     content: [],
     text: "",
     toolCalls: [],
@@ -3499,7 +3527,7 @@ function findDanglingOpenAIToolMessage(messages = []) {
 /**
  * @param {Array<Record<string, any>>} requests
  */
-function createReasoningToolGateway(requests) {
+function createDeepSeekReasoningToolGateway(requests) {
   return http.createServer(async (request, response) => {
     if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
       response.writeHead(404, { "content-type": "application/json" });
@@ -3512,7 +3540,7 @@ function createReasoningToolGateway(requests) {
 
     if (requests.length === 1) {
       response.writeHead(200, { "content-type": "text/event-stream" });
-      response.write('data: {"id":"chatcmpl-reasoning-tool","model":"mock-openai","choices":[{"delta":{"reasoning_content":"Need to read notes before answering."}}]}\n\n');
+      response.write('data: {"id":"chatcmpl-deepseek-tool","model":"mock-openai","choices":[{"delta":{"reasoning_content":"Need to read notes before answering."}}]}\n\n');
       response.write('data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-read-notes","function":{"name":"read_file","arguments":"{\\"path\\":\\"notes.txt\\"}"}}]},"finish_reason":"tool_calls"}]}\n\n');
       response.end("data: [DONE]\n\n");
       return;
@@ -3532,7 +3560,7 @@ function createReasoningToolGateway(requests) {
 
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({
-      id: "chatcmpl-reasoning-final",
+      id: "chatcmpl-deepseek-final",
       model: body.model,
       choices: [
         {
@@ -3543,6 +3571,68 @@ function createReasoningToolGateway(requests) {
           }
         }
       ]
+    }));
+  });
+}
+
+/**
+ * @param {Array<Record<string, any>>} requests
+ */
+function createResponsesReasoningToolGateway(requests) {
+  return http.createServer(async (request, response) => {
+    if (request.method !== "POST" || request.url !== "/v1/responses") {
+      response.writeHead(404, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { code: "NOT_FOUND" } }));
+      return;
+    }
+
+    const body = await readRequestJson(request);
+    requests.push(body);
+
+    if (requests.length === 1) {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        id: "resp-tool-round",
+        model: body.model,
+        status: "completed",
+        output: [
+          {
+            type: "reasoning",
+            id: "rs-tool-round",
+            summary: [{ type: "summary_text", text: "Need to read notes." }],
+            encrypted_content: "opaque-provider-state"
+          },
+          {
+            type: "function_call",
+            id: "fc-read-notes",
+            call_id: "call-read-notes",
+            name: "read_file",
+            arguments: '{"path":"notes.txt"}'
+          }
+        ]
+      }));
+      return;
+    }
+
+    const reasoning = body.input?.find((item) => item.type === "reasoning");
+    const functionCalls = body.input?.filter((item) => item.type === "function_call") ?? [];
+    const toolOutput = body.input?.find((item) => item.type === "function_call_output" && item.call_id === "call-read-notes");
+    if (reasoning?.encrypted_content !== "opaque-provider-state" || functionCalls.length !== 1 || !toolOutput) {
+      response.writeHead(400, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "Native reasoning and function items must be replayed." } }));
+      return;
+    }
+
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      id: "resp-tool-final",
+      model: body.model,
+      status: "completed",
+      output: [{
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "responses reasoning continuation accepted" }]
+      }]
     }));
   });
 }
@@ -3565,7 +3655,7 @@ function createLongReasoningToolGateway(requests) {
       const reasoning = `VERY_OLD_REASONING_START${"填充".repeat(160_000)}LATEST_REASONING_TAIL`;
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.write(`data: ${JSON.stringify({
-        id: "chatcmpl-reasoning-long-tool",
+        id: "chatcmpl-deepseek-long-tool",
         model: "mock-openai",
         choices: [{ delta: { reasoning_content: reasoning } }]
       })}\n\n`);
@@ -3587,7 +3677,7 @@ function createLongReasoningToolGateway(requests) {
     }
 
     response.writeHead(200, { "content-type": "text/event-stream" });
-    response.write('data: {"id":"chatcmpl-reasoning-final","model":"mock-openai","choices":[{"delta":{"content":"trimmed reasoning accepted"},"finish_reason":"stop"}]}\n\n');
+    response.write('data: {"id":"chatcmpl-deepseek-final","model":"mock-openai","choices":[{"delta":{"content":"trimmed reasoning accepted"},"finish_reason":"stop"}]}\n\n');
     response.end("data: [DONE]\n\n");
   });
 }
@@ -3748,3 +3838,62 @@ function mockGatewayEnvWithoutModel(url) {
   delete env.LAB_AGENT_MODEL;
   return env;
 }
+
+test("session hydrates and persists Goal metadata", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "session-goal-hydrate-"));
+  const server = await listen(createRecordingGateway([]), "127.0.0.1");
+  const { enableGoalState } = await import("../../src/core/goal.js");
+  try {
+    const env = mockGatewayEnv(serverUrl(server));
+    env.LAB_AGENT_TRANSCRIPT_ENABLED = "true";
+    const session = await createSession({ cwd, mode: "interactive", env, fullAccess: true });
+    await runSessionTurn(session, { prompt: "seed", env });
+    session.goal = enableGoalState({ text: "finish filters", previousPermissionMode: "workspace" });
+    await persistSessionSnapshot(session, { env });
+    const resumed = await createSession({ cwd, mode: "interactive", env, resume: session.id, resumeFullContext: true });
+    assert.equal(resumed.goal.enabled, true);
+    assert.equal(resumed.goal.text, "finish filters");
+    assert.equal(resumed.goal.previousPermissionMode, "workspace");
+  } finally {
+    await close(server);
+  }
+});
+
+test("Goal sessions skip verbal workflow sync and strip GOAL_STATUS from transcript", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "session-goal-strip-"));
+  const requests = [];
+  const server = await listen(http.createServer(async (request, response) => {
+    const body = await readRequestJson(request);
+    requests.push(body);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      id: "goal-strip",
+      model: body.model,
+      content: [{ type: "text", text: "任务已完成\nGOAL_STATUS: complete\nEVIDENCE: none\nGAPS:\n" }],
+      toolCalls: [],
+      stopReason: "stop"
+    }));
+  }), "127.0.0.1");
+  const { enableGoalState } = await import("../../src/core/goal.js");
+  try {
+    const env = mockGatewayEnv(serverUrl(server));
+    env.LAB_AGENT_TRANSCRIPT_ENABLED = "true";
+    const session = await createSession({ cwd, mode: "interactive", env, fullAccess: true });
+    session.workflow.todos = [{ id: "1", content: "still pending", status: "pending" }];
+    session.goal = enableGoalState({ text: "do not fake complete", previousPermissionMode: "plan" });
+    await runSessionTurn(session, { prompt: "are we done?", env });
+    assert.equal(session.workflow.todos[0].status, "pending");
+    const assistantTranscript = session.transcriptMessages.find((message) => message.role === "assistant");
+    const transcriptText = Array.isArray(assistantTranscript?.content)
+      ? assistantTranscript.content.map((item) => item.text ?? "").join("")
+      : String(assistantTranscript?.content ?? "");
+    assert.doesNotMatch(transcriptText, /GOAL_STATUS:/);
+    const assistantContext = session.messages.find((message) => message.role === "assistant");
+    const contextText = Array.isArray(assistantContext?.content)
+      ? assistantContext.content.map((item) => item.text ?? "").join("")
+      : String(assistantContext?.content ?? "");
+    assert.match(contextText, /GOAL_STATUS: complete/);
+  } finally {
+    await close(server);
+  }
+});

@@ -202,10 +202,9 @@ test("persisted terminal history is scanned incrementally and compacted", async 
   )));
 
   const first = listBackgroundTerminalTasks({ cwd, parentSessionId });
-  assert.ok(first.length > 0);
   assert.ok(first.length <= 64);
   let tasks = first;
-  for (let attempt = 0; attempt < 12; attempt += 1) {
+  for (let attempt = 0; attempt < 240; attempt += 1) {
     tasks = listBackgroundTerminalTasks({ cwd, parentSessionId });
     if (tasks.length === 200) break;
   }

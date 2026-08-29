@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import http from "node:http";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
+import { persistTuiPermissionCycle } from "../../src/cli/tui/permission-cycle.js";
+import { enableGoalState } from "../../src/core/goal.js";
+import { createSession } from "../../src/core/session.js";
 import {
   getPopoverStack,
   hasMouseSequence,
@@ -162,4 +169,52 @@ test("native scrollback mode is disabled when the TUI owns scroll layout", () =>
   assert.equal(shouldUseScrollbackMode(48, { nativeScrollback: true, pinnedSidePanel: true }), false);
   assert.equal(shouldUseScrollbackMode(24, { nativeScrollback: true, streamActive: true }), false);
   assert.equal(shouldUseScrollbackMode(0), false);
+});
+
+test("TUI permission cycle persists Goal-off without another turn", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "goal-tui-cycle-"));
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      id: "tui-goal",
+      model: "mock-model",
+      content: [{ type: "text", text: "ready" }],
+      toolCalls: [],
+      stopReason: "stop"
+    }));
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve(undefined);
+    });
+  });
+  const port = server.address().port;
+  const env = {
+    LAB_MODEL_GATEWAY_URL: `http://127.0.0.1:${port}/v1/chat`,
+    LAB_MODEL_GATEWAY_PROTOCOL: "lab-agent-gateway",
+    LAB_AGENT_MODEL: "mock-model",
+    LAB_AGENT_NETWORK_MODE: "offline",
+    LAB_AGENT_TRANSCRIPT_ENABLED: "true"
+  };
+  try {
+    const { runSessionTurn } = await import("../../src/core/session.js");
+    const session = await createSession({ cwd, mode: "interactive", env, fullAccess: true });
+    await runSessionTurn(session, { prompt: "seed metadata", env });
+    session.goal = enableGoalState({
+      text: "ship dashboard goal mode",
+      previousPermissionMode: "plan"
+    });
+    const { persistSessionSnapshot } = await import("../../src/core/session.js");
+    await persistSessionSnapshot(session, { env });
+    const armed = await createSession({ cwd, mode: "interactive", env, resume: session.id, resumeFullContext: true });
+    assert.equal(armed.goal.enabled, true);
+    await persistTuiPermissionCycle(armed, "plan", { env });
+    const resumed = await createSession({ cwd, mode: "interactive", env, resume: session.id, resumeFullContext: true });
+    assert.equal(resumed.goal.enabled, false);
+    assert.equal(resumed.permissionMode, "plan");
+  } finally {
+    await new Promise((resolve) => server.close(() => resolve(undefined)));
+  }
 });

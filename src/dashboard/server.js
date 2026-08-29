@@ -14,6 +14,7 @@ const PUBLIC_DIR = path.join(DASHBOARD_DIR, "public");
 const SESSION_COOKIE_PREFIX = "antcode_dashboard_session_";
 const CSRF_COOKIE_PREFIX = "antcode_dashboard_csrf_";
 const CSRF_HEADER = "x-antcode-csrf-token";
+const DASHBOARD_API_VERSION = "dashboard.v2";
 const MAX_SSE_CONNECTIONS = 50;
 const MAX_SSE_CONNECTIONS_PER_SESSION = 5;
 const MAX_SSE_BUFFER_BYTES = 1024 * 1024;
@@ -117,6 +118,7 @@ export function createDashboardServer(options) {
   let shutdownFinished = false;
   const configuredHost = normalizeDashboardHost(options.host ?? DEFAULT_HOST);
   const server = http.createServer(async (req, res) => {
+    const requestId = randomBytes(12).toString("base64url");
     applySecurityHeaders(res);
     try {
       const request = authorizeRequest(req, server, auth, configuredHost);
@@ -131,14 +133,15 @@ export function createDashboardServer(options) {
         requestShutdown
       }, request.url, body);
     } catch (error) {
+      const failure = dashboardRequestFailure(error, requestId);
+      if (failure.unexpected) {
+        logUnexpectedDashboardRequestError(req, error, requestId);
+      }
       if (res.headersSent) {
         res.destroy();
         return;
       }
-      const status = error instanceof RequestError ? error.status : 500;
-      const code = error instanceof RequestError ? error.code : "INTERNAL_ERROR";
-      const message = error instanceof RequestError ? error.message : "Internal server error";
-      sendJson(res, status, { ok: false, error: message, code });
+      sendJson(res, failure.status, failure.payload);
     }
   });
 
@@ -335,6 +338,135 @@ class RequestError extends Error {
   }
 }
 
+/** @param {unknown} error @param {string} requestId */
+function dashboardRequestFailure(error, requestId) {
+  try {
+    if (error instanceof RequestError) {
+      return {
+        status: error.status,
+        payload: { ok: false, error: error.message, code: error.code },
+        unexpected: false
+      };
+    }
+
+    const issue = /** @type {Record<string, any>} */ (error ?? {});
+    const code = safeDiagnosticCode(issue.code);
+    if (code.startsWith("CONFIG_V2_")) {
+      const configPath = safeDiagnosticText(issue.path ?? issue.configPath, "");
+      const status = Number.isInteger(issue.status) && issue.status >= 400 && issue.status < 500
+        ? issue.status
+        : code.includes("CONFLICT") ? 409 : 422;
+      return {
+        status,
+        payload: {
+          ok: false,
+          code,
+          error: safeDiagnosticText(issue.message, "模型配置无效"),
+          ...(configPath ? { configPath } : {}),
+          requestId
+        },
+        unexpected: false
+      };
+    }
+  } catch {
+    // Hostile error objects must not escape the request boundary.
+  }
+
+  return {
+    status: 500,
+    payload: { ok: false, error: "Internal server error", code: "INTERNAL_ERROR", requestId },
+    unexpected: true
+  };
+}
+
+/** @param {http.IncomingMessage} req @param {unknown} error @param {string} requestId */
+function logUnexpectedDashboardRequestError(req, error, requestId) {
+  try {
+    const issue = /** @type {Record<string, any>} */ (error ?? {});
+    const record = {
+      event: "dashboard_request_error",
+      requestId,
+      method: safeRequestMethod(req.method),
+      path: safeRequestPath(req.url),
+      name: safeDiagnosticName(issue.name),
+      code: safeDiagnosticCode(issue.code) || "UNEXPECTED_ERROR",
+      configPath: safeDiagnosticText(issue.path ?? issue.configPath, ""),
+      message: safeDiagnosticText(issue.message, "Unexpected dashboard request error")
+    };
+    console.error(JSON.stringify(record));
+  } catch {
+    try {
+      console.error(JSON.stringify({
+        event: "dashboard_request_error",
+        requestId,
+        method: "UNKNOWN",
+        path: "/",
+        name: "Error",
+        code: "UNEXPECTED_ERROR",
+        configPath: "",
+        message: "Unexpected dashboard request error"
+      }));
+    } catch {
+      // Diagnostics must never turn a contained request failure into a process failure.
+    }
+  }
+}
+
+/** @param {unknown} value */
+function safeRequestMethod(value) {
+  const method = String(value ?? "").trim().toUpperCase();
+  return /^[A-Z]{1,16}$/.test(method) ? method : "UNKNOWN";
+}
+
+/** @param {unknown} value */
+function safeRequestPath(value) {
+  try {
+    return new URL(String(value ?? "/"), "http://127.0.0.1").pathname.slice(0, 512) || "/";
+  } catch {
+    return "/";
+  }
+}
+
+/** @param {unknown} value */
+function safeDiagnosticName(value) {
+  const name = String(value ?? "Error").trim();
+  return /^[A-Za-z][A-Za-z0-9_.-]{0,79}$/.test(name) ? name : "Error";
+}
+
+/** @param {unknown} value */
+function safeDiagnosticCode(value) {
+  const code = String(value ?? "").trim();
+  return /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(code) ? code : "";
+}
+
+/** @param {unknown} value @param {string} fallback */
+function safeDiagnosticText(value, fallback) {
+  let source = fallback;
+  try {
+    source = String(value ?? "").trim() || fallback;
+  } catch {
+    // Keep the caller-provided safe fallback when coercion itself is hostile.
+  }
+  return source
+    .replace(/[\r\n\t\0]+/g, " ")
+    .replace(/\b(Bearer|Basic)\s+[^\s,;]+/gi, "$1 [REDACTED]")
+    .replace(/\bsk-[A-Za-z0-9_-]+\b/g, "[REDACTED]")
+    .replace(/\b([a-z0-9_-]*(?:api[_-]?key|access[_-]?token|authorization|token))\b["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;&}]+)/gi, "$1=[REDACTED]")
+    .replace(/https?:\/\/[^\s\"'<>]+/gi, redactDiagnosticUrl)
+    .replace(/\?[^\s#]*/g, "?[REDACTED]")
+    .slice(0, 1_000);
+}
+
+/** @param {string} value */
+function redactDiagnosticUrl(value) {
+  try {
+    const parsed = new URL(value);
+    return `${parsed.origin}${parsed.pathname}${parsed.search ? "?[REDACTED]" : ""}`;
+  } catch {
+    return value.replace(/\?.*$/, "?[REDACTED]");
+  }
+}
+
 async function routeRequest(req, res, options, url, requestBody) {
   const publicDir = options.publicDir ?? PUBLIC_DIR;
   if (req.method === "GET" && url.pathname === "/") {
@@ -344,17 +476,22 @@ async function routeRequest(req, res, options, url, requestBody) {
     return serveStatic(res, path.join(publicDir, url.pathname.replace(/^\/assets\//, "")), publicDir);
   }
   if (req.method === "GET" && url.pathname === "/api/status") {
-    const status = typeof options.runtime.status === "function" ? await options.runtime.status() : { ok: true };
+    const status = typeof options.runtime.status === "function"
+      ? await options.runtime.status({ clientId: url.searchParams.get("clientId") ?? "" })
+      : { ok: true };
     return sendJson(res, status.ok ? 200 : status.status ?? 400, {
       ok: status.ok !== false,
       cwd: options.cwd,
-      version: "dashboard.v1",
+      version: DASHBOARD_API_VERSION,
       sessionStatus: status.sessionStatus ?? null,
       models: status.models ?? [],
       agentModelTiers: status.agentModelTiers ?? {},
       visionAgent: status.visionAgent ?? null,
       gatewayConfig: status.gatewayConfig ?? null,
-      gatewayProfiles: status.gatewayProfiles ?? []
+      gatewayProfiles: status.gatewayProfiles ?? [],
+      settings: status.settings ?? null,
+      configV2: status.configV2 ?? null,
+      configRevisions: status.configRevisions ?? status.configV2?.revisions ?? null
     });
   }
   if (req.method === "GET" && url.pathname === "/api/lifecycle/status") {
@@ -367,6 +504,47 @@ async function routeRequest(req, res, options, url, requestBody) {
     const body = requestBody ?? {};
     const result = await options.runtime.switchModel(body);
     return sendJson(res, result.ok ? 200 : result.status ?? 400, result);
+  }
+  if (req.method === "POST" && url.pathname === "/api/reasoning-effort") {
+    const body = requestBody ?? {};
+    const result = await options.runtime.switchReasoningEffort(body);
+    return sendJson(res, result.ok ? 200 : result.status ?? 400, result);
+  }
+  if (req.method === "POST" && url.pathname === "/api/default-model") {
+    const body = requestBody ?? {};
+    const result = await options.runtime.saveDefaultModelSelection(body);
+    return sendJson(res, result.ok ? 200 : result.status ?? 400, result);
+  }
+  if (req.method === "POST" && url.pathname === "/api/settings-config") {
+    const body = requestBody ?? {};
+    const result = await options.runtime.saveSettingsConfig(body);
+    return sendJson(res, result.ok ? 200 : result.status ?? 400, result);
+  }
+  if (req.method === "POST" && url.pathname === "/api/gateway-probe") {
+    const body = requestBody ?? {};
+    const result = await options.runtime.probeGateway(body);
+    return sendJson(res, result.ok ? 200 : result.status ?? 400, result);
+  }
+  if (req.method === "POST" && url.pathname === "/api/model-capabilities/probe") {
+    const body = requestBody ?? {};
+    const controller = new AbortController();
+    const abort = () => {
+      if (!controller.signal.aborted) {
+        controller.abort(new Error("Dashboard capability probe client disconnected"));
+      }
+    };
+    req.once("aborted", abort);
+    res.once("close", abort);
+    try {
+      const result = await options.runtime.probeModelCapabilities(body, { signal: controller.signal });
+      if (!res.destroyed && !res.writableEnded) {
+        return sendJson(res, result.ok ? 200 : result.status ?? 400, result);
+      }
+      return undefined;
+    } finally {
+      req.off("aborted", abort);
+      res.off("close", abort);
+    }
   }
   if (req.method === "POST" && url.pathname === "/api/gateway-profile") {
     const body = requestBody ?? {};
@@ -437,6 +615,11 @@ async function routeRequest(req, res, options, url, requestBody) {
     const body = requestBody ?? {};
     const result = await options.runtime.startTurn(body);
     return sendJson(res, result.ok ? 202 : result.status ?? 400, result);
+  }
+  if (req.method === "POST" && url.pathname === "/api/goal") {
+    const body = requestBody ?? {};
+    const result = await options.runtime.applyGoal(body);
+    return sendJson(res, result.ok ? 200 : result.status ?? 400, result);
   }
   if (req.method === "POST" && url.pathname === "/api/turns/interrupt") {
     const body = requestBody ?? {};

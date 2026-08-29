@@ -12,6 +12,7 @@ export const GATEWAY_PROTOCOL_VERSION = "lab-agent-gateway.v1";
  *   toolCalls: GatewayToolCall[];
  *   stopReason: string | null;
  *   usage: Record<string, any> | null;
+ *   responseItems?: Array<Record<string, any>>;
  *   raw?: unknown;
  * }} NormalizedGatewayResponse
  */
@@ -71,7 +72,7 @@ function requestIncludesImages(messages = []) {
 }
 
 /**
- * Normalize the gateway response shape into the internal assistant result.
+ * Normalize the lab gateway response shape into the internal assistant result.
  *
  * @param {unknown} raw
  * @returns {NormalizedGatewayResponse}

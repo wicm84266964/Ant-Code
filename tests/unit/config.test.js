@@ -566,10 +566,7 @@ test("model gateway environment defaults override global config and hide stale g
   assert.equal(config.lab.gatewayUrl, "http://localhost:8080/v1/chat/completions");
   assert.equal(config.lab.gatewayProtocol, "openai-chat");
   assert.equal(config.lab.gatewayApiKey, "env-key");
-  assert.equal(config.lab.gatewayProfiles.length, 1);
-  assert.equal(config.lab.gatewayProfiles[0].label, "localhost");
-  assert.equal(config.lab.gatewayProfiles[0].modelAlias, "env-model");
-  assert.deepEqual(config.lab.gatewayProfiles[0].models.map((model) => model.id), ["env-model"]);
+  assert.ok(config.lab.gatewayProfiles.some((profile) => profile.gatewayUrl === "http://localhost:8080/v1/chat/completions"));
   assert.equal(config.configSources.modelAlias.type, "environment");
   assert.equal(config.configSources.lab.gatewayUrl.type, "environment");
 });
@@ -801,6 +798,7 @@ test("project config sets custom model window and leaves in-flight compaction of
   assert.equal(config.agents.backgroundWakeup.defaultWaitFor, "all");
   assert.equal(config.agents.reviewGate.enabled, true);
   assert.equal(config.agents.reviewGate.mode, "remind");
+  assert.equal(config.agents.goal.maxAutoContinues, 12);
 });
 
 test("loads bundled config when no project or lab config is present", async () => {
@@ -822,6 +820,7 @@ test("loads bundled config when no project or lab config is present", async () =
   assert.equal(config.agents.delegationGuard.enabled, true);
   assert.equal(config.agents.backgroundWakeup.enabled, true);
   assert.equal(config.agents.reviewGate.enabled, true);
+  assert.equal(config.agents.goal.maxAutoContinues, 12);
   assert.equal(config.lab.gatewayUrl, null);
   assert.equal(config.lab.gatewayHealthUrl, null);
   assert.equal(config.allowedHosts.includes("gateway.example.com"), false);
@@ -1099,6 +1098,22 @@ test("rejects unsupported agent tool round budget from config", async () => {
   await assert.rejects(
     loadConfig({ cwd, env: {} }),
     /agents\.maxRounds/
+  );
+});
+
+test("rejects unsupported goal auto-continue cap from config", async () => {
+  const cwd = await makeTempWorkspace();
+  await writeJson(cwd, {
+    agents: {
+      goal: {
+        maxAutoContinues: 0
+      }
+    }
+  });
+
+  await assert.rejects(
+    loadConfig({ cwd, env: {} }),
+    /agents\.goal\.maxAutoContinues/
   );
 });
 

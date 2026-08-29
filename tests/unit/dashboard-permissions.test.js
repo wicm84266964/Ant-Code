@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyPermissionMode, approvalKeyFor, buildApprovalPreview, permissionModeSummary, sanitizeSensitiveValue } from "../../src/dashboard/permissions.js";
+import { applyPermissionMode, approvalKeyFor, buildApprovalPreview, normalizePermissionMode, permissionModeSummary, sanitizeSensitiveValue } from "../../src/dashboard/permissions.js";
 
 test("dashboard permission modes map to session flags", () => {
   const session = {};
@@ -148,4 +148,10 @@ test("dashboard approval previews preserve structure while masking command and M
   assert.match(command, /curl/);
   assert.doesNotMatch(mcp, /mcp-secret/);
   assert.match(mcp, /reports\/summary\.md/);
+});
+
+test("normalizePermissionMode treats goal as plan, not a fourth permission", () => {
+  assert.equal(normalizePermissionMode("goal"), "plan");
+  assert.equal(normalizePermissionMode("Goal"), "plan");
+  assert.equal(normalizePermissionMode("fullAccess"), "fullAccess");
 });

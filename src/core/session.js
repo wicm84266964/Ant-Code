@@ -1,9 +1,15 @@
 import crypto from "node:crypto";
 import { buildInitialContext } from "../context/builder.js";
 import { loadConfig } from "../config/load-config.js";
+import {
+  applyRuntimeModelSelection,
+  currentRuntimeModelSelection,
+  patchSessionModelSelectionMetadata,
+  resolveSessionModelSelection
+} from "../config-v2/runtime-selection.js";
 import { formatGatewayError, normalizeGatewayError } from "../model-gateway/errors.js";
 import { createLabModelGateway } from "../model-gateway/client.js";
-import { listConfiguredModels } from "../model-gateway/models.js";
+import { listConfiguredModels, listRoutingModels } from "../model-gateway/models.js";
 import { runHooks } from "../hooks/runner.js";
 import { createMcpRuntime } from "../mcp/runtime.js";
 import { appendThinkingPreview, limitThinkingPreview } from "../model-gateway/thinking-budget.js";
@@ -17,6 +23,7 @@ import { resolveMaxParallelReadonlyAgentRuns } from "../agents/orchestration-con
 import { appendDelegationReminderToExecution, createDelegationGuard } from "../agents/delegation-guard.js";
 import { createReviewGate } from "../agents/review-policy.js";
 import { buildCompactedContextMessage, compactSessionContextWithModel, createContextWindow, estimatePromptPayload, summarizeContextWindow } from "./context-window.js";
+import { buildGoalSystemPromptAppendix, normalizeSessionGoal, serializeSessionGoal, stripGoalStatusFromContent, stripGoalStatusMarkers } from "./goal.js";
 import { createAntEventNormalizer } from "./events.js";
 import { accumulateProviderUsage, normalizeProviderUsageAggregate, sanitizeProviderUsage } from "./provider-usage.js";
 import { resolveMainToolRounds } from "./tool-rounds.js";
@@ -39,11 +46,11 @@ const DEFAULT_RESUME_CONTEXT_BYTES = 1_000_000;
  * @param {{ cwd: string; mode: "interactive" | "print"; clientSurface?: "tui" | "dashboard" | "chat" | "print" | string; env?: NodeJS.ProcessEnv; readonly?: boolean; allowWrite?: boolean; allowCommand?: boolean; fullAccess?: boolean; resume?: string | null; resumeFullContext?: boolean }} options
  */
 export async function createSession(options) {
-  const config = await loadConfig({ cwd: options.cwd, env: options.env });
+  let config = await loadConfig({ cwd: options.cwd, env: options.env });
   const clientSurface = normalizeClientSurfaceValue(options.clientSurface ?? (options.mode === "print" ? "print" : "tui"));
-  const context = await buildInitialContext({ cwd: options.cwd, config, env: options.env, clientSurface });
+  let context = await buildInitialContext({ cwd: options.cwd, config, env: options.env, clientSurface });
   const workspaceDiagnostic = await diagnoseWorkspace(options.cwd);
-  const resumed = options.resume
+  const resumeResult = options.resume
     ? await resolveResumeMetadata({
       cwd: options.cwd,
       config,
@@ -53,6 +60,11 @@ export async function createSession(options) {
       preferFullContext: options.resumeFullContext === true
     })
     : null;
+  const resumed = resumeResult?.metadata ?? null;
+  if (resumeResult?.config && resumeResult.config !== config) {
+    config = resumeResult.config;
+    context = await buildInitialContext({ cwd: options.cwd, config, env: options.env, clientSurface });
+  }
   const contextWindow = createContextWindow(config);
   if (resumed?.contextWindow) {
     contextWindow.summary = typeof resumed.contextWindow.summary === "string" ? resumed.contextWindow.summary : "";
@@ -93,6 +105,10 @@ export async function createSession(options) {
     networkMode: config.networkMode,
     sensitivity: config.security?.sensitivity ?? "standard",
     model: config.modelAlias,
+    modelSelection: currentRuntimeModelSelection(config, {
+      model: config.modelAlias,
+      reasoningEffort: config.reasoningEffort
+    }),
     config,
     context,
     workspaceDiagnostic,
@@ -106,6 +122,7 @@ export async function createSession(options) {
     lastProviderUsage: usage.last ?? null,
     title: resumed?.title ?? null,
     turnCount: resumed?.turnCount ?? 0,
+    goal: normalizeSessionGoal(resumed?.goal),
     resumedFrom: resumed
   };
   await runHooks({
@@ -284,7 +301,7 @@ export async function runSessionTurn(session, options) {
   if (!gateway.configured) {
     finalOutput = [
       "Print mode is scaffolded.",
-      "Set LAB_MODEL_GATEWAY_URL to enable model turns through the configured gateway.",
+      "Set LAB_MODEL_GATEWAY_URL to enable model turns through the lab gateway.",
       `Received prompt bytes: ${Buffer.byteLength(options.prompt, "utf8")}`
     ].join("\n");
     await emitEvent(eventOptions, {
@@ -586,14 +603,16 @@ export async function runSessionTurn(session, options) {
           });
         }
       }
-      const workflowSync = syncWorkflowCompletionOnFinal(session.workflow, finalOutput);
-      if (workflowSync.changed) {
-        await emitEvent(eventOptions, {
-          type: "workflow_updated",
-          reason: "assistant_final_sync",
-          todosCompleted: workflowSync.todosCompleted,
-          planStepsCompleted: workflowSync.planStepsCompleted
-        });
+      if (!session.goal?.enabled) {
+        const workflowSync = syncWorkflowCompletionOnFinal(session.workflow, finalOutput);
+        if (workflowSync.changed) {
+          await emitEvent(eventOptions, {
+            type: "workflow_updated",
+            reason: "assistant_final_sync",
+            todosCompleted: workflowSync.todosCompleted,
+            planStepsCompleted: workflowSync.planStepsCompleted
+          });
+        }
       }
       const compaction = await appendSessionMessages(session, response.data, finalOutput, {
         gateway,
@@ -657,7 +676,10 @@ export async function runSessionTurn(session, options) {
       role: "assistant",
       content: response.data.content,
       toolCalls: response.data.toolCalls,
-      thinking: thinkingForRound(thinkingCapture, round + 1, response.data)
+      thinking: thinkingForRound(thinkingCapture, round + 1, response.data),
+      ...(Array.isArray(response.data.responseItems) && response.data.responseItems.length > 0
+        ? { responseItems: response.data.responseItems }
+        : {})
     };
     messages.push(assistantToolMessage);
     turnMessages.push(assistantToolMessage);
@@ -856,12 +878,16 @@ function resolveVisionAgentModel(config) {
     return null;
   }
   const models = listConfiguredModels(config);
+  const routingModels = listRoutingModels(config);
   const configured = String(vision.model ?? "").trim();
   if (configured) {
-    const model = models.find((item) => item.id === configured || item.label?.toLowerCase() === configured.toLowerCase());
-    return model && modelSupportsImages(config, model.id) ? model : null;
+    const folded = configured.toLowerCase();
+    const model = [...models, ...routingModels].find((item) => (
+      item.id === configured || item.label?.toLowerCase() === folded
+    ));
+    return modelSupportsImagesEntry(model) ? model : null;
   }
-  return models.find((model) => modelSupportsImages(config, model.id)) ?? null;
+  return models.find(modelSupportsImagesEntry) ?? null;
 }
 
 function modelSupportsImages(config, modelId) {
@@ -870,6 +896,11 @@ function modelSupportsImages(config, modelId) {
     return false;
   }
   const model = listConfiguredModels(config).find((item) => item.id === id);
+  return modelSupportsImagesEntry(model);
+}
+
+/** @param {Record<string, any> | null | undefined} model */
+function modelSupportsImagesEntry(model) {
   return Array.isArray(model?.modalities) && model.modalities.includes("image");
 }
 
@@ -979,9 +1010,18 @@ function messagesForModelContext(messages = []) {
  * @param {Awaited<ReturnType<typeof createSession>>} session
  */
 function buildSystemMessages(session) {
-  const text = Array.isArray(session.context?.system)
+  const base = Array.isArray(session.context?.system)
     ? session.context.system.filter((line) => typeof line === "string").join("\n")
     : "";
+  const parts = [base.trim()];
+  if (session.goal?.enabled) {
+    const goalText = String(session.goal.text ?? "").trim();
+    parts.push(buildGoalSystemPromptAppendix());
+    if (goalText) {
+      parts.push(`Active Goal:\nstatus=${session.goal.status}\ntext=${goalText}`);
+    }
+  }
+  const text = parts.filter(Boolean).join("\n\n");
   return text.trim()
     ? [{ role: "system", content: [{ type: "text", text }] }]
     : [];
@@ -1705,6 +1745,7 @@ function countUnifiedDiffChanges(diff) {
 function createTurnMetadata(session, prompt) {
   session.title ??= makeSessionTitle(prompt);
   const metadata = {
+    ...sessionModelMetadata(session),
     id: session.id,
     title: session.title,
     turnIndex: session.turnCount,
@@ -1720,7 +1761,6 @@ function createTurnMetadata(session, prompt) {
     allowCommand: session.allowCommand,
     networkMode: session.networkMode,
     sensitivity: session.sensitivity,
-    model: session.model,
     prompt: redactPersistedText(prompt),
     promptBytes: Buffer.byteLength(prompt, "utf8"),
     outputBytes: 0,
@@ -1730,11 +1770,12 @@ function createTurnMetadata(session, prompt) {
     outputHealth: [],
     interruptedDraft: null,
     toolCalls: [],
-    gatewayErrors: []
+    gatewayErrors: [],
+    usage: normalizeProviderUsageAggregate(session.usage),
+    workflow: summarizeWorkflow(session.workflow),
+    context: summarizeContextWindow(session),
+    goal: serializeSessionGoal(session.goal)
   };
-  metadata.usage = normalizeProviderUsageAggregate(session.usage);
-  metadata.workflow = summarizeWorkflow(session.workflow);
-  metadata.context = summarizeContextWindow(session);
   if (session.resumedFrom) {
     metadata.resumedFrom = {
       id: session.resumedFrom.id,
@@ -1850,6 +1891,24 @@ async function resolveResumeMetadata(options) {
     throw new Error(`Unable to resume session '${options.resume}': ${result.error.message}`);
   }
 
+  const selectionResolution = /** @type {Record<string, any>} */ (
+    resolveSessionModelSelection(options.config, result.metadata)
+  );
+  if (selectionResolution.status === "unresolved") {
+    throw new SessionModelSelectionUnresolvedError(selectionResolution);
+  }
+  const appliedSelection = /** @type {Record<string, any>} */ (selectionResolution.status === "resolved"
+    ? applyRuntimeModelSelection(options.config, selectionResolution.selection)
+    : {
+        status: "legacy",
+        config: configForLegacySessionResume(options.config, result.metadata),
+        selection: null
+      });
+  if (appliedSelection.status === "unresolved") {
+    throw new SessionModelSelectionUnresolvedError(appliedSelection);
+  }
+  const runtimeConfig = appliedSelection.config ?? options.config;
+
   const restoredTranscriptMessages = restoreRecentTranscriptMessages(result.metadata.transcript?.messages);
   const transcriptArchive = normalizeTranscriptArchiveState(result.metadata.transcript?.archive);
   const modelContextArchive = normalizeTranscriptArchiveState(result.metadata.transcript?.modelArchive);
@@ -1859,13 +1918,13 @@ async function resolveResumeMetadata(options) {
     archive: transcriptArchive,
     modelArchive: modelContextArchive,
     metadataMessages: result.metadata.transcript?.contextMessages ?? result.metadata.transcript?.messages,
-    context: options.config.context,
+    context: runtimeConfig.context,
     allowArchive: options.preferFullContext === true || !hasPersistedCompaction(persistedContextWindow),
     preferArchive: options.preferFullContext === true
   });
   restoredContext = limitRestoredContextToPromptBudget(restoredContext, {
-    config: options.config,
-    model: result.metadata.model ?? options.config.modelAlias,
+    config: runtimeConfig,
+    model: appliedSelection.selection?.model ?? result.metadata.model ?? runtimeConfig.modelAlias,
     tools: options.tools,
     clearPersistedSummary: options.preferFullContext === true,
     contextWindow: persistedContextWindow
@@ -1876,35 +1935,88 @@ async function resolveResumeMetadata(options) {
     : persistedContextWindow;
 
   return {
-    id: result.metadata.id,
-    startedAt: result.metadata.startedAt,
-    turnCount: Number.isFinite(result.metadata.turnIndex) ? result.metadata.turnIndex : 0,
-    metadataPath: result.path,
-    status: result.metadata.status ?? "metadata",
-    title: result.metadata.title ?? makeSessionTitle(result.metadata.prompt ?? ""),
-    prompt: result.metadata.prompt ?? "",
-    model: result.metadata.model ?? "",
-    clientSurface: result.metadata.clientSurface ?? null,
-    finishedAt: result.metadata.finishedAt,
-    promptBytes: result.metadata.promptBytes,
-    outputBytes: result.metadata.outputBytes,
-    permissionMode: result.metadata.permissionMode ?? null,
-    permissionReadonlyLocked: typeof result.metadata.permissionReadonlyLocked === "boolean" ? result.metadata.permissionReadonlyLocked : undefined,
-    readonly: typeof result.metadata.readonly === "boolean" ? result.metadata.readonly : undefined,
-    allowWrite: typeof result.metadata.allowWrite === "boolean" ? result.metadata.allowWrite : undefined,
-    allowCommand: typeof result.metadata.allowCommand === "boolean" ? result.metadata.allowCommand : undefined,
-    fullAccess: typeof result.metadata.fullAccess === "boolean" ? result.metadata.fullAccess : undefined,
-    context: result.metadata.context,
-    usage: result.metadata.usage,
-    messages: restoredContextMessages,
-    transcriptMessages: restoredTranscriptMessages,
-    transcriptArchive,
-    modelContextArchive,
-    contextWindow,
-    fullContextRestored: restoredContext.fromArchive,
-    fullContextRestoreLimited: restoredContext.limited === true,
-    fullContextRestoreLimitReason: restoredContext.limitReason ?? null
+    config: runtimeConfig,
+    metadata: {
+      id: result.metadata.id,
+      startedAt: result.metadata.startedAt,
+      turnCount: Number.isFinite(result.metadata.turnIndex) ? result.metadata.turnIndex : 0,
+      metadataPath: result.path,
+      status: result.metadata.status ?? "metadata",
+      title: result.metadata.title ?? makeSessionTitle(result.metadata.prompt ?? ""),
+      prompt: result.metadata.prompt ?? "",
+      model: result.metadata.model ?? "",
+      modelSelection: appliedSelection.selection ?? null,
+      modelSelectionSource: selectionResolution.source ?? null,
+      clientSurface: result.metadata.clientSurface ?? null,
+      finishedAt: result.metadata.finishedAt,
+      promptBytes: result.metadata.promptBytes,
+      outputBytes: result.metadata.outputBytes,
+      permissionMode: result.metadata.permissionMode ?? null,
+      permissionReadonlyLocked: typeof result.metadata.permissionReadonlyLocked === "boolean" ? result.metadata.permissionReadonlyLocked : undefined,
+      readonly: typeof result.metadata.readonly === "boolean" ? result.metadata.readonly : undefined,
+      allowWrite: typeof result.metadata.allowWrite === "boolean" ? result.metadata.allowWrite : undefined,
+      allowCommand: typeof result.metadata.allowCommand === "boolean" ? result.metadata.allowCommand : undefined,
+      fullAccess: typeof result.metadata.fullAccess === "boolean" ? result.metadata.fullAccess : undefined,
+      goal: result.metadata.goal ?? null,
+      context: result.metadata.context,
+      usage: result.metadata.usage,
+      messages: restoredContextMessages,
+      transcriptMessages: restoredTranscriptMessages,
+      transcriptArchive,
+      modelContextArchive,
+      contextWindow,
+      fullContextRestored: restoredContext.fromArchive,
+      fullContextRestoreLimited: restoredContext.limited === true,
+      fullContextRestoreLimitReason: restoredContext.limitReason ?? null
+    }
   };
+}
+
+/**
+ * Legacy metadata stores the model and effort as separate fields. A missing or
+ * undefined effort inherits the current config, while an explicit null keeps
+ * the session-level override cleared across process restarts.
+ *
+ * @param {Record<string, any>} config
+ * @param {Record<string, any>} metadata
+ */
+function configForLegacySessionResume(config, metadata) {
+  const persistedModelId = String(metadata?.model ?? "").trim();
+  const modelId = persistedModelId
+    && listConfiguredModels(config).some((model) => model.id === persistedModelId)
+    ? persistedModelId
+    : String(config.modelAlias ?? "").trim();
+  const metadataDefinesEffort = Object.prototype.hasOwnProperty.call(metadata ?? {}, "reasoningEffort")
+    && metadata.reasoningEffort !== undefined;
+  return {
+    ...config,
+    modelAlias: modelId,
+    reasoningEffort: metadataDefinesEffort
+      ? normalizeLegacyReasoningEffort(metadata.reasoningEffort)
+      : config.reasoningEffort
+  };
+}
+
+/** @param {unknown} value */
+function normalizeLegacyReasoningEffort(value) {
+  const effort = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return effort || null;
+}
+
+export class SessionModelSelectionUnresolvedError extends Error {
+  /** @param {Record<string, any>} resolution */
+  constructor(resolution) {
+    const model = String(resolution.model ?? resolution.selection?.model ?? "").trim();
+    super(model
+      ? `Unable to resume session because model selection '${model}' is unresolved (${resolution.reason})`
+      : `Unable to resume session because its model selection is unresolved (${resolution.reason})`);
+    this.name = "SessionModelSelectionUnresolvedError";
+    this.code = "SESSION_MODEL_SELECTION_UNRESOLVED";
+    this.reason = String(resolution.reason ?? "legacy-no-match");
+    this.model = model;
+    this.selection = resolution.selection ?? null;
+    this.candidates = Array.isArray(resolution.candidates) ? resolution.candidates.slice() : [];
+  }
 }
 
 /**
@@ -2010,6 +2122,12 @@ async function persistSessionMetadata(store, metadata, output, status, session, 
   metadata.lastProviderUsage = metadata.usage.last ?? null;
   metadata.workflow = summarizeWorkflow(session.workflow);
   metadata.context = summarizeContextWindow(session);
+  metadata.goal = serializeSessionGoal(session.goal);
+  metadata.permissionMode = session.permissionMode;
+  metadata.fullAccess = session.fullAccess;
+  metadata.readonly = session.readonly;
+  metadata.allowWrite = session.allowWrite;
+  metadata.allowCommand = session.allowCommand;
   const committed = await commitSessionSnapshot(store, metadata, session);
   Object.assign(metadata, committed.metadata);
   const metadataPath = committed.metadataPath;
@@ -2045,8 +2163,7 @@ export async function persistSessionSnapshot(session, options = {}) {
     transcript: session.config?.transcript,
     env: options.env ?? process.env
   });
-  const metadata = {};
-  metadata.model = session.model;
+  const metadata = /** @type {Record<string, any>} */ (sessionModelMetadata(session));
   metadata.permissionMode = session.permissionMode;
   metadata.fullAccess = session.fullAccess;
   metadata.readonly = session.readonly;
@@ -2054,6 +2171,7 @@ export async function persistSessionSnapshot(session, options = {}) {
   metadata.allowCommand = session.allowCommand;
   metadata.context = summarizeContextWindow(session);
   metadata.workflow = summarizeWorkflow(session.workflow);
+  metadata.goal = serializeSessionGoal(session.goal);
   const committed = await commitSessionSnapshot(store, metadata, session, { requireExisting: true });
   return { ok: true, metadataPath: committed.metadataPath, metadata: committed.metadata };
 }
@@ -2062,10 +2180,11 @@ function persistableMessages(messages) {
   return persistableMessagesWithOptions(messages);
 }
 
-function persistableTranscriptMessages(messages) {
+function persistableTranscriptMessages(messages, session) {
   return persistableMessagesWithOptions(messages, {
     includeThinking: true,
-    includeToolCalls: false
+    includeToolCalls: false,
+    stripGoalStatus: session?.goal?.enabled === true
   });
 }
 
@@ -2199,11 +2318,12 @@ async function commitSessionSnapshot(store, metadataUpdates, session, options = 
     const metadata = {
       ...currentMetadata,
       ...metadataUpdates,
+      ...sessionModelMetadata(session),
       transcript: {
         ...(currentMetadata.transcript ?? {}),
         ...(metadataUpdates.transcript ?? {}),
         version: 2,
-        messages: persistableTranscriptMessages(transcriptMessagesForPersistence(session)),
+        messages: persistableTranscriptMessages(transcriptMessagesForPersistence(session), session),
         contextMessages: persistableContextMessages(limitResumeContextMessages(session.messages, session.config.context)),
         contextWindow: persistableContextWindow(session.contextWindow),
         archive: persistableTranscriptArchive(transcriptArchive),
@@ -2221,11 +2341,48 @@ async function commitSessionSnapshot(store, metadataUpdates, session, options = 
   return committed;
 }
 
+/** @param {Awaited<ReturnType<typeof createSession>>} session */
+function refreshSessionModelSelection(session) {
+  const selection = currentRuntimeModelSelection(session.config ?? {}, {
+    model: session.model,
+    reasoningEffort: session.config?.reasoningEffort
+  });
+  session.modelSelection = selection;
+  return selection;
+}
+
+/** @param {Awaited<ReturnType<typeof createSession>>} session @returns {Record<string, any>} */
+function sessionModelMetadata(session) {
+  const selection = refreshSessionModelSelection(session);
+  if (selection) return patchSessionModelSelectionMetadata({}, selection);
+  if (session.config?.configV2?.enabled === true) {
+    throw new SessionModelSelectionUnresolvedError({
+      reason: "invalid-runtime-selection",
+      model: String(session.model ?? ""),
+      selection: session.modelSelection ?? null
+    });
+  }
+  return {
+    metadataVersion: 1,
+    model: String(session.model ?? ""),
+    reasoningEffort: typeof session.config?.reasoningEffort === "string"
+      ? session.config.reasoningEffort
+      : null,
+    modelSelection: null
+  };
+}
+
 function appendTranscriptMessages(session, messages) {
   if (!Array.isArray(messages) || messages.length === 0) {
     return;
   }
-  const cloned = messages.map((message) => cloneTranscriptMessage(message));
+  const cloned = messages.map((message) => {
+    const copy = cloneTranscriptMessage(message);
+    if (session.goal?.enabled && copy.role === "assistant") {
+      copy.content = stripGoalStatusFromContent(copy.content);
+    }
+    return copy;
+  });
   if (!Array.isArray(session.transcriptMessages)) {
     session.transcriptMessages = Array.isArray(session.messages) ? session.messages.slice() : [];
   }
@@ -2331,7 +2488,8 @@ function persistableMessage(message, options = {}) {
   const persisted = {
     role,
     content: persistableContent(message.content, {
-      sanitizeAssistantText: role === "assistant"
+      sanitizeAssistantText: role === "assistant",
+      stripGoalStatus: options.stripGoalStatus === true && role === "assistant"
     })
   };
   if (message.interruptedDraft === true) {
@@ -2377,8 +2535,10 @@ function persistableThinking(thinking) {
 
 function persistableContent(content, options = {}) {
   const sanitizeAssistantText = options.sanitizeAssistantText === true;
+  const stripGoalStatus = options.stripGoalStatus === true;
   if (typeof content === "string") {
-    const text = redactPersistedText(content);
+    let text = redactPersistedText(content);
+    if (stripGoalStatus) text = stripGoalStatusMarkers(text);
     return sanitizeAssistantText ? sanitizeRestoredAssistantText(text) : text;
   }
   if (!Array.isArray(content)) {
@@ -2386,7 +2546,8 @@ function persistableContent(content, options = {}) {
   }
   return content.map((item) => {
     if (typeof item === "string") {
-      const text = redactPersistedText(item);
+      let text = redactPersistedText(item);
+      if (stripGoalStatus) text = stripGoalStatusMarkers(text);
       return sanitizeAssistantText ? sanitizeRestoredAssistantText(text) : text;
     }
     if (!item || typeof item !== "object") {
@@ -2400,7 +2561,8 @@ function persistableContent(content, options = {}) {
       });
     }
     if ("text" in item) {
-      const text = redactPersistedText(String(item.text ?? ""));
+      let text = redactPersistedText(String(item.text ?? ""));
+      if (stripGoalStatus) text = stripGoalStatusMarkers(text);
       return {
         ...item,
         text: sanitizeAssistantText ? sanitizeRestoredAssistantText(text) : text

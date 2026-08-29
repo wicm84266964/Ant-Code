@@ -172,23 +172,18 @@ async function acquireFileMutationLock(filePath, options) {
   for (;;) {
     try {
       await fs.mkdir(lockPath, { mode: 0o700 });
+      const owner = {
+        token,
+        pid: process.pid,
+        hostname: os.hostname(),
+        createdAt: new Date().toISOString()
+      };
+      const ownerHandle = await fs.open(path.join(lockPath, "owner.json"), "wx", 0o600);
       try {
-        const owner = {
-          token,
-          pid: process.pid,
-          hostname: os.hostname(),
-          createdAt: new Date().toISOString()
-        };
-        const ownerHandle = await fs.open(path.join(lockPath, "owner.json"), "wx", 0o600);
-        try {
-          await ownerHandle.writeFile(`${JSON.stringify(owner)}\n`, "utf8");
-          await ownerHandle.sync();
-        } finally {
-          await ownerHandle.close().catch(() => {});
-        }
-      } catch (error) {
-        await fs.rm(lockPath, { recursive: true, force: true }).catch(() => {});
-        throw error;
+        await ownerHandle.writeFile(`${JSON.stringify(owner)}\n`, "utf8");
+        await ownerHandle.sync();
+      } finally {
+        await ownerHandle.close().catch(() => {});
       }
       return () => releaseOwnedLock(lockPath, token);
     } catch (error) {
@@ -235,31 +230,24 @@ async function releaseOwnedLock(lockPath, token) {
 
 async function isAbandonedLock(lockPath, staleMs) {
   const stat = await fs.stat(lockPath).catch(() => null);
-  if (!stat) {
+  if (!stat || Date.now() - stat.mtimeMs <= staleMs) {
     return false;
   }
   const owner = await readLockOwner(lockPath);
   const pid = Number(owner?.pid);
-  const validPid = Number.isInteger(pid) && pid > 0;
-  const hostname = String(owner?.hostname ?? os.hostname());
-  if (validPid && hostname === os.hostname()) {
-    try {
-      process.kill(pid, 0);
-      return false;
-    } catch (error) {
-      if (error?.code === "ESRCH") {
-        return true;
-      }
-      return false;
-    }
-  }
-  if (Date.now() - stat.mtimeMs <= staleMs) {
-    return false;
-  }
-  if (!validPid) {
+  if (!Number.isInteger(pid) || pid <= 0) {
     return true;
   }
-  return false;
+  const hostname = String(owner?.hostname ?? os.hostname());
+  if (hostname !== os.hostname()) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return error?.code === "ESRCH";
+  }
 }
 
 async function readLockOwner(lockPath) {

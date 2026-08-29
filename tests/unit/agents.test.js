@@ -87,7 +87,7 @@ test("model-driven subagent preserves reasoning_content across OpenAI-compatible
   const cwd = await makeTempWorkspace();
   await fs.writeFile(path.join(cwd, "notes.txt"), "hello from notes\n", "utf8");
   const requests = [];
-  const server = await listen(createReasoningToolGateway(requests), "127.0.0.1");
+  const server = await listen(createDeepSeekReasoningToolGateway(requests), "127.0.0.1");
 
   try {
     const result = await runSubagent({
@@ -1258,7 +1258,7 @@ function createFinalOnlyGateway(requests, finalText) {
 /**
  * @param {Array<Record<string, any>>} requests
  */
-function createReasoningToolGateway(requests) {
+function createDeepSeekReasoningToolGateway(requests) {
   return http.createServer(async (request, response) => {
     if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
       response.writeHead(404, { "content-type": "application/json" });

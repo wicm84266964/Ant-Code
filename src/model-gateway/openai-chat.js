@@ -20,6 +20,7 @@ import { emptyResponse, normalizeContent } from "./protocol.js";
  *   toolResults?: Array<Record<string, any>>;
  *   stream?: boolean;
  *   extraBody?: Record<string, any> | null;
+ *   reasoningEffort?: string | null;
  * }} input
  */
 export function createOpenAIChatCompletionRequest(input) {
@@ -34,6 +35,9 @@ export function createOpenAIChatCompletionRequest(input) {
   }
   if (isPlainObject(input.extraBody) && Object.keys(input.extraBody).length > 0) {
     Object.assign(request, cloneJsonObject(input.extraBody));
+  }
+  if (typeof input.reasoningEffort === "string" && input.reasoningEffort.trim()) {
+    request.reasoning_effort = input.reasoningEffort.trim();
   }
 
   const tools = normalizeOpenAITools(input.tools ?? []);

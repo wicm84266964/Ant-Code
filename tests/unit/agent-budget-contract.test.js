@@ -43,20 +43,20 @@ test("agent budget still honors explicit model-tool round limits", () => {
 
 test("subagent model tiers can all route to the same configured model", () => {
   const config = {
-    modelAlias: "example-vision-model",
+    modelAlias: "mimo-v2.5",
     agents: {
       modelTiers: {
-        cheap: "example-vision-model",
-        default: "example-vision-model",
-        strong: "example-vision-model"
+        cheap: "mimo-v2.5",
+        default: "mimo-v2.5",
+        strong: "mimo-v2.5"
       }
     }
   };
 
-  assert.equal(resolveAgentModel(config, { modelTier: "cheap" }, {}), "example-vision-model");
-  assert.equal(resolveAgentModel(config, { modelTier: "default" }, {}), "example-vision-model");
-  assert.equal(resolveAgentModel(config, { modelTier: "strong" }, {}), "example-vision-model");
-  assert.equal(config.modelAlias, "example-vision-model");
+  assert.equal(resolveAgentModel(config, { modelTier: "cheap" }, {}), "mimo-v2.5");
+  assert.equal(resolveAgentModel(config, { modelTier: "default" }, {}), "mimo-v2.5");
+  assert.equal(resolveAgentModel(config, { modelTier: "strong" }, {}), "mimo-v2.5");
+  assert.equal(config.modelAlias, "mimo-v2.5");
 });
 
 test("visual verifier resolves to the configured vision agent model", () => {
@@ -65,7 +65,7 @@ test("visual verifier resolves to the configured vision agent model", () => {
     agents: {
       vision: {
         enabled: true,
-        model: "example-vision-model"
+        model: "mimo-v2.5"
       },
       modelTiers: {
         default: "text-default",
@@ -74,8 +74,8 @@ test("visual verifier resolves to the configured vision agent model", () => {
     }
   };
 
-  assert.equal(resolveAgentModel(config, { modelTier: "vision" }, { name: "visual-verifier", purpose: "visual" }), "example-vision-model");
-  assert.equal(resolveAgentModel(config, {}, { name: "visual-verifier", purpose: "visual", modelTier: "vision" }), "example-vision-model");
+  assert.equal(resolveAgentModel(config, { modelTier: "vision" }, { name: "visual-verifier", purpose: "visual" }), "mimo-v2.5");
+  assert.equal(resolveAgentModel(config, {}, { name: "visual-verifier", purpose: "visual", modelTier: "vision" }), "mimo-v2.5");
 });
 
 test("visual verifier falls back to model tiers when vision agent is disabled", () => {
@@ -84,7 +84,7 @@ test("visual verifier falls back to model tiers when vision agent is disabled", 
     agents: {
       vision: {
         enabled: false,
-        model: "example-vision-model"
+        model: "mimo-v2.5"
       },
       modelTiers: {
         vision: "configured-vision-tier",
