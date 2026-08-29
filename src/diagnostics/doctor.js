@@ -45,14 +45,8 @@ export async function runDoctor(options) {
   checks.push(checkAllowedHosts(config));
   checks.push(checkTranscriptPolicy(config, env));
   checks.push(checkMcpPolicy(config));
-  checks.push(await checkPath(path.join(packageRoot, "docs", "provenance", "clean-room-provenance-policy.md"), "provenance policy"));
-  checks.push(await checkPath(path.join(packageRoot, "docs", "provenance", "modules"), "module provenance directory"));
-  checks.push(await checkPath(path.join(packageRoot, "docs", "audit", "clean-room-release-attestation.md"), "clean-room release attestation"));
-  checks.push(await checkPath(path.join(packageRoot, "docs", "audit", "mvp-release-audit.generated.md"), "release audit report"));
   checks.push(await checkPath(path.join(packageRoot, "docs", "deployment", "local-installation.md"), "local installation guide"));
   checks.push(await checkPath(path.join(packageRoot, "docs", "deployment", "model-adapter-gateway-readiness.md"), "model adapter readiness guide"));
-  checks.push(await checkPath(path.join(packageRoot, "docs", "deployment", "rc-acceptance-summary.md"), "rc acceptance summary"));
-  checks.push(await checkPath(path.join(packageRoot, "docs", "deployment", "release-candidate-package.md"), "release candidate package"));
   checks.push(await checkPath(path.join(packageRoot, "docs", "deployment", "quickstart.md"), "quickstart guide"));
   checks.push(await checkPath(path.join(packageRoot, "docs", "security", "data-boundary.md"), "data boundary guide"));
 
@@ -67,7 +61,7 @@ export async function runDoctor(options) {
       labConfigPath: config.lab.configPath,
       transcript: {
         enabled: config.transcript?.enabled !== false,
-        retentionDays: config.transcript?.retentionDays === undefined ? 30 : config.transcript.retentionDays,
+        retentionDays: config.transcript?.retentionDays ?? 30,
         encryption: config.transcript?.encryption ?? "off"
       },
       mcpServers: config.mcp?.servers?.length ?? 0
@@ -200,7 +194,7 @@ export function formatDoctorReport(report) {
     `sensitivity: ${report.config.sensitivity}`,
     `project config: ${report.config.projectConfigPath ?? "not found"}`,
     `lab config: ${report.config.labConfigPath ?? "not configured"}`,
-    `metadata: enabled=${report.config.transcript.enabled}, retention=${formatRetention(report.config.transcript.retentionDays)}, encryption=${report.config.transcript.encryption}`,
+    `metadata: enabled=${report.config.transcript.enabled}, retention=${report.config.transcript.retentionDays}d, encryption=${report.config.transcript.encryption}`,
     `mcp servers: ${report.config.mcpServers}`,
     ""
   ];
@@ -323,7 +317,7 @@ function checkSensitivityMode(config) {
  */
 function checkTranscriptPolicy(config, env) {
   const transcript = config.transcript ?? {};
-  const retentionDays = transcript.retentionDays === undefined ? 30 : transcript.retentionDays;
+  const retentionDays = transcript.retentionDays ?? 30;
   const encryption = transcript.encryption ?? "off";
   if (encryption === "required" && !env.LAB_AGENT_TRANSCRIPT_KEY) {
     return {
@@ -339,13 +333,6 @@ function checkTranscriptPolicy(config, env) {
       message: "metadata persistence is disabled or zero-retention"
     };
   }
-  if (retentionDays === null) {
-    return {
-      name: "metadata retention",
-      status: "warn",
-      message: `retention is unlimited, encryption=${encryption}`
-    };
-  }
   if (retentionDays > 30) {
     return {
       name: "metadata retention",
@@ -358,11 +345,6 @@ function checkTranscriptPolicy(config, env) {
     status: encryption === "off" ? "warn" : "ok",
     message: `${retentionDays}d retention, encryption=${encryption}`
   };
-}
-
-/** @param {number | null} retentionDays */
-function formatRetention(retentionDays) {
-  return retentionDays === null ? "forever" : `${retentionDays}d`;
 }
 
 /**
@@ -422,7 +404,7 @@ function buildDoctorHints(checks) {
     if (check.name === "model gateway") {
       hints.push("Set LAB_MODEL_GATEWAY_URL or start the local mock gateway for development.");
     } else if (check.name === "gateway health endpoint") {
-      hints.push("Set LAB_MODEL_GATEWAY_HEALTH_URL before a broad lab rollout.");
+      hints.push("Set LAB_MODEL_GATEWAY_HEALTH_URL before a broad team rollout.");
     } else if (check.name === "metadata encryption") {
       hints.push("Provide LAB_AGENT_TRANSCRIPT_KEY or switch encryption to optional/off for development only.");
     } else if (check.name === "metadata retention") {
@@ -430,7 +412,7 @@ function buildDoctorHints(checks) {
     } else if (check.name === "mcp servers") {
       hints.push("Review MCP server owner/source/checksum before enabling it for a cohort.");
     } else if (check.name === "lab managed config") {
-      hints.push("Set LAB_AGENT_CONFIG on shared machines to a lab-owned config JSON.");
+      hints.push("Set LAB_AGENT_CONFIG on shared machines to a managed config JSON.");
     } else {
       hints.push(`Review ${check.name}: ${check.message}`);
     }
