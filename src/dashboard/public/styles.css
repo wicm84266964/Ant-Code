@@ -2823,6 +2823,18 @@ button {
   font-weight: 600;
 }
 
+.goal-status-bar .goal-objective-ellipsis {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.goal-status-bar .goal-recap {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
 .goal-status-actions {
   display: flex;
   flex-wrap: wrap;

@@ -8,6 +8,7 @@ import {
   nextDetailMode,
   nextPermissionMode,
   approvalKeyFor,
+  normalizeQuestionPrompt,
   permissionModalLines,
   permissionModeDescription,
   permissionModeLabel,
@@ -305,6 +306,14 @@ test("prompt lines expose queue and permission modal states", () => {
   assert.ok(busy.some((line) => line.text.includes("已排队：1 条提示")));
   assert.equal(approval[0].text, "权限弹窗已打开");
   assert.ok(approval.some((line) => line.text.includes("Y 允许一次")));
+});
+
+test("normalizeQuestionPrompt accepts null pending questions", () => {
+  const prompt = normalizeQuestionPrompt(null);
+  assert.equal(Array.isArray(prompt.choices), true);
+  assert.equal(prompt.choices.length, 0);
+  const lines = promptLines("question", false, "", "", { pendingQuestion: null });
+  assert.ok(lines.length > 0);
 });
 
 test("question prompt renders selectable choices and custom answer guidance", () => {

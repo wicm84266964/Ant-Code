@@ -462,11 +462,12 @@ export function promptLines(mode, busy, inputBuffer, questionBuffer, options = {
 }
 
 export function normalizeQuestionPrompt(pendingQuestion = {}) {
-  const choices = Array.isArray(pendingQuestion.choices)
-    ? pendingQuestion.choices.map(normalizeQuestionChoice).filter(Boolean)
+  const source = pendingQuestion && typeof pendingQuestion === "object" ? pendingQuestion : {};
+  const choices = Array.isArray(source.choices)
+    ? source.choices.map(normalizeQuestionChoice).filter(Boolean)
     : [];
-  const selectedIndices = Array.isArray(pendingQuestion.selectedIndices)
-    ? pendingQuestion.selectedIndices
+  const selectedIndices = Array.isArray(source.selectedIndices)
+    ? source.selectedIndices
       .map((index) => Number(index))
       .filter((index) => Number.isInteger(index) && index >= 0 && index < choices.length)
     : [];
@@ -475,18 +476,18 @@ export function normalizeQuestionPrompt(pendingQuestion = {}) {
     .filter((index) => index >= 0);
   const normalizedSelected = selectedIndices.length > 0 ? selectedIndices : seededSelected;
   const focusedIndex = choices.length > 0
-    ? Math.min(Math.max(0, Number(pendingQuestion.focusedIndex) || 0), choices.length - 1)
+    ? Math.min(Math.max(0, Number(source.focusedIndex) || 0), choices.length - 1)
     : 0;
-  const multiple = Boolean(pendingQuestion.multiple || pendingQuestion.selectionMode === "multi");
-  const allowCustom = choices.length === 0 || pendingQuestion.allowCustom !== false;
+  const multiple = Boolean(source.multiple || source.selectionMode === "multi");
+  const allowCustom = choices.length === 0 || source.allowCustom !== false;
 
   return {
-    header: String(pendingQuestion.header ?? "模型提问"),
-    question: String(pendingQuestion.question ?? pendingQuestion.prompt ?? "模型请求澄清"),
+    header: String(source.header ?? "模型提问"),
+    question: String(source.question ?? source.prompt ?? "模型请求澄清"),
     choices,
     multiple,
     allowCustom,
-    confirmLabel: String(pendingQuestion.confirmLabel ?? "确认"),
+    confirmLabel: String(source.confirmLabel ?? "确认"),
     focusedIndex,
     selectedIndices: multiple
       ? [...new Set(normalizedSelected)]
@@ -1092,6 +1093,9 @@ export function colorForKind(kind) {
   }
   if (kind === "gateway") {
     return "magenta";
+  }
+  if (kind === "goal") {
+    return "red";
   }
   return "white";
 }

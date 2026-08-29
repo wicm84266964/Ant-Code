@@ -2,6 +2,7 @@ export const MAX_RECENT_FILES = 12;
 const IMMEDIATE_TUI_COMMANDS = new Set([
   "queue",
   "guide",
+  "goal",
   "background",
   "help",
   "status",

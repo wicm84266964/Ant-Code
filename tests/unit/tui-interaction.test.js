@@ -171,7 +171,7 @@ test("native scrollback mode is disabled when the TUI owns scroll layout", () =>
   assert.equal(shouldUseScrollbackMode(0), false);
 });
 
-test("TUI permission cycle persists Goal-off without another turn", async () => {
+test("TUI permission cycle refuses to switch while Goal is enabled", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "goal-tui-cycle-"));
   const server = http.createServer((_req, res) => {
     res.writeHead(200, { "content-type": "application/json" });
@@ -210,10 +210,13 @@ test("TUI permission cycle persists Goal-off without another turn", async () => 
     await persistSessionSnapshot(session, { env });
     const armed = await createSession({ cwd, mode: "interactive", env, resume: session.id, resumeFullContext: true });
     assert.equal(armed.goal.enabled, true);
-    await persistTuiPermissionCycle(armed, "plan", { env });
+    await assert.rejects(
+      () => persistTuiPermissionCycle(armed, "plan", { env }),
+      (error) => error?.code === "GOAL_PERMISSION_LOCKED"
+    );
     const resumed = await createSession({ cwd, mode: "interactive", env, resume: session.id, resumeFullContext: true });
-    assert.equal(resumed.goal.enabled, false);
-    assert.equal(resumed.permissionMode, "plan");
+    assert.equal(resumed.goal.enabled, true);
+    assert.equal(resumed.permissionMode, "fullAccess");
   } finally {
     await new Promise((resolve) => server.close(() => resolve(undefined)));
   }

@@ -1,26 +1,25 @@
-import { disableGoalState } from "../../core/goal.js";
 import { persistSessionSnapshot } from "../../core/session.js";
 import { applyPermissionMode } from "./format.js";
 
 /**
- * Shift+Tab permission cycle for TUI: clear Goal on disk immediately.
+ * Shift+Tab permission cycle. Goal locks permission until `/goal exit`.
  *
  * @param {Record<string, any>} session
  * @param {string} nextMode
  * @param {{ env?: NodeJS.ProcessEnv }} [options]
  */
 export async function persistTuiPermissionCycle(session, nextMode, options = {}) {
-  const previousMode = session.permissionMode;
-  const previousGoal = session.goal;
   if (session.goal?.enabled) {
-    session.goal = disableGoalState(session.goal, { clearedBy: "tui-permission-change" });
+    const error = new Error("Goal 开启时不能切换权限。请先 /goal exit。");
+    error.code = "GOAL_PERMISSION_LOCKED";
+    throw error;
   }
+  const previousMode = session.permissionMode;
   applyPermissionMode(session, nextMode);
   try {
     await persistSessionSnapshot(session, { env: options.env });
     return true;
   } catch (error) {
-    session.goal = previousGoal;
     applyPermissionMode(session, previousMode);
     throw error;
   }

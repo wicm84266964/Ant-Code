@@ -2164,6 +2164,14 @@ export async function persistSessionSnapshot(session, options = {}) {
     env: options.env ?? process.env
   });
   const metadata = /** @type {Record<string, any>} */ (sessionModelMetadata(session));
+  metadata.id = session.id;
+  metadata.cwd = session.cwd;
+  metadata.startedAt = session.startedAt ?? new Date().toISOString();
+  metadata.mode = session.mode;
+  metadata.clientSurface = session.clientSurface;
+  metadata.title = session.title ?? null;
+  metadata.turnIndex = session.turnCount ?? 0;
+  metadata.status = session.goal?.enabled ? session.goal.status : metadata.status;
   metadata.permissionMode = session.permissionMode;
   metadata.fullAccess = session.fullAccess;
   metadata.readonly = session.readonly;
@@ -2172,7 +2180,9 @@ export async function persistSessionSnapshot(session, options = {}) {
   metadata.context = summarizeContextWindow(session);
   metadata.workflow = summarizeWorkflow(session.workflow);
   metadata.goal = serializeSessionGoal(session.goal);
-  const committed = await commitSessionSnapshot(store, metadata, session, { requireExisting: true });
+  const committed = await commitSessionSnapshot(store, metadata, session, {
+    requireExisting: options.requireExisting !== false
+  });
   return { ok: true, metadataPath: committed.metadataPath, metadata: committed.metadata };
 }
 
@@ -2616,8 +2626,14 @@ async function restoreResumeContextMessages(input) {
   if (input.allowArchive === false) {
     return { messages: persisted, persistedMessages: persisted, fromArchive: false };
   }
-  const archived = await restoreArchivedContextMessages(input.store, input.archive, input.context);
-  const modelArchived = await restoreArchivedContextMessages(input.store, input.modelArchive, input.context);
+  let archived = [];
+  let modelArchived = [];
+  try {
+    archived = await restoreArchivedContextMessages(input.store, input.archive, input.context);
+    modelArchived = await restoreArchivedContextMessages(input.store, input.modelArchive, input.context);
+  } catch {
+    return { messages: persisted, persistedMessages: persisted, fromArchive: false };
+  }
   const bestArchived = mergeModelArchiveIntoBase(archived, modelArchived, input.context);
   if (input.preferArchive === true && archived.length > 0) {
     return { messages: bestArchived.length > 0 ? bestArchived : archived, persistedMessages: persisted, fromArchive: true };
