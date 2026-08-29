@@ -8393,7 +8393,7 @@ test("dashboard Goal stops auto-continue at 12 continues", async () => {
   });
   await waitForCondition(() => {
     const goal = runtime.active.get(started.sessionId)?.session?.goal;
-    return goal?.lastBlockReason === "budget" || goal?.continueCount >= 12;
+    return goal?.lastBlockReason === "budget";
   }, 8000);
   const goal = runtime.active.get(started.sessionId).session.goal;
   assert.equal(goal.continueCount, 12);
