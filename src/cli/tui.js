@@ -16,6 +16,14 @@ import { clearSessionContext, compactSessionContextWithModel, summarizeContextWi
 import { createInitialEventState, reduceAntEvent } from "../core/event-reducer.js";
 import { createSession, runSessionTurn } from "../core/session.js";
 import { persistTuiPermissionCycle } from "./tui/permission-cycle.js";
+import {
+  executeTuiGoalCommand,
+  finishTuiGoalTurn,
+  formatTuiGoalFooter,
+  GOAL_WRITE_TOOLS,
+  shouldSkipTuiGoalQuestion,
+  tuiGoalQuestionResult
+} from "./tui/goal.js";
 import { createLabModelGateway } from "../model-gateway/client.js";
 import { listConfiguredModels } from "../model-gateway/models.js";
 import { appendThinkingPreview, limitThinkingPreview } from "../model-gateway/thinking-budget.js";
@@ -397,6 +405,8 @@ function TuiApp(props) {
   const currentTurnAbortRef = useRef(null);
   const currentTurnPromptRef = useRef("");
   const pendingGuideInterruptRef = useRef(null);
+  const pendingGoalContinueRef = useRef(null);
+  const lastTurnStatusRef = useRef("completed");
   const agentTaskEntriesRef = useRef(new Map());
   const sessionRef = useRef(props.session);
   const stateRef = useRef({});
@@ -1045,6 +1055,11 @@ function TuiApp(props) {
       return false;
     }
     const session = sessionRef.current;
+    if (session.goal?.enabled) {
+      addEntry("permission", "Goal 锁定权限", "Goal 开启时不能切换权限。请先 /goal exit。");
+      setActivity((value) => ({ ...value, status: "Goal 锁定权限" }));
+      return false;
+    }
     const nextMode = nextPermissionMode(session, current.permissionMode);
     try {
       await persistTuiPermissionCycle(session, nextMode, { env: props.env });
@@ -1059,7 +1074,6 @@ function TuiApp(props) {
       : "新模式从后续提示/命令生效；本会话同类批准已清空。";
     addEntry("permission", "模式已切换", [
       `${permissionModeLabel(session)}: ${permissionModeDescription(nextMode)}`,
-      session.goal?.clearedBy === "tui-permission-change" ? "已退出 Dashboard Goal 并写入会话。" : "",
       effectNote
     ].filter(Boolean).join("\n"));
     setActivity((value) => ({ ...value, status: `权限：${permissionModeLabel(session)}（后续生效）` }));
@@ -1326,7 +1340,12 @@ function TuiApp(props) {
       setSelectedEntryId(null);
       setMessageActionIndex(0);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const code = /** @type {{ code?: string }} */ (error)?.code;
+      const raw = error instanceof Error ? error.message : String(error);
+      const missing = code === "SESSION_NOT_FOUND" || /No session metadata matched/i.test(raw);
+      const message = missing
+        ? "没有找到该会话的落盘记录。新会话或 Goal 若在第一轮写盘前异常退出，就不会留下可恢复文件。请在同一工作目录用 /sessions 打开已保存的记录。"
+        : raw;
       addEntry("error", options.resume ? "恢复失败" : "新会话失败", message);
       openCommandPanel(createTextOutputPanel({
         title: options.resume ? "恢复失败" : "新会话失败",
@@ -1775,6 +1794,10 @@ function TuiApp(props) {
   }, [addEntry, pushInspector]);
 
   const askUser = useCallback((request) => {
+    if (shouldSkipTuiGoalQuestion(sessionRef.current)) {
+      addEntry("goal", "已跳过需求核对", "Goal 模式无人值守，已跳过 ask_user。");
+      return Promise.resolve(tuiGoalQuestionResult());
+    }
     const prompt = normalizeQuestionPrompt(request);
     const body = [
       prompt.question,
@@ -2228,6 +2251,9 @@ function TuiApp(props) {
       } else {
         addEntry("tool", `${event.name} ${state}`, body);
       }
+      if (sessionRef.current.goal?.enabled && GOAL_WRITE_TOOLS.has(String(event.name ?? ""))) {
+        sessionRef.current.goal.hasWrites = true;
+      }
       pushInspector(makeInspector(`Tool ${state}`, event.name, body, "tool"), {
         focus: event.blocked || !event.ok
       });
@@ -2294,6 +2320,7 @@ function TuiApp(props) {
       setStreamOffset(0);
       setStream(initialStream());
     } else if (event.type === "turn_interrupted") {
+      lastTurnStatusRef.current = "interrupted";
       flushStreamDeltasNow();
       const draftText = String(event.draftText ?? "");
       const draftThinkingPreview = limitThinkingPreview(String(event.draftThinking ?? ""));
@@ -2340,6 +2367,7 @@ function TuiApp(props) {
       addEntry("error", "工具轮次上限", body);
       pushInspector(makeInspector("工具轮次上限", "session", body, "tool"), { focus: true });
     } else if (event.type === "turn_complete") {
+      lastTurnStatusRef.current = String(event.status ?? "completed");
       flushStreamDeltasNow();
       if (event.status !== "completed") {
         setStreamOffset(0);
@@ -2362,7 +2390,52 @@ function TuiApp(props) {
     }));
   }, []);
 
-  const handlePrompt = useCallback(async (prompt, signal = undefined) => {
+  const handlePrompt = useCallback(async (prompt, signal = undefined, turn = {}) => {
+    const runSessionTurnWithGoal = async (turnPrompt, turnOptions = {}) => {
+      lastTurnStatusRef.current = "completed";
+      const result = await runSessionTurn(sessionRef.current, {
+        prompt: turnPrompt,
+        displayPrompt: turnOptions.displayPrompt,
+        env: props.env,
+        signal,
+        approvalCallback: askApproval,
+        userInputCallback: askUser,
+        onEvent: onSessionEvent,
+        onAntEvent,
+        hooksTrusted: trusted
+      });
+      const terminalStatus = signal?.aborted || lastTurnStatusRef.current === "interrupted"
+        ? "interrupted"
+        : lastTurnStatusRef.current;
+      const goalResult = await finishTuiGoalTurn({
+        session: sessionRef.current,
+        terminalStatus,
+        output: result?.output,
+        env: props.env,
+        hasQueuedWork: queuedPromptsRef.current.length > 0,
+        pendingQuestion: Boolean(stateRef.current.pendingQuestion),
+        pendingApproval: Boolean(stateRef.current.pendingApproval)
+      });
+      if (goalResult.recap) {
+        addEntry("goal", goalResult.recap.title, goalResult.recap.body);
+        setActivity((value) => ({ ...value, status: goalResult.recap.title }));
+      }
+      if (goalResult.continue) {
+        pendingGoalContinueRef.current = {
+          prompt: goalResult.prompt,
+          displayPrompt: goalResult.displayPrompt,
+          kind: "goal-continue"
+        };
+      }
+      return result;
+    };
+
+    if (turn.kind === "goal-continue") {
+      addEntry("goal", "Goal 续跑", turn.displayPrompt || "继续");
+      await runSessionTurnWithGoal(prompt, { displayPrompt: turn.displayPrompt });
+      return;
+    }
+
     if (prompt.trimStart().startsWith("!")) {
       const shellText = prompt.trimStart().slice(1).trim();
       if (!shellText) {
@@ -2474,6 +2547,36 @@ function TuiApp(props) {
       }
       if (lowerName === "guide") {
         guideActiveTurn(slashCommand.args.join(" "));
+        return;
+      }
+      if (lowerName === "goal") {
+        const modelBusy = Boolean(currentTurnAbortRef.current) && currentTurnPromptRef.current !== String(prompt ?? "");
+        const result = await executeTuiGoalCommand({
+          session: sessionRef.current,
+          args: slashCommand.args,
+          env: props.env,
+          busy: modelBusy
+        });
+        addEntry(result.ok ? "goal" : "error", "/goal", result.message);
+        if (result.permissionMode) {
+          setPermissionMode(result.permissionMode);
+        }
+        setActivity((value) => ({ ...value, status: result.ok ? "Goal" : "Goal 未执行" }));
+        if (result.interrupt) {
+          interruptCurrentTurn("goal-command");
+        }
+        if (result.startTurn) {
+          addEntry("user", "你", result.startTurn, {
+            checkpointMessagesLength: sessionRef.current.messages.length,
+            turnIndex: sessionRef.current.turnCount + 1
+          });
+          await runSessionTurnWithGoal(result.startTurn);
+        } else if (result.continueTurn?.prompt) {
+          addEntry("goal", "Goal 续跑", result.continueTurn.displayPrompt || "继续");
+          await runSessionTurnWithGoal(result.continueTurn.prompt, {
+            displayPrompt: result.continueTurn.displayPrompt
+          });
+        }
         return;
       }
       if (lowerName === "background" && slashCommand.args[0] === "run") {
@@ -2592,17 +2695,8 @@ function TuiApp(props) {
       checkpointMessagesLength: sessionRef.current.messages.length,
       turnIndex: sessionRef.current.turnCount + 1
     });
-    await runSessionTurn(sessionRef.current, {
-      prompt,
-      env: props.env,
-      signal,
-      approvalCallback: askApproval,
-      userInputCallback: askUser,
-      onEvent: onSessionEvent,
-      onAntEvent,
-      hooksTrusted: trusted
-    });
-  }, [activity, addEntry, askApproval, askUser, cancelBackgroundSubagent, clearContextNow, guideActiveTurn, loadTaskRecords, modelOptions, onAntEvent, onSessionEvent, openCommandPanel, openLogsPanel, openQueuePanel, openResumeChunkPanel, openResumePanel, openSessionsPanel, props.cwd, props.env, pushInspector, replaceSession, startBackgroundSubagent, summarizeInfo, switchModel, trusted]);
+    await runSessionTurnWithGoal(prompt);
+  }, [activity, addEntry, askApproval, askUser, cancelBackgroundSubagent, clearContextNow, guideActiveTurn, interruptCurrentTurn, loadTaskRecords, modelOptions, onAntEvent, onSessionEvent, openCommandPanel, openLogsPanel, openQueuePanel, openResumeChunkPanel, openResumePanel, openSessionsPanel, props.cwd, props.env, pushInspector, replaceSession, startBackgroundSubagent, summarizeInfo, switchModel, trusted]);
 
   const confirmTrust = useCallback(async () => {
     if (trustStatus === "saving") {
@@ -2631,14 +2725,33 @@ function TuiApp(props) {
   }, [addEntry, setQueueState]);
 
   const runPromptDirect = useCallback(async function runPromptDirect(prompt) {
+    const item = prompt && typeof prompt === "object"
+      ? prompt
+      : { prompt: String(prompt ?? ""), kind: "prompt" };
     setBusy(true);
     const controller = new AbortController();
     currentTurnAbortRef.current = controller;
-    currentTurnPromptRef.current = String(prompt ?? "");
+    currentTurnPromptRef.current = String(item.prompt ?? "");
     try {
-      await handlePrompt(prompt, controller.signal);
+      await handlePrompt(item.prompt, controller.signal, item);
     } catch (error) {
       addEntry("error", "运行时错误", error instanceof Error ? error.message : String(error));
+      const code = /** @type {{ code?: string }} */ (error)?.code;
+      const persistMissing = code === "SESSION_NOT_FOUND" || code === "SESSION_METADATA_NOT_FOUND";
+      lastTurnStatusRef.current = persistMissing ? lastTurnStatusRef.current : "failed";
+      if (sessionRef.current.goal?.enabled && !persistMissing) {
+        try {
+          await finishTuiGoalTurn({
+            session: sessionRef.current,
+            terminalStatus: "failed",
+            output: error instanceof Error ? error.message : String(error),
+            env: props.env,
+            hasQueuedWork: queuedPromptsRef.current.length > 0
+          });
+        } catch {
+          // Goal persist must not take down the TUI.
+        }
+      }
     } finally {
       if (currentTurnAbortRef.current === controller) {
         currentTurnAbortRef.current = null;
@@ -2648,13 +2761,20 @@ function TuiApp(props) {
       const [nextPrompt, ...rest] = queuedPromptsRef.current;
       setQueueState(rest, 0);
       if (nextPrompt) {
+        pendingGoalContinueRef.current = null;
         addEntry("queue", "正在运行排队提示", nextPrompt);
         void runPromptDirect(nextPrompt);
       } else {
-        setBusy(false);
+        const goalNext = pendingGoalContinueRef.current;
+        pendingGoalContinueRef.current = null;
+        if (goalNext?.prompt) {
+          void runPromptDirect(goalNext);
+        } else {
+          setBusy(false);
+        }
       }
     }
-  }, [addEntry, handlePrompt, setQueueState]);
+  }, [addEntry, handlePrompt, props.env, setQueueState]);
 
   useEffect(() => {
     runPromptDirectRef.current = runPromptDirect;
@@ -3715,6 +3835,14 @@ function initialEntries(session) {
     }));
     entries.push(...entriesFromMessages(session.transcriptMessages ?? session.messages));
   }
+  if (session.goal?.enabled) {
+    entries.push(withEntryIdentity({
+      kind: "goal",
+      title: formatTuiGoalFooter(session) || "Goal",
+      body: String(session.goal.text ?? "").trim() || "使用 /goal pause、/goal resume 或 /goal exit。",
+      at: new Date().toLocaleTimeString()
+    }));
+  }
   return entries;
 }
 
@@ -4435,7 +4563,7 @@ function composerContentColumns(current = {}) {
   const size = current.terminalSize ?? {};
   const width = Math.max(60, Number(size.columns) || 100);
   const prompt = current.mode === "question"
-    ? (normalizeQuestionPrompt(current.pendingQuestion).choices.length > 0 ? "自定义>" : "回答>")
+    ? (normalizeQuestionPrompt(current.pendingQuestion ?? {}).choices.length > 0 ? "自定义>" : "回答>")
     : current.busy
       ? "队列>"
       : String(current.inputBuffer ?? "").trimStart().startsWith("!")

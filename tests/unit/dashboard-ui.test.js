@@ -984,6 +984,11 @@ test("dashboard exposes responsive navigation and accessible interaction semanti
   assert.equal([...permissionBlock.matchAll(/data-mode="/g)].length, 3);
   assert.match(app, /clientPreviousPermissionMode: state\.goal\.enabled \? state\.goal\.previousPermissionMode : undefined/);
   assert.match(app, /function applyGoalSnapshot\(/);
+  assert.match(app, /const recapLine = String\(state\.goal\.recap\?\.line \?\? ""\)\.trim\(\)/);
+  assert.match(app, /class="goal-recap"/);
+  assert.match(app, /goal-objective-ellipsis/);
+  assert.match(css, /\.goal-status-bar \.goal-recap\s*\{/);
+  assert.match(css, /\.goal-status-bar \.goal-objective-ellipsis\s*\{/);
   assert.match(app, /启用 Goal 模式？/);
   assert.match(app, /无人值守自动执行/);
   assert.match(app, /请输入目标/);

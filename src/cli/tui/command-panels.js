@@ -4,6 +4,7 @@ import { listConfiguredModels } from "../../model-gateway/models.js";
 import { INSPECTOR_FILTERS, inspectorFilterLabel, inspectorPanelLines } from "./inspector.js";
 import { displayWidth } from "./input-editor.js";
 import { line, permissionModeDescription, permissionModeLabel, truncate, truncateMiddle } from "./format.js";
+import { formatTuiGoalFooter, tuiGoalStatusLabel } from "./goal.js";
 import { parseMarkdownBlocks, renderTable } from "./markdown-table.js";
 
 const MESSAGE_EXCERPT_WRAP_WIDTH = 72;
@@ -59,6 +60,10 @@ export function createStatusPanel(options) {
       line(`敏感级别：${session.sensitivity}`),
       line(`权限：${permissionModeLabel(session)}`),
       line(`只读锁定：${session.permissionReadonlyLocked || session.readonly ? "是" : "否"}`),
+      ...(session.goal?.enabled ? [
+        line(`Goal：${formatTuiGoalFooter(session) ?? tuiGoalStatusLabel(session.goal.status)}`),
+        line(`目标：${truncate(String(session.goal.text ?? ""), 86)}`)
+      ] : [line("Goal：未开启")]),
       line(""),
       line("网关", false, "magenta"),
       line(`状态：${activity.gateway ?? (session.config?.lab?.gatewayUrl ? "已配置" : "缺失")}`),

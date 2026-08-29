@@ -45,7 +45,8 @@ const state = {
     lastContinueReason: "",
     lastBlockReason: "",
     lastEvidence: null,
-    hasWrites: false
+    hasWrites: false,
+    recap: null
   },
   goalSubmitting: false,
   pendingApproval: null,
@@ -829,7 +830,8 @@ function emptyGoalSnapshot() {
     lastContinueReason: "",
     lastBlockReason: "",
     lastEvidence: null,
-    hasWrites: false
+    hasWrites: false,
+    recap: null
   };
 }
 
@@ -891,14 +893,22 @@ function renderGoalStatusBar() {
     failed: "失败",
     off: "关闭"
   }[state.goal.status] ?? state.goal.status;
+  const recapLine = String(state.goal.recap?.line ?? "").trim();
+  const showRecap = recapLine.length > 0;
+  const canResume = state.goal.status === "paused" || state.goal.status === "failed";
+  const showPause = !canResume && state.goal.status !== "complete";
+  const objectiveClass = showRecap ? "goal-objective-ellipsis" : "";
   bar.innerHTML = `
     <div class="goal-copy">
       <div class="goal-title">Goal · ${escapeHtml(statusLabel)}</div>
-      <div>${escapeHtml(state.goal.text || "")}</div>
-      <div>${Number(state.goal.continueCount) || 0} / ${Number(state.goal.maxAutoContinues) || defaultGoalMaxAutoContinues()} 次续跑${state.goal.lastContinueReason ? ` · ${escapeHtml(state.goal.lastContinueReason)}` : ""}</div>
+      <div class="${objectiveClass}" title="${escapeHtml(state.goal.text || "")}">${escapeHtml(state.goal.text || "")}</div>
+      ${showRecap
+    ? `<div class="goal-recap">${escapeHtml(recapLine)}</div>`
+    : `<div>${Number(state.goal.continueCount) || 0} / ${Number(state.goal.maxAutoContinues) || defaultGoalMaxAutoContinues()} 次续跑${state.goal.lastContinueReason ? ` · ${escapeHtml(state.goal.lastContinueReason)}` : ""}</div>`}
     </div>
     <div class="goal-status-actions">
-      ${state.goal.status === "paused" ? `<button type="button" data-goal-action="resume">继续</button>` : `<button type="button" data-goal-action="pause">暂停</button>`}
+      ${canResume ? `<button type="button" data-goal-action="resume">继续</button>` : ""}
+      ${showPause ? `<button type="button" data-goal-action="pause">暂停</button>` : ""}
       <button type="button" data-goal-action="disable">退出 Goal</button>
     </div>
   `;

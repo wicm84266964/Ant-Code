@@ -3854,6 +3854,26 @@ test("session hydrates and persists Goal metadata", async () => {
     assert.equal(resumed.goal.enabled, true);
     assert.equal(resumed.goal.text, "finish filters");
     assert.equal(resumed.goal.previousPermissionMode, "workspace");
+    assert.equal(Boolean(resumed.goal.startedAt), true);
+    assert.equal(resumed.goal.usageBaseline?.promptTokens, 0);
+  } finally {
+    await close(server);
+  }
+});
+
+test("Goal snapshot can create session metadata before the first turn", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "session-goal-bootstrap-"));
+  const server = await listen(createRecordingGateway([]), "127.0.0.1");
+  const { enableGoalState } = await import("../../src/core/goal.js");
+  try {
+    const env = mockGatewayEnv(serverUrl(server));
+    env.LAB_AGENT_TRANSCRIPT_ENABLED = "true";
+    const session = await createSession({ cwd, mode: "interactive", env, fullAccess: true });
+    session.goal = enableGoalState({ text: "bootstrap goal file", previousPermissionMode: "plan" });
+    await persistSessionSnapshot(session, { env, requireExisting: false });
+    const resumed = await createSession({ cwd, mode: "interactive", env, resume: session.id, resumeFullContext: true });
+    assert.equal(resumed.goal.enabled, true);
+    assert.equal(resumed.goal.text, "bootstrap goal file");
   } finally {
     await close(server);
   }

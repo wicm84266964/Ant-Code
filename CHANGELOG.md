@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.4.1 - 2026-08-29
+
+### Added
+
+- TUI `/goal` uses the same unattended Goal loop as the Dashboard: enable with
+  an objective, lock full access, skip `ask_user`, and host-continue until the
+  goal completes, pauses, fails, or hits the auto-continue budget.
+- Goal completion recap on the Dashboard status bar and TUI footer: elapsed
+  time, continue count, model rounds, and prompt/completion tokens for the Goal
+  interval (`输入` / `输出`).
+
+### Changed
+
+- Shift+Tab no longer clears Goal. Permission stays locked until `/goal exit`.
+- Token recap wording uses 输入/输出 instead of the abbreviated 入/出.
+
+### Fixed
+
+- `/goal` on a brand-new TUI session no longer crashes when session metadata
+  does not exist yet. Goal now bootstraps a session file so it can be resumed.
+- TUI `/sessions` restore no longer throws `Cannot read properties of null
+  (reading 'choices')` when clearing an empty question draft.
+- Missing transcript archive chunks no longer fail the entire session resume.
+
 ## 1.4.0 - 2026-08-29
 
 ### Added

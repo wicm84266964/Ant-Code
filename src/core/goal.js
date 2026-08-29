@@ -50,7 +50,10 @@ export function normalizeSessionGoal(raw, options = {}) {
     lastEvidence: normalizeGoalEvidence(source.lastEvidence),
     hasWrites: source.hasWrites === true,
     clearedBy: String(source.clearedBy ?? "").trim(),
-    maxAutoContinues: resolveGoalMaxAutoContinues(source.maxAutoContinues)
+    maxAutoContinues: resolveGoalMaxAutoContinues(source.maxAutoContinues),
+    startedAt: optionalIsoTimestamp(source.startedAt),
+    endedAt: optionalIsoTimestamp(source.endedAt),
+    usageBaseline: normalizeGoalUsageBaseline(source.usageBaseline)
   };
 }
 
@@ -64,8 +67,9 @@ export function serializeSessionGoal(goal) {
 /**
  * @param {Record<string, any> | null | undefined} goal
  * @param {unknown} [config]
+ * @param {unknown} [usage]
  */
-export function publicGoalSnapshot(goal, config) {
+export function publicGoalSnapshot(goal, config, usage) {
   const normalized = serializeSessionGoal(goal);
   return {
     enabled: normalized.enabled,
@@ -78,8 +82,166 @@ export function publicGoalSnapshot(goal, config) {
     lastContinueReason: normalized.lastContinueReason,
     lastBlockReason: normalized.lastBlockReason,
     lastEvidence: normalized.lastEvidence,
-    hasWrites: normalized.hasWrites
+    hasWrites: normalized.hasWrites,
+    recap: shouldShowGoalRecap(normalized) ? buildGoalRecap(normalized, usage) : null
   };
+}
+
+/**
+ * @param {Record<string, any> | null | undefined} goal
+ */
+export function shouldShowGoalRecap(goal) {
+  const status = String(goal?.status ?? "");
+  if (status === "complete" || status === "failed") {
+    return true;
+  }
+  return status === "paused" && String(goal?.lastBlockReason ?? "") === "budget";
+}
+
+/**
+ * @param {unknown} usage
+ */
+export function snapshotGoalUsageBaseline(usage) {
+  const source = usage && typeof usage === "object" ? /** @type {Record<string, any>} */ (usage) : {};
+  return {
+    promptTokens: nonNegativeInteger(source.promptTokens),
+    completionTokens: nonNegativeInteger(source.completionTokens),
+    totalTokens: nonNegativeInteger(source.totalTokens),
+    reports: nonNegativeInteger(source.reports)
+  };
+}
+
+/**
+ * @param {Record<string, any> | null | undefined} goal
+ * @param {unknown} [usage]
+ * @param {Date} [now]
+ */
+export function buildGoalRecap(goal, usage, now = new Date()) {
+  const normalized = serializeSessionGoal(goal);
+  const current = snapshotGoalUsageBaseline(usage);
+  const baseline = normalized.usageBaseline;
+  const startedMs = Date.parse(normalized.startedAt);
+  const endedMs = Date.parse(normalized.endedAt);
+  const elapsedMs = Number.isFinite(startedMs)
+    ? Math.max(0, (Number.isFinite(endedMs) ? endedMs : now.getTime()) - startedMs)
+    : null;
+  let promptTokens = null;
+  let completionTokens = null;
+  let totalTokens = null;
+  if (baseline) {
+    const promptDelta = Math.max(0, current.promptTokens - baseline.promptTokens);
+    const completionDelta = Math.max(0, current.completionTokens - baseline.completionTokens);
+    const totalDelta = Math.max(0, current.totalTokens - baseline.totalTokens);
+    const reportsDelta = Math.max(0, current.reports - baseline.reports);
+    if (reportsDelta > 0 || promptDelta > 0 || completionDelta > 0 || totalDelta > 0) {
+      promptTokens = promptDelta;
+      completionTokens = completionDelta;
+      totalTokens = totalDelta;
+    }
+  }
+  const recap = {
+    elapsedMs,
+    continueCount: normalized.continueCount,
+    roundCount: normalized.roundCount,
+    promptTokens,
+    completionTokens,
+    totalTokens,
+    line: ""
+  };
+  recap.line = formatGoalRecapLine(recap);
+  return recap;
+}
+
+/**
+ * @param {{
+ *   elapsedMs?: number | null,
+ *   continueCount?: number,
+ *   roundCount?: number,
+ *   promptTokens?: number | null,
+ *   completionTokens?: number | null
+ * } | null | undefined} recap
+ */
+export function formatGoalRecapLine(recap) {
+  if (!recap || typeof recap !== "object") {
+    return "";
+  }
+  const parts = [];
+  if (Number.isFinite(recap.elapsedMs)) {
+    parts.push(formatGoalElapsed(/** @type {number} */ (recap.elapsedMs)));
+  }
+  parts.push(`${nonNegativeInteger(recap.continueCount)} 次续跑`);
+  if (nonNegativeInteger(recap.roundCount) > 0) {
+    parts.push(`${nonNegativeInteger(recap.roundCount)} 轮`);
+  }
+  if (recap.promptTokens != null && recap.completionTokens != null) {
+    parts.push(`输入 ${formatGoalTokens(recap.promptTokens)} / 输出 ${formatGoalTokens(recap.completionTokens)}`);
+  }
+  return parts.join(" · ");
+}
+
+/** @param {unknown} value */
+export function formatGoalElapsed(value) {
+  const totalSeconds = Math.max(0, Math.floor(Number(value) / 1000) || 0);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return minutes > 0 ? `${hours}h${minutes}m` : `${hours}h`;
+  }
+  if (minutes > 0) {
+    return seconds > 0 ? `${minutes}m${seconds}s` : `${minutes}m`;
+  }
+  return `${seconds}s`;
+}
+
+/** @param {unknown} value */
+export function formatGoalTokens(value) {
+  const amount = Math.max(0, Math.round(Number(value) || 0));
+  if (amount < 1000) {
+    return String(amount);
+  }
+  if (amount < 1_000_000) {
+    return `${trimGoalCompactNumber(amount / 1000)}k`;
+  }
+  return `${trimGoalCompactNumber(amount / 1_000_000)}M`;
+}
+
+/**
+ * @param {Record<string, any> | null | undefined} goal
+ * @param {Date} [now]
+ */
+export function applyGoalEndedAt(goal, now = new Date()) {
+  if (!goal || optionalIsoTimestamp(goal.endedAt)) {
+    return goal;
+  }
+  goal.endedAt = now.toISOString();
+  return goal;
+}
+
+/**
+ * @param {Record<string, any> | null | undefined} goal
+ */
+export function clearGoalEndedAt(goal) {
+  if (!goal) {
+    return goal;
+  }
+  goal.endedAt = "";
+  return goal;
+}
+
+/**
+ * @param {Record<string, any> | null | undefined} goal
+ */
+export function bumpGoalRoundCount(goal) {
+  if (!goal) {
+    return goal;
+  }
+  const status = String(goal.status ?? "");
+  if (status === "complete" || status === "failed") {
+    return goal;
+  }
+  goal.roundCount = nonNegativeInteger(goal.roundCount) + 1;
+  return goal;
 }
 
 /**
@@ -123,7 +285,10 @@ function optionalPermissionMode(value) {
  *   text?: string,
  *   objective?: string,
  *   previousPermissionMode?: string,
- *   maxAutoContinues?: number
+ *   maxAutoContinues?: number,
+ *   usage?: unknown,
+ *   usageBaseline?: unknown,
+ *   startedAt?: string
  * }} [input]
  */
 export function enableGoalState(input = {}) {
@@ -144,7 +309,10 @@ export function enableGoalState(input = {}) {
     lastContinueReason: "",
     lastBlockReason: "",
     clearedBy: "",
-    maxAutoContinues: input.maxAutoContinues
+    maxAutoContinues: input.maxAutoContinues,
+    startedAt: input.startedAt || new Date().toISOString(),
+    endedAt: "",
+    usageBaseline: input.usageBaseline ?? snapshotGoalUsageBaseline(input.usage)
   }, { hydrateRunningAsPaused: false });
 }
 
@@ -176,6 +344,115 @@ export function shouldSkipGoalContinue(state) {
   if (nonNegativeInteger(goal.continueCount) >= resolveGoalMaxAutoContinues(state.session?.config, goal.maxAutoContinues)) return true;
   if (state.disposed || state.quarantinedTurnId) return true;
   return false;
+}
+
+/**
+ * Apply one finished turn to Goal metadata. Does not enqueue the next prompt.
+ *
+ * @param {Record<string, any> | null | undefined} goal
+ * @param {{
+ *   terminalStatus?: string,
+ *   finalOutput?: string,
+ *   liveWorkflow?: Record<string, any> | null
+ * }} [input]
+ */
+export function applyGoalTurnOutcome(goal, input = {}) {
+  if (!goal?.enabled) {
+    return { action: "none", continue: false, recap: false };
+  }
+  bumpGoalRoundCount(goal);
+  const terminalStatus = String(input.terminalStatus ?? "").trim();
+  if (terminalStatus === "interrupted") {
+    goal.status = "paused";
+    goal.lastBlockReason = "user_interrupt";
+    return { action: "paused", continue: false, recap: false };
+  }
+  if (terminalStatus === "blocked" || terminalStatus === "cancelled") {
+    goal.status = "paused";
+    goal.lastBlockReason = terminalStatus;
+    return { action: "paused", continue: false, recap: false };
+  }
+  if (terminalStatus === "failed") {
+    goal.consecutiveFailures = nonNegativeInteger(goal.consecutiveFailures) + 1;
+    if (goal.consecutiveFailures >= 3) {
+      goal.status = "failed";
+      goal.lastBlockReason = "consecutive_failures";
+      applyGoalEndedAt(goal);
+      return { action: "failed", continue: false, recap: true };
+    }
+    goal.status = "paused";
+    goal.lastBlockReason = "transient_failure";
+    return { action: "paused", continue: false, recap: false };
+  }
+  if (terminalStatus === "completed" || terminalStatus === "") {
+    goal.consecutiveFailures = 0;
+    const evaluation = evaluateGoalCompletion({
+      goal,
+      finalOutput: input.finalOutput,
+      lastEvidence: goal.lastEvidence,
+      liveWorkflow: input.liveWorkflow
+    });
+    goal.lastEvidence = evaluation.evidence;
+    if (evaluation.complete) {
+      goal.status = "complete";
+      goal.lastContinueReason = evaluation.reason;
+      applyGoalEndedAt(goal);
+      return { action: "complete", continue: false, recap: true };
+    }
+    if (goal.status !== "paused") {
+      goal.status = "active";
+    }
+  }
+  return { action: "active", continue: false, recap: false };
+}
+
+/**
+ * Decide whether the host should start another Goal turn.
+ *
+ * @param {{
+ *   session?: Record<string, any>,
+ *   pendingQuestions?: Set<unknown>,
+ *   pendingApprovals?: Set<unknown>,
+ *   disposed?: boolean,
+ *   quarantinedTurnId?: string
+ * }} state
+ */
+export function planGoalHostContinue(state) {
+  const goal = state?.session?.goal;
+  if (shouldSkipGoalContinue(state)) {
+    if (
+      goal?.enabled
+      && nonNegativeInteger(goal.continueCount) >= resolveGoalMaxAutoContinues(state.session?.config, goal.maxAutoContinues)
+    ) {
+      goal.status = "paused";
+      goal.lastBlockReason = "budget";
+      applyGoalEndedAt(goal);
+      return { action: "budget", continue: false, recap: true };
+    }
+    return { action: "skip", continue: false, recap: false };
+  }
+  if (!goal) {
+    return { action: "skip", continue: false, recap: false };
+  }
+  goal.continueCount = nonNegativeInteger(goal.continueCount) + 1;
+  goal.status = "running";
+  goal.lastContinueReason = "unfinished";
+  const prompt = buildGoalContinuePrompt({
+    ...goal,
+    maxAutoContinues: resolveGoalMaxAutoContinues(state?.session?.config, goal.maxAutoContinues)
+  }, {
+    lastTurn: "completed",
+    hostNotes: goal.lastEvidence?.gaps?.length
+      ? goal.lastEvidence.gaps.slice(0, 4)
+      : [`remaining todos: ${goal.lastEvidence?.activeItems ?? 0}`]
+  });
+  return {
+    action: "continue",
+    continue: true,
+    recap: false,
+    prompt,
+    displayPrompt: `Goal 续跑 · 第 ${goal.continueCount} 轮`
+  };
 }
 
 /**
@@ -430,6 +707,30 @@ function countActiveWorkflowItems(workflow) {
 function nonNegativeInteger(value) {
   const number = Number(value);
   return Number.isInteger(number) && number > 0 ? number : 0;
+}
+
+/** @param {unknown} value */
+function optionalIsoTimestamp(value) {
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return "";
+  }
+  const ms = Date.parse(text);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : "";
+}
+
+/** @param {unknown} value */
+function normalizeGoalUsageBaseline(value) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  return snapshotGoalUsageBaseline(value);
+}
+
+/** @param {number} value */
+function trimGoalCompactNumber(value) {
+  const digits = Math.abs(value) >= 100 ? 0 : 1;
+  return value.toFixed(digits).replace(/\.0$/, "");
 }
 
 /** @param {unknown} value @param {number} max */

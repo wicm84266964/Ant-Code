@@ -3,6 +3,7 @@ import { Box, Text } from "ink";
 import { listKeybindings } from "../../commands/registry.js";
 import { buildTaskTree } from "../../agents/orchestrator.js";
 import { summarizeContextWindow } from "../../core/context-window.js";
+import { formatTuiGoalFooter } from "./goal.js";
 import { DEFAULT_TUI_THEME, themeColor } from "./theme.js";
 import {
   colorForKind,
@@ -675,17 +676,18 @@ export function PermissionFooter({ session, width = 100, theme = DEFAULT_TUI_THE
   const mode = session?.permissionMode ?? (session?.fullAccess ? "fullAccess" : session?.allowWrite || session?.allowCommand ? "workspace" : "plan");
   const color = permissionFooterColor(mode, theme);
   const readonlyLocked = session?.permissionReadonlyLocked || session?.readonly;
-  const switchHint = "Shift+Tab 切换";
-  const label = `权限：${permissionModeLabel(session)}`;
-  const detail = readonlyLocked ? " / 只读锁定" : ` / ${permissionModeDescription(mode)}`;
+  const goalLine = formatTuiGoalFooter(session);
+  const switchHint = goalLine ? "/goal exit" : "Shift+Tab 切换";
+  const label = goalLine || `权限：${permissionModeLabel(session)}`;
+  const detail = goalLine ? "" : readonlyLocked ? " / 只读锁定" : ` / ${permissionModeDescription(mode)}`;
   const safeWidth = Math.max(20, Number(width) || 100);
   const compact = safeWidth < 54;
-  const renderedHint = compact ? "S+Tab" : switchHint;
+  const renderedHint = compact ? (goalLine ? "/goal" : "S+Tab") : switchHint;
   const detailWidth = compact ? 0 : Math.max(0, safeWidth - label.length - renderedHint.length - 8);
   return h(Box, { paddingX: 1, height: 1, flexShrink: 0, justifyContent: "space-between" },
     h(Text, null,
-      h(Text, { color, bold: true }, label),
-      compact ? null : h(Text, { dimColor: true }, truncateSingleLine(detail, detailWidth))
+      h(Text, { color: goalLine ? themeColor(theme, "danger", "red") : color, bold: true }, truncateSingleLine(label, Math.max(12, safeWidth - renderedHint.length - 6))),
+      compact || !detail ? null : h(Text, { dimColor: true }, truncateSingleLine(detail, detailWidth))
     ),
     h(Text, { dimColor: true }, renderedHint)
   );

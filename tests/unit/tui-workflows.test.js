@@ -65,6 +65,7 @@ test("bounded index is stable for empty and out-of-range lists", () => {
 test("busy-safe TUI commands can run immediately instead of entering the prompt queue", () => {
   assert.equal(isImmediateTuiCommand("/queue"), true);
   assert.equal(isImmediateTuiCommand("/guide focus on tests"), true);
+  assert.equal(isImmediateTuiCommand("/goal pause"), true);
   assert.equal(isImmediateTuiCommand("/status"), true);
   assert.equal(isImmediateTuiCommand("/run npm test"), false);
   assert.equal(isImmediateTuiCommand("please inspect"), false);

@@ -8152,6 +8152,51 @@ test("dashboard Goal enable requires objective, locks fullAccess, and restores p
   await runtime.shutdown({ force: true, timeoutMs: 50 });
 });
 
+test("dashboard Goal complete snapshot includes compact recap ledger", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-goal-recap-"));
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: {},
+    runTurn: async (session, options) => {
+      if (session.goal?.enabled) {
+        session.usage = {
+          source: "provider-reported",
+          reports: 3,
+          promptTokens: 412000,
+          completionTokens: 86000,
+          totalTokens: 498000
+        };
+        await options.onEvent({ type: "turn_complete", status: "completed" });
+        return { output: "筛选已加上。\nGOAL_STATUS: complete\nEVIDENCE: tests/unit/dashboard-ui.test.js\nGAPS:\n" };
+      }
+      await options.onEvent({ type: "turn_complete", status: "completed" });
+      return { output: "seeded" };
+    }
+  });
+  await runtime.trustWorkspace();
+  const started = await runtime.startTurn({ prompt: "seed session", permissionMode: "workspace" });
+  await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+
+  const enabled = await runtime.applyGoal({
+    sessionId: started.sessionId,
+    action: "enable",
+    objective: "add running-state filters"
+  });
+  assert.equal(enabled.ok, true);
+  const events = await waitForEvent(runtime, started.sessionId, (event) => (
+    event.type === "goal_state" && event.reason === "complete"
+  ));
+  const completed = events.find((event) => event.type === "goal_state" && event.reason === "complete");
+  assert.equal(completed.goal.status, "complete");
+  assert.equal(completed.goal.roundCount, 1);
+  assert.equal(completed.goal.continueCount, 0);
+  assert.match(String(completed.goal.recap?.line ?? ""), /1 轮/);
+  assert.match(String(completed.goal.recap?.line ?? ""), /输入 412k \/ 输出 86k/);
+  assert.equal(completed.goal.recap?.promptTokens, 412000);
+  assert.equal(completed.goal.recap?.completionTokens, 86000);
+  await runtime.shutdown({ force: true, timeoutMs: 50 });
+});
+
 test("dashboard Goal host continues after a finished turn and honors skip rules", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-goal-continue-"));
   let calls = 0;

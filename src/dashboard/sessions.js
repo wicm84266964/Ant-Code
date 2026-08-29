@@ -12,6 +12,9 @@ import {
   GOAL_ABS_MAX_AUTO_CONTINUES,
   GOAL_CONTINUE_KIND,
   GOAL_MIN_AUTO_CONTINUES,
+  applyGoalEndedAt,
+  bumpGoalRoundCount,
+  clearGoalEndedAt,
   resolveGoalMaxAutoContinues,
   buildGoalContinuePrompt,
   disableGoalState,
@@ -1689,7 +1692,11 @@ export function createDashboardRuntime(options) {
           eventCursor: activeState ? activeReplayCursor(activeState) : null,
           sessionStatus: activeState ? sessionStatusSummary(activeState.session) : sessionStatusFromMetadata(metadata, config),
           permission: permissionModeSummary(activeState?.session ?? metadata),
-          goal: publicGoalSnapshot(activeState?.session?.goal ?? /** @type {Record<string, any>} */ (metadata).goal, activeState?.session?.config),
+          goal: publicGoalSnapshot(
+            activeState?.session?.goal ?? /** @type {Record<string, any>} */ (metadata).goal,
+            activeState?.session?.config,
+            activeState?.session?.usage ?? metadata.usage
+          ),
           transcript,
           transcriptPage: transcriptPage.summary,
           failure: persistedSessionFailure(metadata),
@@ -2722,6 +2729,11 @@ function sessionRecordGoalStatus(record) {
   return goal.status ?? "active";
 }
 
+/** @param {Record<string, any>} state */
+function publicStateGoal(state) {
+  return publicGoalSnapshot(state?.session?.goal, state?.session?.config, state?.session?.usage);
+}
+
 /** @param {unknown} value */
 function optionalDashboardPermissionMode(value) {
   if (value == null || String(value).trim() === "") {
@@ -2796,7 +2808,8 @@ async function applyDashboardGoal(context, input) {
       state.session.goal = enableGoalState({
         text: objective,
         previousPermissionMode: previous,
-        maxAutoContinues: resolveGoalMaxAutoContinues(state.session.config)
+        maxAutoContinues: resolveGoalMaxAutoContinues(state.session.config),
+        usage: state.session.usage
       });
       if (!state.running) {
         applyPermissionMode(state.session, "fullAccess");
@@ -2840,6 +2853,7 @@ async function applyDashboardGoal(context, input) {
       goal.status = "active";
       goal.lastBlockReason = "";
       goal.consecutiveFailures = 0;
+      clearGoalEndedAt(goal);
       emitGoalState(state, "resumed");
       if (!state.running && !state.disposed && !state.quarantinedTurnId) {
         const item = createGoalContinueItem(state);
@@ -2863,7 +2877,7 @@ async function applyDashboardGoal(context, input) {
       ok: true,
       sessionId: state.session.id,
       permission: permissionModeSummary(state.session),
-      goal: publicGoalSnapshot(state.session.goal, state.session.config),
+      goal: publicStateGoal(state),
       sessionStatus: sessionStatusSummary(state.session),
       running: state.running === true,
       eventCursor,
@@ -2878,7 +2892,7 @@ function emitGoalState(state, reason) {
     type: "goal_state",
     id: eventId("goal-state"),
     reason,
-    goal: publicGoalSnapshot(state.session.goal, state.session.config),
+    goal: publicStateGoal(state),
     permission: permissionModeSummary(state.session),
     at: new Date().toISOString()
   });
@@ -2956,6 +2970,7 @@ function maybeEnqueueGoalContinue(state, options = {}) {
     if (state.session?.goal?.enabled && nonNegativeInteger(state.session.goal.continueCount) >= resolveGoalMaxAutoContinues(state.session.config, state.session.goal.maxAutoContinues)) {
       state.session.goal.status = "paused";
       state.session.goal.lastBlockReason = "budget";
+      applyGoalEndedAt(state.session.goal);
       emitGoalState(state, "budget");
     }
     return false;
@@ -2980,7 +2995,7 @@ function maybeEnqueueGoalContinue(state, options = {}) {
     id: eventId("goal-continue"),
     reason: state.session.goal.lastContinueReason,
     continueCount: state.session.goal.continueCount,
-    goal: publicGoalSnapshot(state.session.goal, state.session.config),
+    goal: publicStateGoal(state),
     queue: queueSnapshot(state),
     at: new Date().toISOString()
   });
@@ -3007,6 +3022,7 @@ function updateGoalAfterTurn(state, terminalStatus) {
   if (!goal?.enabled) {
     return;
   }
+  bumpGoalRoundCount(goal);
   if (terminalStatus === "interrupted") {
     goal.status = "paused";
     goal.lastBlockReason = "user_interrupt";
@@ -3025,6 +3041,7 @@ function updateGoalAfterTurn(state, terminalStatus) {
     if (goal.consecutiveFailures >= 3) {
       goal.status = "failed";
       goal.lastBlockReason = "consecutive_failures";
+      applyGoalEndedAt(goal);
       emitGoalState(state, "failed");
     } else {
       goal.status = "paused";
@@ -3045,6 +3062,7 @@ function updateGoalAfterTurn(state, terminalStatus) {
     if (evaluation.complete) {
       goal.status = "complete";
       goal.lastContinueReason = evaluation.reason;
+      applyGoalEndedAt(goal);
       emitGoalState(state, "complete");
     } else if (goal.status !== "paused") {
       goal.status = "active";
@@ -3144,6 +3162,7 @@ async function startDashboardTurn(context, input) {
       const created = enableGoalState({
         text: input.goalText,
         maxAutoContinues: resolveGoalMaxAutoContinues(state.session.config),
+        usage: state.session.usage,
         previousPermissionMode: resolveGoalPreviousPermissionMode({
           alreadyEnabled: false,
           sessionPermissionMode: state.session.permissionMode,
@@ -3197,7 +3216,7 @@ async function startDashboardTurn(context, input) {
         queue: queueSnapshot(state),
         queueLength: state.queuedPrompts.length,
         permission: permissionModeSummary(state.session),
-        goal: publicGoalSnapshot(state.session.goal, state.session.config),
+        goal: publicStateGoal(state),
         sessionStatus: sessionStatusSummary(state.session)
       };
     }
@@ -3212,7 +3231,7 @@ async function startDashboardTurn(context, input) {
       queue: queueSnapshot(state),
       current: publicQueueItem(item),
       permission: permissionModeSummary(state.session),
-      goal: publicGoalSnapshot(state.session.goal, state.session.config),
+      goal: publicStateGoal(state),
       sessionStatus: sessionStatusSummary(state.session)
     };
   };
@@ -8108,7 +8127,7 @@ function beginPrompt(state, item, env) {
     queue: queueSnapshot(state),
     current: publicQueueItem(item),
     permission: permissionModeSummary(state.session),
-    goal: publicGoalSnapshot(state.session.goal, state.session.config),
+    goal: publicStateGoal(state),
     sessionStatus: sessionStatusSummary(state.session),
     changeStats: { ...state.turnChangeStats },
     at: new Date().toISOString()
@@ -8273,7 +8292,7 @@ function runTurnInBackground(state, item, env) {
           turnId: state.currentTurnId,
           queue: queueSnapshot(state),
           permission: permissionModeSummary(state.session),
-          goal: publicGoalSnapshot(state.session.goal, state.session.config),
+          goal: publicStateGoal(state),
           sessionStatus: sessionStatusSummary(state.session),
           changeStats: { ...state.turnChangeStats },
           quarantined: false,
