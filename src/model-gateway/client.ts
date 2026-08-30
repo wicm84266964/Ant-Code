@@ -685,7 +685,8 @@ function isConfiguredGatewayRetryable(error: Record<string, unknown>, config: im
  * @param {import("../config/load-config.ts").LabAgentConfig} config
  */
 function usesGatewayRetryProfile(config: import("../config/load-config.ts").LabAgentConfig) {
-  return /retry/i.test(String(config?.modelAlias ?? config?.lab?.gatewayRetryProfile ?? ""));
+  const lab = config?.lab as { gatewayRetryProfile?: unknown } | undefined;
+  return /retry/i.test(String(config?.modelAlias ?? lab?.gatewayRetryProfile ?? ""));
 }
 
 /**

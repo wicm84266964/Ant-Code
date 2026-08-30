@@ -691,7 +691,7 @@ test("mcp doctor reports configured recommended servers without launching them",
   });
 
   assert.match(output, /Ant Code MCP doctor/);
-  assert.match(output, /fetch/);
+  assert.match(output, /filesystem/);
   assert.match(output, /playwright/);
   assert.match(output, /不拉起 MCP 进程/);
   assert.match(output, /\/mcp doctor --live/);

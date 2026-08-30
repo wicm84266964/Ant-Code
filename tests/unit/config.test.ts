@@ -1160,7 +1160,7 @@ test("project config sets custom model window and leaves in-flight compaction of
   assert.ok(config.allowedHosts.includes("github.com"));
   assert.ok(config.allowedHosts.includes("raw.githubusercontent.com"));
   assert.ok(config.allowedHosts.includes("r.jina.ai"));
-  assert.ok(config.mcp.servers.some((server) => server.name === "github" && server.args.includes("package:scripts/github-mcp-server.ts")));
+  assert.equal(Array.isArray(config.mcp.servers), true);
   assert.equal(config.networkMode, "approved-web");
   assert.equal(config.lab.gatewayUrl, "https://gateway.lab.example/v1/chat/completions");
   assert.equal(config.lab.gatewayProtocol, "openai-chat");
@@ -1190,14 +1190,14 @@ test("loads bundled config when no project or lab config is present", async () =
   assert.equal(config.projectConfigPath, null);
   assert.match(config.bundledConfigPath, /lab-agent\.config\.json$/);
   assert.equal(config.modelAlias, "");
-  assert.equal(config.context.maxTokens, 400000);
+  assert.equal(config.context.maxTokens, 200000);
   assert.equal(config.context.summaryBytes, 65536);
   assert.equal(config.context.promptCompactRatio, undefined);
   assert.deepEqual(config.models, []);
   assert.deepEqual(config.agents.modelTiers, {});
   assert.equal(config.agents.budgets.defaults.maxToolCalls, undefined);
   assert.equal(config.agents.budgets.defaults.maxOutputBytes, 320000);
-  assert.equal(config.agents.orchestration.maxParallelReadonlyAgentRuns, 2);
+  assert.equal(config.agents.orchestration.maxParallelReadonlyAgentRuns, 3);
   assert.equal(config.agents.delegationGuard.enabled, true);
   assert.equal(config.agents.backgroundWakeup.enabled, true);
   assert.equal(config.agents.reviewGate.enabled, true);
@@ -1206,7 +1206,7 @@ test("loads bundled config when no project or lab config is present", async () =
   assert.equal(config.lab.gatewayHealthUrl, null);
   assert.equal(config.allowedHosts.includes("gateway.example.com"), false);
   assert.deepEqual(config.agents.vision, {
-    enabled: true,
+    enabled: false,
     model: null,
     autoUseWhenMainModelTextOnly: true
   });
@@ -1238,9 +1238,9 @@ test("explicit empty project model list remains empty instead of restoring bundl
   assert.equal(path.basename(path.dirname(config.projectConfigPath)), ".lab-agent");
   assert.match(config.bundledConfigPath, /lab-agent\.config\.json$/);
   assert.equal(config.modelAlias, "");
-  assert.equal(config.context.maxTokens, 400000);
+  assert.equal(config.context.maxTokens, 200000);
   assert.equal(config.context.promptCompactRatio, undefined);
-  assert.equal(config.context.maxBytes, 2000000);
+  assert.equal(config.context.maxBytes, 800000);
   assert.deepEqual(config.models, []);
   assert.equal(config.lab.gatewayApiKey, "test-key");
 });

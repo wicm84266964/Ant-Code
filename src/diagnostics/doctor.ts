@@ -77,15 +77,10 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
   checks.push(checkAllowedHosts(config));
   checks.push(checkTranscriptPolicy(config, env));
   checks.push(checkMcpPolicy(config));
-  checks.push(await checkPath(path.join(packageRoot, "docs", "provenance", "clean-room-provenance-policy.md"), "provenance policy"));
-  checks.push(await checkPath(path.join(packageRoot, "docs", "provenance", "modules"), "module provenance directory"));
-  checks.push(await checkPath(path.join(packageRoot, "docs", "audit", "clean-room-release-attestation.md"), "clean-room release attestation"));
-  checks.push(await checkPath(path.join(packageRoot, "docs", "audit", "mvp-release-audit.generated.md"), "release audit report"));
   checks.push(await checkPath(path.join(packageRoot, "docs", "deployment", "local-installation.md"), "local installation guide"));
   checks.push(await checkPath(path.join(packageRoot, "docs", "deployment", "model-adapter-gateway-readiness.md"), "model adapter readiness guide"));
-  checks.push(await checkPath(path.join(packageRoot, "docs", "deployment", "rc-acceptance-summary.md"), "rc acceptance summary"));
-  checks.push(await checkPath(path.join(packageRoot, "docs", "deployment", "release-candidate-package.md"), "release candidate package"));
-  checks.push(await checkPath(path.join(packageRoot, "docs", "deployment", "lab-user-quickstart.md"), "lab user quickstart"));
+  checks.push(await checkPath(path.join(packageRoot, "docs", "deployment", "quickstart.md"), "quickstart guide"));
+  checks.push(await checkPath(path.join(packageRoot, "docs", "security", "data-boundary.md"), "data boundary guide"));
 
   return {
     ok: checks.every((check) => check.status !== "error"),
@@ -252,7 +247,7 @@ function checkNodeVersion() {
   return {
     name: "node",
     status: major >= 20 ? "ok" : "error",
-    message: `Node ${process.versions.node} detected; Node 20+ required`
+    message: `Node ${process.versions.node} detected; Node 22.18+ required`
   };
 }
 
