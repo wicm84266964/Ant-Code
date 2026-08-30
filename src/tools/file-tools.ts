@@ -552,7 +552,7 @@ async function ensureNoSymlinkEscape(workspace: string, resolved: string, option
       if (!isInside(workspace, real)) {
         throw toolError("SYMLINK_ESCAPE", "path follows a symlink outside workspace");
       }
-      throw toolError("SYMLINK_REQUIRES_APPROVAL", "symlink paths require explicit approval outside MVP");
+      throw toolError("SYMLINK_REQUIRES_APPROVAL", "symlink paths require explicit approval under the default safety policy");
     }
   }
 }

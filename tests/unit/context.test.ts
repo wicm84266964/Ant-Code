@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { buildInitialContext } from "../../src/context/builder.ts";
 
-test("context builder includes clean-room behavior and final response protocols", async () => {
+test("context builder includes behavior and final response protocols", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
   const context = await buildInitialContext({
     cwd,

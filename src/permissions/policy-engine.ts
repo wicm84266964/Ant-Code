@@ -99,7 +99,7 @@ export function decidePermission(request: PermissionRequest, policy: PermissionP
     if (policy.approvals?.workspaceWrites) {
       return { decision: "allow", reason: "workspace write allowed by session approval" };
     }
-    return { decision: "ask", reason: "workspace writes require approval in MVP" };
+    return { decision: "ask", reason: "workspace writes require approval under the active permission policy" };
   }
 
   return { decision: "allow", reason: "read-only request inside workspace" };

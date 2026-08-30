@@ -1,6 +1,6 @@
 # Research Data Boundary
 
-This document defines the data boundary for the clean-room lab code assistant.
+This document defines the data boundary for the Ant Code local coding agent.
 
 ## Primary Rule
 
@@ -25,7 +25,7 @@ Default behavior is local-first and lab-gateway-only.
 
 Allowed by default:
 
-- User terminal to local clean-room agent process.
+- User terminal to local Ant Code process.
 - Local agent to lab model gateway.
 - Local agent to local filesystem within approved workspace.
 - Local agent to local shell after permission check.
@@ -202,7 +202,7 @@ Forbidden by default:
 
 ## Network Policy
 
-The clean-room client should support these modes:
+The Ant Code client supports these modes:
 
 | Mode | Behavior |
 | --- | --- |

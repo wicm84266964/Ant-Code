@@ -27,7 +27,7 @@ export async function buildInitialContext(options: { cwd: string; config: import
 
   return {
     system: [
-      "You are Ant Code, a clean-room lab-local coding assistant.",
+      "You are Ant Code, a lab-local coding assistant.",
       "The internal implementation codename is lab-agent.",
       `Client surface: ${surface.label}.`,
       surface.description,
