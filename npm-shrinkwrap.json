@@ -7,7 +7,6 @@
     "": {
       "name": "@ant-code/cli",
       "version": "2.0.0",
-      "license": "AGPL-3.0-only",
       "dependencies": {
         "@vscode/ripgrep": "1.18.0",
         "ink": "^6.8.0",
@@ -23,7 +22,6 @@
       },
       "devDependencies": {
         "@types/node": "20.19.43",
-        "@types/react": "^19.2.18",
         "axe-core": "4.12.1",
         "esbuild": "^0.28.0",
         "playwright-core": "1.61.1",
@@ -808,16 +806,6 @@
         "undici-types": "~6.21.0"
       }
     },
-    "node_modules/@types/react": {
-      "version": "19.2.18",
-      "resolved": "https://registry.npmmirror.com/@types/react/-/react-19.2.18.tgz",
-      "integrity": "sha512-AnzbBERsrLKtk2XSfTbYRLjQPdy116Sty4q+T+Bp3IC4l6jNBvreVPAHmpq9qhXQM7CXZPjLVmGMw9sy+hxQ3w==",
-      "devOptional": true,
-      "license": "MIT",
-      "dependencies": {
-        "csstype": "^3.2.2"
-      }
-    },
     "node_modules/@types/trusted-types": {
       "version": "2.0.7",
       "resolved": "https://registry.npmmirror.com/@types/trusted-types/-/trusted-types-2.0.7.tgz",
@@ -1166,13 +1154,6 @@
       "dependencies": {
         "layout-base": "^1.0.0"
       }
-    },
-    "node_modules/csstype": {
-      "version": "3.2.3",
-      "resolved": "https://registry.npmmirror.com/csstype/-/csstype-3.2.3.tgz",
-      "integrity": "sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==",
-      "devOptional": true,
-      "license": "MIT"
     },
     "node_modules/cytoscape": {
       "version": "3.33.3",
