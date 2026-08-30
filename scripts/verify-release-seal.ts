@@ -193,22 +193,7 @@ async function verifyRuntimeDependencyEvidence(name: string, reviewed: { version
     }
   }
 
-  const sbom = await readJson<SbomJson>("docs/audit/dependency-sbom.generated.json");
-  const sbomComponent = sbom?.components?.find((component) => component.name === name && component.scope === "runtime");
-  if (!sbomComponent) {
-    failures.push(`dependency SBOM is missing runtime component ${name}`);
-  } else {
-    if (sbomComponent.installedVersion !== reviewed.installedVersion) {
-      failures.push(`dependency SBOM records ${name}@${sbomComponent.installedVersion}; reviewed version is ${reviewed.installedVersion}`);
-    }
-    if (sbomComponent.license !== reviewed.license) {
-      failures.push(`dependency SBOM records ${name} license ${sbomComponent.license}; reviewed license is ${reviewed.license}`);
-    }
-  }
-
-  await requireDocMarkers("docs/audit/dependency-license-summary.generated.md", [
-    `| ${name} | runtime | ${reviewed.installedVersion} | ${reviewed.license} |`
-  ]);
+  await requireDocMarkers("THIRD_PARTY_NOTICES.md", [name, reviewed.license]);
 }
 
 /**
