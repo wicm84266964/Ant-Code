@@ -7,6 +7,7 @@ This document defines the data boundary for the clean-room lab code assistant.
 Research data must not leave lab-approved infrastructure unless a project owner explicitly approves the destination and the approval is recorded.
 
 Default behavior is local-first and lab-gateway-only.
+`LAB_AGENT_NETWORK_MODE` can temporarily override the configured network mode.
 
 ## Data Classes
 

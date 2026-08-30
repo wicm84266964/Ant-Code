@@ -23,8 +23,8 @@ if (failures.length > 0) {
 
 async function checkNodeVersion() {
   const major = Number.parseInt(process.versions.node.split(".")[0], 10);
-  if (major < 20) {
-    failures.push(`Node ${process.versions.node} detected; Node 20+ is required`);
+  if (major < 22) {
+    failures.push(`Node ${process.versions.node} detected; Node 22.18+ is required`);
   }
   checks.push("node-version");
 }
@@ -68,13 +68,13 @@ async function checkCliEntrypoint() {
 async function checkInstallDocs() {
   await requireDocMarkers("docs/deployment/local-installation.md", [
     "## Local Checkout",
-    "npm install",
+    "npm ci",
     "npm link",
     "ant-code doctor",
     "## PowerShell Environment",
     "## Troubleshooting"
   ]);
-  await requireDocMarkers("docs/deployment/lab-user-quickstart.md", [
+  await requireDocMarkers("docs/deployment/quickstart.md", [
     "ant-code doctor",
     "ant-code -p \"/status\"",
     "Ant Code can still run local slash commands"

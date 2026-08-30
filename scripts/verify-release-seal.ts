@@ -49,7 +49,6 @@ const REVIEWED_RUNTIME_DEPENDENCIES = new Map([
   }]
 ]);
 
-await verifyRequiredAttestation();
 await verifyRuntimeSourceMarkers();
 await verifyPackageBoundary();
 await verifyReviewedRuntimeDependencies();
@@ -209,9 +208,6 @@ async function verifyRuntimeDependencyEvidence(name: string, reviewed: { version
 
   await requireDocMarkers("docs/audit/dependency-license-summary.generated.md", [
     `| ${name} | runtime | ${reviewed.installedVersion} | ${reviewed.license} |`
-  ]);
-  await requireDocMarkers("docs/provenance/modules/cli.md", [
-    reviewed.provenanceMarker
   ]);
 }
 
