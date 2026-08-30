@@ -5,6 +5,6 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["src/dashboard/**/*.js"],
+  "include": ["src/dashboard/**/*.ts", "src/dashboard/**/*.js"],
   "exclude": ["src/dashboard/public/vendor/**"]
 }

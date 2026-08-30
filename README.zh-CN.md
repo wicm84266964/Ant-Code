@@ -65,10 +65,12 @@ ant-code/
 
 ## 环境要求
 
-- Node.js 20+
+- Node.js 22.18+（`node -v`）
 - npm
 - Windows 上的 PowerShell，或 Linux/macOS 上的 POSIX shell
 - 真实模型调用需要用户自己控制的模型网关
+
+Ant Code 2.0.0 直接运行 TypeScript 源码。旧的 JavaScript 检出（`src/cli/index.js`、Node 20）不能跑这份代码。
 
 测试和 mock gateway 不需要真实模型服务。
 
@@ -79,8 +81,8 @@ git clone https://github.com/wicm84266964/Ant-Code.git
 cd Ant-Code
 npm ci
 npm run verify:install
-node src/cli/index.js doctor
-node src/cli/index.js tui
+node src/cli/index.ts doctor
+node src/cli/index.ts tui
 ```
 
 `npm ci` 会安装锁定版本的本地工具链，包括随包 ripgrep 二进制解析器
@@ -137,7 +139,7 @@ ant-code -p "Reply exactly: ready"
 npm run mock-gateway -- --port 8787
 $env:LAB_MODEL_GATEWAY_URL = "http://127.0.0.1:8787/v1/chat"
 $env:LAB_MODEL_GATEWAY_PROTOCOL = "openai-chat"
-node .\src\cli\index.js -p "hello"
+node .\src\cli\index.ts -p "hello"
 ```
 
 ## 运行 Ant Code
@@ -179,8 +181,8 @@ npm run check:syntax
 npm run check:dependencies
 npm test
 npm run mock-gateway -- --port 8787
-node src/cli/index.js --version
-node src/cli/index.js -p "/status"
+node src/cli/index.ts --version
+node src/cli/index.ts -p "/status"
 ```
 
 ## 安全边界
