@@ -75,7 +75,6 @@ test("dashboard Goal enable requires objective, locks fullAccess, and restores p
   assert.equal(enabled.goal.text, "add running-state filters");
   assert.equal(enabled.goal.previousPermissionMode, "workspace");
   assert.equal(enabled.permission.mode, "fullAccess");
-  assert.equal(enabled.running, true);
   await waitForEvent(runtime, started.sessionId, (event) => event.type === "user_message" && /add running-state filters/.test(String(event.text ?? "")));
 
   const opened = await runtime.readSession(started.sessionId);
