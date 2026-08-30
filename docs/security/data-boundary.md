@@ -1,19 +1,19 @@
 # Research Data Boundary
 
-This document defines the data boundary for Ant Code.
+This document defines the data boundary for the clean-room lab code assistant.
 
 ## Primary Rule
 
-Sensitive project data must not leave approved infrastructure unless a project owner explicitly approves the destination and the approval is recorded.
+Research data must not leave lab-approved infrastructure unless a project owner explicitly approves the destination and the approval is recorded.
 
-Default behavior is local-first and gateway-only.
+Default behavior is local-first and lab-gateway-only.
 
 ## Data Classes
 
 | Class | Examples | Default handling |
 | --- | --- | --- |
 | Public code | Open-source dependencies, public examples | May be sent to approved model gateway |
-| Internal code | Private scripts, unpublished methods, project tools | Approved gateway only |
+| Internal code | Lab scripts, unpublished methods, project tools | Lab gateway only |
 | Sensitive research data | Raw data, patient/subject data, unpublished measurements, proprietary datasets | Do not send by default; require explicit policy exception |
 | Credentials | API keys, SSH keys, cloud tokens, cookies, OAuth tokens | Never send to model; scrub from env and logs |
 | Personal data | Names, emails, student IDs, human subject metadata | Treat as sensitive unless explicitly public |
@@ -24,27 +24,27 @@ Default behavior is local-first and gateway-only.
 
 Allowed by default:
 
-- User terminal to local Ant Code process.
-- Local agent to configured model gateway.
+- User terminal to local clean-room agent process.
+- Local agent to lab model gateway.
 - Local agent to local filesystem within approved workspace.
 - Local agent to local shell after permission check.
-- Local agent to approved local or managed MCP servers.
-- Local agent to managed policy/config service.
-- Local agent to managed plugin/skill registry.
+- Local agent to local or lab-approved MCP servers.
+- Local agent to lab policy/config service.
+- Local agent to lab plugin/skill registry.
 
 Conditionally allowed:
 
 - Local agent to public internet for package/docs lookup, only if the project policy allows web access.
-- Local agent to approved object storage for large attachments.
-- Local agent to approved scheduler or compute runner.
+- Local agent to lab object storage for large attachments.
+- Local agent to lab scheduler or compute runner.
 
 Forbidden by default:
 
-- private provider web apps
-- provider API hosts except through an explicitly approved gateway design
-- provider console OAuth hosts
-- unreviewed telemetry intake
-- unreviewed remote feature config
+- `claude.ai`
+- `api.anthropic.com` except through an explicitly approved lab gateway design
+- `platform.claude.com`
+- Datadog intake
+- GrowthBook / Statsig remote config
 - Feedback endpoints
 - Transcript upload endpoints
 - Official marketplace auto-install endpoints
@@ -52,12 +52,12 @@ Forbidden by default:
 
 ## Model Traffic Boundary
 
-All model requests must go through `LAB_MODEL_GATEWAY_URL` or an equivalent approved endpoint.
+All model requests must go through `LAB_MODEL_GATEWAY_URL` or an equivalent lab-approved endpoint.
 
 The client must not directly read or use:
 
-- provider API keys
-- provider OAuth tokens
+- `ANTHROPIC_API_KEY`
+- Claude.ai OAuth tokens
 - Console OAuth tokens
 - Unscoped user cloud credentials
 
@@ -115,7 +115,7 @@ and persisted sessions plus older transcript metadata/chunks remain available.
 
 Default:
 
-- Store transcripts/session metadata locally under the Ant Code local state directory.
+- Store transcripts/session metadata locally under a lab-owned config directory.
 - Do not upload transcripts.
 - Do not include raw secrets.
 - Retain for a bounded period or bounded size.
@@ -144,7 +144,7 @@ Recommended settings:
 - `LAB_AGENT_TRANSCRIPT_ENCRYPTION=required` on shared workstations.
 - `LAB_AGENT_TRANSCRIPT_KEY` supplied by the local operator or lab secret manager when encryption is enabled.
 - `transcript.includeToolOutput=policy` so high-risk command output can be redacted.
-- `models[].contextTokens` and `context.maxTokens` sized to the configured gateway model window, with `context.maxBytes`, `context.maxMessages`, `context.keepRecentMessages`, and `context.summaryBytes` as secondary local safety bounds for project sensitivity.
+- `models[].contextTokens` and `context.maxTokens` sized to the lab gateway model window, with `context.maxBytes`, `context.maxMessages`, `context.keepRecentMessages`, and `context.summaryBytes` as secondary local safety bounds for project sensitivity.
 
 ## Shell and Subprocess Boundary
 
@@ -165,8 +165,8 @@ Environment variables to scrub by default:
 - `AWS_*`
 - `GITHUB_TOKEN`
 - `SSH_AUTH_SOCK`
+- `ANTHROPIC_API_KEY`
 - `OPENAI_API_KEY`
-- provider API key variables
 - OAuth token variables
 
 ## MCP Boundary
@@ -174,24 +174,24 @@ Environment variables to scrub by default:
 Default:
 
 - Local stdio MCP is allowed only from configured paths.
-- HTTP MCP is allowed only from approved hosts.
+- HTTP MCP is allowed only from lab-approved hosts.
 - MCP server environment variables are scrubbed unless explicitly allowlisted.
 - MCP tools inherit the same permission engine as built-in tools.
 
 Forbidden by default:
 
-- Auto-discovering third-party managed MCP servers.
+- Auto-discovering Claude.ai MCP servers.
 - Auto-installing official MCP servers.
-- Passing raw credentials to unreviewed MCP servers.
+- Passing raw lab credentials to unreviewed MCP servers.
 
 ## Plugin and Skill Boundary
 
 Default:
 
-- Plugins and skills come from managed registries or local project paths.
+- Plugins and skills come from the lab registry or local project paths.
 - Plugin packages must be version-pinned.
 - Registry entries must include owner, source, checksum, and review status.
-- Auto-update is disabled unless a managed registry signs releases.
+- Auto-update is disabled unless the lab registry signs releases.
 
 Forbidden by default:
 
@@ -201,20 +201,16 @@ Forbidden by default:
 
 ## Network Policy
 
-Ant Code should support these modes:
+The clean-room client should support these modes:
 
 | Mode | Behavior |
 | --- | --- |
 | `offline` | No network except loopback. |
-| `lab-only` | Configured gateway, managed config, approved MCP, and managed registry only. |
-| `approved-web` | Managed endpoints plus explicit web allowlist. |
+| `lab-only` | Lab gateway, lab config, lab MCP, lab registry only. |
+| `approved-web` | Lab endpoints plus explicit web allowlist. |
 | `open-dev` | Developer mode for non-sensitive repos only; must show warning. |
 
-Default for managed deployment: `lab-only`.
-
-`LAB_AGENT_NETWORK_MODE` can temporarily override the configured network mode
-for a local session. Use it for explicit operator-controlled switches such as
-offline validation or high-sensitivity project work.
+Default for lab deployment: `lab-only`.
 
 High-sensitivity mode permits only `offline` or `lab-only`. `approved-web` and `open-dev` are rejected for high-sensitivity sessions.
 
@@ -244,13 +240,13 @@ Every exception must record:
 
 The new repository should fail CI if these strings appear in runtime code without an explicit test fixture exception:
 
-- private provider web apps
-- private provider coding-agent endpoints
-- provider console OAuth hosts
-- provider MCP proxy hosts
-- unreviewed telemetry intake hosts
-- unreviewed telemetry SDKs
-- unreviewed remote feature-flag SDKs
-- private provider endpoint clients
+- `claude.ai`
+- `api.anthropic.com/api/claude_code`
+- `platform.claude.com/oauth`
+- `mcp-proxy.anthropic.com`
+- `http-intake.logs.us5.datadoghq.com`
+- `growthbook`
+- `statsig`
+- `datadog`
 - `shared_session_transcripts`
 - `claude_cli_feedback`

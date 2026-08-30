@@ -7,10 +7,10 @@ This quickstart is for using Ant Code on a local project. It focuses on safe dai
 From the project directory:
 
 ```sh
-node src/cli/index.js doctor
-node src/cli/index.js -p "/status"
-node src/cli/index.js -p "/map"
-node src/cli/index.js
+node src/cli/index.ts doctor
+node src/cli/index.ts -p "/status"
+node src/cli/index.ts -p "/map"
+node src/cli/index.ts
 ```
 
 After package linking or installation, use:

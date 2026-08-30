@@ -6,7 +6,7 @@ the configured model gateway/model adapter layer.
 
 ## Requirements
 
-- Node.js 20 or newer.
+- Node.js 22.18 or newer.
 - npm, bundled with Node.js.
 - PowerShell on Windows, or a POSIX shell on Linux/macOS.
 
@@ -15,14 +15,14 @@ package works without enabling those MCP servers.
 
 ## Install From Tarball
 
-The npm tarball is useful for install validation and source checkout users. It
-contains the runtime source files by npm design; the source is AGPL-3.0
-licensed and remains available in this repository.
+The npm tarball is for internal install validation and source checkout users. It
+contains the runtime source files by npm design, so it is not the
+source-protected external distribution.
 
 From the directory containing the release tarball:
 
 ```powershell
-npm install -g .\dist\ant-code-cli-1.0.0.tgz
+npm install -g .\dist\ant-code-cli-1.3.0.tgz
 ant-code --version
 ant-code doctor
 ```
@@ -31,7 +31,7 @@ If you do not want a global install, install into a local tools directory:
 
 ```powershell
 mkdir .ant-code-tooling
-npm install --prefix .\.ant-code-tooling .\dist\ant-code-cli-1.0.0.tgz
+npm install --prefix .\.ant-code-tooling .\dist\ant-code-cli-1.3.0.tgz
 .\.ant-code-tooling\node_modules\.bin\ant-code.cmd --version
 ```
 
@@ -63,12 +63,12 @@ Give users the `dist\ant-code-windows-x64\` directory. It contains:
 - `configure-gateway.ps1` and `configure-gateway.cmd`: interactive
   gateway/model/token setup scripts.
 - `config\`: config templates and bundled skills.
-- `docs\`: installation, gateway, quickstart, and security docs.
+- `docs\`: deployment, audit, provenance, security, and gateway protocol docs.
 - `README.md`, `README.zh-CN.md`, `package.json`, and
   `RELEASE-MANIFEST.md`.
 
-It intentionally does not include `src\`, `tests\`, `node_modules\`, local
-sessions, logs, or temporary files.
+It intentionally does not include `src\`, `tests\`, `node_modules\`,
+`docs\handoff\`, or `docs\plans\`.
 
 After unpacking the executable directory, most Windows users should configure
 their gateway with:
@@ -86,29 +86,31 @@ deployment must block public web access.
 
 ## Local Checkout
 
-From a fresh source checkout:
+From a fresh source checkout, replace `<repository-url>` with the actual
+development repository URL:
 
 ```sh
-git clone https://github.com/wicm84266964/Ant-Code.git
-cd Ant-Code
+git clone <repository-url> ant-code
+cd ant-code
 npm ci
 npm run verify:install
 npm run verify:release
-node src/cli/index.js doctor
-node src/cli/index.js tui
-node src/cli/index.js -p "/status"
+node src/cli/index.ts doctor
+node src/cli/index.ts tui
+node src/cli/index.ts -p "/status"
 ```
 
 If the repository is already checked out, run the commands from the repository
 root, starting with `npm ci`.
 
 This repository uses reviewed public open-source runtime dependencies for the
-terminal UI layer, local ripgrep-backed search, and TypeScript/JavaScript
-semantic analysis. `npm ci` installs the locked dependency graph from
-`package-lock.json`, including `@vscode/ripgrep` and `typescript`; no separate
-search or TypeScript setup script is required. Packed releases carry the same
-graph through `npm-shrinkwrap.json`. Release checks verify the reviewed
-allowlist, lockfile integrity, dependency notices, and shrinkwrap parity.
+terminal UI layer and local code-intelligence tools. `npm ci` installs the
+locked dependency graph from `package-lock.json`; packed releases carry the same
+graph through `npm-shrinkwrap.json`. The default install includes local
+ripgrep-backed search and the TypeScript language service, both running on the
+workstation against workspace files only. Release checks verify the reviewed
+allowlist, lockfile integrity, dependency SBOM, license summary, shrinkwrap
+parity, and provenance notes.
 
 ## Linked CLI
 
@@ -262,8 +264,7 @@ Create `lab-agent.config.json` in each project that needs its own gateway:
 ```
 
 For OpenAI Chat Completions compatible gateways, use
-`"gatewayProtocol": "openai-chat"`. For Claude/Anthropic Messages routes, use
-`"gatewayProtocol": "anthropic-messages"`. For the legacy native Ant Code gateway protocol, use
+`"gatewayProtocol": "openai-chat"`. For the native Ant Code lab gateway, use
 `"gatewayProtocol": "lab-agent-gateway"`.
 
 Store gateway bearer tokens outside the JSON:
@@ -286,7 +287,7 @@ keys in Ant Code config files.
 
 ### Option B: Shared Config
 
-For a machine-wide or operator-managed config, copy the template from the installed
+For a machine-wide or lab-managed config, copy the template from the installed
 package or this checkout:
 
 ```powershell
@@ -370,6 +371,13 @@ defaults < packaged lab-agent.config.json < LAB_AGENT_CONFIG/user config
          < runtime environment controls
 ```
 
+The Dashboard can save model settings either to the user global config
+(`%USERPROFILE%\.ant-code\lab-agent.config.json`, or `LAB_AGENT_CONFIG` when
+that variable is set) or to the current project `.lab-agent/config.json`.
+Project config wins when it contains a real model/gateway config. Template or
+placeholder model entries are ignored so copied examples do not mask the global
+default.
+
 Project model and gateway settings intentionally override model and gateway
 environment defaults so Dashboard changes take effect immediately. Runtime
 controls such as network mode and context limits still take precedence from the
@@ -406,7 +414,7 @@ you switch gateways often.
 
 ## PowerShell Environment
 
-For a local model adapter or model gateway:
+For a local model adapter or lab model gateway:
 
 ```powershell
 $env:LAB_MODEL_GATEWAY_URL = "http://127.0.0.1:8787/v1/chat"
@@ -422,13 +430,13 @@ For an OpenAI Chat Completions compatible local adapter:
 $env:LAB_MODEL_GATEWAY_PROTOCOL = "openai-chat"
 $env:LAB_MODEL_GATEWAY_URL = "http://localhost:8080/v1/chat/completions"
 $env:LAB_MODEL_GATEWAY_API_KEY = "<adapter-access-token>"
-$env:LAB_AGENT_MODEL = "example-coding-model"
+$env:LAB_AGENT_MODEL = "claude-sonnet-4-5-20250929"
 $env:LAB_AGENT_NETWORK_MODE = "offline"
-node src/cli/index.js -p "hello"
-node src/cli/index.js tui
+node src/cli/index.ts -p "hello"
+node src/cli/index.ts tui
 ```
 
-`LAB_MODEL_GATEWAY_API_KEY` is a local adapter access token. Do not commit it to config files; use a PowerShell session variable, a Windows user environment variable, or another approved secret store.
+`LAB_MODEL_GATEWAY_API_KEY` is a local adapter access token. Do not commit it to config files; use a PowerShell session variable, a Windows user environment variable, or another lab-approved secret store.
 
 Optional TUI appearance variables:
 
@@ -463,7 +471,7 @@ Expected result:
 - Release verification passes.
 - Doctor shows no unexpected errors.
 - Slash commands work without model gateway access.
-- The configured gateway, model aliases, and network mode match the intended environment.
+- The v1.0 acceptance record in `docs/deployment/v1.0-acceptance.md` matches the configured delivery environment.
 
 `npm run verify:release` includes `npm run check`. That gate verifies syntax,
 forbidden endpoints, dependency policy and lockfile parity, the type diagnostic
@@ -485,9 +493,9 @@ history.
 
 ## Troubleshooting
 
-- If `ant-code` is not found, rerun `npm link` from the repository root or use `node src/cli/index.js`.
+- If `ant-code` is not found, rerun `npm link` from the repository root or use `node src/cli/index.ts`.
 - If the TUI is not comfortable in the current terminal, use line-mode `ant-code chat` or print mode with `ant-code -p`.
 - If `doctor` says the model gateway is not configured, local slash commands still work; set `LAB_MODEL_GATEWAY_URL` only when model turns are needed.
-- If live gateway checks fail in `offline` mode, use a loopback adapter such as `127.0.0.1` or switch to an approved `lab-only` host.
+- If live gateway checks fail in `offline` mode, use a loopback adapter such as `127.0.0.1` or switch to a lab-approved `lab-only` host.
 - If metadata retention is too broad for the project, set `LAB_AGENT_SENSITIVITY=high` or use the high-sensitivity config template.
 - If command approvals are confusing, use `/status`, `/next`, and `/report` to inspect the current local workflow state before continuing.

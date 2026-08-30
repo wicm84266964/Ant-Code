@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.0.0 - 2026-08-30
+
+### Changed
+
+- Runtime source is TypeScript. Node.js 22.18+ runs `src/cli/index.ts`
+  directly; there is no compile-to-`dist` step for the CLI.
+- Large modules are split behind the same public facades (`createDashboardRuntime`,
+  `runTui`, session and config exports).
+- Existing JavaScript installs (`src/cli/index.js`, Node 20) cannot run this
+  tree. Re-run `npm ci` and `npm link` after upgrading Node.
+
+### Added
+
+- TUI `/goal` from 1.4.1 remains part of this line: unattended Goal loop,
+  recap footer, session bootstrap, and permission lock until `/goal exit`.
+
 ## 1.4.1 - 2026-08-29
 
 ### Added

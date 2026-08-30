@@ -79,10 +79,13 @@ ant-code/
 
 ## Requirements
 
-- Node.js 20+
+- Node.js 22.18+ (`node -v`)
 - npm
 - PowerShell on Windows, or a POSIX shell on Linux/macOS
 - a user-controlled model gateway for real model calls
+
+Ant Code 2.0.0 runs TypeScript source directly. Older JavaScript checkouts
+(`src/cli/index.js`, Node 20) cannot run this tree.
 
 The tests and mock gateway can run without a real model provider.
 
@@ -93,8 +96,8 @@ git clone https://github.com/wicm84266964/Ant-Code.git
 cd Ant-Code
 npm ci
 npm run verify:install
-node src/cli/index.js doctor
-node src/cli/index.js tui
+node src/cli/index.ts doctor
+node src/cli/index.ts tui
 ```
 
 `npm ci` installs the locked local toolchain, including the bundled ripgrep
@@ -109,6 +112,10 @@ ant-code --version
 ant-code doctor
 ant-code
 ```
+
+`ant-code --version` should print `2.0.0`. If you previously linked a
+JavaScript install, run `npm link` again so the global command points at
+`src/cli/index.ts`.
 
 The package keeps `"private": true` to prevent accidental npm registry
 publication. The source repository itself is open under AGPL-3.0.
@@ -151,7 +158,7 @@ For temporary local testing, use the built-in mock gateway:
 npm run mock-gateway -- --port 8787
 $env:LAB_MODEL_GATEWAY_URL = "http://127.0.0.1:8787/v1/chat"
 $env:LAB_MODEL_GATEWAY_PROTOCOL = "openai-chat"
-node .\src\cli\index.js -p "hello"
+node .\src\cli\index.ts -p "hello"
 ```
 
 ## Run Ant Code
@@ -206,8 +213,8 @@ npm run check:syntax
 npm run check:dependencies
 npm test
 npm run mock-gateway -- --port 8787
-node src/cli/index.js --version
-node src/cli/index.js -p "/status"
+node src/cli/index.ts --version
+node src/cli/index.ts -p "/status"
 ```
 
 `npm run check` is the release gate for syntax, forbidden endpoints, dependency

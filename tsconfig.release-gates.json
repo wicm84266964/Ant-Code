@@ -5,11 +5,11 @@
     "types": ["node"]
   },
   "include": [
-    "scripts/build-dashboard-assets.js",
-    "scripts/check-dashboard-assets.js",
-    "scripts/check-types.js",
-    "scripts/dashboard-assets.js",
-    "scripts/lockfile-consistency.js",
-    "scripts/type-ratchet.js"
+    "scripts/build-dashboard-assets.ts",
+    "scripts/check-dashboard-assets.ts",
+    "scripts/check-types.ts",
+    "scripts/dashboard-assets.ts",
+    "scripts/lockfile-consistency.ts",
+    "scripts/type-ratchet.ts"
   ]
 }

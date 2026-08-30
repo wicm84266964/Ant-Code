@@ -1,69 +1,131 @@
 {
   "typescriptVersion": "6.0.3",
   "diagnostics": {
-    "src/agents/background-registry.js": {
+    "src/agents/background-registry.ts": {
       "TS2339": 12,
       "TS7006": 1
     },
-    "src/agents/background-terminal-registry.js": {
-      "TS2339": 13,
-      "TS2345": 1,
-      "TS7006": 11
+    "src/agents/background-terminal-registry.ts": {
+      "TS18046": 2,
+      "TS2339": 39,
+      "TS2554": 1,
+      "TS7005": 8,
+      "TS7006": 81,
+      "TS7034": 8
     },
-    "src/agents/task-group-store.js": {
-      "TS18048": 6,
-      "TS2339": 30,
-      "TS2722": 1,
-      "TS7006": 16
-    },
-    "src/agents/task-store.js": {
-      "TS18048": 3,
-      "TS2339": 95,
-      "TS7006": 13
-    },
-    "src/config/load-config.js": {
-      "TS18048": 6,
+    "src/agents/task-group-store.ts": {
+      "TS18048": 8,
+      "TS2339": 36,
       "TS2345": 2,
-      "TS2353": 1,
-      "TS7006": 39,
-      "TS7031": 8,
+      "TS7006": 30
+    },
+    "src/agents/task-store.ts": {
+      "TS18048": 5,
+      "TS2339": 96,
+      "TS7006": 14
+    },
+    "src/config-v2/file-repository.ts": {
+      "TS2339": 6,
+      "TS7006": 35,
+      "TS7023": 1,
+      "TS7024": 1,
+      "TS7031": 1
+    },
+    "src/config-v2/model-mutations.ts": {
+      "TS18046": 10,
+      "TS2339": 51,
+      "TS7006": 153,
       "TS7053": 1
     },
-    "src/core/context-window.js": {
-      "TS18048": 14,
-      "TS2322": 9,
-      "TS2339": 13,
-      "TS7006": 17
+    "src/config-v2/paths.ts": {
+      "TS7006": 3
     },
-    "src/core/session.js": {
-      "TS18047": 7,
-      "TS2322": 3,
-      "TS2339": 137,
+    "src/config-v2/resolver.ts": {
+      "TS18046": 4,
+      "TS2339": 12,
+      "TS7006": 39,
+      "TS7053": 8
+    },
+    "src/config-v2/runtime-selection.ts": {
+      "TS18047": 1,
+      "TS18048": 6,
+      "TS2339": 15,
       "TS2345": 6,
-      "TS2353": 12,
+      "TS7006": 48,
+      "TS7053": 1
+    },
+    "src/config-v2/schema.ts": {
+      "TS18048": 3,
+      "TS2322": 16,
+      "TS2339": 38,
+      "TS7006": 78,
+      "TS7022": 1,
+      "TS7023": 1,
+      "TS7024": 1,
+      "TS7053": 8
+    },
+    "src/config/load-config.ts": {
+      "TS18046": 5,
+      "TS2339": 14,
+      "TS7005": 1,
+      "TS7006": 145,
+      "TS7031": 29,
+      "TS7034": 1,
+      "TS7053": 7
+    },
+    "src/core/context-window.ts": {
+      "TS18048": 3,
+      "TS2339": 27,
+      "TS7006": 52
+    },
+    "src/core/goal.ts": {
+      "TS2339": 23,
+      "TS7006": 35,
+      "TS7019": 1
+    },
+    "src/core/session.ts": {
+      "TS18047": 7,
+      "TS2322": 1,
+      "TS2339": 142,
+      "TS2345": 9,
+      "TS2353": 1,
       "TS7005": 4,
-      "TS7006": 149,
+      "TS7006": 208,
       "TS7023": 1,
       "TS7024": 2,
-      "TS7034": 2,
-      "TS8024": 2
-    },
-    "src/dashboard/events.js": {
-      "TS2339": 2,
-      "TS7006": 27,
-      "TS7053": 2
-    },
-    "src/dashboard/files.js": {
-      "TS2339": 19,
-      "TS2345": 4,
-      "TS2769": 1,
-      "TS7005": 5,
-      "TS7006": 42,
       "TS7034": 2
     },
-    "src/dashboard/permissions.js": {
-      "TS2339": 3,
-      "TS7006": 11,
+    "src/credentials/store.ts": {
+      "TS2339": 2,
+      "TS7006": 22,
+      "TS7031": 1
+    },
+    "src/dashboard/config-store.ts": {
+      "TS2339": 8,
+      "TS7006": 24
+    },
+    "src/dashboard/events.ts": {
+      "TS2339": 2,
+      "TS7006": 29,
+      "TS7053": 2
+    },
+    "src/dashboard/files.ts": {
+      "TS18046": 5,
+      "TS2339": 19,
+      "TS2345": 3,
+      "TS2769": 1,
+      "TS7005": 5,
+      "TS7006": 51,
+      "TS7034": 2
+    },
+    "src/dashboard/model-settings-v2.ts": {
+      "TS18046": 1,
+      "TS2339": 8,
+      "TS7006": 50
+    },
+    "src/dashboard/permissions.ts": {
+      "TS2339": 9,
+      "TS7006": 15,
       "TS7022": 1,
       "TS7023": 1,
       "TS7024": 1,
@@ -71,16 +133,16 @@
     },
     "src/dashboard/public/app.js": {
       "TS18046": 8,
-      "TS18047": 335,
+      "TS18047": 325,
       "TS18049": 3,
-      "TS2322": 33,
-      "TS2339": 289,
+      "TS2322": 16,
+      "TS2339": 286,
       "TS2345": 11,
-      "TS2531": 9,
+      "TS2531": 2,
       "TS2554": 1,
-      "TS2698": 2,
-      "TS7005": 5,
-      "TS7006": 270,
+      "TS2698": 1,
+      "TS7005": 3,
+      "TS7006": 269,
       "TS7019": 1,
       "TS7034": 1,
       "TS7053": 3
@@ -109,64 +171,89 @@
     "src/dashboard/public/transcript.js": {
       "TS7006": 1
     },
-    "src/dashboard/server.js": {
-      "TS2339": 10,
-      "TS2810": 1,
+    "src/dashboard/server.ts": {
+      "TS18046": 2,
+      "TS2339": 14,
+      "TS2345": 1,
+      "TS2794": 1,
       "TS7005": 4,
-      "TS7006": 70,
+      "TS7006": 88,
       "TS7034": 4
     },
-    "src/dashboard/sessions.js": {
-      "TS18047": 22,
-      "TS18048": 22,
-      "TS2322": 2,
-      "TS2339": 98,
-      "TS2345": 4,
+    "src/dashboard/sessions.ts": {
+      "TS18046": 21,
+      "TS18047": 9,
+      "TS18048": 15,
+      "TS18049": 9,
+      "TS2322": 1,
+      "TS2339": 276,
+      "TS2345": 22,
+      "TS2488": 2,
       "TS2698": 1,
       "TS2722": 1,
       "TS2769": 2,
       "TS2783": 1,
-      "TS7005": 3,
-      "TS7006": 338,
-      "TS7034": 2,
-      "TS7053": 4
+      "TS2790": 3,
+      "TS7005": 6,
+      "TS7006": 595,
+      "TS7031": 8,
+      "TS7034": 4,
+      "TS7053": 8
     },
-    "src/dashboard/vendor/rich-entry.js": {
+    "src/dashboard/vendor/rich-entry.ts": {
       "TS2339": 1,
       "TS7006": 4
     },
-    "src/model-gateway/client.js": {
-      "TS18048": 1,
-      "TS2339": 8,
-      "TS2345": 1,
-      "TS7006": 25,
+    "src/model-gateway/client.ts": {
+      "TS2339": 15,
+      "TS7005": 2,
+      "TS7006": 82,
+      "TS7034": 2,
+      "TS7053": 3
+    },
+    "src/model-gateway/errors.ts": {
+      "TS2339": 7,
+      "TS7006": 15,
+      "TS7019": 1
+    },
+    "src/model-gateway/models.ts": {
+      "TS2339": 5,
+      "TS7006": 23,
       "TS7053": 2
     },
-    "src/model-gateway/models.js": {
-      "TS18047": 1,
-      "TS18048": 1,
-      "TS2339": 20,
-      "TS2345": 2,
-      "TS7006": 9,
-      "TS7053": 1
+    "src/model-gateway/reasoning-capabilities.ts": {
+      "TS2339": 1,
+      "TS7005": 1,
+      "TS7006": 12,
+      "TS7031": 3,
+      "TS7034": 1
     },
-    "src/storage/session-store.js": {
-      "TS2339": 11,
-      "TS7006": 51
+    "src/permissions/approval-keys.ts": {
+      "TS7006": 20
     },
-    "src/tools/document-tools.js": {
+    "src/permissions/workspace-trust.ts": {
+      "TS18046": 2,
+      "TS2339": 1,
+      "TS2698": 1,
+      "TS7006": 11
+    },
+    "src/storage/session-store.ts": {
+      "TS2339": 25,
+      "TS7005": 2,
+      "TS7006": 88,
+      "TS7034": 2
+    },
+    "src/tools/document-tools.ts": {
+      "TS18046": 4,
       "TS2339": 5,
       "TS7005": 1,
       "TS7006": 48,
       "TS7034": 1,
       "TS7053": 2
     },
-    "src/tools/workflow-tools.js": {
-      "TS2322": 10,
-      "TS2339": 1,
-      "TS2698": 1,
-      "TS7005": 4,
-      "TS7006": 3,
+    "src/tools/workflow-tools.ts": {
+      "TS2339": 2,
+      "TS7006": 47,
       "TS7053": 1
     }
   }
