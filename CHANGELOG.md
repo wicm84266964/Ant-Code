@@ -2,19 +2,50 @@
 
 ## 2.0.0 - 2026-08-30
 
+This is a runtime-generation release. TUI, Dashboard, permissions, Goal, tools,
+and gateway behavior stay on the 1.4.1 product line. The source language and
+module layout changed.
+
 ### Changed
 
-- Runtime source is TypeScript. Node.js 22.18+ runs `src/cli/index.ts`
-  directly; there is no compile-to-`dist` step for the CLI.
-- Large modules are split behind the same public facades (`createDashboardRuntime`,
-  `runTui`, session and config exports).
-- Existing JavaScript installs (`src/cli/index.js`, Node 20) cannot run this
-  tree. Re-run `npm ci` and `npm link` after upgrading Node.
+- The runtime is TypeScript. Node.js 22.18+ runs `src/cli/index.ts` directly
+  with type stripping. There is no compile-to-`dist` step for the CLI.
+- Oversized modules were split behind the same public facades:
+  `createDashboardRuntime`, `runTui`, session exports, and config exports.
+  Dashboard still ships `public/app.js`. Permission radiogroup ids are unchanged.
+- JavaScript 1.x checkouts (`src/cli/index.js`, Node 20) cannot run this tree.
+  Upgrade Node, run `npm ci`, and re-run `npm link` so the global command points
+  at `index.ts`. `git pull` alone is not enough.
 
 ### Added
 
-- TUI `/goal` from 1.4.1 remains part of this line: unattended Goal loop,
-  recap footer, session bootstrap, and permission lock until `/goal exit`.
+- TUI `/goal` uses the same unattended Goal loop as the Dashboard: enable with
+  an objective, lock full access, skip `ask_user`, and host-continue until the
+  goal completes, pauses, fails, or hits the auto-continue budget.
+- `/goal pause | resume | exit | status`. Shift+Tab does not clear Goal;
+  permission stays locked until `/goal exit`.
+- Goal completion recap on the Dashboard status bar and TUI footer: elapsed
+  time, continue count, model rounds, and 输入/输出 tokens for the Goal interval.
+
+### Fixed
+
+- `/goal` on a brand-new TUI session no longer crashes when session metadata
+  does not exist yet.
+- TUI `/sessions` restore no longer throws on `null.choices`.
+- Missing transcript archive chunks no longer fail the entire session resume.
+
+### Upgrade
+
+```sh
+git pull
+npm ci
+npm run verify:install
+npm link
+ant-code --version
+```
+
+`ant-code --version` should print `2.0.0`. Gateway config and `.lab-agent`
+sessions do not need to be recreated.
 
 ## 1.4.1 - 2026-08-29
 
