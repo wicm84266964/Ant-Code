@@ -113,10 +113,11 @@ test("dashboard context status prefers active model messages over latest gateway
     promptMessageTokens: 21000,
     promptTokens: 40000,
     providerPromptTokens: 39000,
+    providerCachedPromptTokens: 19500,
     maxTokens: 200000
   });
 
-  assert.equal(text, "20k / 200k · 10% · 输入 40k");
+  assert.equal(text, "20k / 200k · 10% · 缓存命中 50%");
 });
 
 test("dashboard running send button exposes interrupt action", async () => {

@@ -27,6 +27,19 @@ export function createUnifiedDiff(input: { filePath: string; before: string; aft
  * @param {string} after
  * @param {{ maxCells?: number }} options
  */
+export function previewUnifiedDiff(diff: unknown, maxLines: number = 24) {
+  const text = String(diff ?? "").replace(/\s+$/g, "");
+  if (!text) {
+    return "";
+  }
+  const lines = text.split(/\r?\n/);
+  const limit = Math.max(4, Number(maxLines) || 24);
+  if (lines.length <= limit) {
+    return text;
+  }
+  return `${lines.slice(0, limit).join("\n")}\n... 还有 ${lines.length - limit} 行`;
+}
+
 export function countLineChanges(before: string, after: string, options: { maxCells?: number } = {}) {
   const beforeLines = splitLines(String(before ?? ""));
   const afterLines = splitLines(String(after ?? ""));

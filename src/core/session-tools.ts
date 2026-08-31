@@ -15,7 +15,7 @@ import { createMcpRuntime } from "../mcp/runtime.ts";
 import { appendThinkingPreview, limitThinkingPreview } from "../model-gateway/thinking-budget.ts";
 import { createSessionStore } from "../storage/session-store.ts";
 import { serializeToolResult } from "../tools/result.ts";
-import { countLineChanges } from "../tools/diff.ts";
+import { countLineChanges, previewUnifiedDiff } from "../tools/diff.ts";
 import { createToolRuntime } from "../tools/runtime.ts";
 import { createWorkflowState, formatWorkflowContext, summarizeWorkflow, syncWorkflowCompletionOnFinal, type WorkflowState } from "../tools/workflow-tools.ts";
 import { getAgentProfile } from "../agents/profiles.ts";
@@ -237,6 +237,12 @@ export async function executeOneToolCall(call: import("../model-gateway/protocol
     decision: execution.decision && typeof execution.decision === "object" ? execution.decision.decision ?? null : null,
     changeStats: changeSummary?.changeStats ?? null,
     turnChangeStats: changeSummary?.turnChangeStats ?? null,
+    path: typeof execution.result === "object" && execution.result && "path" in execution.result
+      ? String((execution.result as { path?: unknown }).path ?? "") || null
+      : null,
+    diffPreview: typeof execution.result === "object" && execution.result && "diff" in execution.result
+      ? previewUnifiedDiff((execution.result as { diff?: unknown }).diff, 40)
+      : null,
     resultBytes: serialized.bytes,
     truncated: serialized.truncated
   });

@@ -326,6 +326,14 @@ export function createToolRuntime(options: ToolRuntimeOptions) {
           : execution);
       }
 
+      if (name === "web_search") {
+        const execution = await executeWebSearchTool(options, input, definition);
+        const searchResult = asResultRecord(execution);
+        return finishTool(options, name, input, definition, options.signal?.aborted && searchResult.interrupted !== true
+          ? interruptedToolExecution(name, input, definition, searchResult)
+          : execution);
+      }
+
       const decision = decidePermission(
         {
           toolName: name,
@@ -681,6 +689,60 @@ function normalizeWebFetchProvider(config: ToolRuntimeConfig | Record<string, un
     return value;
   }
   return "mcp-first";
+}
+
+async function executeWebSearchTool(options: ToolRuntimeOptions, input: Record<string, unknown>, definition: ToolDefinition) {
+  const decision = decidePermission(
+    {
+      toolName: "web_search",
+      risk: asPermissionRisk(definition.risk),
+      cwd: options.cwd,
+      networkHosts: networkHostsForWebTool("web_search", input, options.config, options.env),
+      summary: definition.description
+    },
+    { workspace: options.cwd, ...(options.policy ?? EMPTY_POLICY) }
+  );
+
+  let approvedByUser = false;
+  if (decision.decision === "ask" && options.approve) {
+    const approved = await options.approve({
+      toolName: "web_search",
+      input,
+      decision,
+      definition
+    });
+    if (!approved) {
+      await emitPermissionDeniedHook(options, "web_search", input, definition, decision);
+      return { ok: false, blocked: true, decision };
+    }
+    approvedByUser = true;
+  } else if (decision.decision !== "allow") {
+    await emitPermissionDeniedHook(options, "web_search", input, definition, decision);
+    return { ok: false, blocked: true, decision };
+  }
+
+  try {
+    const result = await webSearchTool({
+      ...input,
+      cwd: options.cwd,
+      config: options.config,
+      env: options.env,
+      signal: options.signal,
+      policy: {
+        ...(options.policy ?? EMPTY_POLICY),
+        approved: approvedByUser
+      }
+    });
+    return { ok: true, result };
+  } catch (error) {
+    return {
+      ok: false,
+      error: {
+        code: error && typeof error === "object" && "code" in error ? String(error.code) : "TOOL_RUNTIME_ERROR",
+        message: error instanceof Error ? error.message : String(error)
+      }
+    };
+  }
 }
 
 function buildMcpFetchArguments(input: Record<string, unknown>) {

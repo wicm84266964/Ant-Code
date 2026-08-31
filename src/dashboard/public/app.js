@@ -2478,7 +2478,7 @@ function handleDashboardEvent3(event) {
     return;
   }
   if (event.type === "background_subagent_snapshot") {
-    reconcileBackgroundSubagentSnapshot2(event.groups);
+    reconcileBackgroundSubagentSnapshot2(event.groups, event.at);
     return;
   }
   if (event.type === "background_subagent_cancelled") {
@@ -3147,14 +3147,18 @@ function handleActivity3(activity) {
   }
 }
 function isBackgroundSubagentActivity3(activity) {
-  return activity?.backgroundSubagent === true || String(activity?.rawType ?? "").startsWith("subagent_group_");
+  const rawType = String(activity?.rawType ?? "");
+  return activity?.backgroundSubagent === true || activity?.kind === "terminal" || rawType.startsWith("subagent_group_") || rawType.startsWith("background_terminal_");
 }
 function handleBackgroundSubagentActivity3(activity) {
   const key = activity.coalesceKey || activity.groupId || activity.taskId || activity.id;
   const previous = state.backgroundSubagents.get(key) ?? emptyBackgroundSubagent;
+  const rawType = String(activity.rawType ?? "");
+  const kind = typeof activity.kind === "string" ? activity.kind : typeof previous.kind === "string" ? previous.kind : rawType.startsWith("background_terminal_") ? "terminal" : void 0;
   const merged = {
     ...previous,
     ...activity,
+    kind,
     groupId: activity.groupId ?? previous.groupId ?? null,
     taskId: activity.taskId ?? previous.taskId ?? null,
     profile: activity.profile ?? previous.profile ?? null,
@@ -3176,8 +3180,9 @@ function clearBackgroundSubagentStatus3(groupId) {
   const id = String(groupId ?? "").trim();
   if (id) {
     state.backgroundSubagents.delete(`subagent-group:${id}`);
+    state.backgroundSubagents.delete(`background-terminal:${id}`);
     for (const [key, item] of state.backgroundSubagents.entries()) {
-      if (item.groupId === id) {
+      if (item.groupId === id || item.taskId === id) {
         state.backgroundSubagents.delete(key);
       }
     }
@@ -3193,15 +3198,16 @@ function clearBackgroundSubagentStatus3(groupId) {
   }
   updateLiveStatus3();
 }
-function reconcileBackgroundSubagentSnapshot2(groups) {
+function reconcileBackgroundSubagentSnapshot2(groups, snapshotAt) {
   const visibleGroups = Array.isArray(groups) ? groups.filter(backgroundSubagentVisible4) : [];
   const nextKeys = /* @__PURE__ */ new Set();
+  const snapshotTime = Date.parse(String(snapshotAt ?? "")) || Date.now();
   for (const group of visibleGroups) {
     const id = String(group.groupId ?? group.taskId ?? "").trim();
     if (!id) {
       continue;
     }
-    const key = `subagent-group:${id}`;
+    const key = group.kind === "terminal" ? `background-terminal:${id}` : `subagent-group:${id}`;
     nextKeys.add(key);
     const previous = state.backgroundSubagents.get(key) ?? emptyBackgroundSubagent;
     state.backgroundSubagents.set(key, {
@@ -3233,9 +3239,15 @@ function reconcileBackgroundSubagentSnapshot2(groups) {
     });
   }
   for (const [key, item] of state.backgroundSubagents.entries()) {
-    if ((item.groupId || String(key).startsWith("subagent-group:")) && !nextKeys.has(key)) {
-      state.backgroundSubagents.delete(key);
+    const tracked = item.kind === "terminal" || item.groupId || String(key).startsWith("subagent-group:") || String(key).startsWith("background-terminal:");
+    if (!tracked || nextKeys.has(key)) {
+      continue;
     }
+    const itemTime = Date.parse(String(item.at ?? ""));
+    if (Number.isFinite(itemTime) && itemTime > snapshotTime) {
+      continue;
+    }
+    state.backgroundSubagents.delete(key);
   }
   if (state.backgroundSubagents.size === 0) {
     state.liveStatusExpanded = false;
@@ -3362,9 +3374,14 @@ function renderBackgroundSubagentStatus4(background) {
     for (const item of ordered.slice(0, 3)) {
       const chip = document.createElement("div");
       chip.className = `live-chip background-subagent-chip ${item.status}`;
+      const cancelKey = backgroundCancelKey3(item.groupId, item.taskId);
+      const cancelling = state.backgroundCancelling.has(cancelKey);
       chip.innerHTML = `
         <span class="chip-pulse" aria-hidden="true"></span>
         ${escapeHtml(backgroundSubagentCompactLabel4(item))}
+        ${backgroundSubagentCancellable4(item) ? `
+          <button type="button" class="live-chip-cancel" data-background-cancel="true" data-group-id="${escapeHtml(item.groupId ?? "")}" data-task-id="${escapeHtml(item.taskId ?? "")}" ${cancelling ? "disabled" : ""}>${cancelling ? "回收中" : "回收"}</button>
+        ` : ""}
       `;
       els.liveSubtasks.append(chip);
     }
@@ -6358,14 +6375,18 @@ function formatContextUsage4(context) {
     context.promptTokens,
     context.providerPromptTokens
   );
-  const latestInput = firstFiniteNumber8(
-    context.promptTokens,
-    context.providerPromptTokens
-  );
   const limit = firstFiniteNumber8(context.maxTokens, context.modelMaxTokens);
   const percent = typeof used === "number" && typeof limit === "number" && Number.isFinite(used) && Number.isFinite(limit) && limit > 0 ? ` · ${Math.min(999, Math.round(used / limit * 100))}%` : "";
-  const input = Number.isFinite(latestInput) ? ` · 输入 ${formatTokenCount5(latestInput)}` : "";
-  return `${formatTokenCount5(used)} / ${formatTokenCount5(limit)}${percent}${input}`;
+  const cached = firstFiniteNumber8(
+    context.providerCachedPromptTokens,
+    context.cachedPromptTokens
+  );
+  const promptForCache = firstFiniteNumber8(
+    context.providerPromptTokens,
+    context.promptTokens
+  );
+  const cacheHit = typeof cached === "number" && typeof promptForCache === "number" && promptForCache > 0 ? ` · 缓存命中 ${Math.min(100, Math.max(0, Math.round(cached / promptForCache * 100)))}%` : " · 缓存命中 --";
+  return `${formatTokenCount5(used)} / ${formatTokenCount5(limit)}${percent}${cacheHit}`;
 }
 function firstFiniteNumber8(...values) {
   for (const value of values) {

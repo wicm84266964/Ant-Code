@@ -295,6 +295,7 @@ type TuiViewProps = {
   streamScrollOffset?: number;
   scrollbackMode?: boolean;
   selectedEntryId?: string | null;
+  transcriptSelection?: { startIndex: number; endIndex: number } | null;
   view?: string;
   sidePanelOffset?: number;
   taskRecords?: TuiTaskRecord[];
@@ -404,7 +405,7 @@ function isStaticActivityStatus(status: string) {
     || value.startsWith("再次按");
 }
 
-export function LogPane({ entries, width, height, stream, pulse = 0, detailMode = "compact", thinkingVisible = false, scrollOffset = 0, streamScrollOffset = 0, scrollbackMode = false, selectedEntryId = null, theme = DEFAULT_TUI_THEME }: TuiViewProps) {
+export function LogPane({ entries, width, height, stream, pulse = 0, detailMode = "compact", thinkingVisible = false, scrollOffset = 0, streamScrollOffset = 0, scrollbackMode = false, selectedEntryId = null, transcriptSelection = null, theme = DEFAULT_TUI_THEME }: TuiViewProps) {
   const initialLayout = resolveLogPaneLayout({
     height,
     streamActive: Boolean(stream?.active),
@@ -429,6 +430,12 @@ export function LogPane({ entries, width, height, stream, pulse = 0, detailMode 
     ? "0 rows"
     : `${viewport.firstRow}-${viewport.lastRow}/${viewport.totalRows}${viewport.offset > 0 ? ` +${viewport.offset}` : scrollbackMode ? " scrollback" : " bottom"}`;
   const readingHistory = viewport.offset > 0;
+  const selectionRange = transcriptSelection
+    ? {
+      start: Math.min(transcriptSelection.startIndex, transcriptSelection.endIndex),
+      end: Math.max(transcriptSelection.startIndex, transcriptSelection.endIndex)
+    }
+    : null;
   return h(Box, {
     flexDirection: "column",
     width,
@@ -447,7 +454,8 @@ export function LogPane({ entries, width, height, stream, pulse = 0, detailMode 
       : h(Box, { flexDirection: "row", flexShrink: 0 },
         h(Box, { flexDirection: "column", width: Math.max(1, (width ?? 100) - 6), flexShrink: 1 },
           paddedLines.map((item, index) => {
-            const selected = selectedEntryId && item.entryId === selectedEntryId;
+            const rangeSelected = Boolean(selectionRange && index >= selectionRange.start && index <= selectionRange.end);
+            const selected = rangeSelected || (selectedEntryId && item.entryId === selectedEntryId);
             return h(Text, {
               key: `${viewport.firstRow}-${index}`,
               wrap: "truncate",

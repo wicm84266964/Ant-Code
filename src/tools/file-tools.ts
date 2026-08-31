@@ -308,6 +308,17 @@ async function* walkTextFiles(root: string) {
  * @param {string} root
  */
 async function* walkPaths(root: string): AsyncGenerator<string> {
+  const rootStat = await fs.stat(root).catch(() => null);
+  if (!rootStat) {
+    return;
+  }
+  if (rootStat.isFile()) {
+    yield root;
+    return;
+  }
+  if (!rootStat.isDirectory()) {
+    return;
+  }
   const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
   for (const entry of entries) {
     const fullPath = path.join(root, entry.name);
@@ -552,7 +563,7 @@ async function ensureNoSymlinkEscape(workspace: string, resolved: string, option
       if (!isInside(workspace, real)) {
         throw toolError("SYMLINK_ESCAPE", "path follows a symlink outside workspace");
       }
-      throw toolError("SYMLINK_REQUIRES_APPROVAL", "symlink paths require explicit approval outside MVP");
+      throw toolError("SYMLINK_REQUIRES_APPROVAL", "symlink paths require explicit approval under the default safety policy");
     }
   }
 }

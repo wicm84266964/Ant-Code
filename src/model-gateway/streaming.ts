@@ -25,7 +25,7 @@ type GatewayProtocolError = Error & { code?: string };
 /**
  * Parse a lab gateway streaming response.
  *
- * MVP supports two lab-owned streaming encodings:
+ * The gateway supports two lab-owned streaming encodings:
  * - text/event-stream with `data: {...}` records
  * - application/x-ndjson with one JSON object per line
  *

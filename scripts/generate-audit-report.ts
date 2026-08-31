@@ -12,7 +12,7 @@ const endpointManifestPath = path.join(AUDIT_DIR, "endpoint-manifest.generated.j
 const provenanceSummaryPath = path.join(AUDIT_DIR, "provenance-summary.generated.md");
 const dependencySbomPath = path.join(AUDIT_DIR, "dependency-sbom.generated.json");
 const dependencyLicensePath = path.join(AUDIT_DIR, "dependency-license-summary.generated.md");
-const cleanRoomAttestationPath = path.join(AUDIT_DIR, "clean-room-release-attestation.md");
+const thirdPartyNoticesPath = path.join(ROOT, "THIRD_PARTY_NOTICES.md");
 const rcSummaryPath = path.join(AUDIT_DIR, "release-candidate-summary.generated.md");
 const rolloutChecklistPath = path.join(ROOT, "docs", "deployment", "lab-gateway-rollout-checklist.md");
 const releaseCandidatePackagePath = path.join(ROOT, "docs", "deployment", "release-candidate-package.md");
@@ -34,7 +34,7 @@ const endpointManifestExists = await exists(endpointManifestPath);
 const provenanceSummaryExists = await exists(provenanceSummaryPath);
 const dependencySbomExists = await exists(dependencySbomPath);
 const dependencyLicenseExists = await exists(dependencyLicensePath);
-const cleanRoomAttestationExists = await exists(cleanRoomAttestationPath);
+const thirdPartyNoticesExists = await exists(thirdPartyNoticesPath);
 const rcSummaryExists = await exists(rcSummaryPath);
 const rolloutChecklistExists = await exists(rolloutChecklistPath);
 const releaseCandidatePackageExists = await exists(releaseCandidatePackagePath);
@@ -64,7 +64,7 @@ const lines = [
   "",
   "## Scope",
   "",
-  `- Ant Code clean-room lab-local coding agent ${pkg.version} controlled internal release.`,
+  `- Ant Code local coding agent ${pkg.version} release audit.`,
   "- Local-first operation with lab model gateway boundary.",
   "- No direct provider keys or forbidden cloud service dependencies in runtime source.",
   "",
@@ -77,7 +77,7 @@ const lines = [
   `- Provenance summary: ${provenanceSummaryExists ? rel(provenanceSummaryPath) : "missing"}`,
   `- Dependency SBOM: ${dependencySbomExists ? rel(dependencySbomPath) : "missing"}`,
   `- Dependency license summary: ${dependencyLicenseExists ? rel(dependencyLicensePath) : "missing"}`,
-  `- Clean-room release attestation: ${cleanRoomAttestationExists ? rel(cleanRoomAttestationPath) : "missing"}`,
+  `- Third-party notices: ${thirdPartyNoticesExists ? rel(thirdPartyNoticesPath) : "missing"}`,
   `- Release candidate summary: ${rcSummaryExists ? rel(rcSummaryPath) : "missing"}`,
   `- Gateway rollout checklist: ${rolloutChecklistExists ? rel(rolloutChecklistPath) : "missing"}`,
   `- Release candidate package: ${releaseCandidatePackageExists ? rel(releaseCandidatePackagePath) : "missing"}`,
@@ -132,8 +132,8 @@ const lines = [
   "",
   "- Public command name is `ant-code`; `lab-agent` remains an internal compatibility alias.",
   "- User-facing diagnostics and rollout material use the Ant Code public name while protocol, config, and metadata compatibility anchors remain stable.",
-  "- Model gateway metadata declares the intended boundary: local client tool execution, gateway-only provider credentials, and no MVP remote tools.",
-  "- Release seal checks validate clean-room attestation material, runtime source markers, public identity, package privacy, reviewed runtime dependency evidence, and local tool/model-adapter boundary evidence.",
+  "- Model gateway metadata declares the intended boundary: local client tool execution, gateway-only provider credentials, and no required remote tools.",
+  "- Release seal checks validate runtime source markers, package metadata, third-party notices, reviewed runtime dependency evidence, and local tool/model-adapter boundaries.",
   "- Dependency policy checks validate reviewed runtime dependencies, package-lock integrity, and npm-shrinkwrap parity for packed internal releases.",
   "- Release candidate packaging includes a generated RC summary and human-readable acceptance summary for lab review.",
   "- Model traffic is configured only by `LAB_MODEL_GATEWAY_URL`, `LAB_MODEL_GATEWAY_PROTOCOL`, and optional gateway adapter auth.",
@@ -141,7 +141,7 @@ const lines = [
   "- Gateway requests include non-sensitive compatibility metadata, and gateway errors include redacted diagnostic hints.",
   "- Doctor checks deployment readiness for CLI bins, config sources, gateway settings, allowed hosts, metadata policy, MCP servers, provenance, and release audit material.",
   "- Network default is `lab-only`; `offline` permits loopback only.",
-  "- MCP is explicit local stdio only in MVP.",
+  "- MCP uses explicit local stdio processes only.",
   "- Read-only local git tools provide bounded status and diff output without shell interpolation.",
   "- Repository maps are derived locally from manifests and top-level directories for status, next-action, report, and map commands without persisting raw source contents.",
   "- User-facing local commands use consistent sectioned text output, with `/status --json` reserved for machine-readable automation.",
@@ -153,12 +153,12 @@ const lines = [
   "- `/verify suggest`, `/verify run suggested`, and `/next` connect local validation suggestions to the delivery workflow without persisting raw command output.",
   "- Transcripts/session metadata are local, bounded, retention-limited, can be zero-retention for high-sensitivity projects, and can be encrypted with local key material.",
   "- High-sensitivity mode forces zero-retention metadata and restricts network mode to offline or lab-only.",
-  "- Every model turn receives clean-room Ant Code behavior and final-response protocol context through the lab gateway request.",
+  "- Every model turn receives Ant Code behavior and final-response protocol context through the configured gateway request.",
   "- Delivery status includes a derived task lifecycle stage and detects stale passing validations when later file changes exist.",
   "- Conversation context is budgeted and older turns compact into bounded redacted process-local summaries; persisted metadata stores only context counts and byte totals.",
   "- Interactive chat keeps bounded session context, session-local todo/plan state, recorded changes, validation history, redacted failed-validation repair context, delivery status and concrete next-action hints, review/next/report commands, metadata-only resume, context clearing/compaction, and local per-tool approval prompts; print mode still requires explicit approval flags.",
-  "- Ink TUI v1.2 renders the same clean-room session runtime with a modularized local TUI implementation, Chinese-first common UI copy, TUI-owned transcript scrolling, pinned side panels, command panels, queue/session/resume workflows, model-summary-first context compaction, file-by-file patch browsing, diff/patch highlighting for command/tool details, multi-line composer, local approval prompts, and non-TTY fallback.",
-  "- v1.0-v1.4 acceptance records cover the clean-room base, TUI experience, local extension runtime, and orchestration milestones.",
+  "- Ink TUI v1.2 renders the same session runtime with a modularized local TUI implementation, Chinese-first common UI copy, TUI-owned transcript scrolling, pinned side panels, command panels, queue/session/resume workflows, model-summary-first context compaction, file-by-file patch browsing, diff/patch highlighting for command/tool details, multi-line composer, local approval prompts, and non-TTY fallback.",
+  "- v1.0-v1.4 acceptance records cover the independently implemented base, TUI experience, local extension runtime, and orchestration milestones.",
   `- Ant Code ${pkg.version} Dashboard acceptance records the hardened WebUI, TUI interaction updates, version alignment, Windows file safety, and release validation.`,
   "- The retired internal v3.0 Dashboard record remains dated historical evidence and is not a current release line.",
   "- Write and mutating shell tools require explicit local session approval.",
@@ -172,7 +172,7 @@ const lines = [
 ];
 
 await ensureAuditDir();
-const outputPath = path.join(AUDIT_DIR, "mvp-release-audit.generated.md");
+const outputPath = path.join(AUDIT_DIR, "release-audit.generated.md");
 await fs.writeFile(outputPath, lines.join("\n"), "utf8");
 console.log(`Ant Code ${pkg.version} audit report written to ${rel(outputPath)}.`);
 

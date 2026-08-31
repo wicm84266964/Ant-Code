@@ -296,6 +296,7 @@ export function useTuiAppCore(props: TuiAppProps) {
   const [streamScrollOffset, setStreamScrollOffset] = useState(0);
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null);
   const [selectedEntryHighlightUntil, setSelectedEntryHighlightUntil] = useState(0);
+  const [transcriptSelection, setTranscriptSelection] = useState<{ startIndex: number; endIndex: number } | null>(null);
   const [messageActionIndex, setMessageActionIndex] = useState(0);
   const commandPanelKindRef = useRef<string | null>(null);
   const entryIdCounterRef = useRef(0);
@@ -316,6 +317,7 @@ export function useTuiAppCore(props: TuiAppProps) {
   const claimedInkInputRef = useRef(false);
   const rawShiftTabInputTailRef = useRef("");
   const lastTranscriptClickRef = useRef<{ entryId: string | null; at: number }>({ entryId: null, at: 0 });
+  const transcriptDragRef = useRef<{ x: number; y: number; lineIndex: number } | null>(null);
   const bracketedPasteRef = useRef({ active: false, buffer: "", prefix: "" });
   const lastActivityAtRef = useRef(Date.now());
   const idleSilentRef = useRef(false);
@@ -783,11 +785,12 @@ export function useTuiAppCore(props: TuiAppProps) {
       streamScrollOffset,
       selectedEntryId,
       selectedEntryHighlightUntil,
+      transcriptSelection,
       messageActionIndex,
       terminalSize,
       modelOptions
     };
-  }, [entries, inputBuffer, inputCursor, questionBuffer, questionCursor, busy, mode, stream, startupConfirmed, trusted, trustStatus, pendingApproval, pendingQuestion, history, historyIndex, sideView, workflowFilter, taskFilter, inspectorIndex, inspectorOffset, inspectorFilter, inspectorItems, inspectorPatchFileIndex, sidePanelOffset, detailMode, thinkingVisible, permissionMode, slashPalette, slashPaletteIndex, fileMention, fileMentionCandidates, fileMentionIndex, recentFiles, queuedPrompts, queuePanelIndex, sessionRecords, sessionPickerIndex, taskRecords, taskGroupRecords, modelPickerOpen, modelPickerIndex, commandPanel, commandPanelOffset, approvalChoiceIndex, exitConfirmUntil, interruptConfirmUntil, backgroundExitPending, idleSilent, transcriptScrollOffset, streamScrollOffset, selectedEntryId, selectedEntryHighlightUntil, messageActionIndex, terminalSize, modelOptions]);
+  }, [entries, inputBuffer, inputCursor, questionBuffer, questionCursor, busy, mode, stream, startupConfirmed, trusted, trustStatus, pendingApproval, pendingQuestion, history, historyIndex, sideView, workflowFilter, taskFilter, inspectorIndex, inspectorOffset, inspectorFilter, inspectorItems, inspectorPatchFileIndex, sidePanelOffset, detailMode, thinkingVisible, permissionMode, slashPalette, slashPaletteIndex, fileMention, fileMentionCandidates, fileMentionIndex, recentFiles, queuedPrompts, queuePanelIndex, sessionRecords, sessionPickerIndex, taskRecords, taskGroupRecords, modelPickerOpen, modelPickerIndex, commandPanel, commandPanelOffset, approvalChoiceIndex, exitConfirmUntil, interruptConfirmUntil, backgroundExitPending, idleSilent, transcriptScrollOffset, streamScrollOffset, selectedEntryId, selectedEntryHighlightUntil, transcriptSelection, messageActionIndex, terminalSize, modelOptions]);
 
   useEffect(() => {
     if (commandPanel?.kind !== "queue") {
@@ -968,6 +971,8 @@ export function useTuiAppCore(props: TuiAppProps) {
     setSelectedEntryId,
     selectedEntryHighlightUntil,
     setSelectedEntryHighlightUntil,
+    transcriptSelection,
+    setTranscriptSelection,
     messageActionIndex,
     setMessageActionIndex,
     commandPanelKindRef,
@@ -989,6 +994,7 @@ export function useTuiAppCore(props: TuiAppProps) {
     claimedInkInputRef,
     rawShiftTabInputTailRef,
     lastTranscriptClickRef,
+    transcriptDragRef,
     bracketedPasteRef,
     lastActivityAtRef,
     idleSilentRef,

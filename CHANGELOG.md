@@ -1,5 +1,50 @@
 # Changelog
 
+## 2.0.1 - 2026-08-31
+
+This is a small release on the 2.0 TypeScript runtime. Default TUI and
+Dashboard chrome are gold-on-black, transcript drag-select copies chat text
+only, and search plus Windows terminal fixes are included. Permission mode
+ids are unchanged.
+
+### Changed
+
+- TUI default theme is `gold-black`. `LAB_AGENT_TUI_THEME=sky-blue` still
+  selects the older sky-blue theme.
+- Transcript drag-select copies chat lines from the session pane. It does not
+  copy pane borders or the right sidebar. Click still selects a block; double
+  click still opens the excerpt panel.
+- Dashboard chrome matches the same gold-on-black direction. Goal sits next to
+  the permission radios. Context status shows cache-hit rate instead of the
+  latest input token count.
+- `web_search` uses built-in DuckDuckGo HTML. The `duckduckgo-search` MCP is
+  disabled by default because public search often times out. `fetch` MCP is
+  unchanged for `web_fetch`. A self-hosted SearXNG remains the stable no-key
+  search backend when configured.
+- User-facing copy no longer describes the current product as a clean-room MVP.
+
+### Fixed
+
+- Windows `background_shell` stays attached so a long-running task remains
+  visible after launch returns. Cancellable background tasks can be reclaimed
+  from the Dashboard live chips.
+- `grep` on a single file no longer misses matches.
+- Windows bash launched through WSL converts the workspace to `/mnt/<drive>/...`
+  instead of passing a Windows path.
+
+### Upgrade
+
+```sh
+git pull
+npm ci
+npm run verify:install
+npm link
+ant-code --version
+```
+
+`ant-code --version` should print `2.0.1`. Gateway config and `.lab-agent`
+sessions do not need to be recreated.
+
 ## 2.0.0 - 2026-08-30
 
 This is a runtime-generation release. TUI, Dashboard, permissions, Goal, tools,

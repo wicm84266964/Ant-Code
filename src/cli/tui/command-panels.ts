@@ -881,7 +881,7 @@ export function createUndoRedoPanel(options: { session?: AgentSession; gitAvaila
       line(`工作区版本控制：${status}`, false, options.gitAvailable ? "green" : "yellow"),
       ...(options.gitStatus ? [line(`git status: ${truncate(options.gitStatus, 120)}`)] : []),
       line(""),
-      line("安全 MVP 计划", false, "yellow"),
+      line("安全实施计划", false, "yellow"),
       line("1. 任何撤销动作前先展示改动文件和验证状态。"),
       line("2. 只在审批后提供 patch 预览和逐文件回退。"),
       line("3. 对话回退作为本地 metadata 分叉，和源码分支分离。"),

@@ -119,6 +119,13 @@ test("mouse click parser returns primary button press coordinates", () => {
     y: 12,
     encoding: "sgr"
   }]);
+  assert.deepEqual(mouseClickEvents("\u001b[<32;40;14M"), [{
+    kind: "drag",
+    button: 0,
+    x: 40,
+    y: 14,
+    encoding: "sgr"
+  }]);
   assert.deepEqual(mouseClickEvents("\u001b[<64;40;12M"), []);
 });
 

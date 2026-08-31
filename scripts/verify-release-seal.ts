@@ -63,25 +63,6 @@ if (failures.length > 0) {
   console.log("Release seal check passed.");
 }
 
-async function verifyRequiredAttestation() {
-  await requireDocMarkers("docs/audit/clean-room-release-attestation.md", [
-    "## Clean-Room Statement",
-    "## Allowed Design Inputs",
-    "## Prohibited Inputs",
-    "## Data Boundary",
-    "## Release Evidence"
-  ]);
-  await requireDocMarkers("docs/branding/public-identity.md", [
-    "The public project name is **Ant Code**.",
-    "Primary CLI command: `ant-code`",
-    "Internal Surface Kept Stable"
-  ]);
-  await requireDocMarkers("docs/deployment/model-adapter-gateway-readiness.md", [
-    "Tools execute on the local client.",
-    "Provider credentials live inside the gateway/model adapter service boundary"
-  ]);
-}
-
 async function verifyRuntimeSourceMarkers() {
   const files = await collectFiles(["src", "scripts", "tests", "package.json"], {
     extensions: new Set([".ts", ".js", ".json"])

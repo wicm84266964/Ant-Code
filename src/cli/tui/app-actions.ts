@@ -447,6 +447,7 @@ export function useTuiAppActions(s: ReturnType<typeof useTuiAppPanels>) {
     hydrateEntryFromState,
     runMessageAction,
     selectTranscriptEntryAtMouse,
+    handleTranscriptPointerEvent,
     applyRawDraftOperations
   } = s;
   useEffect(() => {
@@ -493,20 +494,11 @@ export function useTuiAppActions(s: ReturnType<typeof useTuiAppPanels>) {
         }
         return;
       }
-      const clickEvent = mouseClickEvents(chunkText).find((event: TuiRuntimeEvent) => event.kind === "press");
-      if (clickEvent) {
+      const clickEvents = mouseClickEvents(chunkText);
+      if (clickEvents.length > 0) {
         claimedInkInputRef.current = true;
-        const frame = frameForState(current);
-        const target = resolveScrollTarget(clickEvent, frame, {
-          activeOverlay: Boolean(activeOverlayKind(current)),
-          defaultTarget: "transcript"
-        });
-        const subtarget = target === "transcript" ? transcriptSubtargetForMouse(clickEvent, current, frame) : target;
-        debugTuiInput(props.env, `raw_mouse_click x=${clickEvent.x} y=${clickEvent.y} target=${target} subtarget=${subtarget} overlay=${activeOverlayKind(current) ?? "none"}`);
-        if (current.startupConfirmed && current.trusted && target === "transcript" && subtarget === "transcript") {
-          if (selectTranscriptEntryAtMouse(clickEvent, current)) {
-            return;
-          }
+        for (const clickEvent of clickEvents) {
+          handleTranscriptPointerEvent(clickEvent, current);
         }
         return;
       }
@@ -531,7 +523,7 @@ export function useTuiAppActions(s: ReturnType<typeof useTuiAppPanels>) {
       inputEvents?.off?.("input", onRawInput);
       inputEvents?.removeListener?.("input", onRawInput);
     };
-  }, [applyMouseWheelScroll, applyRawDraftOperations, applyVisibleScroll, cyclePermissionMode, inputEvents, insertPastedText, markUserActivity, props.env, selectTranscriptEntryAtMouse]);
+  }, [applyMouseWheelScroll, applyRawDraftOperations, applyVisibleScroll, cyclePermissionMode, handleTranscriptPointerEvent, inputEvents, insertPastedText, markUserActivity, props.env]);
 
   const askApproval = useCallback((request: {
     toolName: string;

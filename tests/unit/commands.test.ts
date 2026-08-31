@@ -1118,8 +1118,9 @@ test("keybindings expose TUI discovery states", async () => {
   assert.match(keybindings, /Ctrl\+↑\/Ctrl\+↓：召回上一条\/下一条已提交提示/);
   assert.match(keybindings, /@：打开工作区文件提及面板/);
   assert.match(keybindings, /鼠标滚轮：按鼠标位置滚动聊天区、右侧栏或当前弹层/);
-  assert.match(keybindings, /←\/→：输入区为空时切换当前侧栏分类；在状态栏中切换侧栏/);
-  assert.match(keybindings, /Tab：切换右侧栏：状态、任务、子智能体/);
+  assert.match(keybindings, /Tab：在输入区和会话区之间切换焦点/);
+  assert.match(keybindings, /y：复制当前选中块的正文到系统剪贴板/);
+  assert.match(keybindings, /Shift\+←\/→：切换右侧栏：状态、任务、子智能体/);
   assert.doesNotMatch(keybindings, /切换右侧栏：状态、待办、任务/);
   assert.match(keybindings, /\/logs：打开最近运行日志/);
   assert.doesNotMatch(keybindings, /Ctrl\+T：切换检查过滤器/);

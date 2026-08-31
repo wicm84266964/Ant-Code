@@ -23,18 +23,22 @@ export function formatContextUsage(context: Record<string, unknown> | null | und
     context.promptTokens,
     context.providerPromptTokens
   );
-  const latestInput = firstFiniteNumber(
-    context.promptTokens,
-    context.providerPromptTokens
-  );
   const limit = firstFiniteNumber(context.maxTokens, context.modelMaxTokens);
   const percent = typeof used === "number" && typeof limit === "number" && Number.isFinite(used) && Number.isFinite(limit) && limit > 0
     ? ` · ${Math.min(999, Math.round((used / limit) * 100))}%`
     : "";
-  const input = Number.isFinite(latestInput)
-    ? ` · 输入 ${formatTokenCount(latestInput)}`
-    : "";
-  return `${formatTokenCount(used)} / ${formatTokenCount(limit)}${percent}${input}`;
+  const cached = firstFiniteNumber(
+    context.providerCachedPromptTokens,
+    context.cachedPromptTokens
+  );
+  const promptForCache = firstFiniteNumber(
+    context.providerPromptTokens,
+    context.promptTokens
+  );
+  const cacheHit = typeof cached === "number" && typeof promptForCache === "number" && promptForCache > 0
+    ? ` · 缓存命中 ${Math.min(100, Math.max(0, Math.round((cached / promptForCache) * 100)))}%`
+    : " · 缓存命中 --";
+  return `${formatTokenCount(used)} / ${formatTokenCount(limit)}${percent}${cacheHit}`;
 }
 
 export function firstFiniteNumber(...values: unknown[]) {

@@ -142,7 +142,7 @@ export function parseDocumentBuffer(buffer: Buffer, ext: string, options: Record
       supported: false,
       content: "",
       notes: [
-        "PDF binary parsing is not bundled in the clean-room core.",
+        "PDF binary parsing is not bundled in the Ant Code core.",
         "Use the document-intake skill with MarkItDown installed, or convert the PDF to text/Markdown first."
       ]
     };

@@ -6,8 +6,8 @@ import { AUDIT_DIR, ROOT, ensureAuditDir, rel } from "./audit-common.ts";
 const pkg = JSON.parse(await fs.readFile(path.join(ROOT, "package.json"), "utf8"));
 
 const artifacts = [
-  "docs/audit/clean-room-release-attestation.md",
-  "docs/audit/mvp-release-audit.generated.md",
+  "THIRD_PARTY_NOTICES.md",
+  "docs/audit/release-audit.generated.md",
   "docs/audit/endpoint-manifest.generated.json",
   "docs/audit/provenance-summary.generated.md",
   "docs/audit/dependency-sbom.generated.json",
@@ -47,9 +47,9 @@ const lines = [
   "",
   "- Local install readiness is checked by `npm run verify:install`.",
   "- Full local release readiness is checked by `npm run verify:release`.",
-  "- Clean-room release seal is checked by `npm run check:release-seal`.",
+  "- Release source and dependency integrity are checked by `npm run check:release-seal`.",
   "- Model traffic uses the model gateway/model adapter boundary.",
-  "- Tools execute locally; remote tool servers are not required for MVP.",
+  "- Tools execute locally; remote tool servers are not required for normal operation.",
   `- Current Dashboard acceptance is recorded for Ant Code ${pkg.version}; earlier internal milestones, including the retired v3.0 number, remain historical evidence.`,
   "- Broad rollout still requires live model adapter evidence from `node scripts/verify-gateway-compat.ts --live --json`.",
   "",
@@ -72,7 +72,7 @@ const lines = [
   "",
   "- Real model adapter URL, health URL, authentication, quota, and retention policy must be approved by lab operators.",
   "- Sensitive projects must use high-sensitivity mode or an approved encrypted metadata policy.",
-  "- Any future remote tools require a separate reviewed protocol and are out of scope for this MVP.",
+  "- Any future remote tools require a separate reviewed protocol and release review.",
   ""
 ];
 

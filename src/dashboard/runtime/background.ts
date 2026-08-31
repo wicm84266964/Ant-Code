@@ -268,6 +268,9 @@ export async function appendBackgroundSubagentSnapshot(state: DashboardActiveSes
   if (state.disposed) {
     return;
   }
+  if (snapshot.ok === false) {
+    return;
+  }
   if (!snapshot.hasRecords && snapshot.groups.length === 0) {
     appendDashboardEvent(state, {
       type: "background_subagent_snapshot",
@@ -397,12 +400,13 @@ export async function buildBackgroundSubagentSnapshot(state: { session: { id: st
         updatedAt: task.updatedAt
       }));
     return {
+      ok: true,
       hasRecords: groups.length > 0 || terminals.length > 0,
       totalGroups: groups.length + terminals.length,
       groups: [...visible, ...terminals]
     };
   } catch {
-    return { hasRecords: false, totalGroups: 0, groups: [] };
+    return { ok: false, hasRecords: false, totalGroups: 0, groups: [] };
   }
 }
 

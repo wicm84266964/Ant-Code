@@ -410,6 +410,7 @@ export type TuiUiState = {
   streamScrollOffset: number;
   selectedEntryId: string | null;
   selectedEntryHighlightUntil: number;
+  transcriptSelection: { startIndex: number; endIndex: number } | null;
   messageActionIndex: number;
   terminalSize: TuiTerminalSize;
   modelOptions: LabModel[];
