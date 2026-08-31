@@ -14,8 +14,8 @@ export const RECOMMENDED_MCP_SERVERS = Object.freeze([
   },
   {
     name: "duckduckgo-search",
-    description: "免 key DuckDuckGo 搜索 MCP；可能受公开搜索限流影响。",
-    enabled: true,
+    description: "免 key DuckDuckGo 搜索 MCP；公开搜索经常超时或被限流，默认关闭。",
+    enabled: false,
     transport: "stdio",
     command: "uvx",
     args: ["duckduckgo-mcp-server"],

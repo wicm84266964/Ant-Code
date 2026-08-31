@@ -5,6 +5,13 @@ import { resolveProxyForUrl } from "../net/proxy.ts";
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
 export const WEB_FETCH_DEFAULT_MAX_BYTES = 32 * 1024 * 1024;
 const DEFAULT_SEARCH_MAX_BYTES = 1024 * 1024;
+const DEFAULT_FETCH_USER_AGENT = "ant-code/1.1 local-lab-agent";
+const SEARCH_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+const SEARCH_HEADERS = Object.freeze({
+  "user-agent": SEARCH_USER_AGENT,
+  accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  "accept-language": "en-US,en;q=0.9"
+});
 const RAW_HTTP_HEADER_MAX_BYTES = 64 * 1024;
 const MAX_SEARCH_RESULTS = 10;
 const MAX_REDIRECTS = 5;
@@ -20,6 +27,7 @@ type WebFetchOptions = {
   timeoutMs: number;
   maxBytes: number;
   truncateOnLimit?: boolean;
+  headers?: Record<string, string>;
   config?: Record<string, unknown>;
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
@@ -91,14 +99,28 @@ export async function webSearchTool(input: Record<string, unknown>) {
   const signal = asAbortSignal(input.signal);
   const searxngUrl = normalizeOptionalUrl(input.searxngUrl ?? asRecord(config.web).searxngUrl ?? env?.LAB_AGENT_SEARXNG_URL);
 
+  const errors: string[] = [];
+  const attempts: Array<[string, () => Promise<{ provider: string; query: string; url: string; results: SearchResult[]; truncated: boolean }>]> = [];
   if (searxngUrl) {
-    const result = await searchSearxng({ query, maxResults, timeoutMs, searxngUrl, config, env, signal });
-    if (result.results.length > 0) {
-      return result;
+    attempts.push(["searxng", () => searchSearxng({ query, maxResults, timeoutMs, searxngUrl, config, env, signal })]);
+  }
+  attempts.push(["duckduckgo", () => searchDuckDuckGo({ query, maxResults, timeoutMs, config, env, signal })]);
+
+  for (const [label, run] of attempts) {
+    try {
+      const result = await run();
+      if (result.results.length > 0) {
+        return result;
+      }
+      errors.push(`${label}: empty`);
+    } catch (error) {
+      errors.push(`${label}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
-  return searchDuckDuckGo({ query, maxResults, timeoutMs, config, env, signal });
+  throw Object.assign(new Error(`Web search fetch failed (${errors.join("; ")})`), {
+    code: "WEB_SEARCH_FETCH_FAILED"
+  });
 }
 
 export function networkHostsForWebTool(name: string, input: Record<string, unknown> = {}, config: Record<string, unknown> = {}, env: NodeJS.ProcessEnv | Record<string, unknown> = {}) {
@@ -108,7 +130,12 @@ export function networkHostsForWebTool(name: string, input: Record<string, unkno
   }
   if (name === "web_search") {
     const searxngUrl = normalizeOptionalUrl(input.searxngUrl ?? asRecord(config.web).searxngUrl ?? env.LAB_AGENT_SEARXNG_URL);
-    return [searxngUrl ?? "https://duckduckgo.com/"];
+    return [
+      ...(searxngUrl ? [searxngUrl] : []),
+      "https://html.duckduckgo.com/",
+      "https://lite.duckduckgo.com/",
+      "https://duckduckgo.com/"
+    ];
   }
   return [];
 }
@@ -150,22 +177,68 @@ async function searchSearxng({ query, maxResults, timeoutMs, searxngUrl, config,
 }
 
 async function searchDuckDuckGo({ query, maxResults, timeoutMs, config, env, signal }: { query: string; maxResults: number; timeoutMs: number; config?: Record<string, unknown>; env?: NodeJS.ProcessEnv; signal?: AbortSignal }) {
-  const endpoint = new URL("https://duckduckgo.com/html/");
+  const htmlEndpoint = new URL("https://html.duckduckgo.com/html/");
+  htmlEndpoint.searchParams.set("q", query);
+  try {
+    const { body } = await fetchTextWithTimeout(htmlEndpoint.href, {
+      timeoutMs,
+      maxBytes: DEFAULT_SEARCH_MAX_BYTES,
+      truncateOnLimit: true,
+      headers: SEARCH_HEADERS,
+      config,
+      env,
+      signal
+    });
+    const results = parseDuckDuckGoHtml(body.text).slice(0, maxResults);
+    if (results.length > 0) {
+      return {
+        provider: "duckduckgo-html",
+        query,
+        url: htmlEndpoint.href,
+        results,
+        truncated: body.truncated
+      };
+    }
+  } catch (error) {
+    const lite = await searchDuckDuckGoLite({ query, maxResults, timeoutMs, config, env, signal }).catch(() => null);
+    if (lite && lite.results.length > 0) {
+      return lite;
+    }
+    throw Object.assign(new Error(`DuckDuckGo search fetch failed: ${error instanceof Error ? error.message : String(error)}`), {
+      code: "WEB_SEARCH_FETCH_FAILED",
+      cause: error
+    });
+  }
+  const lite = await searchDuckDuckGoLite({ query, maxResults, timeoutMs, config, env, signal });
+  if (lite.results.length > 0) {
+    return lite;
+  }
+  return {
+    provider: "duckduckgo-html",
+    query,
+    url: htmlEndpoint.href,
+    results: [],
+    truncated: false
+  };
+}
+
+async function searchDuckDuckGoLite({ query, maxResults, timeoutMs, config, env, signal }: { query: string; maxResults: number; timeoutMs: number; config?: Record<string, unknown>; env?: NodeJS.ProcessEnv; signal?: AbortSignal }) {
+  const endpoint = new URL("https://lite.duckduckgo.com/lite/");
   endpoint.searchParams.set("q", query);
   const { body } = await fetchTextWithTimeout(endpoint.href, {
     timeoutMs,
     maxBytes: DEFAULT_SEARCH_MAX_BYTES,
     truncateOnLimit: true,
+    headers: SEARCH_HEADERS,
     config,
     env,
     signal
   });
-  const results = parseDuckDuckGoHtml(body.text).slice(0, maxResults);
   return {
-    provider: "duckduckgo-html",
+    provider: "duckduckgo-lite",
     query,
     url: endpoint.href,
-    results,
+    results: parseDuckDuckGoLite(body.text).slice(0, maxResults),
     truncated: body.truncated
   };
 }
@@ -185,6 +258,20 @@ export function parseDuckDuckGoHtml(html: unknown) {
     const snippet = cleanText(stripHtml(snippetMatch?.[1] ?? snippetMatch?.[2] ?? ""));
     if (title && url) {
       results.push({ title, url, snippet });
+    }
+  }
+  return dedupeResults(results);
+}
+
+export function parseDuckDuckGoLite(html: unknown) {
+  const text = String(html ?? "");
+  const links = Array.from(text.matchAll(/<a[^>]+class=["'][^"']*result-link[^"']*["'][^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi));
+  const results: SearchResult[] = [];
+  for (const link of links) {
+    const url = decodeHtml(link[1]);
+    const title = cleanText(stripHtml(link[2]));
+    if (title && url && !/duckduckgo\.com/i.test(url)) {
+      results.push({ title, url, snippet: "" });
     }
   }
   return dedupeResults(results);
@@ -297,22 +384,22 @@ async function fetchTextWithTimeout(url: string, options: WebFetchOptions): Prom
  * @param {string} url
  * @param {{ maxBytes: number; truncateOnLimit?: boolean; config?: Record<string, unknown>; env?: NodeJS.ProcessEnv; signal?: AbortSignal }} options
  */
-async function fetchResponse(url: string, options: { maxBytes: number; truncateOnLimit?: boolean; config?: Record<string, unknown>; env?: NodeJS.ProcessEnv; signal?: AbortSignal }): Promise<Response> {
+async function fetchResponse(url: string, options: { maxBytes: number; truncateOnLimit?: boolean; headers?: Record<string, string>; config?: Record<string, unknown>; env?: NodeJS.ProcessEnv; signal?: AbortSignal }): Promise<Response> {
   const proxyUrl = resolveProxyForUrl(url, { config: options.config, env: options.env });
+  const headers = options.headers ?? { "user-agent": DEFAULT_FETCH_USER_AGENT };
   if (proxyUrl) {
     return fetchViaHttpProxy(url, {
       proxyUrl,
       signal: options.signal,
       maxRedirects: MAX_REDIRECTS,
       maxBytes: options.maxBytes,
-      truncateOnLimit: options.truncateOnLimit === true
+      truncateOnLimit: options.truncateOnLimit === true,
+      headers
     });
   }
   return fetch(url, {
     signal: options.signal,
-    headers: {
-      "user-agent": "ant-code/1.1 local-lab-agent"
-    }
+    headers
   });
 }
 
@@ -354,7 +441,7 @@ function linkAbortSignals(signals: Array<AbortSignal | undefined>) {
  * @param {string} url
  * @param {{ proxyUrl: string; signal?: AbortSignal; maxRedirects: number; maxBytes: number; truncateOnLimit: boolean }} options
  */
-async function fetchViaHttpProxy(url: string, options: { proxyUrl: string; signal?: AbortSignal; maxRedirects: number; maxBytes: number; truncateOnLimit: boolean }): Promise<Response> {
+async function fetchViaHttpProxy(url: string, options: { proxyUrl: string; signal?: AbortSignal; maxRedirects: number; maxBytes: number; truncateOnLimit: boolean; headers?: Record<string, string> }): Promise<Response> {
   const response = await requestViaHttpProxy(url, options);
   const location = response.headers.get("location");
   if (isRedirect(response.status) && location && options.maxRedirects > 0) {
@@ -369,12 +456,12 @@ async function fetchViaHttpProxy(url: string, options: { proxyUrl: string; signa
  * @param {string} targetUrl
  * @param {{ proxyUrl: string; signal?: AbortSignal; maxBytes: number; truncateOnLimit: boolean }} options
  */
-function requestViaHttpProxy(targetUrl: string, options: { proxyUrl: string; signal?: AbortSignal; maxBytes: number; truncateOnLimit: boolean }): Promise<Response> {
+function requestViaHttpProxy(targetUrl: string, options: { proxyUrl: string; signal?: AbortSignal; maxBytes: number; truncateOnLimit: boolean; headers?: Record<string, string> }): Promise<Response> {
   return new Promise((resolve, reject) => {
     const target = new URL(targetUrl);
     const proxy = new URL(options.proxyUrl);
     if (target.protocol === "http:") {
-      proxyHttpRequest({ target, proxy, signal: options.signal }).then(resolve, reject);
+      proxyHttpRequest({ target, proxy, signal: options.signal, headers: options.headers }).then(resolve, reject);
       return;
     }
     if (target.protocol === "https:") {
@@ -383,7 +470,8 @@ function requestViaHttpProxy(targetUrl: string, options: { proxyUrl: string; sig
         proxy,
         signal: options.signal,
         maxBytes: options.maxBytes,
-        truncateOnLimit: options.truncateOnLimit
+        truncateOnLimit: options.truncateOnLimit,
+        headers: options.headers
       }).then(resolve, reject);
       return;
     }
@@ -394,14 +482,14 @@ function requestViaHttpProxy(targetUrl: string, options: { proxyUrl: string; sig
 /**
  * @param {{ target: URL; proxy: URL; signal?: AbortSignal }} input
  */
-function proxyHttpRequest(input: { target: URL; proxy: URL; signal?: AbortSignal }): Promise<Response> {
+function proxyHttpRequest(input: { target: URL; proxy: URL; signal?: AbortSignal; headers?: Record<string, string> }): Promise<Response> {
   return new Promise((resolve, reject) => {
     const request = http.request({
       host: input.proxy.hostname,
       port: input.proxy.port || 80,
       method: "GET",
       path: input.target.href,
-      headers: createProxyHeaders(input.target, input.proxy)
+      headers: createProxyHeaders(input.target, input.proxy, input.headers)
     });
     wireRequest(request, input.signal, reject);
     request.on("response", (response) => resolve(toFetchLikeResponse(input.target.href, response)));
@@ -412,7 +500,7 @@ function proxyHttpRequest(input: { target: URL; proxy: URL; signal?: AbortSignal
 /**
  * @param {{ target: URL; proxy: URL; signal?: AbortSignal; maxBytes: number; truncateOnLimit: boolean }} input
  */
-function proxyHttpsRequest(input: { target: URL; proxy: URL; signal?: AbortSignal; maxBytes: number; truncateOnLimit: boolean }): Promise<Response> {
+function proxyHttpsRequest(input: { target: URL; proxy: URL; signal?: AbortSignal; maxBytes: number; truncateOnLimit: boolean; headers?: Record<string, string> }): Promise<Response> {
   return new Promise((resolve, reject) => {
     const request = http.request({
       host: input.proxy.hostname,
@@ -434,8 +522,8 @@ function proxyHttpsRequest(input: { target: URL; proxy: URL; signal?: AbortSigna
         tlsSocket.write([
           `GET ${input.target.pathname}${input.target.search} HTTP/1.1`,
           `Host: ${input.target.host}`,
-          "User-Agent: ant-code/1.1 local-lab-agent",
-          "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          `User-Agent: ${input.headers?.["user-agent"] ?? DEFAULT_FETCH_USER_AGENT}`,
+          `Accept: ${input.headers?.accept ?? "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}`,
           "Accept-Encoding: identity",
           "Connection: close",
           "",
@@ -730,12 +818,12 @@ function normalizeHeaders(headers: import("node:http").IncomingHttpHeaders) {
  * @param {URL} target
  * @param {URL} proxy
  */
-function createProxyHeaders(target: URL, proxy: URL) {
+function createProxyHeaders(target: URL, proxy: URL, headers: Record<string, string> = {}) {
   return {
     ...createProxyAuthHeader(proxy),
     host: target.host,
-    "user-agent": "ant-code/1.1 local-lab-agent",
-    accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "user-agent": headers["user-agent"] ?? DEFAULT_FETCH_USER_AGENT,
+    accept: headers.accept ?? "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "accept-encoding": "identity",
     connection: "close"
   };

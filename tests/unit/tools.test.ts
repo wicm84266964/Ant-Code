@@ -25,6 +25,7 @@ import {
 import { createWorkflowState, syncWorkflowCompletionOnFinal } from "../../src/tools/workflow-tools.ts";
 import { listBackgroundAgentTasks } from "../../src/agents/background-registry.ts";
 import { listBackgroundTerminalTasks } from "../../src/agents/background-terminal-registry.ts";
+import { resolveBashInvocation } from "../../src/tools/shell-tools.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -88,6 +89,23 @@ test("grep defaults to all matches with full matching lines", async () => {
   assert.equal(result.truncated, false);
   assert.equal(result.matches.length, 3);
   assert.equal(result.matches[0].text, longLine);
+});
+
+test("grep searches a single file path without walking the parent directory", async () => {
+  const cwd = await makeTempWorkspace();
+  await fs.writeFile(path.join(cwd, "hit.txt"), "alpha needle\n", "utf8");
+  await fs.writeFile(path.join(cwd, "miss.txt"), "needle-should-not-match-if-scoped\n", "utf8");
+
+  const result = await grepTool({
+    cwd,
+    pattern: "needle",
+    path: "hit.txt"
+  });
+
+  assert.equal(result.truncated, false);
+  assert.equal(result.matches.length, 1);
+  assert.equal(result.matches[0].path, "hit.txt");
+  assert.equal(result.matches[0].text, "alpha needle");
 });
 
 test("grep skips binary model/data artifacts while preserving text matches", async () => {
@@ -1750,6 +1768,22 @@ test("web_fetch treats an oversized MCP transport frame as terminal", async () =
   assert.equal(result.error.code, "MCP_TRANSPORT_FRAME_TOO_LARGE");
 });
 
+test("Windows bash launch converts WSL cwd instead of passing a Windows path", () => {
+  const launch = resolveBashInvocation(
+    "D:\\ant-code-worktrees\\typescript-trial",
+    "pwd",
+    {
+      platform: "win32",
+      executable: "C:\\Windows\\System32\\bash.exe",
+      env: { SystemRoot: "C:\\Windows" }
+    }
+  );
+  assert.equal(launch.executable, "C:\\Windows\\System32\\bash.exe");
+  assert.equal(launch.args[0], "-lc");
+  assert.match(launch.args[1], /cd '\/mnt\/d\/ant-code-worktrees\/typescript-trial' && pwd/);
+  assert.match(String(launch.cwd).replace(/\//g, "\\").toLowerCase(), /c:\\windows/);
+});
+
 test("web_search is blocked by lab-only policy for public fallback search", async () => {
   const runtime = createToolRuntime({
     cwd: process.cwd(),
@@ -2171,6 +2205,47 @@ test("foreground shell refuses known long discover commands", async () => {
   assert.equal(result.error.code, "BACKGROUND_SHELL_REQUIRED");
 });
 
+test("background shell keeps the worker alive after launch returns", async () => {
+  const cwd = await makeTempWorkspace();
+  const runtime = createToolRuntime({
+    cwd,
+    parentSessionId: "session-keepalive-terminal",
+    policy: {
+      networkMode: "offline",
+      approvals: { workspaceCommands: true }
+    }
+  });
+  const command = process.platform === "win32"
+    ? "Start-Sleep -Seconds 20"
+    : "sleep 20";
+  const result = await runtime.execute("background_shell", {
+    command,
+    title: "Keepalive terminal",
+    taskId: "keepalive-terminal"
+  });
+
+  try {
+    assert.equal(result.ok, true);
+    assert.equal(result.result.started, true);
+    assert.equal(result.result.detached, process.platform !== "win32");
+    assert.ok(result.result.pid);
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    assert.equal(await processAlive(result.result.pid), true);
+    const tasks = listBackgroundTerminalTasks({
+      cwd,
+      parentSessionId: "session-keepalive-terminal",
+      taskId: "keepalive-terminal"
+    });
+    assert.equal(tasks.length, 1);
+    assert.equal(tasks[0].status, "running");
+    assert.equal(tasks[0].pid, result.result.pid);
+  } finally {
+    if (result.result?.pid) {
+      await killProcessTree(result.result.pid);
+    }
+  }
+});
+
 test("background shell persists terminal task records", async () => {
   const cwd = await makeTempWorkspace();
   const runtime = createToolRuntime({
@@ -2404,6 +2479,23 @@ test("background terminal liveness sampling never runs tasklist synchronously", 
 
 async function makeTempWorkspace() {
   return fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
+}
+
+async function processAlive(pid) {
+  if (process.platform === "win32") {
+    try {
+      const { stdout } = await execFileAsync("tasklist", ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"]);
+      return String(stdout).includes(String(pid));
+    } catch {
+      return false;
+    }
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function killProcessTree(pid) {

@@ -186,7 +186,10 @@ test("dashboard maps background terminal registration before pid is available", 
   assert.equal(events.length, 1);
   assert.equal(events[0].type, "activity");
   assert.equal(events[0].title, "终端后台任务启动中");
-  assert.equal(events[0].status, "running");
+  assert.equal(events[0].status, "starting");
+  assert.equal(events[0].kind, "terminal");
+  assert.equal(events[0].backgroundSubagent, true);
+  assert.equal(events[0].taskId, "terminal-starting");
   assert.equal(events[0].coalesceKey, "background-terminal:terminal-starting");
   assert.match(events[0].detail, /task=terminal-starting/);
   assert.match(events[0].detail, /stdout=out\.log/);

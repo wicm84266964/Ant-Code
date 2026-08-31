@@ -125,11 +125,19 @@ export function mapSessionEventToDashboard(event: Record<string, unknown>) {
   }
   if (type === "background_terminal_started") {
     return [activity("background-terminal-started", "终端后台任务运行中", backgroundTerminalStartedDetail(event), "running", "tool", event, {
+      backgroundSubagent: true,
+      kind: "terminal",
+      taskId: typeof event.taskId === "string" ? event.taskId : null,
+      cancellable: true,
       coalesceKey: `background-terminal:${event.taskId ?? "unknown"}`
     })];
   }
   if (type === "background_terminal_registered") {
-    return [activity("background-terminal-registered", "终端后台任务启动中", backgroundTerminalStartedDetail(event), "running", "tool", event, {
+    return [activity("background-terminal-registered", "终端后台任务启动中", backgroundTerminalStartedDetail(event), "starting", "tool", event, {
+      backgroundSubagent: true,
+      kind: "terminal",
+      taskId: typeof event.taskId === "string" ? event.taskId : null,
+      cancellable: true,
       coalesceKey: `background-terminal:${event.taskId ?? "unknown"}`
     })];
   }

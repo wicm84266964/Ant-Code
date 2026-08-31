@@ -398,7 +398,7 @@ export function handleDashboardEvent(event: DashboardStreamEvent) {
     return;
   }
   if (event.type === "background_subagent_snapshot") {
-    reconcileBackgroundSubagentSnapshot(event.groups);
+    reconcileBackgroundSubagentSnapshot(event.groups, event.at);
     return;
   }
   if (event.type === "background_subagent_cancelled") {

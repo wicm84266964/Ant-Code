@@ -12,7 +12,7 @@ argument_hint: 简述要调查的问题、时间范围、可信来源偏好和�
 ## 工作流
 
 1. 明确用户要查什么、是否需要最新信息、是否有指定来源。
-2. 优先使用 `web_search` 搜索 3-5 个候选来源；如果配置了 SearXNG 或搜索 MCP，可先检查 `mcp_list`。
+2. 优先使用 `web_search` 搜索 3-5 个候选来源（内置 DuckDuckGo HTML）。只有配置了自建 SearXNG 时才走搜索 MCP。
 3. 对关键来源使用 `web_fetch` 抓取正文，优先 `markdown`。当前 Ant Code 默认让 `web_fetch` 先走 `fetch` MCP；如果 MCP 不可用，再回退到内置抓取器。
    - 如果抓取被权限策略、反爬或 HTML 噪声阻断，先改用搜索摘要、官方 API/raw 文件。
    - 若配置允许，可尝试 reader mirror：`https://r.jina.ai/http://r.jina.ai/http://<原始URL>`，并在 caveats 中说明使用了镜像读取。

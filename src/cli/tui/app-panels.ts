@@ -200,6 +200,7 @@ import {
   commandPanelVisibleRowsForSize,
   entryAtTranscriptMouseEvent,
   frameForState,
+  transcriptHitAtMouseEvent,
   isMessageExcerptPanelActive,
   isNativeScrollbackMode,
   maxCommandPanelOffset,
@@ -210,6 +211,7 @@ import {
   transcriptSubtargetForMouse
 } from "./layout-frame.ts";
 import { entriesFromSelected, formatEntriesForClipboard, formatEntryForClipboard, messageActionsForEntry, writeClipboardText } from "./clipboard.ts";
+import { formatVisibleTranscriptSelection, isMeaningfulTranscriptDrag, normalizeTranscriptSelection } from "./transcript-selection.ts";
 import { readGitStatusSummary } from "./git-status.ts";
 import {
   clearTerminalForFullRedraw,
@@ -1118,6 +1120,49 @@ export function useTuiAppPanels(s: ReturnType<typeof useTuiAppCore>) {
     return true;
   }, [openMessageExcerpt, props.env]);
 
+  const handleTranscriptPointerEvent = useCallback((event: TuiRuntimeEvent, current: TuiUiState = stateRef.current) => {
+    const kind = String(event?.kind ?? "");
+    if (kind !== "press" && kind !== "drag" && kind !== "release") {
+      return false;
+    }
+    if (!current.startupConfirmed || !current.trusted) {
+      return false;
+    }
+    const hit = transcriptHitAtMouseEvent(event, current, { clamp: kind !== "press" });
+    if (kind === "press") {
+      if (!hit) {
+        s.transcriptDragRef.current = null;
+        s.setTranscriptSelection(null);
+        return false;
+      }
+      s.transcriptDragRef.current = { x: Number(event.x), y: Number(event.y), lineIndex: hit.lineIndex };
+      s.setTranscriptSelection({ startIndex: hit.lineIndex, endIndex: hit.lineIndex });
+      return true;
+    }
+    const start = s.transcriptDragRef.current;
+    if (!start) {
+      return false;
+    }
+    const lineIndex = hit?.lineIndex ?? start.lineIndex;
+    s.setTranscriptSelection(normalizeTranscriptSelection(start.lineIndex, lineIndex));
+    if (kind === "drag") {
+      return true;
+    }
+    s.transcriptDragRef.current = null;
+    const range = normalizeTranscriptSelection(start.lineIndex, lineIndex);
+    if (isMeaningfulTranscriptDrag(start, event, start.lineIndex, lineIndex)) {
+      const text = formatVisibleTranscriptSelection(hit?.viewport.lines ?? [], range.startIndex, range.endIndex);
+      if (text) {
+        writeClipboardText(text, props.env);
+        s.setActivity((value) => ({ ...value, status: "已复制选中文字" }));
+      }
+      setTimeout(() => s.setTranscriptSelection(null), 120);
+      return true;
+    }
+    s.setTranscriptSelection(null);
+    return selectTranscriptEntryAtMouse(event, current);
+  }, [props.env, s, selectTranscriptEntryAtMouse]);
+
   const applyRawDraftOperations = useCallback((operations: Array<{ type?: string; text?: string }> = [], current: TuiUiState = stateRef.current) => {
     const actionable = operations.filter((operation) => operation.type !== "ignore");
     if (actionable.length === 0) {
@@ -1191,6 +1236,7 @@ export function useTuiAppPanels(s: ReturnType<typeof useTuiAppCore>) {
     hydrateEntryFromState,
     runMessageAction,
     selectTranscriptEntryAtMouse,
+    handleTranscriptPointerEvent,
     applyRawDraftOperations
   };
 }

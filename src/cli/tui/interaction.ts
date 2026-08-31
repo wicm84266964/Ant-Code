@@ -376,12 +376,12 @@ function mouseButtonKind(code: number, finalByte: string) {
   if (code >= 64) {
     return null;
   }
-  if ((code & 32) !== 0) {
-    return null;
-  }
   const button = code & 3;
   if (button !== 0) {
     return null;
+  }
+  if ((code & 32) !== 0) {
+    return "drag";
   }
   return finalByte === "m" ? "release" : "press";
 }

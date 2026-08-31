@@ -192,15 +192,28 @@ export function handleActivity(activity: DashboardActivity) {
 }
 
 export function isBackgroundSubagentActivity(activity: DashboardActivity | DashboardStreamEvent | null | undefined) {
-  return activity?.backgroundSubagent === true || String(activity?.rawType ?? "").startsWith("subagent_group_");
+  const rawType = String(activity?.rawType ?? "");
+  return activity?.backgroundSubagent === true
+    || activity?.kind === "terminal"
+    || rawType.startsWith("subagent_group_")
+    || rawType.startsWith("background_terminal_");
 }
 
 export function handleBackgroundSubagentActivity(activity: DashboardActivity | DashboardStreamEvent) {
   const key = activity.coalesceKey || activity.groupId || activity.taskId || activity.id;
   const previous = state.backgroundSubagents.get(key) ?? emptyBackgroundSubagent;
-  const merged = {
+  const rawType = String(activity.rawType ?? "");
+  const kind = typeof activity.kind === "string"
+    ? activity.kind
+    : typeof previous.kind === "string"
+      ? previous.kind
+      : rawType.startsWith("background_terminal_")
+        ? "terminal"
+        : undefined;
+  const merged: DashboardActivity = {
     ...previous,
     ...activity,
+    kind,
     groupId: activity.groupId ?? previous.groupId ?? null,
     taskId: activity.taskId ?? previous.taskId ?? null,
     profile: activity.profile ?? previous.profile ?? null,
@@ -223,8 +236,9 @@ export function clearBackgroundSubagentStatus(groupId: unknown) {
   const id = String(groupId ?? "").trim();
   if (id) {
     state.backgroundSubagents.delete(`subagent-group:${id}`);
+    state.backgroundSubagents.delete(`background-terminal:${id}`);
     for (const [key, item] of state.backgroundSubagents.entries()) {
-      if (item.groupId === id) {
+      if (item.groupId === id || item.taskId === id) {
         state.backgroundSubagents.delete(key);
       }
     }
@@ -241,15 +255,16 @@ export function clearBackgroundSubagentStatus(groupId: unknown) {
   updateLiveStatus();
 }
 
-export function reconcileBackgroundSubagentSnapshot(groups: unknown) {
+export function reconcileBackgroundSubagentSnapshot(groups: unknown, snapshotAt?: unknown) {
   const visibleGroups = Array.isArray(groups) ? groups.filter(backgroundSubagentVisible) : [];
   const nextKeys = new Set();
+  const snapshotTime = Date.parse(String(snapshotAt ?? "")) || Date.now();
   for (const group of visibleGroups) {
     const id = String(group.groupId ?? group.taskId ?? "").trim();
     if (!id) {
       continue;
     }
-    const key = `subagent-group:${id}`;
+    const key = group.kind === "terminal" ? `background-terminal:${id}` : `subagent-group:${id}`;
     nextKeys.add(key);
     const previous = state.backgroundSubagents.get(key) ?? emptyBackgroundSubagent;
     state.backgroundSubagents.set(key, {
@@ -283,9 +298,18 @@ export function reconcileBackgroundSubagentSnapshot(groups: unknown) {
     });
   }
   for (const [key, item] of state.backgroundSubagents.entries()) {
-    if ((item.groupId || String(key).startsWith("subagent-group:")) && !nextKeys.has(key)) {
-      state.backgroundSubagents.delete(key);
+    const tracked = item.kind === "terminal"
+      || item.groupId
+      || String(key).startsWith("subagent-group:")
+      || String(key).startsWith("background-terminal:");
+    if (!tracked || nextKeys.has(key)) {
+      continue;
     }
+    const itemTime = Date.parse(String(item.at ?? ""));
+    if (Number.isFinite(itemTime) && itemTime > snapshotTime) {
+      continue;
+    }
+    state.backgroundSubagents.delete(key);
   }
   if (state.backgroundSubagents.size === 0) {
     state.liveStatusExpanded = false;
@@ -431,9 +455,14 @@ export function renderBackgroundSubagentStatus(background: DashboardActivity[]) 
     for (const item of ordered.slice(0, 3)) {
       const chip = document.createElement("div");
       chip.className = `live-chip background-subagent-chip ${item.status}`;
+      const cancelKey = backgroundCancelKey(item.groupId, item.taskId);
+      const cancelling = state.backgroundCancelling.has(cancelKey);
       chip.innerHTML = `
         <span class="chip-pulse" aria-hidden="true"></span>
         ${escapeHtml(backgroundSubagentCompactLabel(item))}
+        ${backgroundSubagentCancellable(item) ? `
+          <button type="button" class="live-chip-cancel" data-background-cancel="true" data-group-id="${escapeHtml(item.groupId ?? "")}" data-task-id="${escapeHtml(item.taskId ?? "")}" ${cancelling ? "disabled" : ""}>${cancelling ? "回收中" : "回收"}</button>
+        ` : ""}
       `;
       els.liveSubtasks.append(chip);
     }

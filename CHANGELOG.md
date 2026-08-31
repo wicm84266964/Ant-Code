@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+Dashboard and TUI chrome now default to gold-on-black. Transcript drag-select
+copies visible chat text only. Search and Windows terminal fixes from the
+development freeze are included. Version remains `2.0.0` until the next tagged
+release.
+
+### Changed
+
+- TUI default theme is `gold-black`. `LAB_AGENT_TUI_THEME=sky-blue` still
+  selects the older sky-blue theme.
+- Transcript drag-select copies chat lines from the session pane. It does not
+  copy pane borders or the right sidebar. Click still selects a block; double
+  click still opens the excerpt panel.
+- Dashboard chrome matches the same gold-on-black direction.
+- `web_search` uses built-in DuckDuckGo HTML. The `duckduckgo-search` MCP is
+  disabled by default because public search often times out. `fetch` MCP is
+  unchanged for `web_fetch`. A self-hosted SearXNG remains the stable no-key
+  search backend when configured.
+
+### Fixed
+
+- Windows `background_shell` stays attached so a long-running task remains
+  visible after launch returns.
+- `grep` on a single file no longer misses matches.
+- Windows bash launched through WSL converts the workspace to `/mnt/<drive>/...`
+  instead of passing a Windows path.
+
 ## 2.0.0 - 2026-08-30
 
 This is a runtime-generation release. TUI, Dashboard, permissions, Goal, tools,

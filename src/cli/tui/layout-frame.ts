@@ -10,6 +10,7 @@ import { resolveTuiFrame } from "./layout.ts";
 import { fileMentionState, slashPaletteState } from "./palettes.ts";
 import { createScrollableRegion } from "./scroll-region.ts";
 import { initialStream } from "./stream.ts";
+import { transcriptLineIndexForMouseY } from "./transcript-selection.ts";
 import type {
   TuiCommandPanel,
   TuiFrame,
@@ -253,15 +254,23 @@ export function transcriptSubtargetForMouse(event: TuiRuntimeEvent, current: Par
   return y >= streamTop ? "stream" : "transcript";
 }
 
-export function entryAtTranscriptMouseEvent(event: TuiRuntimeEvent, current: Partial<TuiUiState> = {}) {
-  const x = Number(event.x);
-  const y = Number(event.y);
+export function transcriptHitAtMouseEvent(
+  event: TuiRuntimeEvent | { x?: number; y?: number } | null | undefined,
+  current: Partial<TuiUiState> = {},
+  options: { clamp?: boolean } = {}
+) {
+  const x = Number(event?.x);
+  const y = Number(event?.y);
   if (!event || !Number.isFinite(y)) {
     return null;
   }
   const frame = frameForState(current);
   const transcript = frame.regions.transcript;
-  if (!transcript || x < transcript.left || x > transcript.right || y < transcript.top || y > transcript.bottom) {
+  if (!transcript) {
+    return null;
+  }
+  const inBox = Number.isFinite(x) && x >= transcript.left && x <= transcript.right && y >= transcript.top && y <= transcript.bottom;
+  if (!inBox && !options.clamp) {
     return null;
   }
   const logLayout = resolveLogPaneLayout({
@@ -276,12 +285,23 @@ export function entryAtTranscriptMouseEvent(event: TuiRuntimeEvent, current: Par
     current.transcriptScrollOffset ?? 0,
     current.detailMode ?? "compact"
   );
-  const rowInBox = y - transcript.top;
-  const lineIndex = rowInBox - 2;
-  if (lineIndex < 0 || lineIndex >= viewport.lines.length) {
+  const lineIndex = transcriptLineIndexForMouseY(y, transcript.top, viewport.lines.length, {
+    historyWarning: viewport.offset > 0,
+    clamp: options.clamp
+  });
+  if (lineIndex === null) {
     return null;
   }
-  const lineEntryId = viewport.lines[lineIndex]?.entryId;
+  return {
+    lineIndex,
+    line: viewport.lines[lineIndex],
+    viewport
+  };
+}
+
+export function entryAtTranscriptMouseEvent(event: TuiRuntimeEvent, current: Partial<TuiUiState> = {}) {
+  const hit = transcriptHitAtMouseEvent(event, current);
+  const lineEntryId = hit?.line?.entryId;
   if (!lineEntryId) {
     return null;
   }

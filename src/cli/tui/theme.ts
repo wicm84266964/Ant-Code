@@ -1,4 +1,4 @@
-export const THEME_NAMES = ["sky-blue", "ant-code", "terminal-default", "no-color"] as const;
+export const THEME_NAMES = ["gold-black", "sky-blue", "ant-code", "terminal-default", "no-color"] as const;
 
 export type ThemeName = typeof THEME_NAMES[number];
 
@@ -41,6 +41,42 @@ const SEMANTIC_KEYS = [
   "history",
   "status"
 ];
+
+const GOLD_BLACK: Theme = Object.freeze({
+  name: "gold-black",
+  label: "Gold Black",
+  colors: Object.freeze({
+    identity: "#e8c547",
+    text: "#f5f5f5",
+    dim: "#c8c8c8",
+    panel: "#161616",
+    border: "#c9a227",
+    success: "#e8c547",
+    warning: "#f6c86f",
+    danger: "#ff8585",
+    info: "#e8c547",
+    accent: "#e8c547",
+    selection: "#e8c547",
+    cursor: "#e8c547",
+    diffAdd: "#e8c547",
+    diffRemove: "#ff8585",
+    diffContext: "#c8c8c8",
+    conversation: "#f5f5f5",
+    assistant: "#e8c547",
+    user: "#f5f5f5",
+    tool: "#c9a227",
+    gateway: "#e8c547",
+    approval: "#f6c86f",
+    command: "#e8c547",
+    code: "#d8d8d8",
+    file: "#e8c547",
+    model: "#e8c547",
+    shell: "#c9a227",
+    inspector: "#e8c547",
+    history: "#f6c86f",
+    status: "#e8c547"
+  })
+});
 
 const SKY_BLUE: Theme = Object.freeze({
   name: "sky-blue",
@@ -113,13 +149,14 @@ const NO_COLOR: Theme = Object.freeze({
 });
 
 const THEMES: Readonly<Record<string, Theme>> = Object.freeze({
+  "gold-black": GOLD_BLACK,
   "sky-blue": SKY_BLUE,
   "ant-code": ANT_CODE,
   "terminal-default": TERMINAL_DEFAULT,
   "no-color": NO_COLOR
 });
 
-export const DEFAULT_THEME_NAME = "sky-blue";
+export const DEFAULT_THEME_NAME = "gold-black";
 export const DEFAULT_TUI_THEME = THEMES[DEFAULT_THEME_NAME];
 
 export function resolveTheme(name: string, options: Record<string, unknown> = {}): Theme {

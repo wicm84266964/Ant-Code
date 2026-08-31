@@ -352,6 +352,7 @@ export function renderTuiAppView(s: ReturnType<typeof useTuiAppKeys>) {
     setSelectedEntryId,
     selectedEntryHighlightUntil,
     setSelectedEntryHighlightUntil,
+    transcriptSelection,
     messageActionIndex,
     setMessageActionIndex,
     commandPanelKindRef,
@@ -594,6 +595,7 @@ export function renderTuiAppView(s: ReturnType<typeof useTuiAppKeys>) {
         streamScrollOffset,
         scrollbackMode,
         selectedEntryId: visibleSelectedEntryId,
+        transcriptSelection,
         theme
       }),
       wide ? h(SidePanel, {

@@ -88,15 +88,82 @@ export async function powershellTool(input: { cwd: string; command: string; time
  * @param {{ cwd: string; command: string; timeoutMs?: number; env?: NodeJS.ProcessEnv; signal?: AbortSignal; policy?: Record<string, unknown> }} input
  */
 export async function bashTool(input: { cwd: string; command: string; timeoutMs?: number; env?: NodeJS.ProcessEnv; signal?: AbortSignal; policy?: Record<string, unknown> }) {
+  const launch = resolveBashInvocation(input.cwd, input.command, { env: input.env });
   return runShellCommand({
-    executable: "bash",
-    args: ["-lc", input.command],
-    cwd: input.cwd,
+    executable: launch.executable,
+    args: launch.args,
+    cwd: launch.cwd,
     timeoutMs: input.timeoutMs,
     env: input.env,
     signal: input.signal,
     policy: input.policy
   });
+}
+
+export function resolveBashInvocation(
+  cwd: string,
+  command: string,
+  options: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv; executable?: string } = {}
+) {
+  const platform = options.platform ?? process.platform;
+  if (platform !== "win32") {
+    return { executable: "bash", args: ["-lc", command], cwd };
+  }
+  const env = options.env ?? process.env;
+  const executable = options.executable || findWindowsBash(env);
+  if (isWslBash(executable)) {
+    const wslCwd = toWslPath(cwd);
+    return {
+      executable,
+      args: ["-lc", `cd ${posixShellSingleQuote(wslCwd)} && ${command}`],
+      cwd: windowsWslLaunchCwd(env)
+    };
+  }
+  return { executable, args: ["-lc", command], cwd };
+}
+
+function findWindowsBash(env: NodeJS.ProcessEnv) {
+  const programFiles = env.ProgramFiles || "C:\\Program Files";
+  const localAppData = env.LOCALAPPDATA || "";
+  const candidates = [
+    env.LAB_AGENT_BASH,
+    env.GIT_BASH,
+    path.join(programFiles, "Git", "bin", "bash.exe"),
+    path.join(programFiles, "Git", "usr", "bin", "bash.exe"),
+    localAppData ? path.join(localAppData, "Programs", "Git", "bin", "bash.exe") : ""
+  ].filter((value): value is string => Boolean(value));
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return "bash";
+}
+
+function isWslBash(executable: string) {
+  const normalized = String(executable ?? "").replace(/\//g, "\\").toLowerCase();
+  return normalized.endsWith("\\system32\\bash.exe")
+    || normalized.endsWith("\\sysnative\\bash.exe")
+    || normalized.includes("\\windowsapps\\");
+}
+
+function toWslPath(windowsPath: string) {
+  const resolved = path.resolve(windowsPath);
+  const match = resolved.match(/^([A-Za-z]):[\\/](.*)$/);
+  if (!match) {
+    return resolved.replace(/\\/g, "/");
+  }
+  return `/mnt/${match[1].toLowerCase()}/${match[2].replace(/\\/g, "/")}`;
+}
+
+function windowsWslLaunchCwd(env: NodeJS.ProcessEnv) {
+  const systemRoot = env.SystemRoot || env.WINDIR || "C:\\Windows";
+  const system32 = path.join(systemRoot, "System32");
+  return fs.existsSync(system32) ? system32 : systemRoot;
+}
+
+function posixShellSingleQuote(value: string) {
+  return `'${String(value ?? "").replace(/'/g, `'\\''`)}'`;
 }
 
 /**
@@ -185,7 +252,7 @@ export async function backgroundShellTool(input: BackgroundShellToolInput) {
     pid: started.pid,
     launcherPid: started.launcherPid ?? null,
     started: true,
-    detached: true,
+    detached: process.platform !== "win32",
     stdoutPath,
     stderrPath,
     scrubbedEnv: scrubbed.removed
@@ -196,21 +263,70 @@ async function startWindowsBackgroundShell(input: BackgroundLaunchInput & { logD
   const workerPath = path.join(input.logDir, `${input.taskId}.worker.ps1`);
   await fs.promises.writeFile(workerPath, [
     "$ErrorActionPreference = 'Continue'",
-    `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8`,
-    `& {`,
     input.command,
-    `} 1>> ${powerShellSingleQuoted(input.stdoutPath)} 2>> ${powerShellSingleQuoted(input.stderrPath)}`,
     ""
   ].join("\r\n"), "utf8");
   return new Promise((resolve) => {
     let settled = false;
-    const worker = spawn("powershell.exe", ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", workerPath], {
-      cwd: input.cwd,
-      env: input.scrubbed.env,
-      windowsHide: true,
-      detached: true,
-      stdio: "ignore"
-    });
+    let stdoutFd = -1;
+    let stderrFd = -1;
+    let streamsClosed = false;
+    const closeStreams = () => {
+      if (streamsClosed) {
+        return;
+      }
+      streamsClosed = true;
+      if (stdoutFd >= 0) {
+        fs.closeSync(stdoutFd);
+        stdoutFd = -1;
+      }
+      if (stderrFd >= 0) {
+        fs.closeSync(stderrFd);
+        stderrFd = -1;
+      }
+    };
+    try {
+      stdoutFd = fs.openSync(input.stdoutPath, "a");
+      stderrFd = fs.openSync(input.stderrPath, "a");
+    } catch (error) {
+      closeStreams();
+      resolve({
+        launcherPid: null,
+        error: {
+          code: "BACKGROUND_SHELL_SPAWN_ERROR",
+          message: error instanceof Error ? error.message : String(error)
+        }
+      });
+      return;
+    }
+    let worker: ChildProcess;
+    try {
+      worker = spawn("powershell.exe", [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        workerPath
+      ], {
+        cwd: input.cwd,
+        env: input.scrubbed.env,
+        windowsHide: true,
+        detached: false,
+        stdio: ["ignore", stdoutFd, stderrFd]
+      });
+    } catch (error) {
+      closeStreams();
+      resolve({
+        launcherPid: null,
+        error: {
+          code: "BACKGROUND_SHELL_SPAWN_ERROR",
+          message: error instanceof Error ? error.message : String(error)
+        }
+      });
+      return;
+    }
     const finish = (result: BackgroundStartResult) => {
       if (settled) {
         return;
@@ -250,6 +366,7 @@ async function startWindowsBackgroundShell(input: BackgroundLaunchInput & { logD
       });
     }, DEFAULT_BACKGROUND_LAUNCH_TIMEOUT_MS);
     input.signal?.addEventListener?.("abort", onAbort, { once: true });
+    bindBackgroundChildExit(worker, input, closeStreams);
     worker.on("spawn", () => {
       const pid = worker.pid ?? null;
       const updated = updateBackgroundTerminalTask(input.taskId, {
@@ -268,7 +385,6 @@ async function startWindowsBackgroundShell(input: BackgroundLaunchInput & { logD
         });
         return;
       }
-      worker.unref?.();
       if (input.signal?.aborted) {
         onAbort();
         return;
@@ -316,6 +432,11 @@ function startPosixBackgroundShell(input: BackgroundLaunchInput): BackgroundStar
     };
   }
   child.unref?.();
+  bindBackgroundChildExit(child, input, closeStreams);
+  return { pid: child.pid };
+}
+
+function bindBackgroundChildExit(child: ChildProcess, input: BackgroundLaunchInput, closeStreams?: () => void) {
   child.on("close", (exitCode, signal) => {
     const stoppedExternally = signal === "SIGTERM" || signal === "SIGINT" || signal === "SIGHUP";
     updateBackgroundTerminalTask(input.taskId, {
@@ -324,7 +445,7 @@ function startPosixBackgroundShell(input: BackgroundLaunchInput): BackgroundStar
       exitCode,
       signal: signal ?? null
     });
-    closeStreams();
+    closeStreams?.();
   });
   child.on("error", (error: Error) => {
     updateBackgroundTerminalTask(input.taskId, {
@@ -332,9 +453,8 @@ function startPosixBackgroundShell(input: BackgroundLaunchInput): BackgroundStar
       status: "failed",
       error: error.message
     });
-    closeStreams();
+    closeStreams?.();
   });
-  return { pid: child.pid };
 }
 
 async function notifyBackgroundTerminalEvent(input: BackgroundShellToolInput, event: Record<string, unknown>) {
@@ -547,10 +667,6 @@ function sanitizeTaskId(value: unknown) {
     .replace(/[^a-zA-Z0-9_.-]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 80);
-}
-
-function powerShellSingleQuoted(value: unknown) {
-  return `'${String(value ?? "").replace(/'/g, "''")}'`;
 }
 
 /**
