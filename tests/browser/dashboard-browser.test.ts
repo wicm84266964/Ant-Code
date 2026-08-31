@@ -189,7 +189,7 @@ test("model controls keep switching compact while settings owns configuration", 
       model: getComputedStyle(document.querySelector("#model-status-toggle")).fontSize,
       reasoning: getComputedStyle(document.querySelector(".reasoning-effort-control")).fontSize
     }));
-    assert.deepEqual(compactControlTypography, { settings: "12px", model: "12px", reasoning: "12px" });
+    assert.deepEqual(compactControlTypography, { settings: "14px", model: "13px", reasoning: "13px" });
 
     await page.locator("#settings-button").click();
     await page.waitForFunction(() => document.body.classList.contains("settings-open"));
