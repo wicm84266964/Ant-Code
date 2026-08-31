@@ -148,12 +148,20 @@ function isWslBash(executable: string) {
 }
 
 function toWslPath(windowsPath: string) {
+  const normalized = String(windowsPath ?? "").replace(/\//g, "\\");
+  const match = normalized.match(/^([A-Za-z]):\\(.*)$/);
+  if (match) {
+    return `/mnt/${match[1].toLowerCase()}/${match[2].replace(/\\/g, "/")}`;
+  }
+  if (process.platform !== "win32") {
+    return normalized.replace(/\\/g, "/");
+  }
   const resolved = path.resolve(windowsPath);
-  const match = resolved.match(/^([A-Za-z]):[\\/](.*)$/);
-  if (!match) {
+  const resolvedMatch = resolved.replace(/\//g, "\\").match(/^([A-Za-z]):\\(.*)$/);
+  if (!resolvedMatch) {
     return resolved.replace(/\\/g, "/");
   }
-  return `/mnt/${match[1].toLowerCase()}/${match[2].replace(/\\/g, "/")}`;
+  return `/mnt/${resolvedMatch[1].toLowerCase()}/${resolvedMatch[2].replace(/\\/g, "/")}`;
 }
 
 function windowsWslLaunchCwd(env: NodeJS.ProcessEnv) {
