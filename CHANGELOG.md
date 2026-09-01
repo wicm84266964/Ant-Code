@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Dashboard recycle of lost background subagents now marks those tasks
+  `interrupted` even when the current process has no live controller. A group
+  recycle chip cancels every child in the group. Child agents that throw after
+  heartbeat stops persist `failed` or `interrupted` instead of remaining
+  `running` on disk.
+
 ## 2.0.1 - 2026-08-31
 
 This is a small release on the 2.0 TypeScript runtime. Default TUI and

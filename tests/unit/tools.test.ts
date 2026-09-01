@@ -1145,6 +1145,66 @@ test("background agent_run returns task and group immediately", async () => {
   assert.equal(wakeup?.wakeParent, true);
 });
 
+test("background agent_run persists a failed child when the gateway fetch fails", async () => {
+  const cwd = await makeTempWorkspace();
+  const runtime = createToolRuntime({
+    cwd,
+    env: {
+      LAB_AGENT_TRANSCRIPT_ENABLED: "false"
+    },
+    config: {
+      networkMode: "online",
+      allowedHosts: ["127.0.0.1"],
+      lab: {
+        gatewayUrl: "http://127.0.0.1:1/v1/chat",
+        gatewayProtocol: "openai-chat",
+        gatewayApiKey: "test",
+        gatewayMaxRetries: 0,
+        gatewayTimeoutMs: 250
+      },
+      agents: {
+        backgroundWakeup: {
+          enabled: true,
+          autoQueueParentPrompt: true,
+          defaultWaitFor: "all"
+        },
+        profiles: []
+      },
+      mcp: { servers: [] }
+    },
+    policy: { fullAccess: true },
+    parentSessionId: "session-bg-fail"
+  });
+
+  const result = await runtime.execute("agent_run", {
+    profile: "explorer",
+    taskId: "task-bg-fail",
+    groupId: "group-bg-fail",
+    background: true,
+    query: "inspect in background"
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.result.background, true);
+  await waitFor(async () => {
+    try {
+      const rawTask = await fs.readFile(path.join(cwd, ".lab-agent", "tasks", "task-bg-fail.json"), "utf8");
+      const rawGroup = await fs.readFile(path.join(cwd, ".lab-agent", "task-groups", "group-bg-fail.json"), "utf8");
+      const task = JSON.parse(rawTask);
+      const group = JSON.parse(rawGroup);
+      return task.status !== "running" && group.status !== "running";
+    } catch {
+      return false;
+    }
+  }, 8000);
+  const task = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "tasks", "task-bg-fail.json"), "utf8"));
+  assert.equal(task.status, "failed");
+  assert.ok(task.finishedAt);
+  const group = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "task-groups", "group-bg-fail.json"), "utf8"));
+  assert.equal(group.status, "partial");
+  assert.ok(group.completedAt);
+});
+
 test("blocked agent_run writes a task record for TUI detail views", async () => {
   const cwd = await makeTempWorkspace();
   const runtime = createToolRuntime({

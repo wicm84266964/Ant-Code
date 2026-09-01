@@ -161,6 +161,7 @@ type BuiltinHandler = (input: Record<string, unknown>) => Promise<unknown> | unk
 
 const EMPTY_POLICY: PermissionPolicy = {};
 const EMPTY_RECORD: Record<string, unknown> = {};
+const TERMINAL_AGENT_TASK_STATUSES = new Set(["completed", "failed", "partial", "blocked", "cancelled", "interrupted"]);
 
 export type ToolRuntimeOptions = {
   cwd: string;
@@ -1395,6 +1396,7 @@ async function finalizeBackgroundAgentTool(options: ToolRuntimeOptions, state: {
 }) {
   const groupStore = createAgentTaskGroupStore({ cwd: options.cwd });
   const taskStore = createAgentTaskStore({ cwd: options.cwd });
+  await persistBackgroundAgentResultIfNeeded(taskStore, state);
   type GroupUpdateResult = { ok?: boolean; group?: AgentGroupRecord };
   const asGroupUpdate = (value: unknown): GroupUpdateResult => (
     value && typeof value === "object" ? value as GroupUpdateResult : {}
@@ -1512,6 +1514,44 @@ async function readGroupTasks(
     }
   }
   return tasks;
+}
+
+async function persistBackgroundAgentResultIfNeeded(
+  taskStore: ReturnType<typeof createAgentTaskStore>,
+  state: {
+    taskId: string;
+    result: SubagentResult | Record<string, unknown>;
+  }
+) {
+  const read = await taskStore.readTask(state.taskId);
+  if (!read.ok || TERMINAL_AGENT_TASK_STATUSES.has(String(read.task.status))) {
+    return;
+  }
+  const result = isPlainObject(state.result) ? state.result : EMPTY_RECORD;
+  const interrupted = result.interrupted === true;
+  const ok = result.ok === true;
+  const partial = result.partial === true;
+  const error = isPlainObject(result.error)
+    ? result.error
+    : ok
+      ? null
+      : {
+        code: "BACKGROUND_AGENT_ERROR",
+        message: "后台子智能体异常结束"
+      };
+  const now = new Date().toISOString();
+  await taskStore.updateTask(state.taskId, {
+    status: ok ? (partial ? "partial" : "completed") : interrupted ? "interrupted" : "failed",
+    finishedAt: now,
+    heartbeatAt: now,
+    progressAt: now,
+    latestProgress: interrupted
+      ? "后台子智能体已中断"
+      : ok
+        ? (partial ? "子智能体阶段性暂停，可继续" : "子智能体已完成")
+        : String(error?.message ?? "后台子智能体异常结束"),
+    error: ok ? null : error
+  });
 }
 
 function shouldQueueWakePrompt(group: AgentGroupRecord, summary: { completed?: boolean; status?: string; summary?: string }) {

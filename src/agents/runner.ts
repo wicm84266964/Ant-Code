@@ -288,8 +288,29 @@ export async function runSubagent(options: {
       taskId: task.id,
       childSessionId
     });
+  } catch (error) {
+    result = {
+      ok: false,
+      profile: profile.name,
+      mode: profile.mode,
+      error: {
+        code: "AGENT_RUNTIME_ERROR",
+        message: error instanceof Error ? error.message : String(error)
+      }
+    };
   } finally {
     stopHeartbeat();
+  }
+  if (!isPlainObject(result)) {
+    result = {
+      ok: false,
+      profile: profile.name,
+      mode: profile.mode,
+      error: {
+        code: "AGENT_RUNTIME_ERROR",
+        message: "子智能体没有返回结果"
+      }
+    };
   }
   const finalStatus = result.partial ? "partial" : result.ok ? "completed" : result.interrupted ? "interrupted" : result.blocked ? "blocked" : "failed";
   const persistedOutput = await persistResultOutput(taskStore, task.id, result);

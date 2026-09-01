@@ -512,7 +512,7 @@ test("dashboard runtime keeps still-running background siblings visible after wa
   }
 });
 
-test("dashboard runtime reports stale background subagents without claiming an absent controller was cancelled", async () => {
+test("dashboard runtime tombstones lost background subagents when no live controller exists", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
   const server = await listen(createGateway("snapshot refresh"), "127.0.0.1", 0);
   const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
@@ -571,13 +571,91 @@ test("dashboard runtime reports stale background subagents without claiming an a
       sessionId: started.sessionId,
       groupId: "group-lost-bg"
     });
-    assert.equal(cancelled.ok, false);
-    assert.equal(cancelled.status, 409);
-    assert.equal(cancelled.code, "BACKGROUND_CONTROLLER_NOT_FOUND");
+    assert.equal(cancelled.ok, true);
+    assert.deepEqual(cancelled.updatedTaskIds, ["task-lost-bg"]);
     const readTask = await taskStore.readTask("task-lost-bg");
     assert.equal(readTask.ok, true);
-    assert.equal(readTask.task.status, "running");
-    assert.equal(readTask.task.cancelRequestedAt, null);
+    assert.equal(readTask.task.status, "interrupted");
+    assert.ok(readTask.task.cancelRequestedAt);
+    assert.match(readTask.task.latestProgress, /未找到当前进程 controller/);
+    const readGroup = await groupStore.readGroup("group-lost-bg");
+    assert.equal(readGroup.ok, true);
+    assert.equal(readGroup.group.status, "partial");
+    assert.ok(readGroup.group.completedAt);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard recycle of a lost multi-profile group tombstones every child even when the chip also sends taskId", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createGateway("snapshot refresh"), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+  await runtime.trustWorkspace();
+
+  try {
+    const started = await runtime.startTurn({
+      prompt: "seed session",
+      permissionMode: "workspace"
+    });
+    assert.equal(started.ok, true);
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "files_updated");
+
+    const taskStore = createAgentTaskStore({ cwd });
+    const groupStore = createAgentTaskGroupStore({ cwd });
+    const old = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+    await taskStore.createTask({
+      id: "task-lost-explorer",
+      parentSessionId: started.sessionId,
+      groupId: "group-lost-pair",
+      childSessionId: "agent-explorer-lost",
+      profile: "explorer",
+      title: "Lost explorer",
+      prompt: "hang",
+      status: "running",
+      startedAt: old,
+      heartbeatAt: old,
+      progressAt: old,
+      latestProgress: "glob 完成"
+    });
+    await taskStore.createTask({
+      id: "task-lost-researcher",
+      parentSessionId: started.sessionId,
+      groupId: "group-lost-pair",
+      childSessionId: "agent-web-researcher-lost",
+      profile: "web-researcher",
+      title: "Lost researcher",
+      prompt: "hang",
+      status: "running",
+      startedAt: old,
+      heartbeatAt: old,
+      progressAt: old,
+      latestProgress: "运行工具 web_fetch"
+    });
+    await groupStore.createGroup({
+      id: "group-lost-pair",
+      parentSessionId: started.sessionId,
+      status: "running",
+      waitFor: "all",
+      wakeParent: true,
+      taskIds: ["task-lost-explorer", "task-lost-researcher"],
+      latestProgress: "后台子任务仍在运行"
+    });
+
+    const cancelled = await runtime.cancelBackgroundSubagent({
+      sessionId: started.sessionId,
+      groupId: "group-lost-pair",
+      taskId: "task-lost-explorer"
+    });
+    assert.equal(cancelled.ok, true);
+    assert.deepEqual(new Set(cancelled.updatedTaskIds), new Set(["task-lost-explorer", "task-lost-researcher"]));
+    const explorer = await taskStore.readTask("task-lost-explorer");
+    const researcher = await taskStore.readTask("task-lost-researcher");
+    assert.equal(explorer.task.status, "interrupted");
+    assert.equal(researcher.task.status, "interrupted");
+    const group = await groupStore.readGroup("group-lost-pair");
+    assert.equal(group.group.status, "partial");
+    assert.ok(group.group.completedAt);
   } finally {
     await close(server);
   }
