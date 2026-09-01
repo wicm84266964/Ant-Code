@@ -9,6 +9,12 @@
   recycle chip cancels every child in the group. Child agents that throw after
   heartbeat stops persist `failed` or `interrupted` instead of remaining
   `running` on disk.
+- Parent tool results sent to the model are capped at 32KB. Later gateway
+  rounds compact oversized in-flight tool output, not only older session
+  messages. `glob`/`grep` default to 200 matches and `list_files` defaults to
+  200 entries so a broad scan cannot inflate the next request into an upstream
+  HTTP 400. Pass a higher `maxMatches` or `maxEntries` when a larger bounded
+  slice is required.
 
 ## 2.0.1 - 2026-08-31
 

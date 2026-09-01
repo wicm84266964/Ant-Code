@@ -15,19 +15,20 @@ export const BUILT_IN_TOOLS = Object.freeze([
   },
   {
     name: "list_files",
-    description: "List direct children of a workspace directory, or an approved/full-access local directory.",
+    description: "List direct children of a workspace directory, or an approved/full-access local directory. Defaults to 200 entries.",
     risk: "read",
     supportsAbort: false,
     inputSchema: {
       type: "object",
       properties: {
-        path: { type: "string" }
+        path: { type: "string" },
+        maxEntries: { type: "number" }
       }
     }
   },
   {
     name: "glob",
-    description: "Match workspace files with a glob pattern, or files under an approved/full-access local path. Returns all matches unless maxMatches is explicitly supplied.",
+    description: "Match workspace files with a glob pattern, or files under an approved/full-access local path. Defaults to 200 matches; pass a higher maxMatches only when a bounded extra slice is required.",
     risk: "read",
     supportsAbort: true,
     inputSchema: {
@@ -42,7 +43,7 @@ export const BUILT_IN_TOOLS = Object.freeze([
   },
   {
     name: "grep",
-    description: "Search workspace text files, or text files under an approved/full-access local path. Returns all matching lines unless maxMatches is explicitly supplied.",
+    description: "Search workspace text files, or text files under an approved/full-access local path. Defaults to 200 matches; pass a higher maxMatches only when a bounded extra slice is required.",
     risk: "read",
     supportsAbort: true,
     inputSchema: {
