@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { editFileTool, globTool, grepTool, readFileTool, writeFileTool } from "../../src/tools/file-tools.ts";
+import { editFileTool, globTool, grepTool, listFilesTool, readFileTool, writeFileTool } from "../../src/tools/file-tools.ts";
 import { formatRgCloseResult, rgCountTool, rgFilesTool, rgFilesWithMatchesTool, rgSearchTool, windowsReservedDeviceGlobArgs } from "../../src/tools/rg-tools.ts";
 import { tsDiagnosticsTool, tsFindDefinitionTool, tsFindReferencesTool, tsSymbolsTool } from "../../src/tools/semantic-tools.ts";
 import { scrubEnvironment } from "../../src/tools/env-scrubber.ts";
@@ -47,6 +47,36 @@ test("glob matches source files with bounded output", async () => {
 
   assert.ok(result.matches.length <= 5);
   assert.ok(result.matches.some((item) => item.startsWith("src/") && item.endsWith(".js")));
+});
+
+test("glob defaults to 200 matches instead of walking the whole tree", async () => {
+  const cwd = await makeTempWorkspace();
+  await fs.mkdir(path.join(cwd, "files"), { recursive: true });
+  await Promise.all(Array.from({ length: 240 }, (_, index) => (
+    fs.writeFile(path.join(cwd, "files", `item-${String(index).padStart(3, "0")}.txt`), "x\n", "utf8")
+  )));
+
+  const result = await globTool({
+    cwd,
+    pattern: "files/*.txt"
+  });
+
+  assert.equal(result.matches.length, 200);
+  assert.equal(result.truncated, true);
+});
+
+test("list_files defaults to 200 entries", async () => {
+  const cwd = await makeTempWorkspace();
+  const dir = path.join(cwd, "many");
+  await fs.mkdir(dir, { recursive: true });
+  await Promise.all(Array.from({ length: 220 }, (_, index) => (
+    fs.writeFile(path.join(dir, `file-${String(index).padStart(3, "0")}.txt`), "x\n", "utf8")
+  )));
+
+  const result = await listFilesTool({ cwd, path: "many" });
+  assert.equal(result.entries.length, 200);
+  assert.equal(result.total, 220);
+  assert.equal(result.truncated, true);
 });
 
 test("read file returns workspace-relative path", async () => {
@@ -277,16 +307,17 @@ test("TypeScript semantic tools work without a tsconfig", async () => {
   assert.equal(diagnostics.fileCount, 1);
 });
 
-test("tool result serializer preserves oversized JSON for model context", () => {
+test("tool result serializer truncates oversized JSON for model context", () => {
   const result = serializeToolResult({
     ok: true,
     result: { content: `head-${"x".repeat(1000)}-tail` }
   }, { maxBytes: 128 });
 
-  assert.equal(result.truncated, false);
+  assert.equal(result.truncated, true);
+  assert.ok(result.bytes <= 128);
   assert.match(result.content, /head-/);
-  assert.match(result.content, /-tail/);
-  assert.equal("omittedBytes" in result, false);
+  assert.match(result.content, /\[tool result truncated\]/);
+  assert.doesNotMatch(result.content, /-tail/);
 });
 
 test("tool runtime blocks write_file without approval", async () => {
@@ -1143,6 +1174,66 @@ test("background agent_run returns task and group immediately", async () => {
   assert.equal(progress?.wakeParent, true);
   assert.equal(wakeup?.waitFor, "all");
   assert.equal(wakeup?.wakeParent, true);
+});
+
+test("background agent_run persists a failed child when the gateway fetch fails", async () => {
+  const cwd = await makeTempWorkspace();
+  const runtime = createToolRuntime({
+    cwd,
+    env: {
+      LAB_AGENT_TRANSCRIPT_ENABLED: "false"
+    },
+    config: {
+      networkMode: "online",
+      allowedHosts: ["127.0.0.1"],
+      lab: {
+        gatewayUrl: "http://127.0.0.1:1/v1/chat",
+        gatewayProtocol: "openai-chat",
+        gatewayApiKey: "test",
+        gatewayMaxRetries: 0,
+        gatewayTimeoutMs: 250
+      },
+      agents: {
+        backgroundWakeup: {
+          enabled: true,
+          autoQueueParentPrompt: true,
+          defaultWaitFor: "all"
+        },
+        profiles: []
+      },
+      mcp: { servers: [] }
+    },
+    policy: { fullAccess: true },
+    parentSessionId: "session-bg-fail"
+  });
+
+  const result = await runtime.execute("agent_run", {
+    profile: "explorer",
+    taskId: "task-bg-fail",
+    groupId: "group-bg-fail",
+    background: true,
+    query: "inspect in background"
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.result.background, true);
+  await waitFor(async () => {
+    try {
+      const rawTask = await fs.readFile(path.join(cwd, ".lab-agent", "tasks", "task-bg-fail.json"), "utf8");
+      const rawGroup = await fs.readFile(path.join(cwd, ".lab-agent", "task-groups", "group-bg-fail.json"), "utf8");
+      const task = JSON.parse(rawTask);
+      const group = JSON.parse(rawGroup);
+      return task.status !== "running" && group.status !== "running";
+    } catch {
+      return false;
+    }
+  }, 8000);
+  const task = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "tasks", "task-bg-fail.json"), "utf8"));
+  assert.equal(task.status, "failed");
+  assert.ok(task.finishedAt);
+  const group = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "task-groups", "group-bg-fail.json"), "utf8"));
+  assert.equal(group.status, "partial");
+  assert.ok(group.completedAt);
 });
 
 test("blocked agent_run writes a task record for TUI detail views", async () => {

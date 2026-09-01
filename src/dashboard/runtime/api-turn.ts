@@ -29,6 +29,7 @@ import {
 } from "./approvals.ts";
 import {
   appendBackgroundSubagentSnapshot,
+  backgroundSubagentCancelProgress,
   buildBackgroundSubagentSnapshot,
   cancelSessionBackgroundWork,
   cancelWorkspaceBackgroundTerminals,
@@ -306,8 +307,11 @@ export async function runtimeCancelBackgroundSubagent(ctx: DashboardFactoryState
   if (groupResult?.ok && groupResult.group && groupResult.group.parentSessionId !== state.session.id) {
     return { ok: false, status: 403, code: "BACKGROUND_TASK_OWNERSHIP_MISMATCH", error: "子智能体任务组不属于该会话" };
   }
+  if (taskId && groupResult?.ok && groupResult.group && !groupResult.group.taskIds.includes(taskId)) {
+    return { ok: false, status: 404, error: "子智能体任务不存在或不属于该任务组" };
+  }
   const targetTaskIds = groupResult?.ok && groupResult.group
-    ? (taskId ? groupResult.group.taskIds.filter((id: string) => id === taskId) : groupResult.group.taskIds)
+    ? groupResult.group.taskIds
     : [taskId];
   if (targetTaskIds.length === 0) {
     return { ok: false, status: 404, error: "子智能体任务不存在或不属于该任务组" };
@@ -329,31 +333,20 @@ export async function runtimeCancelBackgroundSubagent(ctx: DashboardFactoryState
   const aborted = cancelBackgroundAgentTasks({
     parentSessionId: state.session.id,
     groupId: groupId || null,
-    taskId: taskId || null
+    taskId: groupId ? null : taskId || null
   });
   const abortedTaskIds = new Set(aborted.filter((task) => task.aborted === true).map((task) => task.taskId));
   const cancellableTargets = targetTasks.filter((task) => !TERMINAL_TASK_STATUSES.has(String(task.status)));
-  if (cancellableTargets.length > 0 && !cancellableTargets.some((task) => abortedTaskIds.has(task.id))) {
-    return {
-      ok: false,
-      status: 409,
-      code: "BACKGROUND_CONTROLLER_NOT_FOUND",
-      error: "未找到可确认中止的后台子智能体 controller，任务状态未被修改"
-    };
-  }
   const now = new Date().toISOString();
   const updatedTasks = [];
-  for (const task of targetTasks) {
-    if (TERMINAL_TASK_STATUSES.has(String(task.status)) || !abortedTaskIds.has(task.id)) {
-      continue;
-    }
+  for (const task of cancellableTargets) {
     const updated = await taskStore.updateTask(task.id, {
       status: "interrupted",
       cancelRequestedAt: now,
       finishedAt: now,
       heartbeatAt: now,
       progressAt: now,
-      latestProgress: "Dashboard 已请求回收后台子智能体；当前进程 controller 已中止。"
+      latestProgress: backgroundSubagentCancelProgress(abortedTaskIds.has(task.id), "recycle")
     });
     if (updated.ok) {
       updatedTasks.push(updated.task);

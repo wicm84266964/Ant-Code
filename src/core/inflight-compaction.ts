@@ -2,6 +2,7 @@ const DEFAULT_TOKEN_BYTES = 4;
 const DEFAULT_TRIGGER_RATIO = 0.68;
 const DEFAULT_KEEP_RECENT_TOOLS = 4;
 const DEFAULT_MAX_TOOL_TEXT_CHARS = 1400;
+const DEFAULT_OVERSIZED_RECENT_CHARS = 8000;
 const COMPACTED_MARKER = "[compacted tool result]";
 
 /**
@@ -10,9 +11,9 @@ const COMPACTED_MARKER = "[compacted tool result]";
  * replacing bulky raw output with evidence summaries.
  *
  * @param {Array<Record<string, any>>} messages
- * @param {{ maxTokens?: number | null; triggerRatio?: number; keepRecentTools?: number; maxToolTextChars?: number; force?: boolean }} options
+ * @param {{ maxTokens?: number | null; triggerRatio?: number; keepRecentTools?: number; maxToolTextChars?: number; oversizedRecentChars?: number; force?: boolean }} options
  */
-export function compactInFlightToolMessages(messages: Array<Record<string, unknown>>, options: { maxTokens?: number | null; triggerRatio?: number; keepRecentTools?: number; maxToolTextChars?: number; force?: boolean } = {}) {
+export function compactInFlightToolMessages(messages: Array<Record<string, unknown>>, options: { maxTokens?: number | null; triggerRatio?: number; keepRecentTools?: number; maxToolTextChars?: number; oversizedRecentChars?: number; force?: boolean } = {}) {
   const maxTokens = positiveInteger(options.maxTokens) ?? null;
   const beforeBytes = estimateMessagesBytes(messages);
   const beforeTokens = estimateTokensFromBytes(beforeBytes);
@@ -32,27 +33,78 @@ export function compactInFlightToolMessages(messages: Array<Record<string, unkno
   const keepRecentTools = nonNegativeInteger(options.keepRecentTools) ?? DEFAULT_KEEP_RECENT_TOOLS;
   const compactUntil = Math.max(0, toolIndexes.length - keepRecentTools);
   const maxToolTextChars = positiveInteger(options.maxToolTextChars) ?? DEFAULT_MAX_TOOL_TEXT_CHARS;
+  const oversizedRecentChars = positiveInteger(options.oversizedRecentChars) ?? DEFAULT_OVERSIZED_RECENT_CHARS;
   let compactedTools = 0;
 
   for (let item = 0; item < compactUntil; item += 1) {
-    const message = messages[toolIndexes[item]];
-    const text = extractText(message.content);
-    if (!text || text.includes(COMPACTED_MARKER)) {
-      continue;
+    compactedTools += compactToolMessage(messages[toolIndexes[item]], maxToolTextChars) ? 1 : 0;
+  }
+
+  const oversizedChars = Math.max(maxToolTextChars, oversizedRecentChars);
+  while (shouldCompactMore(messages, triggerTokens, options.force === true)) {
+    const candidate = largestUncompactedTool(messages, toolIndexes, oversizedChars, triggerTokens);
+    if (candidate == null) {
+      break;
     }
-    if (!triggerTokens && text.length <= maxToolTextChars) {
-      continue;
+    if (!compactToolMessage(messages[candidate], maxToolTextChars)) {
+      break;
     }
-    const summary = summarizeToolText(message.name, text, maxToolTextChars);
-    if (summary && summary.length < text.length) {
-      message.content = [{ type: "text", text: summary }];
-      compactedTools += 1;
-    }
+    compactedTools += 1;
   }
 
   const afterBytes = estimateMessagesBytes(messages);
   const afterTokens = estimateTokensFromBytes(afterBytes);
   return result(compactedTools > 0, beforeBytes, afterBytes, beforeTokens, afterTokens, compactedTools, triggerTokens);
+}
+
+function compactToolMessage(message: Record<string, unknown> | undefined, maxToolTextChars: number) {
+  if (!message) {
+    return false;
+  }
+  const text = extractText(message.content);
+  if (!text || text.includes(COMPACTED_MARKER)) {
+    return false;
+  }
+  const summary = summarizeToolText(message.name, text, maxToolTextChars);
+  if (!summary || summary.length >= text.length) {
+    return false;
+  }
+  message.content = [{ type: "text", text: summary }];
+  return true;
+}
+
+function shouldCompactMore(messages: Array<Record<string, unknown>>, triggerTokens: number | null, force: boolean) {
+  if (!triggerTokens) {
+    return force;
+  }
+  return estimateTokensFromBytes(estimateMessagesBytes(messages)) >= triggerTokens;
+}
+
+function largestUncompactedTool(
+  messages: Array<Record<string, unknown>>,
+  toolIndexes: number[],
+  oversizedChars: number,
+  triggerTokens: number | null
+) {
+  let bestIndex: number | null = null;
+  let bestLength = 0;
+  for (const index of toolIndexes) {
+    const text = extractText(messages[index]?.content);
+    if (!text || text.includes(COMPACTED_MARKER)) {
+      continue;
+    }
+    if (!triggerTokens && text.length <= oversizedChars) {
+      continue;
+    }
+    if (triggerTokens && text.length <= oversizedChars && estimateTokensFromBytes(estimateMessagesBytes(messages)) < triggerTokens) {
+      continue;
+    }
+    if (text.length > bestLength) {
+      bestIndex = index;
+      bestLength = text.length;
+    }
+  }
+  return bestIndex;
 }
 
 /**

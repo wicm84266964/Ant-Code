@@ -305,8 +305,13 @@ async function runFilesCommand(options: Parameters<typeof runSlashCommand>[0], c
   if (!execution || typeof execution !== "object" || !("ok" in execution) || execution.ok !== true) {
     return formatObject(execution);
   }
-  const result = "result" in execution && Array.isArray(execution.result) ? execution.result : [];
-  const entries = result.filter((entry): entry is { type: string; name: string } => (
+  const rawResult = "result" in execution ? execution.result : undefined;
+  const listed = Array.isArray(rawResult)
+    ? rawResult
+    : rawResult && typeof rawResult === "object" && Array.isArray((rawResult as { entries?: unknown }).entries)
+      ? (rawResult as { entries: unknown[] }).entries
+      : [];
+  const entries = listed.filter((entry): entry is { type: string; name: string } => (
     Boolean(entry) && typeof entry === "object" && typeof (entry as { type?: unknown }).type === "string" && typeof (entry as { name?: unknown }).name === "string"
   )).sort((a, b) => {
     if (a.type !== b.type) {

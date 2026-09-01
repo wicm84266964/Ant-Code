@@ -7,6 +7,8 @@ import { normalizeToolPath } from "../permissions/path-utils.ts";
 import { countLineChanges, createUnifiedDiff } from "./diff.ts";
 
 const SKIP_DIRS = new Set([".git", ".lab-agent", ".venv", "__pycache__", "node_modules", "dist", "build", "coverage"]);
+export const DEFAULT_FILE_LIST_MAX_ENTRIES = 200;
+export const DEFAULT_FILE_SEARCH_MAX_MATCHES = 200;
 const BINARY_EXTENSIONS = new Set([
   ".7z", ".avi", ".bin", ".bmp", ".ckpt", ".db", ".dll", ".doc", ".docx", ".dylib", ".exe", ".gif", ".gz",
   ".ico", ".jpeg", ".jpg", ".mov", ".mp4", ".npy", ".npz", ".onnx", ".pdf", ".pkl", ".png", ".pt", ".pth",
@@ -54,7 +56,7 @@ export async function readFileTool(input: { cwd: string; path: string; maxBytes?
 /**
  * @param {{ cwd: string; path?: string; policy?: Record<string, any> }} input
  */
-export async function listFilesTool(input: { cwd: string; path?: string; policy?: Record<string, unknown> }) {
+export async function listFilesTool(input: { cwd: string; path?: string; maxEntries?: number; policy?: Record<string, unknown> }) {
   const dirPath = await resolveWorkspacePath(input.cwd, input.path ?? ".", { allowOutsideWorkspace: canUseOutsideWorkspace(input.policy) });
   const entries = await fs.readdir(dirPath, { withFileTypes: true }).catch((error: unknown) => {
     if (isNotFoundError(error)) {
@@ -62,10 +64,17 @@ export async function listFilesTool(input: { cwd: string; path?: string; policy?
     }
     throw error;
   });
-  return entries.map((entry) => ({
+  const mapped = entries.map((entry) => ({
     name: entry.name,
     type: entry.isDirectory() ? "directory" : entry.isFile() ? "file" : "other"
   }));
+  const maxEntries = positiveIntegerOrNull(input.maxEntries) ?? DEFAULT_FILE_LIST_MAX_ENTRIES;
+  return {
+    path: toDisplayPath(input.cwd, dirPath),
+    entries: mapped.slice(0, maxEntries),
+    total: mapped.length,
+    truncated: mapped.length > maxEntries
+  };
 }
 
 /**
@@ -73,7 +82,7 @@ export async function listFilesTool(input: { cwd: string; path?: string; policy?
  */
 export async function globTool(input: { cwd: string; pattern: string; path?: string; maxMatches?: number; policy?: Record<string, unknown> }) {
   const root = await resolveWorkspacePath(input.cwd, input.path ?? ".", { allowOutsideWorkspace: canUseOutsideWorkspace(input.policy) });
-  const maxMatches = positiveIntegerOrNull(input.maxMatches);
+  const maxMatches = positiveIntegerOrNull(input.maxMatches) ?? DEFAULT_FILE_SEARCH_MAX_MATCHES;
   const regex = globToRegex(input.pattern);
   const matches: string[] = [];
 
@@ -96,7 +105,7 @@ export async function globTool(input: { cwd: string; pattern: string; path?: str
  */
 export async function grepTool(input: { cwd: string; pattern: string; path?: string; maxMatches?: number; policy?: Record<string, unknown> }) {
   const root = await resolveWorkspacePath(input.cwd, input.path ?? ".", { allowOutsideWorkspace: canUseOutsideWorkspace(input.policy) });
-  const maxMatches = positiveIntegerOrNull(input.maxMatches);
+  const maxMatches = positiveIntegerOrNull(input.maxMatches) ?? DEFAULT_FILE_SEARCH_MAX_MATCHES;
   const matches: Array<{ path: string; line: number; text: string }> = [];
 
   for await (const filePath of walkTextFiles(root)) {

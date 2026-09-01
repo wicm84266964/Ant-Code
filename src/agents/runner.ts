@@ -288,8 +288,29 @@ export async function runSubagent(options: {
       taskId: task.id,
       childSessionId
     });
+  } catch (error) {
+    result = {
+      ok: false,
+      profile: profile.name,
+      mode: profile.mode,
+      error: {
+        code: "AGENT_RUNTIME_ERROR",
+        message: error instanceof Error ? error.message : String(error)
+      }
+    };
   } finally {
     stopHeartbeat();
+  }
+  if (!isPlainObject(result)) {
+    result = {
+      ok: false,
+      profile: profile.name,
+      mode: profile.mode,
+      error: {
+        code: "AGENT_RUNTIME_ERROR",
+        message: "子智能体没有返回结果"
+      }
+    };
   }
   const finalStatus = result.partial ? "partial" : result.ok ? "completed" : result.interrupted ? "interrupted" : result.blocked ? "blocked" : "failed";
   const persistedOutput = await persistResultOutput(taskStore, task.id, result);
@@ -678,7 +699,9 @@ async function runModelSubagent(options: {
             error: { code: "AGENT_TOOL_NOT_ALLOWED", message: `${call.name} is not available to ${options.profile.name}.` }
           };
       const execution = isPlainObject(executionRaw) ? executionRaw : EMPTY_RECORD;
-      const serialized = serializeToolResult(execution as ToolResultValue);
+      const serialized = serializeToolResult(execution as ToolResultValue, {
+        maxBytes: typeof budget.maxToolResultBytes === "number" ? budget.maxToolResultBytes : undefined
+      });
       if (!skipReason) {
         recordBudgetToolResult(budgetTracker, {
           ok: execution.ok === true,
@@ -1086,6 +1109,15 @@ function applyAgentToolLimits(name: string, input: Record<string, unknown> = EMP
   const next = { ...input };
   if (name === "web_search") {
     next.maxResults = boundedPositive(next.maxResults ?? next.count, budget.maxSearchResults);
+  }
+  if (name === "glob" || name === "grep") {
+    next.maxMatches = boundedPositive(next.maxMatches, budget.maxFileMatches);
+  }
+  if (name === "list_files") {
+    next.maxEntries = boundedPositive(next.maxEntries, budget.maxFileMatches);
+  }
+  if (name === "rg_search" || name === "rg_files" || name === "rg_files_with_matches") {
+    next.maxResults = boundedPositive(next.maxResults, budget.maxFileMatches);
   }
   return next;
 }

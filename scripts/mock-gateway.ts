@@ -46,6 +46,7 @@ type MockToolPayload = {
   error?: { message?: string };
   todos?: unknown[];
   steps?: unknown[];
+  entries?: Array<{ type?: string; name?: string }>;
   matches?: Array<string | { path?: string; line?: unknown; text?: string }>;
   stdout?: string;
   stderr?: string;
@@ -421,7 +422,11 @@ function summarizeToolResults(toolResults: Array<{ name?: string; content?: unkn
     } else if (result.name === "read_file") {
       summaries.push(`Tool read_file returned ${payload.path}:\n${(payload.content ?? "").slice(0, 800)}`);
     } else if (result.name === "list_files") {
-      const entries = Array.isArray(parsed.result) ? parsed.result : [];
+      const entries = Array.isArray(parsed.result)
+        ? parsed.result
+        : Array.isArray(payload.entries)
+          ? payload.entries
+          : [];
       const names = entries.map((entry) => `${entry.type}:${entry.name}`).join(", ");
       summaries.push(`Tool list_files returned: ${names}`);
     } else if (result.name === "grep") {

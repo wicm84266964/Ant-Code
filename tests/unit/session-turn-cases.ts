@@ -552,7 +552,7 @@ test("OpenAI-compatible prompt repair drops partially returned tool blocks", asy
   }
 });
 
-test("session preserves in-flight tool results before later gateway rounds", async () => {
+test("session compactes oversized in-flight tool results before later gateway rounds", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
   await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
     context: {
@@ -587,9 +587,9 @@ test("session preserves in-flight tool results before later gateway rounds", asy
     const toolText = Array.isArray(toolMessage.content)
       ? toolMessage.content.map((item) => item.text ?? "").join("")
       : String(toolMessage.content ?? "");
-    assert.doesNotMatch(toolText, /\[compacted tool result\]/);
-    assert.match(toolText, /large tool output large tool output/);
-    assert.equal(events.some((event) => event.type === "context_compacted" && event.strategy === "in-flight-tool-summary"), false);
+    assert.match(toolText, /\[compacted tool result\]/);
+    assert.match(toolText, /large tool output/);
+    assert.equal(events.some((event) => event.type === "context_compacted" && event.strategy === "inflight-tools"), true);
   } finally {
     await close(server);
   }

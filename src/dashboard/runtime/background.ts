@@ -115,7 +115,7 @@ export async function cancelSessionBackgroundWork(state: DashboardActiveSessionS
   const tasks = await taskStore.listTasks({ parentSessionId: state.session.id });
   const now = new Date().toISOString();
   for (const task of tasks) {
-    if (!abortedIds.has(task.id) || TERMINAL_TASK_STATUSES.has(String(task.status))) {
+    if (TERMINAL_TASK_STATUSES.has(String(task.status))) {
       continue;
     }
     await taskStore.updateTask(task.id, {
@@ -124,7 +124,7 @@ export async function cancelSessionBackgroundWork(state: DashboardActiveSessionS
       finishedAt: now,
       heartbeatAt: now,
       progressAt: now,
-      latestProgress: "Dashboard 已取消会话，后台子任务 controller 已中止。"
+      latestProgress: backgroundSubagentCancelProgress(abortedIds.has(task.id), "session")
     });
   }
   const groups = await groupStore.listGroups({ parentSessionId: state.session.id });
@@ -518,6 +518,17 @@ export function backgroundStaleReason(status: string, health: unknown = {}) {
     return "长时间没有新的进展记录，但 heartbeat 仍在更新";
   }
   return "";
+}
+
+export function backgroundSubagentCancelProgress(aborted: boolean, source: "recycle" | "session" = "recycle") {
+  if (source === "session") {
+    return aborted
+      ? "Dashboard 已取消会话，后台子任务 controller 已中止。"
+      : "Dashboard 已取消会话；未找到当前进程 controller，已将失联后台子任务标记为 interrupted。";
+  }
+  return aborted
+    ? "Dashboard 已请求回收后台子智能体；当前进程 controller 已中止。"
+    : "Dashboard 已请求回收后台子智能体；未找到当前进程 controller（疑似失联或已退出未落盘），已将任务标记为 interrupted。";
 }
 
 

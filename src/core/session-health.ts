@@ -23,6 +23,7 @@ import { resolveMaxParallelReadonlyAgentRuns } from "../agents/orchestration-con
 import { appendDelegationReminderToExecution, createDelegationGuard } from "../agents/delegation-guard.ts";
 import { createReviewGate } from "../agents/review-policy.ts";
 import { buildCompactedContextMessage, compactSessionContextWithModel, createContextWindow, estimatePromptPayload, summarizeContextWindow } from "./context-window.ts";
+import { compactInFlightToolMessages } from "./inflight-compaction.ts";
 import { buildGoalSystemPromptAppendix, normalizeSessionGoal, serializeSessionGoal, stripGoalStatusFromContent, stripGoalStatusMarkers } from "./goal.ts";
 import { createAntEventNormalizer } from "./events.ts";
 import { accumulateProviderUsage, normalizeProviderUsageAggregate, sanitizeProviderUsage, type ProviderUsageAggregate } from "./provider-usage.ts";
@@ -465,6 +466,26 @@ export async function preparePromptBudgetForGateway(input: { session: AgentSessi
     }
   }
 
+  const inflight = compactInFlightToolMessages(messages as Array<Record<string, unknown>>, {
+    maxTokens: input.session.contextWindow?.maxTokens,
+    triggerRatio: boundedContextRatio(input.session.config.context?.inFlightCompactRatio, 0.68),
+    keepRecentTools: input.session.config.context?.inFlightKeepRecentTools ?? undefined,
+    force: true
+  });
+  if (inflight.compacted) {
+    syncCompactedToolResults(input.toolResults, messages);
+    await emitEvent(input.eventOptions, {
+      type: "context_compacted",
+      beforeMessages: messages.length,
+      afterMessages: messages.length,
+      beforeTokens: inflight.beforeTokens,
+      afterTokens: inflight.afterTokens,
+      compactedTools: inflight.compactedTools,
+      strategy: "inflight-tools",
+      reason: input.round === 0 ? "automatic_prompt_budget" : "automatic_inflight_tools"
+    });
+  }
+
   const afterEstimate = estimatePromptPayload({
     model: input.session.model,
     messages,
@@ -484,6 +505,45 @@ export async function preparePromptBudgetForGateway(input: { session: AgentSessi
   }
 
   return { messages, estimate: afterEstimate };
+}
+
+function syncCompactedToolResults(toolResults: SessionToolResult[] = [], messages: SessionMessage[] = []) {
+  const compacted = new Map<string, string>();
+  for (const message of messages) {
+    if (message.role !== "tool") {
+      continue;
+    }
+    const id = String(message.toolCallId ?? message.tool_call_id ?? "").trim();
+    if (!id) {
+      continue;
+    }
+    const content = message.content;
+    const text = typeof content === "string"
+      ? content
+      : Array.isArray(content)
+        ? content.map((item) => {
+          if (typeof item === "string") {
+            return item;
+          }
+          if (item && typeof item === "object" && "text" in item && typeof item.text === "string") {
+            return item.text;
+          }
+          return "";
+        }).filter(Boolean).join("\n")
+        : "";
+    if (text.includes("[compacted tool result]")) {
+      compacted.set(id, text);
+    }
+  }
+  for (const result of toolResults) {
+    const id = String(result.toolCallId ?? "").trim();
+    const text = compacted.get(id);
+    if (!text) {
+      continue;
+    }
+    result.content = text;
+    result.truncated = true;
+  }
 }
 
 

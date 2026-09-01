@@ -486,3 +486,41 @@ test("in-flight compaction summarizes older tool results before context limit", 
   assert.ok(olderTool.length < longContent.length / 2);
   assert.match(recentTool, /fresh/);
 });
+
+test("in-flight compaction shrinks oversized recent tool results when still over budget", () => {
+  const longContent = "glob match ".repeat(2000);
+  const messages = Array.from({ length: 5 }, (_, index) => ([
+    { role: "assistant", content: [], toolCalls: [{ id: `glob-${index}`, name: "glob", input: {} }] },
+    {
+      role: "tool",
+      toolCallId: `glob-${index}`,
+      name: "glob",
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          ok: true,
+          result: {
+            matches: Array.from({ length: 50 }, (unused, matchIndex) => `${longContent}-${index}-${matchIndex}`)
+          }
+        })
+      }]
+    }
+  ])).flat();
+
+  const result = compactInFlightToolMessages(messages, {
+    maxTokens: 200,
+    triggerRatio: 0.5,
+    keepRecentTools: 4,
+    maxToolTextChars: 400,
+    oversizedRecentChars: 800
+  });
+
+  const compacted = messages.filter((message) => (
+    message.role === "tool" && JSON.stringify(message.content).includes("[compacted tool result]")
+  ));
+  assert.equal(result.compacted, true);
+  assert.ok(result.compactedTools >= 5);
+  assert.equal(compacted.length, 5);
+  assert.ok(result.afterTokens < result.beforeTokens);
+  assert.ok(result.afterTokens < result.beforeTokens / 4);
+});

@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased
+
+## 2.0.2 - 2026-09-01
+
+This is a small reliability release on the 2.0 TypeScript runtime. Dashboard
+recycle of lost background subagents no longer requires a live in-process
+controller. Parent tool results are capped so a broad scan cannot inflate the
+next gateway request into an upstream HTTP 400. Permission mode ids are
+unchanged.
+
+### Fixed
+
+- Dashboard recycle of lost background subagents now marks those tasks
+  `interrupted` even when the current process has no live controller. A group
+  recycle chip cancels every child in the group. Child agents that throw after
+  heartbeat stops persist `failed` or `interrupted` instead of remaining
+  `running` on disk.
+- Parent tool results sent to the model are capped at 32KB. Later gateway
+  rounds compact oversized in-flight tool output, not only older session
+  messages. `glob`/`grep` default to 200 matches and `list_files` defaults to
+  200 entries so a broad scan cannot inflate the next request into an upstream
+  HTTP 400. Pass a higher `maxMatches` or `maxEntries` when a larger bounded
+  slice is required.
+
+### Upgrade
+
+```sh
+git pull
+npm ci
+npm run verify:install
+npm link
+ant-code --version
+```
+
+`ant-code --version` should print `2.0.2`. Gateway config and `.lab-agent`
+sessions do not need to be recreated.
+
 ## 2.0.1 - 2026-08-31
 
 This is a small release on the 2.0 TypeScript runtime. Default TUI and
