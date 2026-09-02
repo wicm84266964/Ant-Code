@@ -909,6 +909,12 @@ function applyGoalSnapshot(goal, options = {}) {
     setPermissionMode(permissionSource);
   }
   renderGoalControls();
+  syncPromptPlaceholder();
+}
+var DEFAULT_PROMPT_PLACEHOLDER = "输入任务需求，例如：整理这批实验数据并生成一份简洁报告";
+function syncPromptPlaceholder() {
+  if (!els.promptInput) return;
+  els.promptInput.placeholder = DEFAULT_PROMPT_PLACEHOLDER;
 }
 function renderGoalControls() {
   const enabled = state.goal.enabled === true;
@@ -950,12 +956,13 @@ function renderGoalStatusBar() {
   const showRecap = recapLine.length > 0;
   const canResume = state.goal.status === "paused" || state.goal.status === "failed";
   const showPause = !canResume && state.goal.status !== "complete";
-  const objectiveClass = showRecap ? "goal-objective-ellipsis" : "";
+  const objectiveClass = ["goal-objective", showRecap ? "goal-objective-ellipsis" : ""].filter(Boolean).join(" ");
+  const continueReason = String(state.goal.lastContinueReason ?? "").trim();
   bar.innerHTML = `
     <div class="goal-copy">
       <div class="goal-title">Goal · ${escapeHtml(statusLabel)}</div>
       <div class="${objectiveClass}" title="${escapeHtml(state.goal.text || "")}">${escapeHtml(state.goal.text || "")}</div>
-      ${showRecap ? `<div class="goal-recap">${escapeHtml(recapLine)}</div>` : `<div>${Number(state.goal.continueCount) || 0} / ${Number(state.goal.maxAutoContinues) || defaultGoalMaxAutoContinues()} 次续跑${state.goal.lastContinueReason ? ` · ${escapeHtml(state.goal.lastContinueReason)}` : ""}</div>`}
+      ${showRecap ? `<div class="goal-recap">${escapeHtml(recapLine)}</div>` : `<div class="goal-continue-meta">${Number(state.goal.continueCount) || 0} / ${Number(state.goal.maxAutoContinues) || defaultGoalMaxAutoContinues()} 次续跑${continueReason ? ` · ${escapeHtml(continueReason)}` : ""}</div>`}
     </div>
     <div class="goal-status-actions">
       ${canResume ? `<button type="button" data-goal-action="resume">继续</button>` : ""}
@@ -1060,7 +1067,6 @@ async function enableGoalWithObjective(text) {
     text,
     previousPermissionMode: previous
   });
-  els.promptInput.placeholder = `Goal：${text.slice(0, 80)}`;
   if (!state.currentSessionId) {
     if (currentSessionNeedsModelSelection()) {
       applyGoalSnapshot(null, { permissionMode: previous });
@@ -1109,7 +1115,6 @@ async function submitGoalAction(action, extra = {}) {
   if (!state.currentSessionId) {
     if (action === "disable" || action === "clear") {
       applyGoalSnapshot(null, { permissionMode: state.goal.previousPermissionMode || "plan" });
-      els.promptInput.placeholder = "输入任务需求，例如：整理这批实验数据并生成一份简洁报告";
     }
     return;
   }

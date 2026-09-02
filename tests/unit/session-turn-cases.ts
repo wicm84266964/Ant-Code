@@ -323,7 +323,8 @@ test("session compacts before gateway request when full prompt payload exceeds t
   await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
     context: {
       maxMessages: 100,
-      maxTokens: 260,
+      maxTokens: 50000,
+      promptCompactRatio: 0.01,
       keepRecentMessages: 2,
       summaryBytes: 4096
     }
@@ -375,7 +376,8 @@ test("session keeps current-turn images after automatic prompt compaction", asyn
     ],
     context: {
       maxMessages: 100,
-      maxTokens: 260,
+      maxTokens: 50000,
+      promptCompactRatio: 0.01,
       keepRecentMessages: 2,
       summaryBytes: 4096
     }
@@ -469,9 +471,10 @@ test("OpenAI-compatible prompt compaction drops leading orphan tool messages", a
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
   await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
     modelAlias: "mock-openai",
-    models: [{ id: "mock-openai", contextTokens: 1000 }],
+    models: [{ id: "mock-openai", contextTokens: 50000 }],
     context: {
-      maxTokens: 260,
+      maxTokens: 50000,
+      promptCompactRatio: 0.01,
       keepRecentMessages: 5,
       tailTurns: 1,
       preserveRecentTokens: 1,
@@ -546,9 +549,9 @@ test("OpenAI-compatible prompt repair drops partially returned tool blocks", asy
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
   await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
     modelAlias: "mock-openai",
-    models: [{ id: "mock-openai", contextTokens: 1000 }],
+    models: [{ id: "mock-openai", contextTokens: 50000 }],
     context: {
-      maxTokens: 1000,
+      maxTokens: 50000,
       keepRecentMessages: 10,
       tailTurns: 2,
       preserveRecentTokens: 4000,
@@ -645,6 +648,44 @@ test("session compactes oversized in-flight tool results before later gateway ro
     assert.match(toolText, /\[compacted tool result\]/);
     assert.match(toolText, /large tool output/);
     assert.equal(events.some((event) => event.type === "context_compacted" && event.strategy === "inflight-tools"), true);
+  } finally {
+    await close(server);
+  }
+});
+
+test("session does not send a gateway request that remains over the context window", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
+  await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
+    context: {
+      maxTokens: 8,
+      maxBytes: 32,
+      promptCompactRatio: 1
+    }
+  }), "utf8");
+  const requests = [];
+  const events = [];
+  const server = await listen(createRecordingGateway(requests), "127.0.0.1");
+
+  try {
+    const env = mockGatewayEnv(serverUrl(server));
+    delete env.LAB_AGENT_TRANSCRIPT_ENABLED;
+    const session = await createSession({
+      cwd,
+      mode: "interactive",
+      env
+    });
+
+    const result = await runSessionTurn(session, {
+      prompt: "this prompt cannot fit the configured window",
+      env,
+      onEvent: (event) => events.push(event)
+    });
+
+    assert.equal(requests.length, 0);
+    assert.match(String(result.output), /仍超过上下文窗口/);
+    assert.equal(events.some((event) => event.type === "context_overflow"), true);
+    assert.equal(events.some((event) => event.type === "turn_complete" && event.status === "context_overflow"), true);
+    assert.equal(events.some((event) => event.type === "gateway_request_start"), false);
   } finally {
     await close(server);
   }

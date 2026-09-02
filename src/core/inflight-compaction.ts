@@ -1,5 +1,5 @@
 const DEFAULT_TOKEN_BYTES = 4;
-const DEFAULT_TRIGGER_RATIO = 0.68;
+export const DEFAULT_IN_FLIGHT_COMPACT_RATIO = 1;
 const DEFAULT_KEEP_RECENT_TOOLS = 4;
 const DEFAULT_MAX_TOOL_TEXT_CHARS = 1400;
 const DEFAULT_OVERSIZED_RECENT_CHARS = 8000;
@@ -17,7 +17,7 @@ export function compactInFlightToolMessages(messages: Array<Record<string, unkno
   const maxTokens = positiveInteger(options.maxTokens) ?? null;
   const beforeBytes = estimateMessagesBytes(messages);
   const beforeTokens = estimateTokensFromBytes(beforeBytes);
-  const triggerRatio = boundedRatio(options.triggerRatio, DEFAULT_TRIGGER_RATIO);
+  const triggerRatio = boundedRatio(options.triggerRatio, DEFAULT_IN_FLIGHT_COMPACT_RATIO);
   const triggerTokens = maxTokens ? Math.floor(maxTokens * triggerRatio) : null;
   if (!options.force && triggerTokens && beforeTokens < triggerTokens) {
     return result(false, beforeBytes, beforeBytes, beforeTokens, beforeTokens, 0, triggerTokens);
@@ -243,5 +243,5 @@ function nonNegativeInteger(value: unknown) {
 
 function boundedRatio(value: unknown, fallback: number) {
   const number = Number(value);
-  return Number.isFinite(number) && number > 0 && number < 1 ? number : fallback;
+  return Number.isFinite(number) && number > 0 && number <= 1 ? number : fallback;
 }

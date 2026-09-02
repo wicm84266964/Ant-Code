@@ -3,7 +3,7 @@ import test from "node:test";
 import { createInternalAgentRequest } from "../../src/agents/internal.ts";
 import { applyModelContextBudget } from "../../src/config/context-budget.ts";
 import { buildCompactedContextMessage, clearSessionContext, compactSessionContext, compactSessionContextWithModel, createContextWindow, estimatePromptPayload, estimateTokensFromBytes, summarizeContextWindow } from "../../src/core/context-window.ts";
-import { compactInFlightToolMessages } from "../../src/core/inflight-compaction.ts";
+import { compactInFlightToolMessages, DEFAULT_IN_FLIGHT_COMPACT_RATIO } from "../../src/core/inflight-compaction.ts";
 
 test("context window compacts older messages into a bounded redacted summary", () => {
   const session = {
@@ -537,6 +537,23 @@ test("in-flight compaction summarizes older tool results before context limit", 
   assert.match(olderTool, /https:\/\/example.com\/a/);
   assert.ok(olderTool.length < longContent.length / 2);
   assert.match(recentTool, /fresh/);
+});
+
+test("in-flight compaction waits until the configured token window by default", () => {
+  assert.equal(DEFAULT_IN_FLIGHT_COMPACT_RATIO, 1);
+  const text = "tool-output-".repeat(400);
+  const messages = [
+    { role: "assistant", content: [], toolCalls: [{ id: "t1", name: "read_file", input: {} }] },
+    { role: "tool", toolCallId: "t1", name: "read_file", content: [{ type: "text", text }] },
+    { role: "assistant", content: [], toolCalls: [{ id: "t2", name: "read_file", input: {} }] },
+    { role: "tool", toolCallId: "t2", name: "read_file", content: [{ type: "text", text: "recent" }] }
+  ];
+  const sample = compactInFlightToolMessages(structuredClone(messages), { maxTokens: 1_000_000, keepRecentTools: 1 });
+  const tokens = sample.beforeTokens;
+  const below = compactInFlightToolMessages(structuredClone(messages), { maxTokens: tokens + 50, keepRecentTools: 1 });
+  const above = compactInFlightToolMessages(structuredClone(messages), { maxTokens: Math.max(1, tokens - 1), keepRecentTools: 1 });
+  assert.equal(below.compacted, false);
+  assert.equal(above.compacted, true);
 });
 
 test("in-flight compaction shrinks oversized recent tool results when still over budget", () => {

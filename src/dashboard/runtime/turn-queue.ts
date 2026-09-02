@@ -1020,7 +1020,7 @@ export function dashboardTurnStatus(turnCompleteStatus: unknown, result: Record<
   if (result?.interrupted === true || status === "interrupted") {
     return "interrupted";
   }
-  if (["gateway_not_configured", "tool_limit", "vision_unavailable", "blocked"].includes(status)) {
+  if (["gateway_not_configured", "tool_limit", "vision_unavailable", "context_overflow", "blocked"].includes(status)) {
     return "blocked";
   }
   return status === "completed" ? "completed" : "failed";

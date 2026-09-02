@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+## 2.0.4 - 2026-09-02
+
+This is a small reliability release on the 2.0 TypeScript runtime. Automatic
+compaction waits until the configured context window is full. Later gateway
+rounds compact in-flight tool results first, then history if still over. If
+the prompt remains over budget after both, the turn is cancelled locally as
+`context_overflow` instead of sending a request that would likely return HTTP
+400. Dashboard Goal text stays inside the status bar, and the composer
+placeholder is no longer replaced by the Goal prompt. Permission mode ids are
+unchanged.
+
+### Fixed
+
+- In-flight tool compaction defaults to 100% of the configured window, the
+  same as history compaction. An explicit ratio of `1` is accepted.
+- After tools land, later rounds compact those results before summarizing
+  history. If the prompt is still over the window, Ant Code does not send
+  the gateway request.
+- Dashboard Goal status text no longer stretches the status bar. Completed,
+  failed, and budget-paused goals stay on one ellipsis line; in-progress goals
+  clamp to three lines. The composer placeholder keeps the original task hint.
+
+### Upgrade
+
+```sh
+git pull
+npm ci
+npm run verify:install
+npm link
+ant-code --version
+```
+
+`ant-code --version` should print `2.0.4`. Restart a running Dashboard so it
+loads this runtime. Gateway config and `.lab-agent` sessions do not need to
+be recreated.
+
 ## 2.0.3 - 2026-09-02
 
 This is a small reliability release on the 2.0 TypeScript runtime. Image

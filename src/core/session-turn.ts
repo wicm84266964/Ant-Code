@@ -69,6 +69,7 @@ import {
   gatewayThinkingBytes,
   toolRoundLimitMessage,
   mainToolRoundLimitReached,
+  contextOverflowMessage,
   preparePromptBudgetForGateway,
   sessionGatewayProtocol,
   executeToolCalls
@@ -301,6 +302,16 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
       visionAnalysisText: visionPreparation.analysisText
     });
     messages = budgetPreparation.messages;
+    if (budgetPreparation.blocked) {
+      finalOutput = contextOverflowMessage(budgetPreparation.estimate, session.contextWindow);
+      await persistSessionMetadata(sessionStore, metadata, finalOutput, "context_overflow", session, options);
+      await emitEvent(eventOptions, {
+        type: "turn_complete",
+        status: "context_overflow",
+        outputBytes: Buffer.byteLength(finalOutput, "utf8")
+      });
+      return { session, output: finalOutput };
+    }
 
     const promptEstimate = estimatePromptPayload({
       model: session.model,

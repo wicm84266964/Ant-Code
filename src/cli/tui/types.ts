@@ -74,6 +74,8 @@ export type TuiRuntimeEvent = {
   toolResultCount?: number;
   promptBytesEstimate?: number;
   promptTokensEstimate?: number;
+  maxTokens?: number;
+  maxBytes?: number;
   promptMessageTokensEstimate?: number;
   promptToolSchemaTokensEstimate?: number;
   promptToolResultTokensEstimate?: number;
