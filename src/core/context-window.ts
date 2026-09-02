@@ -928,16 +928,16 @@ function estimateJsonBytes(value: unknown) {
   return Buffer.byteLength(JSON.stringify(value ?? []), "utf8");
 }
 
-function messagesForContextBudget(messages: unknown = []) {
+function messagesForContextBudget(messages: unknown = []): Array<Record<string, unknown>> {
   if (!Array.isArray(messages)) {
     return [];
   }
   return messages.map((message) => redactImageDataForEstimate(message));
 }
 
-function redactImageDataForEstimate(message: unknown) {
+function redactImageDataForEstimate(message: unknown): Record<string, unknown> {
   if (!isRecord(message) || !Array.isArray(message.content)) {
-    return message;
+    return isRecord(message) ? message : {};
   }
   return {
     ...message,

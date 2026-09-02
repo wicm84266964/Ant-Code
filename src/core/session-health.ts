@@ -411,7 +411,7 @@ export function mainToolRoundLimitReached(maxToolRounds: number | null | undefin
 /**
  * @param {{ session: AgentSession; prompt: string; messages: Array<Record<string, any>>; toolResults: Array<Record<string, any>>; round: number; gateway: ReturnType<typeof createLabModelGateway>; signal?: AbortSignal; env?: NodeJS.ProcessEnv; hooksTrusted?: boolean; eventOptions: Record<string, any> }} input
  */
-export async function preparePromptBudgetForGateway(input: { session: AgentSession; prompt: string; messages: SessionMessage[]; toolResults: SessionToolResult[]; round: number; gateway: ReturnType<typeof createLabModelGateway>; signal?: AbortSignal; env?: NodeJS.ProcessEnv; hooksTrusted?: boolean; eventOptions: Record<string, unknown>; attachments?: unknown; visionAnalysisText?: string }) {
+export async function preparePromptBudgetForGateway(input: { session: AgentSession; prompt: string; messages: SessionMessage[]; toolResults: SessionToolResult[]; round: number; gateway: ReturnType<typeof createLabModelGateway>; signal?: AbortSignal; env?: NodeJS.ProcessEnv; hooksTrusted?: boolean; eventOptions: Record<string, unknown>; attachments?: Parameters<typeof buildUserTurnMessage>[2]; visionAnalysisText?: string }) {
   let messages: SessionMessage[] = input.messages;
   const estimate = estimatePromptPayload({
     model: input.session.model,
