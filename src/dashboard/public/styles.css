@@ -2949,7 +2949,10 @@ button {
   justify-content: space-between;
   margin: 0 auto 8px;
   max-width: 860px;
+  min-width: 0;
+  overflow: hidden;
   padding: 10px 14px;
+  width: 100%;
 }
 
 .goal-status-bar .goal-copy {
@@ -2957,6 +2960,8 @@ button {
   flex: 1 1 240px;
   font-size: var(--fs-ui);
   line-height: 1.4;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .goal-status-bar .goal-title {
@@ -2964,16 +2969,34 @@ button {
   font-weight: 600;
 }
 
-.goal-status-bar .goal-objective-ellipsis {
+.goal-status-bar .goal-objective {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
   max-width: 100%;
   overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.goal-status-bar .goal-objective-ellipsis {
+  -webkit-box-orient: initial;
+  -webkit-line-clamp: unset;
+  display: block;
+  line-clamp: unset;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.goal-status-bar .goal-recap {
+.goal-status-bar .goal-recap,
+.goal-status-bar .goal-continue-meta {
   color: var(--text);
   font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.goal-status-bar .goal-continue-meta {
+  color: var(--text-muted);
 }
 
 .goal-status-actions {

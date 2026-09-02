@@ -886,9 +886,15 @@ test("dashboard exposes responsive navigation and accessible interaction semanti
   assert.match(app, /function applyGoalSnapshot\(/);
   assert.match(app, /const recapLine = String\(state\.goal\.recap\?\.line \?\? ""\)\.trim\(\)/);
   assert.match(app, /class="goal-recap"/);
+  assert.match(app, /goal-objective/);
   assert.match(app, /goal-objective-ellipsis/);
-  assert.match(css, /\.goal-status-bar \.goal-recap\s*\{/);
+  assert.match(app, /class="goal-continue-meta"/);
+  assert.match(css, /\.goal-status-bar \.goal-recap\s*,/);
   assert.match(css, /\.goal-status-bar \.goal-objective-ellipsis\s*\{/);
+  assert.match(css, /\.goal-status-bar \.goal-copy\s*\{[\s\S]*min-width:\s*0/);
+  assert.match(css, /\.goal-status-bar \.goal-objective-ellipsis\s*\{[\s\S]*text-overflow:\s*ellipsis/);
+  assert.match(css, /\.goal-status-bar \.goal-objective\s*\{[\s\S]*-webkit-line-clamp:\s*3/);
+  assert.doesNotMatch(app, /promptInput\.placeholder = `Goal：/);
   assert.match(app, /启用 Goal 模式？/);
   assert.match(app, /无人值守自动执行/);
   assert.match(app, /请输入目标/);
