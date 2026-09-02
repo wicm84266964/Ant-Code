@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createInternalAgentRequest } from "../../src/agents/internal.ts";
+import { applyModelContextBudget } from "../../src/config/context-budget.ts";
 import { buildCompactedContextMessage, clearSessionContext, compactSessionContext, compactSessionContextWithModel, createContextWindow, estimatePromptPayload, estimateTokensFromBytes, summarizeContextWindow } from "../../src/core/context-window.ts";
 import { compactInFlightToolMessages } from "../../src/core/inflight-compaction.ts";
 
@@ -268,6 +269,33 @@ test("context summaries expose local token budget and configured model window", 
   assert.equal(summary.messageTokens, estimateTokensFromBytes(summary.messageBytes));
 });
 
+test("switching to a larger model raises the local context budget to the model window", () => {
+  const local = {
+    modelAlias: "small-model",
+    models: [
+      { id: "small-model", contextTokens: 256000 },
+      { id: "large-model", contextTokens: 500000 }
+    ],
+    context: {
+      maxTokens: 256000,
+      maxBytes: 1024000,
+      resumeMaxTokens: 256000,
+      resumeMaxBytes: 1024000
+    }
+  };
+  const next = {
+    ...local,
+    modelAlias: "large-model"
+  };
+  applyModelContextBudget(next, local, 500000);
+  const window = createContextWindow(next);
+
+  assert.equal(next.context.maxTokens, 500000);
+  assert.equal(next.context.maxBytes, 2000000);
+  assert.equal(window.modelMaxTokens, 500000);
+  assert.equal(window.maxTokens, 500000);
+});
+
 test("model context windows cap larger local token and byte budgets", () => {
   const window = createContextWindow({
     modelAlias: "smaller-model",
@@ -281,6 +309,30 @@ test("model context windows cap larger local token and byte budgets", () => {
   assert.equal(window.modelMaxTokens, 128000);
   assert.equal(window.maxTokens, 128000);
   assert.equal(window.maxBytes, 512000);
+});
+
+test("prompt payload estimates do not treat image bytes as text tokens", () => {
+  const prompt = {
+    role: "user",
+    content: [
+      { type: "text", text: "see this screenshot" },
+      { type: "image", name: "shot.png", mimeType: "image/png", size: 12, data: "aGVsbG8=" }
+    ]
+  };
+  const tiny = estimatePromptPayload({ messages: [prompt] });
+  const huge = estimatePromptPayload({
+    messages: [{
+      role: "user",
+      content: [
+        { type: "text", text: "see this screenshot" },
+        { type: "image", name: "shot.png", mimeType: "image/png", size: 4000000, data: "A".repeat(4_000_000) }
+      ]
+    }]
+  });
+
+  assert.ok(tiny.tokens > 0);
+  assert.ok(Math.abs(tiny.tokens - huge.tokens) < 20);
+  assert.ok(huge.bytes < 2000);
 });
 
 test("prompt payload estimates include tools and tool results shown to the model", () => {

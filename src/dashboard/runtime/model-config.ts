@@ -80,11 +80,13 @@ import {
 import {
   gatewayProfileOwner
 } from "./public-config.ts";
+import { applyModelContextBudget } from "../../config/context-budget.ts";
 import {
   asRecord,
   clonePlainObject,
   isPlainObject
 } from "./util.ts";
+export { applyModelContextBudget };
 import {
   upsertGatewayProfileForPersistence,
   gatewayProfileForPersistence,
@@ -295,23 +297,6 @@ export function buildLocalModelConfig(local: LabAgentConfig | Record<string, unk
     lab
   );
   return next;
-}
-
-
-export function applyModelContextBudget(next: Record<string, unknown>, local: Record<string, unknown>, contextTokens: unknown) {
-  const tokens = Number(contextTokens);
-  if (!Number.isFinite(tokens) || tokens <= 0) {
-    return;
-  }
-  const nextContext: Record<string, unknown> = {
-    ...(isPlainObject(local.context) ? local.context : {}),
-    ...(isPlainObject(next.context) ? next.context : {})
-  };
-  nextContext.maxTokens = Math.max(positiveIntegerOrNull(nextContext.maxTokens) ?? 0, tokens);
-  nextContext.maxBytes = Math.max(positiveIntegerOrNull(nextContext.maxBytes) ?? 0, tokens * 4);
-  nextContext.resumeMaxTokens = Math.max(positiveIntegerOrNull(nextContext.resumeMaxTokens) ?? 0, tokens);
-  nextContext.resumeMaxBytes = Math.max(positiveIntegerOrNull(nextContext.resumeMaxBytes) ?? 0, tokens * 4);
-  next.context = nextContext;
 }
 
 

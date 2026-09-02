@@ -411,6 +411,38 @@ test("MCP servers can configure request timeout", async (t) => {
   assert.equal(tools.ok, true);
 });
 
+test("MCP request timeout is a failed request, not a user interrupt", async (t) => {
+  const runtime = createMcpRuntime({
+    cwd: process.cwd(),
+    config: {
+      mcp: {
+        servers: [
+          {
+            name: "timeout-fixture",
+            transport: "stdio",
+            command: process.execPath,
+            args: [path.resolve("tests/fixtures/mcp-cancel-server.ts")],
+            requestTimeoutMs: 80,
+            toolRisks: { slow: "read" }
+          }
+        ]
+      }
+    },
+    policy: {
+      networkMode: "offline"
+    }
+  });
+  t.after(() => runtime.close());
+
+  await runtime.listTools("timeout-fixture");
+  const result = await runtime.callTool("timeout-fixture", "slow", {});
+
+  assert.equal(result.ok, false);
+  assert.equal(result.interrupted, undefined);
+  assert.equal(result.error.code, "MCP_REQUEST_TIMEOUT");
+  assert.match(result.error.message, /MCP request timed out: tools\/call/);
+});
+
 test("MCP tool abort sends cancellation notification", async (t) => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-mcp-cancel-"));
   const logPath = path.join(cwd, "cancel.log");

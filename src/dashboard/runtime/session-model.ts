@@ -35,6 +35,7 @@ import {
   type SessionModelSelectionResolution,
   type RuntimeModelSelection
 } from "../../config-v2/runtime-selection.ts";
+import { applyModelContextBudget, contextTokensForConfig } from "../../config/context-budget.ts";
 import { clearSessionContext, compactSessionContextWithModel, createContextWindow, summarizeContextWindow } from "../../core/context-window.ts";
 import { createLabModelGateway } from "../../model-gateway/client.ts";
 import { redactGatewayText } from "../../model-gateway/errors.ts";
@@ -140,6 +141,7 @@ export function refreshDashboardSessionModelSelection(session: AgentSession) {
 
 
 export function refreshSessionContextWindow(session: AgentSession) {
+  applyModelContextBudget(session.config, session.config, contextTokensForConfig(session.config));
   const previous = session.contextWindow;
   const next = createContextWindow(session.config);
   session.contextWindow = {
@@ -661,11 +663,13 @@ export function configWithModelSelection(config: LabAgentConfig, modelId: unknow
     requestedEffort,
     model?.defaultReasoningEffort
   );
-  return {
+  const next = {
     ...config,
     modelAlias: selectedModel,
     reasoningEffort: effort || null
   };
+  applyModelContextBudget(next, config, model?.contextTokens);
+  return next;
 }
 
 /** @param {Record<string, any>} config @param {Record<string, any> | null | undefined} selection */

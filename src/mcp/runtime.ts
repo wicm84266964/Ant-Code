@@ -591,9 +591,25 @@ async function requestFromSession(session: StdioSession, method: string, params:
   }
 }
 
-/** @param {unknown} error */
+function abortError() {
+  const error = new Error("The operation was aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function mcpTimeoutError(method: string, stderr: string) {
+  const error = new Error(`MCP request timed out: ${method}${stderr ? `; stderr: ${summarizeStderr(stderr)}` : ""}`);
+  error.name = "TimeoutError";
+  Object.defineProperty(error, "code", { value: "MCP_REQUEST_TIMEOUT" });
+  return error;
+}
+
 function isAbortError(error: unknown) {
-  return error instanceof Error && /aborted/i.test(error.message);
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const record = error as { name?: unknown; code?: unknown };
+  return record.name === "AbortError" || record.code === "ABORT_ERR";
 }
 
 /**
@@ -654,15 +670,15 @@ async function createStdioSession(server: McpServer, cwd: string, config: Record
           reject(value);
         };
         const timeout = setTimeout(() => {
-          finishReject(new Error(`MCP request timed out: ${method}${session.stderr ? `; stderr: ${summarizeStderr(session.stderr)}` : ""}`));
+          finishReject(mcpTimeoutError(method, session.stderr));
         }, server.requestTimeoutMs);
         const onAbort = () => {
           sendCancellationNotification(session, id, "aborted");
-          finishReject(new Error("The operation was aborted"));
+          finishReject(abortError());
         };
         if (signal) {
           if (signal.aborted) {
-            finishReject(new Error("The operation was aborted"));
+            finishReject(abortError());
             return;
           }
           signal.addEventListener("abort", onAbort, { once: true });

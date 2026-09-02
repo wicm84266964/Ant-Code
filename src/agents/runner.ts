@@ -786,7 +786,7 @@ async function runModelSubagent(options: {
         content: [{ type: "text", text: serialized.content }]
       });
     }
-    if (options.signal?.aborted || toolResults.some((result) => result.interrupted)) {
+    if (options.signal?.aborted) {
       return {
         ok: false,
         profile: options.profile.name,

@@ -296,7 +296,9 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
       signal: options.signal,
       env: options.env,
       hooksTrusted: options.hooksTrusted,
-      eventOptions
+      eventOptions,
+      attachments: visionPreparation.attachments,
+      visionAnalysisText: visionPreparation.analysisText
     });
     messages = budgetPreparation.messages;
 
@@ -619,7 +621,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
       turnChangeTracker
     });
     metadata.toolCalls.push(...summarizeToolCalls(response.data.toolCalls, toolResults));
-    if (options.signal?.aborted || toolResults.some((result) => result.interrupted)) {
+    if (options.signal?.aborted) {
       return finishInterruptedTurn({
         session,
         sessionStore,
@@ -630,7 +632,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
         env: options.env,
         hooksTrusted: options.hooksTrusted,
         draft: interruptedDraft,
-        reason: options.signal?.aborted ? "after_tool_execution" : "tool_interrupted"
+        reason: "after_tool_execution"
       });
     }
     for (const result of toolResults) {

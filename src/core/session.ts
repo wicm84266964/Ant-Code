@@ -32,6 +32,7 @@ import { getAgentProfile } from "../agents/profiles.ts";
 import { resolveMaxParallelReadonlyAgentRuns } from "../agents/orchestration-config.ts";
 import { appendDelegationReminderToExecution, createDelegationGuard } from "../agents/delegation-guard.ts";
 import { createReviewGate } from "../agents/review-policy.ts";
+import { applyModelContextBudget, contextTokensForConfig } from "../config/context-budget.ts";
 import { buildCompactedContextMessage, compactSessionContextWithModel, createContextWindow, estimatePromptPayload, summarizeContextWindow } from "./context-window.ts";
 import { buildGoalSystemPromptAppendix, normalizeSessionGoal, serializeSessionGoal, stripGoalStatusFromContent, stripGoalStatusMarkers } from "./goal.ts";
 import { createAntEventNormalizer } from "./events.ts";
@@ -93,6 +94,7 @@ export async function createSession(options: CreateSessionOptions): Promise<Agen
     config = resumeResult.config;
     context = await buildInitialContext({ cwd: options.cwd, config, env: options.env, clientSurface });
   }
+  applyModelContextBudget(config, config, contextTokensForConfig(config));
   const contextWindow = createContextWindow(config);
   const resumedWindow = isPlainObject(resumed?.contextWindow) ? resumed.contextWindow : null;
   if (resumedWindow) {

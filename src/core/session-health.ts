@@ -411,7 +411,7 @@ export function mainToolRoundLimitReached(maxToolRounds: number | null | undefin
 /**
  * @param {{ session: AgentSession; prompt: string; messages: Array<Record<string, any>>; toolResults: Array<Record<string, any>>; round: number; gateway: ReturnType<typeof createLabModelGateway>; signal?: AbortSignal; env?: NodeJS.ProcessEnv; hooksTrusted?: boolean; eventOptions: Record<string, any> }} input
  */
-export async function preparePromptBudgetForGateway(input: { session: AgentSession; prompt: string; messages: SessionMessage[]; toolResults: SessionToolResult[]; round: number; gateway: ReturnType<typeof createLabModelGateway>; signal?: AbortSignal; env?: NodeJS.ProcessEnv; hooksTrusted?: boolean; eventOptions: Record<string, unknown> }) {
+export async function preparePromptBudgetForGateway(input: { session: AgentSession; prompt: string; messages: SessionMessage[]; toolResults: SessionToolResult[]; round: number; gateway: ReturnType<typeof createLabModelGateway>; signal?: AbortSignal; env?: NodeJS.ProcessEnv; hooksTrusted?: boolean; eventOptions: Record<string, unknown>; attachments?: unknown; visionAnalysisText?: string }) {
   let messages: SessionMessage[] = input.messages;
   const estimate = estimatePromptPayload({
     model: input.session.model,
@@ -444,7 +444,12 @@ export async function preparePromptBudgetForGateway(input: { session: AgentSessi
       })
     });
     if (compaction.compacted) {
-      messages = buildTurnMessages(input.session, buildUserTurnMessage(input.prompt, input.session.workflow));
+      messages = buildTurnMessages(input.session, buildUserTurnMessage(
+        input.prompt,
+        input.session.workflow,
+        input.attachments ?? [],
+        input.visionAnalysisText ?? ""
+      ));
       await emitEvent(input.eventOptions, {
         type: "context_compacted",
         beforeMessages: compaction.beforeMessages,
@@ -466,11 +471,22 @@ export async function preparePromptBudgetForGateway(input: { session: AgentSessi
     }
   }
 
+  const postCompactEstimate = estimatePromptPayload({
+    model: input.session.model,
+    messages,
+    tools: input.session.context.tools,
+    toolResults: input.toolResults,
+    gatewayProtocol: sessionGatewayProtocol(input.session)
+  });
   const inflight = compactInFlightToolMessages(messages as Array<Record<string, unknown>>, {
     maxTokens: input.session.contextWindow?.maxTokens,
     triggerRatio: boundedContextRatio(input.session.config.context?.inFlightCompactRatio, 0.68),
     keepRecentTools: input.session.config.context?.inFlightKeepRecentTools ?? undefined,
-    force: true
+    force: input.round !== 0 || promptEstimateNeedsCompaction(
+      postCompactEstimate,
+      input.session.contextWindow,
+      input.session.config.context?.promptCompactRatio
+    )
   });
   if (inflight.compacted) {
     syncCompactedToolResults(input.toolResults, messages);
@@ -607,7 +623,7 @@ export async function executeToolCalls(toolCalls: import("../model-gateway/proto
     if (batch.parallel) {
       const batchResults = await Promise.all(batch.calls.map((call) => executeOneToolCall(call, toolRuntime, options, agentTaskIds)));
       results.push(...batchResults);
-      if (options.signal?.aborted || batchResults.some((result) => result.interrupted)) {
+      if (options.signal?.aborted) {
         return results;
       }
       continue;
@@ -619,7 +635,7 @@ export async function executeToolCalls(toolCalls: import("../model-gateway/proto
       }
       const result = await executeOneToolCall(call, toolRuntime, options, agentTaskIds);
       results.push(result);
-      if (options.signal?.aborted || result.interrupted) {
+      if (options.signal?.aborted) {
         return results;
       }
     }

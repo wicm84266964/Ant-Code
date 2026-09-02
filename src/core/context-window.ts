@@ -848,11 +848,12 @@ function estimateGatewayRequestBytes(input: {
   tools?: Array<Record<string, unknown>>;
   toolResults?: Array<Record<string, unknown>>;
 }) {
+  const messages = messagesForContextBudget(input.messages);
   const protocol = String(input.gatewayProtocol ?? "openai-chat").trim();
   if (protocol === "openai-chat") {
     return Buffer.byteLength(JSON.stringify(createOpenAIChatCompletionRequest({
       model: input.model,
-      messages: input.messages,
+      messages,
       tools: input.tools,
       toolResults: input.toolResults,
       stream: false
@@ -861,7 +862,7 @@ function estimateGatewayRequestBytes(input: {
   if (protocol === "openai-responses") {
     return Buffer.byteLength(JSON.stringify(createOpenAIResponsesRequest({
       model: input.model,
-      messages: input.messages,
+      messages,
       tools: input.tools,
       toolResults: input.toolResults,
       stream: false
@@ -870,7 +871,7 @@ function estimateGatewayRequestBytes(input: {
   if (protocol === "anthropic-messages") {
     return Buffer.byteLength(JSON.stringify(createAnthropicMessagesRequest({
       model: input.model,
-      messages: input.messages,
+      messages,
       tools: input.tools,
       toolResults: input.toolResults,
       stream: false
@@ -878,7 +879,7 @@ function estimateGatewayRequestBytes(input: {
   }
   return Buffer.byteLength(JSON.stringify(createGatewayRequest({
     model: input.model,
-    messages: input.messages,
+    messages,
     tools: input.tools,
     toolResults: input.toolResults,
     stream: false,
@@ -931,12 +932,28 @@ function messagesForContextBudget(messages: unknown = []) {
   if (!Array.isArray(messages)) {
     return [];
   }
-  return messages.map((message) => {
-    if (!message || typeof message !== "object") {
-      return message;
-    }
+  return messages.map((message) => redactImageDataForEstimate(message));
+}
+
+function redactImageDataForEstimate(message: unknown) {
+  if (!isRecord(message) || !Array.isArray(message.content)) {
     return message;
-  });
+  }
+  return {
+    ...message,
+    content: message.content.map((item) => {
+      if (!isRecord(item) || item.type !== "image") {
+        return item;
+      }
+      return {
+        type: "image",
+        name: item.name,
+        mimeType: item.mimeType ?? item.mime_type,
+        size: item.size,
+        redacted: true
+      };
+    })
+  };
 }
 
 export function estimateTokensFromBytes(bytes: unknown) {
