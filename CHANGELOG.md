@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+Automatic compaction now waits until the configured context window is full.
+Later gateway rounds compact in-flight tool results first, then history if
+still over. If the prompt remains over budget after both, the turn is
+cancelled locally as `context_overflow` instead of sending a request that
+would likely return HTTP 400. Permission mode ids are unchanged. This is
+synced locally and not yet a public release.
+
+### Fixed
+
+- In-flight tool compaction defaults to 100% of the configured window, the
+  same as history compaction. An explicit ratio of `1` is accepted.
+- After tools land, later rounds compact those results before summarizing
+  history. If the prompt is still over the window, Ant Code does not send
+  the gateway request.
+
 ## 2.0.3 - 2026-09-02
 
 This is a small reliability release on the 2.0 TypeScript runtime. Image

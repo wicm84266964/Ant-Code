@@ -37,7 +37,7 @@ function asRecord(value: unknown): Record<string, unknown> {
   return isRecord(value) ? value : {};
 }
 
-const BLOCKED_TURN_STATUSES = new Set(["gateway_not_configured", "tool_limit", "vision_unavailable"]);
+const BLOCKED_TURN_STATUSES = new Set(["gateway_not_configured", "tool_limit", "vision_unavailable", "context_overflow"]);
 const INTERRUPTED_TURN_STATUSES = new Set(["interrupted", "cancelled"]);
 const FAILED_BACKGROUND_STATUSES = new Set(["failed", "error", "lost"]);
 const BLOCKED_BACKGROUND_STATUSES = new Set(["blocked", "partial"]);
@@ -179,6 +179,17 @@ export function mapSessionEventToDashboard(event: Record<string, unknown>) {
   }
   if (type === "turn_interrupted") {
     return [activity("turn-interrupted", "任务已中断", event.reason ?? "用户中断", "interrupted", "session", event)];
+  }
+  if (type === "context_overflow") {
+    return [activity(
+      "context-overflow",
+      "上下文超出窗口",
+      "压缩后仍超过上限，已取消本轮请求，避免网关返回 400",
+      "blocked",
+      "session",
+      event,
+      { coalesceKey: "context-compaction" }
+    )];
   }
   if (type === "context_compacting") {
     return [activity("context-compacting", "正在压缩上下文", contextCompactionStartDetail(event), "running", "session", event, { coalesceKey: "context-compaction" })];

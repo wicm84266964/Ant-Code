@@ -1147,6 +1147,13 @@ export function useTuiAppActions(s: ReturnType<typeof useTuiAppPanels>) {
       const body = `在最终助手响应前已达到工具轮次上限（${event.maxToolRounds ?? "未知"} 轮）。待执行工具数：${event.toolCallCount ?? 0}。`;
       addEntry("error", "工具轮次上限", body);
       pushInspector(makeInspector("工具轮次上限", "session", body, "tool"), { focus: true });
+    } else if (event.type === "context_overflow") {
+      flushStreamDeltasNow();
+      setStreamOffset(0);
+      setStream(initialStream());
+      const body = `压缩历史和工具结果后仍超过上下文窗口（约 ${event.promptTokensEstimate ?? "未知"} tokens，上限 ${event.maxTokens ?? "未知"}）。已取消本轮请求，避免网关返回 400。`;
+      addEntry("error", "上下文超出窗口", body);
+      pushInspector(makeInspector("上下文超出窗口", "session", body, "context"), { focus: true });
     } else if (event.type === "turn_complete") {
       lastTurnStatusRef.current = String(event.status ?? "completed");
       flushStreamDeltasNow();

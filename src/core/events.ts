@@ -367,7 +367,7 @@ export function createAntEventNormalizer(options: { sessionId: string; now?: () 
       return events;
     }
 
-    if (type === "tool_limit" || type === "turn_unexpected_end") {
+    if (type === "tool_limit" || type === "turn_unexpected_end" || type === "context_overflow") {
       events.push(makeEvent(type, legacyEvent, {
         outputBytes: legacyEvent.outputBytes ?? null,
         toolCallCount: legacyEvent.toolCallCount ?? null

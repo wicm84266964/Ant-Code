@@ -23,7 +23,7 @@ import { resolveMaxParallelReadonlyAgentRuns } from "../agents/orchestration-con
 import { appendDelegationReminderToExecution, createDelegationGuard } from "../agents/delegation-guard.ts";
 import { createReviewGate } from "../agents/review-policy.ts";
 import { buildCompactedContextMessage, compactSessionContextWithModel, createContextWindow, estimatePromptPayload, summarizeContextWindow } from "./context-window.ts";
-import { compactInFlightToolMessages } from "./inflight-compaction.ts";
+import { compactInFlightToolMessages, DEFAULT_IN_FLIGHT_COMPACT_RATIO } from "./inflight-compaction.ts";
 import { buildGoalSystemPromptAppendix, normalizeSessionGoal, serializeSessionGoal, stripGoalStatusFromContent, stripGoalStatusMarkers } from "./goal.ts";
 import { createAntEventNormalizer } from "./events.ts";
 import { accumulateProviderUsage, normalizeProviderUsageAggregate, sanitizeProviderUsage, type ProviderUsageAggregate } from "./provider-usage.ts";
@@ -403,124 +403,182 @@ export function mainToolRoundLimitReached(maxToolRounds: number | null | undefin
   return Number.isInteger(maxToolRounds) && Number(maxToolRounds) > 0 && round === maxToolRounds;
 }
 
-/**
- * @param {{ session: AgentSession; prompt: string; messages: Array<Record<string, any>>; toolResults: Array<Record<string, any>>; round: number; gateway: ReturnType<typeof createLabModelGateway>; signal?: AbortSignal; env?: NodeJS.ProcessEnv; hooksTrusted?: boolean; eventOptions: Record<string, any> }} input
- */
+export function contextOverflowMessage(
+  estimate: { tokens?: number; bytes?: number },
+  contextWindow: ReturnType<typeof createContextWindow> | null | undefined
+) {
+  const tokens = Number.isFinite(estimate?.tokens) ? Math.floor(Number(estimate.tokens)) : 0;
+  const maxTokens = contextWindow && Number.isFinite(contextWindow.maxTokens) ? contextWindow.maxTokens : "未知";
+  return [
+    `当前请求在压缩历史和工具结果后仍超过上下文窗口（约 ${tokens} tokens，上限 ${maxTokens}）。`,
+    "已取消本轮模型请求，避免网关返回 400。",
+    "可以新开一轮、手动压缩上下文，或换更大窗口的模型后再继续。"
+  ].join("");
+}
 
+type PromptBudgetInput = {
+  session: AgentSession;
+  prompt: string;
+  messages: SessionMessage[];
+  toolResults: SessionToolResult[];
+  round: number;
+  gateway: ReturnType<typeof createLabModelGateway>;
+  signal?: AbortSignal;
+  env?: NodeJS.ProcessEnv;
+  hooksTrusted?: boolean;
+  eventOptions: Record<string, unknown>;
+  attachments?: Parameters<typeof buildUserTurnMessage>[2];
+  visionAnalysisText?: string;
+};
 
-/**
- * @param {{ session: AgentSession; prompt: string; messages: Array<Record<string, any>>; toolResults: Array<Record<string, any>>; round: number; gateway: ReturnType<typeof createLabModelGateway>; signal?: AbortSignal; env?: NodeJS.ProcessEnv; hooksTrusted?: boolean; eventOptions: Record<string, any> }} input
- */
-export async function preparePromptBudgetForGateway(input: { session: AgentSession; prompt: string; messages: SessionMessage[]; toolResults: SessionToolResult[]; round: number; gateway: ReturnType<typeof createLabModelGateway>; signal?: AbortSignal; env?: NodeJS.ProcessEnv; hooksTrusted?: boolean; eventOptions: Record<string, unknown>; attachments?: Parameters<typeof buildUserTurnMessage>[2]; visionAnalysisText?: string }) {
+export async function preparePromptBudgetForGateway(input: PromptBudgetInput) {
   let messages: SessionMessage[] = input.messages;
-  const estimate = estimatePromptPayload({
+  const estimateOf = (current: SessionMessage[]) => estimatePromptPayload({
     model: input.session.model,
-    messages,
+    messages: current,
     tools: input.session.context.tools,
     toolResults: input.toolResults,
     gatewayProtocol: sessionGatewayProtocol(input.session)
   });
-  if (!promptEstimateNeedsCompaction(estimate, input.session.contextWindow, input.session.config.context?.promptCompactRatio)) {
-    return { messages, estimate };
-  }
-
-  if (input.round === 0) {
-    const compaction = await compactSessionContextWithModel(input.session, {
-      reason: "automatic_prompt_budget",
-      force: true,
-      gateway: input.gateway,
-      signal: input.signal,
-      env: input.env,
-      hooksTrusted: input.hooksTrusted,
-      onBeforeCompact: (payload: Record<string, unknown>) => emitEvent(input.eventOptions, {
-        type: "context_compacting",
-        reason: "automatic_prompt_budget",
-        beforeMessages: payload.beforeMessages,
-        beforeTokens: estimate.tokens,
-        beforeBytes: payload.beforeBytes,
-        maxTokens: payload.maxTokens,
-        maxBytes: payload.maxBytes,
-        maxMessages: payload.maxMessages
-      })
-    });
-    if (compaction.compacted) {
-      messages = buildTurnMessages(input.session, buildUserTurnMessage(
-        input.prompt,
-        input.session.workflow,
-        input.attachments ?? [],
-        input.visionAnalysisText ?? ""
-      ));
-      await emitEvent(input.eventOptions, {
-        type: "context_compacted",
-        beforeMessages: compaction.beforeMessages,
-        afterMessages: compaction.afterMessages,
-        beforeTokens: estimate.tokens,
-        afterTokens: estimatePromptPayload({
-          model: input.session.model,
-          messages,
-          tools: input.session.context.tools,
-          toolResults: input.toolResults,
-          gatewayProtocol: sessionGatewayProtocol(input.session)
-        }).tokens,
-        summaryBytes: compaction.summaryBytes,
-        strategy: compaction.strategy,
-        internalAgent: compaction.internalAgent ?? null,
-        fallbackReason: compaction.fallbackReason ?? null,
-        reason: "automatic_prompt_budget"
-      });
-    }
-  }
-
-  const postCompactEstimate = estimatePromptPayload({
-    model: input.session.model,
-    messages,
-    tools: input.session.context.tools,
-    toolResults: input.toolResults,
-    gatewayProtocol: sessionGatewayProtocol(input.session)
-  });
-  const inflight = compactInFlightToolMessages(messages as Array<Record<string, unknown>>, {
-    maxTokens: input.session.contextWindow?.maxTokens,
-    triggerRatio: boundedContextRatio(input.session.config.context?.inFlightCompactRatio, 0.68),
-    keepRecentTools: input.session.config.context?.inFlightKeepRecentTools ?? undefined,
-    force: input.round !== 0 || promptEstimateNeedsCompaction(
-      postCompactEstimate,
+  const needsCompaction = (currentEstimate: ReturnType<typeof estimatePromptPayload>) => (
+    promptEstimateNeedsCompaction(
+      currentEstimate,
       input.session.contextWindow,
       input.session.config.context?.promptCompactRatio
     )
-  });
-  if (inflight.compacted) {
-    syncCompactedToolResults(input.toolResults, messages);
-    await emitEvent(input.eventOptions, {
-      type: "context_compacted",
-      beforeMessages: messages.length,
-      afterMessages: messages.length,
-      beforeTokens: inflight.beforeTokens,
-      afterTokens: inflight.afterTokens,
-      compactedTools: inflight.compactedTools,
-      strategy: "inflight-tools",
-      reason: input.round === 0 ? "automatic_prompt_budget" : "automatic_inflight_tools"
-    });
+  );
+
+  let estimate = estimateOf(messages);
+  if (!needsCompaction(estimate)) {
+    return { messages, estimate, blocked: false };
   }
 
-  const afterEstimate = estimatePromptPayload({
-    model: input.session.model,
-    messages,
-    tools: input.session.context.tools,
-    toolResults: input.toolResults,
-    gatewayProtocol: sessionGatewayProtocol(input.session)
-  });
-  if (promptEstimateOverBudget(afterEstimate, input.session.contextWindow)) {
+  if (input.round !== 0) {
+    messages = await compactInflightForGateway(input, messages, true);
+    estimate = estimateOf(messages);
+  }
+
+  if (needsCompaction(estimate)) {
+    messages = await compactHistoryForGateway(input, messages, estimate);
+    estimate = estimateOf(messages);
+  }
+
+  if (needsCompaction(estimate)) {
+    messages = await compactInflightForGateway(input, messages, true);
+    estimate = estimateOf(messages);
+  }
+
+  if (promptEstimateOverBudget(estimate, input.session.contextWindow)) {
     await emitEvent(input.eventOptions, {
-      type: "context_budget_warning",
+      type: "context_overflow",
       round: input.round + 1,
-      promptBytesEstimate: afterEstimate.bytes,
-      promptTokensEstimate: afterEstimate.tokens,
+      promptBytesEstimate: estimate.bytes,
+      promptTokensEstimate: estimate.tokens,
       maxBytes: input.session.contextWindow?.maxBytes ?? null,
       maxTokens: input.session.contextWindow?.maxTokens ?? null
     });
+    return { messages, estimate, blocked: true };
   }
 
-  return { messages, estimate: afterEstimate };
+  return { messages, estimate, blocked: false };
+}
+
+async function compactHistoryForGateway(
+  input: PromptBudgetInput,
+  messages: SessionMessage[],
+  beforeEstimate: ReturnType<typeof estimatePromptPayload>
+) {
+  const compaction = await compactSessionContextWithModel(input.session, {
+    reason: "automatic_prompt_budget",
+    force: true,
+    gateway: input.gateway,
+    signal: input.signal,
+    env: input.env,
+    hooksTrusted: input.hooksTrusted,
+    onBeforeCompact: (payload: Record<string, unknown>) => emitEvent(input.eventOptions, {
+      type: "context_compacting",
+      reason: "automatic_prompt_budget",
+      beforeMessages: payload.beforeMessages,
+      beforeTokens: beforeEstimate.tokens,
+      beforeBytes: payload.beforeBytes,
+      maxTokens: payload.maxTokens,
+      maxBytes: payload.maxBytes,
+      maxMessages: payload.maxMessages
+    })
+  });
+  if (!compaction.compacted) {
+    return messages;
+  }
+
+  const rebuilt = buildTurnMessages(input.session, buildUserTurnMessage(
+    input.prompt,
+    input.session.workflow,
+    input.attachments ?? [],
+    input.visionAnalysisText ?? ""
+  ));
+  const nextMessages = input.round === 0
+    ? rebuilt
+    : [...rebuilt, ...continuationAfterLastUser(messages)];
+  await emitEvent(input.eventOptions, {
+    type: "context_compacted",
+    beforeMessages: compaction.beforeMessages,
+    afterMessages: compaction.afterMessages,
+    beforeTokens: beforeEstimate.tokens,
+    afterTokens: estimatePromptPayload({
+      model: input.session.model,
+      messages: nextMessages,
+      tools: input.session.context.tools,
+      toolResults: input.toolResults,
+      gatewayProtocol: sessionGatewayProtocol(input.session)
+    }).tokens,
+    summaryBytes: compaction.summaryBytes,
+    strategy: compaction.strategy,
+    internalAgent: compaction.internalAgent ?? null,
+    fallbackReason: compaction.fallbackReason ?? null,
+    reason: "automatic_prompt_budget"
+  });
+  return nextMessages;
+}
+
+async function compactInflightForGateway(
+  input: PromptBudgetInput,
+  messages: SessionMessage[],
+  force: boolean
+) {
+  const inflight = compactInFlightToolMessages(messages as Array<Record<string, unknown>>, {
+    maxTokens: input.session.contextWindow?.maxTokens,
+    triggerRatio: boundedContextRatio(input.session.config.context?.inFlightCompactRatio, DEFAULT_IN_FLIGHT_COMPACT_RATIO),
+    keepRecentTools: input.session.config.context?.inFlightKeepRecentTools ?? undefined,
+    force
+  });
+  if (!inflight.compacted) {
+    return messages;
+  }
+  syncCompactedToolResults(input.toolResults, messages);
+  await emitEvent(input.eventOptions, {
+    type: "context_compacted",
+    beforeMessages: messages.length,
+    afterMessages: messages.length,
+    beforeTokens: inflight.beforeTokens,
+    afterTokens: inflight.afterTokens,
+    compactedTools: inflight.compactedTools,
+    strategy: "inflight-tools",
+    reason: input.round === 0 ? "automatic_prompt_budget" : "automatic_inflight_tools"
+  });
+  return messages;
+}
+
+function continuationAfterLastUser(messages: SessionMessage[]) {
+  let lastUser = -1;
+  for (let index = 0; index < messages.length; index += 1) {
+    if (messages[index]?.role === "user") {
+      lastUser = index;
+    }
+  }
+  if (lastUser < 0 || lastUser >= messages.length - 1) {
+    return [];
+  }
+  return messages.slice(lastUser + 1);
 }
 
 function syncCompactedToolResults(toolResults: SessionToolResult[] = [], messages: SessionMessage[] = []) {

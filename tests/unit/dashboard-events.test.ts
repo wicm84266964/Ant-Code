@@ -280,16 +280,17 @@ test("dashboard maps tool finish to concise result", () => {
 test("dashboard maps turn completion according to its real terminal status", () => {
   const completed = mapSessionEventToDashboard({ type: "turn_complete", status: "completed" })[0];
   const blocked = mapSessionEventToDashboard({ type: "turn_complete", status: "tool_limit" })[0];
+  const overflow = mapSessionEventToDashboard({ type: "turn_complete", status: "context_overflow" })[0];
   const interrupted = mapSessionEventToDashboard({ type: "turn_complete", status: "interrupted" })[0];
   const failed = mapSessionEventToDashboard({ type: "turn_complete", status: "gateway_error" })[0];
 
   assert.deepEqual(
-    [completed.status, blocked.status, interrupted.status, failed.status],
-    ["completed", "blocked", "interrupted", "failed"]
+    [completed.status, blocked.status, overflow.status, interrupted.status, failed.status],
+    ["completed", "blocked", "blocked", "interrupted", "failed"]
   );
   assert.deepEqual(
-    [completed.severity, blocked.severity, interrupted.severity, failed.severity],
-    ["success", "warning", "warning", "danger"]
+    [completed.severity, blocked.severity, overflow.severity, interrupted.severity, failed.severity],
+    ["success", "warning", "warning", "warning", "danger"]
   );
   assert.equal(blocked.title, "任务未完成");
   assert.equal(interrupted.title, "任务已中断");
