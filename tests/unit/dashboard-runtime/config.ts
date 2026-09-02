@@ -856,6 +856,49 @@ test("dashboard preserves the largest persisted context budget regardless of mod
   }
 });
 
+test("switching to a larger model raises a leftover smaller local context cap", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-context-switch-"));
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+  const savedSmall = await runtime.saveModelConfig({
+    saveTarget: "project",
+    gatewayUrl: "https://context-switch.gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    modelId: "small-model",
+    label: "Small",
+    contextTokens: "256000",
+    modalities: ["text"],
+    switchToModel: true
+  });
+  assert.equal(savedSmall.ok, true);
+  const profileId = savedSmall.gatewayConfig.activeProfileId;
+  const savedLarge = await runtime.saveModelConfig({
+    saveTarget: "project",
+    profileId,
+    gatewayUrl: "https://context-switch.gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    modelId: "large-model",
+    label: "Large",
+    contextTokens: "500000",
+    modalities: ["text"],
+    switchToModel: false
+  });
+  assert.equal(savedLarge.ok, true);
+
+  const localPath = path.join(cwd, ".lab-agent", "config.json");
+  const local = JSON.parse(await fs.readFile(localPath, "utf8"));
+  local.context.maxTokens = 256000;
+  local.context.maxBytes = 1024000;
+  local.context.resumeMaxTokens = 256000;
+  local.context.resumeMaxBytes = 1024000;
+  await fs.writeFile(localPath, `${JSON.stringify(local, null, 2)}\n`, "utf8");
+
+  const restarted = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+  const switched = await restarted.switchModel({ profileId, modelId: "large-model" });
+  assert.equal(switched.ok, true);
+  assert.equal(switched.sessionStatus.context.modelMaxTokens, 500000);
+  assert.equal(switched.sessionStatus.context.maxTokens, 500000);
+});
+
 test("dashboard edits a global-owned model through a same-endpoint project profile without shadowing", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-edit-mixed-owner-"));
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-home-edit-mixed-owner-"));

@@ -1,3 +1,4 @@
+import { applyModelContextBudget, contextTokensForConfig } from "../config/context-budget.ts";
 import { projectLegacyRuntimeConfig } from "./legacy-projection.ts";
 
 const UNRESOLVED_CODE = "SESSION_MODEL_SELECTION_UNRESOLVED";
@@ -266,20 +267,22 @@ export function applyRuntimeModelSelection(
     if (currentLab[key] !== undefined) nextLab[key] = currentLab[key];
   }
 
+  const nextConfig = {
+    ...config,
+    modelAlias: projection.modelAlias,
+    defaultModelAlias: projection.defaultModelAlias,
+    reasoningEffort: projection.reasoningEffort,
+    models: projection.models,
+    routingModels: projection.routingModels,
+    agents: replaceRuntimeAgentRouting(config.agents, runtimeAgents),
+    lab: nextLab
+  };
+  applyModelContextBudget(nextConfig, config, contextTokensForConfig(nextConfig));
   return {
     status: "resolved" as const,
     source: validated.source,
     selection: validated.selection,
-    config: {
-      ...config,
-      modelAlias: projection.modelAlias,
-      defaultModelAlias: projection.defaultModelAlias,
-      reasoningEffort: projection.reasoningEffort,
-      models: projection.models,
-      routingModels: projection.routingModels,
-      agents: replaceRuntimeAgentRouting(config.agents, runtimeAgents),
-      lab: nextLab
-    }
+    config: nextConfig
   };
 }
 
@@ -501,7 +504,7 @@ function materializeRuntimeProfileSelection(config: RuntimeConfig, profile: Gate
   const profileAgents = profile.agents && typeof profile.agents === "object" && !Array.isArray(profile.agents)
     ? profile.agents
     : EMPTY_OBJECT;
-  return {
+  const nextConfig = {
     ...config,
     modelAlias: selection.model,
     defaultModelAlias: selection.model,
@@ -520,6 +523,8 @@ function materializeRuntimeProfileSelection(config: RuntimeConfig, profile: Gate
       gatewayProfiles: gatewayProfiles(config)
     }
   };
+  applyModelContextBudget(nextConfig, config, contextTokensForConfig(nextConfig));
+  return nextConfig;
 }
 
 /**

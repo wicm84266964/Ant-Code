@@ -483,6 +483,13 @@ test("dashboard runtime keeps still-running background siblings visible after wa
         && lastSnapshot.groups[0].status === "running"
         && lastSnapshot.groups[0].wakePromptQueued === false;
     }, 15_000);
+    await waitForCondition(async () => {
+      const current = await runtime.readSession(started.sessionId);
+      return current.ok === true
+        && current.session?.backgroundSnapshot?.groups?.length === 1
+        && current.session.backgroundSnapshot.groups[0].status === "running"
+        && current.session.backgroundSnapshot.groups[0].runningCount === 1;
+    }, 15_000);
     const events = runtime.listActiveEvents(started.sessionId);
     const snapshots = events.filter((event) => event.type === "background_subagent_snapshot");
     const lastSnapshot = snapshots.at(-1);

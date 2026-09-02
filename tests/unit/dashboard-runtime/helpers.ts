@@ -448,7 +448,7 @@ export function createBackgroundAnyWakeGateway(requests) {
     if (sessionId.startsWith("agent-explorer-")) {
       const slow = /slow sibling/.test(JSON.stringify(body.messages ?? []));
       if (slow) {
-        await new Promise((resolve) => setTimeout(resolve, 250));
+        await new Promise((resolve) => setTimeout(resolve, 4_000));
       }
       const text = slow ? "slow sibling done later" : "fast sibling done";
       res.end(JSON.stringify({

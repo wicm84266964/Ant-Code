@@ -366,6 +366,61 @@ test("session compacts before gateway request when full prompt payload exceeds t
   }
 });
 
+test("session keeps current-turn images after automatic prompt compaction", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
+  await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
+    modelAlias: "vision-model",
+    models: [
+      { id: "vision-model", modalities: ["text", "image"] }
+    ],
+    context: {
+      maxMessages: 100,
+      maxTokens: 260,
+      keepRecentMessages: 2,
+      summaryBytes: 4096
+    }
+  }), "utf8");
+  const requests = [];
+  const events = [];
+  const server = await listen(createRecordingGateway(requests), "127.0.0.1");
+
+  try {
+    const env = mockGatewayEnvWithoutModel(serverUrl(server));
+    delete env.LAB_AGENT_TRANSCRIPT_ENABLED;
+    const session = await createSession({
+      cwd,
+      mode: "interactive",
+      env
+    });
+    session.messages = [
+      { role: "user", content: "older context " + "alpha ".repeat(80) },
+      { role: "assistant", content: [{ type: "text", text: "older answer " + "beta ".repeat(80) }] },
+      { role: "user", content: "recent question" },
+      { role: "assistant", content: [{ type: "text", text: "recent answer" }] }
+    ];
+
+    await runSessionTurn(session, {
+      prompt: "what is in this image?",
+      attachments: [{
+        type: "image",
+        name: "shot.png",
+        mimeType: "image/png",
+        size: 5,
+        data: "aGVsbG8="
+      }],
+      env,
+      onEvent: (event) => events.push(event)
+    });
+
+    const finalRequest = requests.at(-1);
+    const userMessage = finalRequest.messages.findLast((message) => message.role === "user");
+    assert.equal(userMessage.content.some((block) => block.type === "image" && block.data === "aGVsbG8="), true);
+    assert.ok(events.some((event) => event.type === "context_compacted" && event.reason === "automatic_prompt_budget"));
+  } finally {
+    await close(server);
+  }
+});
+
 test("session does not compact before the configured context window is reached by default", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
   await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
