@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+## 2.0.3 - 2026-09-02
+
+This is a small reliability release on the 2.0 TypeScript runtime. Image
+attachments no longer inflate the local prompt estimate into a false
+compaction that drops the current picture. Switching to a larger-window
+model raises the local context budget. An interrupted sibling subagent no
+longer marks the whole parent turn interrupted. Permission mode ids are
+unchanged.
+
+### Fixed
+
+- Prompt-budget estimates no longer treat image base64 as text tokens. After
+  history compaction, the current turn's image or vision report is still sent
+  to the model. If the first-round compact already brings the prompt under
+  the threshold, in-flight tool compaction is not forced.
+- Switching to a model with a larger advertised window raises local
+  `context.maxTokens` / `maxBytes` to at least that window. A smaller model
+  still caps the effective window.
+- A single interrupted parallel readonly subagent no longer finishes the
+  parent turn as `interrupted`. MCP timeouts are `MCP_REQUEST_TIMEOUT`
+  failures, not user interrupts. An explicit stop still aborts the turn.
+
+### Upgrade
+
+```sh
+git pull
+npm ci
+npm run verify:install
+npm link
+ant-code --version
+```
+
+`ant-code --version` should print `2.0.3`. Restart a running Dashboard so it
+loads this runtime. Gateway config and `.lab-agent` sessions do not need to
+be recreated.
+
 ## 2.0.2 - 2026-09-01
 
 This is a small reliability release on the 2.0 TypeScript runtime. Dashboard
