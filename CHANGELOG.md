@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+## 2.0.5 - 2026-09-04
+
+This is a small reliability release on the 2.0 TypeScript runtime. Tool
+results sent to the model are now per-tool short views instead of pretty-printed
+JSON. Older current-turn tool results beyond the most recent four are stubbed
+without waiting for the context window to fill. User images and tool screenshots
+are registered as in-session visual evidence: the main model can still see the
+picture on the first round, then later requests keep evidence ids instead of
+replaying pixels. `visual-verifier` can continue from those ids. Permission
+mode ids are unchanged.
+
+### Fixed
+
+- Model-facing tool output uses bounded views: numbered file excerpts, limited
+  search matches, head/tail shell output, and write results without a full diff.
+  32KB remains the hard safety valve.
+- Current-turn tool results older than the last four are replaced with a
+  one-line stub on the next gateway request.
+- After the first gateway round that uses tools, live image pixels are dropped
+  from the main context. MCP images are recorded as evidence ids, not base64 in
+  tool JSON.
+- `agent_run` can pass `evidenceIds` to `visual-verifier`; pending evidence is
+  attached when ids are omitted.
+- TUI and Dashboard context usage prefer the live prompt estimate that will be
+  sent to the gateway.
+
+### Upgrade
+
+```sh
+git pull
+npm ci
+npm run verify:install
+npm link
+ant-code --version
+```
+
+`ant-code --version` should print `2.0.5`. Restart a running Dashboard so it
+loads this runtime. Gateway config and `.lab-agent` sessions do not need to
+be recreated.
+
 ## 2.0.4 - 2026-09-02
 
 This is a small reliability release on the 2.0 TypeScript runtime. Automatic

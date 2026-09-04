@@ -3,7 +3,9 @@ export const DEFAULT_IN_FLIGHT_COMPACT_RATIO = 1;
 const DEFAULT_KEEP_RECENT_TOOLS = 4;
 const DEFAULT_MAX_TOOL_TEXT_CHARS = 1400;
 const DEFAULT_OVERSIZED_RECENT_CHARS = 8000;
-const COMPACTED_MARKER = "[compacted tool result]";
+export const COMPACTED_TOOL_MARKER = "[compacted tool result]";
+export const STALE_TOOL_MARKER = "[stale tool result]";
+const COMPACTED_MARKER = COMPACTED_TOOL_MARKER;
 
 /**
  * Compact older in-flight tool messages in place once an active turn approaches
@@ -11,25 +13,29 @@ const COMPACTED_MARKER = "[compacted tool result]";
  * replacing bulky raw output with evidence summaries.
  *
  * @param {Array<Record<string, any>>} messages
- * @param {{ maxTokens?: number | null; triggerRatio?: number; keepRecentTools?: number; maxToolTextChars?: number; oversizedRecentChars?: number; force?: boolean }} options
+ * @param {{ maxTokens?: number | null; triggerRatio?: number; keepRecentTools?: number; maxToolTextChars?: number; oversizedRecentChars?: number; force?: boolean; pruneStale?: boolean; currentTurnOnly?: boolean }} options
  */
-export function compactInFlightToolMessages(messages: Array<Record<string, unknown>>, options: { maxTokens?: number | null; triggerRatio?: number; keepRecentTools?: number; maxToolTextChars?: number; oversizedRecentChars?: number; force?: boolean } = {}) {
+export function compactInFlightToolMessages(messages: Array<Record<string, unknown>>, options: {
+  maxTokens?: number | null;
+  triggerRatio?: number;
+  keepRecentTools?: number;
+  maxToolTextChars?: number;
+  oversizedRecentChars?: number;
+  force?: boolean;
+  pruneStale?: boolean;
+  currentTurnOnly?: boolean;
+} = {}) {
   const maxTokens = positiveInteger(options.maxTokens) ?? null;
   const beforeBytes = estimateMessagesBytes(messages);
   const beforeTokens = estimateTokensFromBytes(beforeBytes);
   const triggerRatio = boundedRatio(options.triggerRatio, DEFAULT_IN_FLIGHT_COMPACT_RATIO);
   const triggerTokens = maxTokens ? Math.floor(maxTokens * triggerRatio) : null;
-  if (!options.force && triggerTokens && beforeTokens < triggerTokens) {
+  const pruneStale = options.pruneStale === true;
+  if (!options.force && !pruneStale && triggerTokens && beforeTokens < triggerTokens) {
     return result(false, beforeBytes, beforeBytes, beforeTokens, beforeTokens, 0, triggerTokens);
   }
 
-  const toolIndexes = [];
-  for (let index = 0; index < messages.length; index += 1) {
-    if (messages[index]?.role === "tool") {
-      toolIndexes.push(index);
-    }
-  }
-
+  const toolIndexes = collectToolIndexes(messages, options.currentTurnOnly === true);
   const keepRecentTools = nonNegativeInteger(options.keepRecentTools) ?? DEFAULT_KEEP_RECENT_TOOLS;
   const compactUntil = Math.max(0, toolIndexes.length - keepRecentTools);
   const maxToolTextChars = positiveInteger(options.maxToolTextChars) ?? DEFAULT_MAX_TOOL_TEXT_CHARS;
@@ -37,19 +43,23 @@ export function compactInFlightToolMessages(messages: Array<Record<string, unkno
   let compactedTools = 0;
 
   for (let item = 0; item < compactUntil; item += 1) {
-    compactedTools += compactToolMessage(messages[toolIndexes[item]], maxToolTextChars) ? 1 : 0;
+    compactedTools += pruneStale && !options.force
+      ? stubStaleToolMessage(messages[toolIndexes[item]]) ? 1 : 0
+      : compactToolMessage(messages[toolIndexes[item]], maxToolTextChars) ? 1 : 0;
   }
 
-  const oversizedChars = Math.max(maxToolTextChars, oversizedRecentChars);
-  while (shouldCompactMore(messages, triggerTokens, options.force === true)) {
-    const candidate = largestUncompactedTool(messages, toolIndexes, oversizedChars, triggerTokens);
-    if (candidate == null) {
-      break;
+  if (!pruneStale || options.force === true) {
+    const oversizedChars = Math.max(maxToolTextChars, oversizedRecentChars);
+    while (shouldCompactMore(messages, triggerTokens, options.force === true)) {
+      const candidate = largestUncompactedTool(messages, toolIndexes, oversizedChars, triggerTokens);
+      if (candidate == null) {
+        break;
+      }
+      if (!compactToolMessage(messages[candidate], maxToolTextChars)) {
+        break;
+      }
+      compactedTools += 1;
     }
-    if (!compactToolMessage(messages[candidate], maxToolTextChars)) {
-      break;
-    }
-    compactedTools += 1;
   }
 
   const afterBytes = estimateMessagesBytes(messages);
@@ -57,12 +67,30 @@ export function compactInFlightToolMessages(messages: Array<Record<string, unkno
   return result(compactedTools > 0, beforeBytes, afterBytes, beforeTokens, afterTokens, compactedTools, triggerTokens);
 }
 
+function collectToolIndexes(messages: Array<Record<string, unknown>>, currentTurnOnly: boolean): number[] {
+  let start = 0;
+  if (currentTurnOnly) {
+    for (let index = 0; index < messages.length; index += 1) {
+      if (messages[index]?.role === "user") {
+        start = index + 1;
+      }
+    }
+  }
+  const toolIndexes = [];
+  for (let index = start; index < messages.length; index += 1) {
+    if (messages[index]?.role === "tool") {
+      toolIndexes.push(index);
+    }
+  }
+  return toolIndexes;
+}
+
 function compactToolMessage(message: Record<string, unknown> | undefined, maxToolTextChars: number) {
   if (!message) {
     return false;
   }
   const text = extractText(message.content);
-  if (!text || text.includes(COMPACTED_MARKER)) {
+  if (!text || isReducedToolText(text)) {
     return false;
   }
   const summary = summarizeToolText(message.name, text, maxToolTextChars);
@@ -71,6 +99,56 @@ function compactToolMessage(message: Record<string, unknown> | undefined, maxToo
   }
   message.content = [{ type: "text", text: summary }];
   return true;
+}
+
+function stubStaleToolMessage(message: Record<string, unknown> | undefined) {
+  if (!message) {
+    return false;
+  }
+  const text = extractText(message.content);
+  if (!text || isReducedToolText(text)) {
+    return false;
+  }
+  const placeholder = formatStaleToolPlaceholder(message.name, text);
+  if (!placeholder || placeholder.length >= text.length) {
+    return false;
+  }
+  message.content = [{ type: "text", text: placeholder }];
+  return true;
+}
+
+export function isReducedToolText(text: string) {
+  return text.includes(COMPACTED_TOOL_MARKER) || text.includes(STALE_TOOL_MARKER);
+}
+
+function formatStaleToolPlaceholder(toolName: unknown, text: string) {
+  const parsed = parseJson(text);
+  const record = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    ? parsed as Record<string, unknown>
+    : {};
+  const resultValue = record.result && typeof record.result === "object" && !Array.isArray(record.result)
+    ? record.result as Record<string, unknown>
+    : {};
+  const locators = [
+    resultValue.path ? `path=${cleanInline(resultValue.path)}` : "",
+    resultValue.finalUrl || resultValue.url ? `url=${cleanInline(resultValue.finalUrl ?? resultValue.url)}` : "",
+    Number.isFinite(Number(resultValue.bytes)) ? `bytes=${resultValue.bytes}` : "",
+    Number.isFinite(Number(resultValue.bytesRead)) ? `bytes=${resultValue.bytesRead}` : ""
+  ].filter(Boolean);
+  const header = firstViewHeader(text);
+  const ok = record.ok === true || /\bok=true\b/.test(header);
+  const pathFromHeader = /\bpath=([^\s]+)/.exec(header)?.[1];
+  return [
+    STALE_TOOL_MARKER,
+    `tool=${toolName ?? "unknown"} ok=${ok}`,
+    locators.length ? locators.join(" ") : (pathFromHeader ? `path=${pathFromHeader}` : header),
+    "需要时再读或再跑同一工具。"
+  ].filter(Boolean).join("\n");
+}
+
+function firstViewHeader(text: string) {
+  const first = String(text ?? "").split(/\r?\n/).find((line) => line.trim());
+  return first && first.length <= 240 ? first.trim() : "";
 }
 
 function shouldCompactMore(messages: Array<Record<string, unknown>>, triggerTokens: number | null, force: boolean) {
@@ -90,7 +168,7 @@ function largestUncompactedTool(
   let bestLength = 0;
   for (const index of toolIndexes) {
     const text = extractText(messages[index]?.content);
-    if (!text || text.includes(COMPACTED_MARKER)) {
+    if (!text || isReducedToolText(text)) {
       continue;
     }
     if (!triggerTokens && text.length <= oversizedChars) {

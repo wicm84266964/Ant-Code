@@ -34,6 +34,12 @@ import { rgCountTool, rgFilesTool, rgFilesWithMatchesTool, rgSearchTool } from "
 import { tsDiagnosticsTool, tsFindDefinitionTool, tsFindReferencesTool, tsSymbolsTool } from "./semantic-tools.ts";
 import { backgroundShellTool, bashTool, powershellTool } from "./shell-tools.ts";
 import {
+  markVisualEvidenceStatus,
+  normalizeEvidenceIds,
+  pendingVisualEvidence,
+  resolveVisualEvidence
+} from "../core/visual-evidence.ts";
+import {
   networkHostsForWebTool,
   utf8Prefix,
   WEB_FETCH_DEFAULT_MAX_BYTES,
@@ -192,6 +198,7 @@ export type ToolRuntimeOptions = {
   askUser?: (input: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
   onBackgroundAgentEvent?: (event: Record<string, unknown>) => void | Promise<void>;
   onBackgroundTerminalEvent?: (event: Record<string, unknown>) => void | Promise<void>;
+  visualEvidence?: import("../core/visual-evidence.ts").VisualEvidenceStore | null;
 };
 
 export function createToolRuntime(options: ToolRuntimeOptions) {
@@ -203,6 +210,7 @@ export function createToolRuntime(options: ToolRuntimeOptions) {
     config: options.config,
     parentSessionId: options.parentSessionId,
     hooksTrusted: options.hooksTrusted === true,
+    visualEvidence: options.visualEvidence ?? null,
     definitions: BUILT_IN_TOOLS,
     /**
      * @param {string} name
@@ -1225,8 +1233,26 @@ async function runAgentTool(options: ToolRuntimeOptions, input: Record<string, u
     writeScope: input.writeScope,
     acceptance: input.acceptance,
     contextPack: isPlainObject(input.contextPack) ? input.contextPack : undefined,
-    query: String(input.query ?? "")
+    query: String(input.query ?? ""),
+    visualEvidence: resolveAgentVisualEvidence(options, profile, input)
   });
+}
+
+function resolveAgentVisualEvidence(
+  options: ToolRuntimeOptions,
+  profile: AgentProfile,
+  input: Record<string, unknown>
+) {
+  const visualProfile = profile.purpose === "visual" || profile.name === "visual-verifier";
+  if (!visualProfile || !options.visualEvidence) {
+    return [];
+  }
+  const requested = normalizeEvidenceIds(input.evidenceIds);
+  const selected = requested.length > 0
+    ? resolveVisualEvidence(options.visualEvidence, requested)
+    : pendingVisualEvidence(options.visualEvidence);
+  markVisualEvidenceStatus(options.visualEvidence, selected.map((item) => item.id), "inspected");
+  return selected;
 }
 
 function shouldRunAgentInBackground(options: ToolRuntimeOptions, input: Record<string, unknown>) {
@@ -1332,7 +1358,8 @@ async function startBackgroundAgentTool(
     writeScope: input.writeScope,
     acceptance: input.acceptance,
     contextPack: isPlainObject(input.contextPack) ? input.contextPack : undefined,
-    query: String(input.query ?? "")
+    query: String(input.query ?? ""),
+    visualEvidence: resolveAgentVisualEvidence(options, profile, input)
   });
 
   runPromise

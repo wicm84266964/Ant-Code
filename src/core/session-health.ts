@@ -23,7 +23,7 @@ import { resolveMaxParallelReadonlyAgentRuns } from "../agents/orchestration-con
 import { appendDelegationReminderToExecution, createDelegationGuard } from "../agents/delegation-guard.ts";
 import { createReviewGate } from "../agents/review-policy.ts";
 import { buildCompactedContextMessage, compactSessionContextWithModel, createContextWindow, estimatePromptPayload, summarizeContextWindow } from "./context-window.ts";
-import { compactInFlightToolMessages, DEFAULT_IN_FLIGHT_COMPACT_RATIO } from "./inflight-compaction.ts";
+import { compactInFlightToolMessages, DEFAULT_IN_FLIGHT_COMPACT_RATIO, isReducedToolText } from "./inflight-compaction.ts";
 import { buildGoalSystemPromptAppendix, normalizeSessionGoal, serializeSessionGoal, stripGoalStatusFromContent, stripGoalStatusMarkers } from "./goal.ts";
 import { createAntEventNormalizer } from "./events.ts";
 import { accumulateProviderUsage, normalizeProviderUsageAggregate, sanitizeProviderUsage, type ProviderUsageAggregate } from "./provider-usage.ts";
@@ -448,6 +448,7 @@ export async function preparePromptBudgetForGateway(input: PromptBudgetInput) {
     )
   );
 
+  messages = pruneStaleInflightForGateway(input, messages);
   let estimate = estimateOf(messages);
   if (!needsCompaction(estimate)) {
     return { messages, estimate, blocked: false };
@@ -540,6 +541,20 @@ async function compactHistoryForGateway(
   return nextMessages;
 }
 
+function pruneStaleInflightForGateway(input: PromptBudgetInput, messages: SessionMessage[]) {
+  const inflight = compactInFlightToolMessages(messages as Array<Record<string, unknown>>, {
+    maxTokens: input.session.contextWindow?.maxTokens,
+    keepRecentTools: input.session.config.context?.inFlightKeepRecentTools ?? undefined,
+    pruneStale: true,
+    currentTurnOnly: true
+  });
+  if (!inflight.compacted) {
+    return messages;
+  }
+  syncCompactedToolResults(input.toolResults, messages);
+  return messages;
+}
+
 async function compactInflightForGateway(
   input: PromptBudgetInput,
   messages: SessionMessage[],
@@ -605,7 +620,7 @@ function syncCompactedToolResults(toolResults: SessionToolResult[] = [], message
           return "";
         }).filter(Boolean).join("\n")
         : "";
-    if (text.includes("[compacted tool result]")) {
+    if (isReducedToolText(text)) {
       compacted.set(id, text);
     }
   }

@@ -56,6 +56,7 @@ type MockToolPayload = {
 
 type ParsedToolResult = {
   ok?: boolean;
+  blocked?: boolean;
   error?: { code?: string; message?: string };
   decision?: unknown;
   result?: MockToolPayload | Array<{ type?: string; name?: string }>;
@@ -418,7 +419,7 @@ function summarizeToolResults(toolResults: Array<{ name?: string; content?: unkn
     const parsed = parseToolResult(result.content);
     const payload = asToolPayload(parsed.result);
     if (!parsed.ok) {
-      summaries.push(`Tool ${result.name} did not complete: ${JSON.stringify(parsed.error ?? parsed.decision ?? parsed)}`);
+      summaries.push(`Tool ${result.name} did not complete: ${normalizeContent(result.content)}`);
     } else if (result.name === "read_file") {
       summaries.push(`Tool read_file returned ${payload.path}:\n${(payload.content ?? "").slice(0, 800)}`);
     } else if (result.name === "list_files") {
@@ -476,8 +477,118 @@ function parseToolResult(content: unknown): ParsedToolResult {
   try {
     return JSON.parse(text) as ParsedToolResult;
   } catch {
-    return { ok: false, error: { code: "MOCK_PARSE_ERROR", message: "tool result was not JSON" } };
+    return parseToolResultView(text);
   }
+}
+
+function parseToolResultView(text: string): ParsedToolResult {
+  const lines = String(text ?? "").split(/\r?\n/);
+  const fields: Record<string, string> = {};
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+    if (line.startsWith("[") || line.startsWith("- ") || line.startsWith("stdout:") || line.startsWith("stderr:") || line.startsWith("--- ") || /^\d+:\s/.test(line)) {
+      break;
+    }
+    if (line.startsWith("error=")) {
+      fields.error = line.slice("error=".length);
+      index += 1;
+      continue;
+    }
+    if (!/^\w+=/.test(line)) {
+      break;
+    }
+    Object.assign(fields, parseKeyedFields(line));
+    index += 1;
+  }
+  const body = lines.slice(index).join("\n");
+  const jsonBody = parseJsonObject(body.trim());
+  const result: MockToolPayload = {
+    path: fields.path,
+    content: stripNumberedLines(body),
+    diff: body.includes("--- ") ? body : undefined,
+    edited: fields.edited !== "false",
+    stdout: sectionAfter(body, "stdout:") ?? (fields.tool?.startsWith("git_") || fields.tool === "powershell" || fields.tool === "bash" ? stripNumberedLines(body) : undefined),
+    stderr: sectionAfter(body, "stderr:"),
+    exitCode: fields.exitCode != null && fields.exitCode !== "" ? Number(fields.exitCode) : undefined,
+    matches: parseMatchLines(body),
+    entries: parseEntryLines(body),
+    todos: Array.isArray(jsonBody?.todos) ? jsonBody.todos : undefined,
+    steps: Array.isArray(jsonBody?.steps) ? jsonBody.steps : undefined
+  };
+  return {
+    ok: fields.ok !== "false",
+    blocked: fields.blocked === "true" ? true : undefined,
+    error: fields.error ? { message: fields.error } : undefined,
+    decision: fields.decision ? { decision: fields.decision } : undefined,
+    result: jsonBody ? { ...result, ...jsonBody } : result
+  };
+}
+
+function parseKeyedFields(line: string) {
+  const fields: Record<string, string> = {};
+  for (const part of line.split(/\s+/)) {
+    const eq = part.indexOf("=");
+    if (eq <= 0) {
+      continue;
+    }
+    fields[part.slice(0, eq)] = part.slice(eq + 1);
+  }
+  return fields;
+}
+
+function parseJsonObject(text: string): Record<string, unknown> | null {
+  if (!text.startsWith("{")) {
+    return null;
+  }
+  try {
+    const value = JSON.parse(text);
+    return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+function stripNumberedLines(body: string) {
+  const lines = body.split(/\r?\n/);
+  if (!lines.some((line) => /^\d+:\s/.test(line))) {
+    return body.replace(/^stdout:\n?/m, "").trim();
+  }
+  return lines.map((line) => line.replace(/^\d+:\s/, "")).join("\n");
+}
+
+function sectionAfter(body: string, header: string) {
+  const index = body.indexOf(header);
+  if (index < 0) {
+    return undefined;
+  }
+  return body.slice(index + header.length).replace(/^\n/, "");
+}
+
+function parseMatchLines(body: string) {
+  return body.split(/\r?\n/).filter((line) => line.startsWith("- ")).map((line) => {
+    const text = line.slice(2);
+    const match = /^([^:]+):(\d+)\s?(.*)$/.exec(text);
+    if (!match) {
+      return text;
+    }
+    return { path: match[1], line: Number(match[2]), text: match[3] };
+  });
+}
+
+function parseEntryLines(body: string) {
+  return body.split(/\r?\n/).filter((line) => line.startsWith("- ")).map((line) => {
+    const text = line.slice(2);
+    const match = /^(file|directory|other)\s+(.+)$/.exec(text);
+    if (!match) {
+      return { type: "file", name: text };
+    }
+    return { type: match[1], name: match[2] };
+  });
 }
 
 function asToolPayload(result: ParsedToolResult["result"]): MockToolPayload {

@@ -615,7 +615,8 @@ export const BUILT_IN_TOOLS = Object.freeze([
         modelTier: { type: "string" },
         writeScope: { type: "array", items: { type: "string" } },
         acceptance: { type: "array", items: { type: "string" } },
-        contextPack: { type: "object" }
+        contextPack: { type: "object" },
+        evidenceIds: { type: "array", items: { type: "string" } }
       }
     }
   },

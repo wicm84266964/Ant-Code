@@ -386,12 +386,17 @@ export function summarizeContextWindow(session: { config?: Parameters<typeof cre
   const summaryBytes = Buffer.byteLength(window.summary ?? "", "utf8");
   const promptEstimate = isRecord(session.lastPromptEstimate) ? session.lastPromptEstimate : null;
   const providerUsage = normalizeProviderUsageAggregate(session.usage);
+  const messageTokens = estimateTokensFromBytes(messageBytes);
+  const promptTokens = typeof promptEstimate?.tokens === "number" && Number.isFinite(promptEstimate.tokens)
+    ? promptEstimate.tokens
+    : null;
   return {
     messages: messages.length,
     messageBytes,
-    messageTokens: estimateTokensFromBytes(messageBytes),
+    messageTokens,
+    livePromptTokens: promptTokens ?? messageTokens,
     promptBytes: typeof promptEstimate?.bytes === "number" && Number.isFinite(promptEstimate.bytes) ? promptEstimate.bytes : null,
-    promptTokens: typeof promptEstimate?.tokens === "number" && Number.isFinite(promptEstimate.tokens) ? promptEstimate.tokens : null,
+    promptTokens,
     promptMessageTokens: typeof promptEstimate?.messageTokens === "number" && Number.isFinite(promptEstimate.messageTokens) ? promptEstimate.messageTokens : null,
     promptToolSchemaTokens: typeof promptEstimate?.toolSchemaTokens === "number" && Number.isFinite(promptEstimate.toolSchemaTokens) ? promptEstimate.toolSchemaTokens : null,
     promptToolResultTokens: typeof promptEstimate?.toolResultTokens === "number" && Number.isFinite(promptEstimate.toolResultTokens) ? promptEstimate.toolResultTokens : null,
@@ -436,7 +441,7 @@ export function formatContextWindowStatus(session: { config?: Record<string, unk
   const summary = summarizeContextWindow(session);
   return [
     `context messages: ${summary.messages}/${summary.maxMessages}`,
-    `context tokens: ${summary.messageTokens}/${summary.maxTokens}`,
+    `context tokens: ${summary.livePromptTokens}/${summary.maxTokens}`,
     `context bytes: ${summary.messageBytes}/${summary.maxBytes}`,
     summary.promptTokens ? `latest model input tokens: ${summary.promptTokens}` : null,
     Number.isFinite(summary.providerPromptTokens) ? `latest provider input tokens: ${summary.providerPromptTokens}` : null,

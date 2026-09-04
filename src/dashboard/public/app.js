@@ -6375,9 +6375,10 @@ function formatContextUsage4(context) {
     return "-- / --";
   }
   const used = firstFiniteNumber8(
-    context.messageTokens,
-    context.promptMessageTokens,
+    context.livePromptTokens,
     context.promptTokens,
+    context.promptMessageTokens,
+    context.messageTokens,
     context.providerPromptTokens
   );
   const limit = firstFiniteNumber8(context.maxTokens, context.modelMaxTokens);

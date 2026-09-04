@@ -106,18 +106,19 @@ test("dashboard transcript hides internal prompt roles", () => {
   assert.equal(visibleTranscriptRole("tool"), null);
 });
 
-test("dashboard context status prefers active model messages over latest gateway prompt", async () => {
+test("dashboard context status prefers live gateway prompt over persisted messages", async () => {
   const module = await loadAppExports(["formatContextUsage"]);
   const text = module.formatContextUsage({
     messageTokens: 20000,
     promptMessageTokens: 21000,
     promptTokens: 40000,
+    livePromptTokens: 40000,
     providerPromptTokens: 39000,
     providerCachedPromptTokens: 19500,
     maxTokens: 200000
   });
 
-  assert.equal(text, "20k / 200k · 10% · 缓存命中 50%");
+  assert.equal(text, "40k / 200k · 20% · 缓存命中 50%");
 });
 
 test("dashboard running send button exposes interrupt action", async () => {

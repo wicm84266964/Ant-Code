@@ -205,7 +205,7 @@ test("/context panel shows prompt payload split when gateway input was estimated
   const panel = createContextPanel({ session });
   const text = panel.lines.map((item) => item.text).join("\n");
 
-  assert.match(text, /当前模型上下文：1\/200k tokens（估算）/);
+  assert.match(text, /当前模型上下文：1.2k\/200k tokens（估算）/);
   assert.match(text, /最近模型输入：1.2k\/200k tokens（估算）/);
   assert.match(text, /拆分：消息 200 \/ 工具定义 300 \/ 工具结果 734/);
 });

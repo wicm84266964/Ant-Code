@@ -14,7 +14,9 @@ import { runHooks } from "../hooks/runner.ts";
 import { createMcpRuntime } from "../mcp/runtime.ts";
 import { appendThinkingPreview, limitThinkingPreview } from "../model-gateway/thinking-budget.ts";
 import { createSessionStore } from "../storage/session-store.ts";
-import { DEFAULT_TOOL_RESULT_MAX_BYTES, serializeToolResult } from "../tools/result.ts";
+import { DEFAULT_TOOL_RESULT_MAX_BYTES } from "../tools/result.ts";
+import { formatToolResultForModel } from "../tools/result-view.ts";
+import { extractImagePayloads, registerVisualEvidence } from "./visual-evidence.ts";
 import { countLineChanges, previewUnifiedDiff } from "../tools/diff.ts";
 import { createToolRuntime } from "../tools/runtime.ts";
 import { createWorkflowState, formatWorkflowContext, summarizeWorkflow, syncWorkflowCompletionOnFinal, type WorkflowState } from "../tools/workflow-tools.ts";
@@ -219,8 +221,24 @@ export async function executeOneToolCall(call: import("../model-gateway/protocol
     }
   );
   const executionForModel = omitInternalToolResultFields(execution);
-  const serialized = serializeToolResult(executionForModel, {
-    maxBytes: resolveParentToolResultMaxBytes(toolRuntime.config)
+  const harvested = extractImagePayloads(executionForModel);
+  const evidence = [];
+  for (const image of harvested) {
+    const registered = registerVisualEvidence(toolRuntime.visualEvidence, {
+      source: "mcp",
+      name: image.name,
+      mimeType: image.mimeType,
+      data: image.data,
+      bytes: image.size,
+      toolCallId: call.id
+    });
+    if (registered) {
+      evidence.push(registered);
+    }
+  }
+  const serialized = formatToolResultForModel(call.name, executionForModel, {
+    maxBytes: resolveParentToolResultMaxBytes(toolRuntime.config),
+    evidence
   });
   await emitEvent(options, {
     type: "tool_finish",

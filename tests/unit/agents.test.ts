@@ -83,6 +83,56 @@ test("model-driven explorer subagent can use readonly tools", async () => {
   }
 });
 
+test("visual-verifier subagent receives registered image evidence as image blocks", async () => {
+  const cwd = await makeTempWorkspace();
+  const requests = [];
+  const server = await listen(http.createServer(async (request, response) => {
+    if (request.method !== "POST") {
+      response.writeHead(404);
+      response.end();
+      return;
+    }
+    const body = await readRequestJson(request);
+    requests.push(body);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      id: "mock-visual",
+      model: body.model,
+      content: [{ type: "text", text: "visual report: pass" }],
+      toolCalls: [],
+      stopReason: "stop"
+    }));
+  }), "127.0.0.1");
+
+  try {
+    const result = await runSubagent({
+      cwd,
+      profileName: "visual-verifier",
+      query: "inspect the screenshot",
+      env: mockGatewayEnv(serverUrl(server)),
+      visualEvidence: [{
+        id: "vis-1",
+        source: "user",
+        name: "tiny.png",
+        mimeType: "image/png",
+        bytes: 5,
+        status: "pending",
+        digest: "abc",
+        data: "aGVsbG8="
+      }]
+    });
+
+    assert.equal(result.ok, true);
+    const userMessage = requests[0].messages.find((message) => message.role === "user");
+    const content = userMessage.content;
+    assert.equal(Array.isArray(content), true);
+    assert.equal(content.some((block) => block.type === "image" && block.data === "aGVsbG8="), true);
+    assert.match(content.find((block) => block.type === "text")?.text ?? "", /vis-1/);
+  } finally {
+    await close(server);
+  }
+});
+
 test("model-driven subagent preserves reasoning_content across OpenAI-compatible tool continuations", async () => {
   const cwd = await makeTempWorkspace();
   await fs.writeFile(path.join(cwd, "notes.txt"), "hello from notes\n", "utf8");
@@ -213,8 +263,9 @@ test("model-driven explorer preserves explicit read_file requests", async () => 
     assert.equal(result.tools[0].ok, true);
     assert.match(result.tools[0].inputSummary, /maxBytes=999999/);
     const toolResultMessage = requests[1].toolResults?.[0]?.content ?? "";
-    assert.match(toolResultMessage, /"bytesRead": 16385/);
-    assert.match(toolResultMessage, /"truncated": false/);
+    assert.match(toolResultMessage, /bytes=16385/);
+    assert.match(toolResultMessage, /truncated=true/);
+    assert.doesNotMatch(toolResultMessage, /"bytesRead"/);
   } finally {
     await close(server);
   }
