@@ -8,7 +8,8 @@ import { formatSkillContextLines } from "../skills/registry.ts";
 import { getToolDefinitions } from "../tools/definitions.ts";
 
 import { createToolRuntime } from "../tools/runtime.ts";
-import { serializeToolResult, type ToolResultValue } from "../tools/result.ts";
+import { type ToolResultValue } from "../tools/result.ts";
+import { formatToolResultForModel } from "../tools/result-view.ts";
 import { estimatePromptPayload } from "../core/context-window.ts";
 import { buildValidationMemory, formatValidationMemory } from "../core/validation-memory.ts";
 import { suggestValidationCommands } from "../core/validation-suggestions.ts";
@@ -20,6 +21,7 @@ import { formatOutputContract, summarizeContractResult } from "./contracts.ts";
 import { createPlanPackageStore, extractPlanPackage } from "./plan-package-store.ts";
 import { getAgentProfile, listAgentProfileLabels, type AgentProfile } from "./profiles.ts";
 import { createAgentTaskStore } from "./task-store.ts";
+import { visualEvidenceImageBlocks } from "../core/visual-evidence.ts";
 
 const SUMMARY_PATTERNS = Object.freeze(["src/**/*.js", "tests/**/*.js", "docs/**/*.md"]);
 const MAX_AGENT_OUTPUT_CHARS = 32_000;
@@ -140,6 +142,7 @@ export async function runSubagent(options: {
   parentTaskId?: string;
   title?: string;
   hooksTrusted?: boolean;
+  visualEvidence?: import("../core/visual-evidence.ts").VisualEvidence[];
 }): Promise<SubagentResult> {
   const config = options.config ?? await loadConfig({ cwd: options.cwd, env: options.env });
   const profile = getAgentProfile(options.profileName, config, {
@@ -286,7 +289,8 @@ export async function runSubagent(options: {
       gateway,
       taskStore,
       taskId: task.id,
-      childSessionId
+      childSessionId,
+      visualEvidence: options.visualEvidence
     });
   } catch (error) {
     result = {
@@ -456,6 +460,7 @@ async function runModelSubagent(options: {
   backgroundParentSessionId?: string;
   parentSessionId?: string;
   hooksTrusted?: boolean;
+  visualEvidence?: import("../core/visual-evidence.ts").VisualEvidence[];
 }): Promise<SubagentResult> {
   const allowedTools = new Set(options.profile.tools ?? []);
   allowedTools.delete("agent_run");
@@ -493,7 +498,7 @@ async function runModelSubagent(options: {
       role: "system",
       content: [{ type: "text", text: await buildAgentSystemPrompt(options) }]
     },
-    { role: "user", content: formatAgentUserPrompt(options) }
+    formatAgentUserMessage(options)
   ];
   const budget = options.budget ?? resolveAgentBudget({
     config: options.config,
@@ -699,7 +704,7 @@ async function runModelSubagent(options: {
             error: { code: "AGENT_TOOL_NOT_ALLOWED", message: `${call.name} is not available to ${options.profile.name}.` }
           };
       const execution = isPlainObject(executionRaw) ? executionRaw : EMPTY_RECORD;
-      const serialized = serializeToolResult(execution as ToolResultValue, {
+      const serialized = formatToolResultForModel(call.name, execution as ToolResultValue, {
         maxBytes: typeof budget.maxToolResultBytes === "number" ? budget.maxToolResultBytes : undefined
       });
       if (!skipReason) {
@@ -1076,7 +1081,9 @@ function formatAgentUserPrompt(options: {
   contextPack?: Record<string, unknown>;
   profile: AgentProfile;
   fullAccess?: boolean;
+  visualEvidence?: import("../core/visual-evidence.ts").VisualEvidence[];
 }) {
+  const evidence = Array.isArray(options.visualEvidence) ? options.visualEvidence : [];
   return [
     "Delegated task:",
     options.query,
@@ -1084,10 +1091,35 @@ function formatAgentUserPrompt(options: {
     "Context pack:",
     formatContextPack(options.contextPack ?? EMPTY_RECORD),
     "",
+    evidence.length > 0
+      ? `Visual evidence: ${evidence.map((item) => item.id).join(", ")}. Treat attached image blocks as primary evidence and return the visual-verification contract.`
+      : null,
     requiresWriteScope(options.profile) && !hasWriteScope(options.contextPack ?? EMPTY_RECORD) && !options.fullAccess
       ? "Write boundary: no writeScope was supplied. This write-capable profile is running with write and command tools disabled; do not write files or run mutating commands. Report the needed writeScope to the coordinator."
       : null
   ].filter(Boolean).join("\n");
+}
+
+function formatAgentUserMessage(options: {
+  query: string;
+  contextPack?: Record<string, unknown>;
+  profile: AgentProfile;
+  fullAccess?: boolean;
+  visualEvidence?: import("../core/visual-evidence.ts").VisualEvidence[];
+}): AgentChatMessage {
+  const text = formatAgentUserPrompt(options);
+  const evidence = Array.isArray(options.visualEvidence) ? options.visualEvidence : [];
+  const imageBlocks = visualEvidenceImageBlocks(evidence);
+  if (imageBlocks.length === 0) {
+    return { role: "user", content: text };
+  }
+  return {
+    role: "user",
+    content: [
+      { type: "text", text },
+      ...imageBlocks
+    ]
+  };
 }
 
 function scopedAgentConfig(config: LabAgentConfig, profile: AgentProfile): LabAgentConfig {

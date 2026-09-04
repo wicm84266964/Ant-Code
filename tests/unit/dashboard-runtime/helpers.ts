@@ -729,8 +729,12 @@ export function createQuestionGateway() {
     const toolResults = parsed.toolResults ?? [];
     const answerText = JSON.stringify(toolResults);
     const cancelled = toolResults.some((result) => {
+      const text = String(result.content ?? "");
+      if (/\bcancelled=true\b/.test(text)) {
+        return true;
+      }
       try {
-        return JSON.parse(result.content)?.result?.cancelled === true;
+        return JSON.parse(text)?.result?.cancelled === true;
       } catch {
         return false;
       }

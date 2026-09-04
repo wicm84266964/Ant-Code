@@ -374,7 +374,7 @@ export function StatusBar({ session, cwd = "", activity, pulse = 0, detailMode =
   const providerBrief = Number.isFinite(context.providerPromptTokens)
     ? ` provider ${formatTokenCount(context.providerPromptTokens)}`
     : "";
-  const contextBrief = `ctx≈${formatTokenCount(context.messageTokens)}/${formatTokenCount(primaryTokenLimit(context))}${inputBrief}${providerBrief} tok c${context.compacted}`;
+  const contextBrief = `ctx≈${formatTokenCount(context.livePromptTokens ?? context.promptTokens ?? context.messageTokens)}/${formatTokenCount(primaryTokenLimit(context))}${inputBrief}${providerBrief} tok c${context.compacted}`;
   const activityStatus = activity?.status ?? "idle";
   const activityPrefix = isStaticActivityStatus(activityStatus)
     ? ""
@@ -588,7 +588,7 @@ export function CompactSideSummary({ session, activity }: TuiViewProps & { sessi
     : "";
   return h(Box, { paddingX: 1 },
     h(Text, { dimColor: true },
-      `状态=${activity?.status ?? "idle"} | 模型上下文=${formatTokenCount(context.messageTokens)}/${formatTokenCount(primaryTokenLimit(context))} tokens（估算）${inputBrief}${providerBrief} 压缩=${context.compacted} | 轮次=${session.turnCount} | 工具=${activity?.toolCount ?? 0} | 审批=${activity?.approvalCount ?? 0}`)
+      `状态=${activity?.status ?? "idle"} | 模型上下文=${formatTokenCount(context.livePromptTokens ?? context.promptTokens ?? context.messageTokens)}/${formatTokenCount(primaryTokenLimit(context))} tokens（估算）${inputBrief}${providerBrief} 压缩=${context.compacted} | 轮次=${session.turnCount} | 工具=${activity?.toolCount ?? 0} | 审批=${activity?.approvalCount ?? 0}`)
   );
 }
 
@@ -1104,7 +1104,7 @@ function statusPanelLines(session: AgentSession, activity: TuiActivity = EMPTY_A
     line(permissionModeDescription(session.permissionMode ?? "plan"), true),
     line(""),
     line("上下文", true),
-    line(`模型上下文：${formatTokenCount(context.messageTokens)}/${formatTokenCount(primaryTokenLimit(context))} tokens（本地估算）`),
+    line(`模型上下文：${formatTokenCount(context.livePromptTokens ?? context.promptTokens ?? context.messageTokens)}/${formatTokenCount(primaryTokenLimit(context))} tokens（本地估算）`),
     ...(Number.isFinite(context.promptTokens)
       ? [line(`最近模型输入：${formatTokenCount(context.promptTokens)}/${formatTokenCount(primaryTokenLimit(context))} tokens（本地估算）`, true)]
       : []),

@@ -388,7 +388,7 @@ export function createContextPanel(options: { session: AgentSession; compactResu
       ...resultLines,
       ...(resultLines.length > 0 ? [line("")] : []),
       line("窗口", false, "cyan"),
-      line(`当前模型上下文：${formatTokenCount(summary.messageTokens)}/${formatTokenCount(primaryTokenLimit(summary))} tokens（估算）`),
+      line(`当前模型上下文：${formatTokenCount(summary.livePromptTokens ?? summary.promptTokens ?? summary.messageTokens)}/${formatTokenCount(primaryTokenLimit(summary))} tokens（估算）`),
       ...(Number.isFinite(summary.promptTokens)
         ? [line(`最近模型输入：${formatTokenCount(summary.promptTokens)}/${formatTokenCount(primaryTokenLimit(summary))} tokens（估算）`, true)]
         : []),
@@ -1482,7 +1482,7 @@ function formatContextBrief(summary: ContextSummary) {
   const provider = Number.isFinite(summary.providerPromptTokens)
     ? `, Provider=${formatProviderUsageBrief(summary)}`
     : "";
-  return `模型上下文=${formatTokenCount(summary.messageTokens)}/${formatTokenCount(primaryTokenLimit(summary))}（估算）${latestInput}${localLimit}${provider}, 压缩=${summary.compacted}, 摘要=${formatTokenCount(summary.summaryTokens)} tokens`;
+  return `模型上下文=${formatTokenCount(summary.livePromptTokens ?? summary.promptTokens ?? summary.messageTokens)}/${formatTokenCount(primaryTokenLimit(summary))}（估算）${latestInput}${localLimit}${provider}, 压缩=${summary.compacted}, 摘要=${formatTokenCount(summary.summaryTokens)} tokens`;
 }
 
 function providerUsagePanelLines(usage: TokenUsageView = EMPTY_USAGE) {

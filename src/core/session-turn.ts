@@ -75,6 +75,11 @@ import {
   executeToolCalls
 } from "./session-health.ts";
 import {
+  createVisualEvidenceStore,
+  distillLiveImageBlocks,
+  registerVisualEvidence
+} from "./visual-evidence.ts";
+import {
   createTurnChangeTracker,
   createTurnMetadata,
   recordGatewayRoundRequest,
@@ -160,6 +165,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
     },
     approve: options.approvalCallback
   });
+  session.visualEvidence ??= createVisualEvidenceStore();
   const toolRuntime = createToolRuntime({
     cwd: session.cwd,
     config: session.config,
@@ -167,6 +173,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
     signal: options.signal,
     mcpRuntime,
     workflowState: session.workflow,
+    visualEvidence: session.visualEvidence,
     approve: options.approvalCallback,
     askUser: options.userInputCallback,
     parentSessionId: session.id,
@@ -264,6 +271,16 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
     return { session, output: finalOutput };
   }
 
+  for (const attachment of normalizeInputAttachments(attachments)) {
+    registerVisualEvidence(session.visualEvidence, {
+      source: "user",
+      name: attachment.name,
+      mimeType: attachment.mimeType,
+      data: attachment.data,
+      bytes: attachment.size
+    });
+  }
+
   const userMessage = buildUserTurnMessage(options.prompt, session.workflow, visionPreparation.attachments, visionPreparation.analysisText);
   let messages: SessionMessage[] = buildTurnMessages(session, userMessage);
   let toolResults: SessionToolResult[] = [];
@@ -287,6 +304,9 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
         reason: "before_gateway_request"
       });
     }
+    if (round > 0) {
+      messages = distillLiveImageBlocks(messages, session.visualEvidence);
+    }
     const budgetPreparation = await preparePromptBudgetForGateway({
       session,
       prompt: options.prompt,
@@ -298,7 +318,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
       env: options.env,
       hooksTrusted: options.hooksTrusted,
       eventOptions,
-      attachments: visionPreparation.attachments,
+      attachments: round === 0 ? visionPreparation.attachments : [],
       visionAnalysisText: visionPreparation.analysisText
     });
     messages = budgetPreparation.messages;

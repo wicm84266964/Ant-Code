@@ -73,6 +73,7 @@ import {
   limitTranscriptMemory,
   normalizeTranscriptArchiveState
 } from "./session-persist.ts";
+import { createVisualEvidenceStore } from "./visual-evidence.ts";
 
 export async function createSession(options: CreateSessionOptions): Promise<AgentSession> {
   let config = await loadConfig({ cwd: options.cwd, env: options.env });
@@ -158,7 +159,8 @@ export async function createSession(options: CreateSessionOptions): Promise<Agen
     title: resumed?.title ?? null,
     turnCount: resumed?.turnCount ?? 0,
     goal: normalizeSessionGoal(resumed?.goal),
-    resumedFrom: resumed
+    resumedFrom: resumed,
+    visualEvidence: createVisualEvidenceStore()
   };
   await runHooks({
     config,

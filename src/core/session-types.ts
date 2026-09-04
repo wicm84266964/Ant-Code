@@ -101,6 +101,7 @@ export type AgentSession = {
   resumedFrom: { id?: unknown; metadataPath?: unknown; contextWindow?: ReturnType<typeof createContextWindow>; messages?: SessionMessage[]; transcriptMessages?: SessionMessage[]; [key: string]: unknown } | null | undefined;
   modelSelectionInvalidation?: unknown;
   pendingModelSelectionMutation?: unknown;
+  visualEvidence?: import("./visual-evidence.ts").VisualEvidenceStore;
   [key: string]: unknown;
 };
 

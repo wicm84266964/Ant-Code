@@ -21,19 +21,25 @@ export function serializeToolResult(
   value: ToolResultValue,
   options: { maxBytes?: number } = {}
 ): SerializedToolResult {
-  const json = JSON.stringify(value, null, 2);
-  const bytes = Buffer.byteLength(json, "utf8");
+  return capToolResultText(JSON.stringify(value, null, 2), options);
+}
+
+export function capToolResultText(
+  text: string,
+  options: { maxBytes?: number; truncated?: boolean } = {}
+): SerializedToolResult {
+  const bytes = Buffer.byteLength(text, "utf8");
   const maxBytes = positiveInteger(options.maxBytes);
   if (!maxBytes || bytes <= maxBytes) {
     return {
-      content: json,
+      content: text,
       bytes,
-      truncated: false
+      truncated: options.truncated === true
     };
   }
   const markerBytes = Buffer.byteLength(TRUNCATION_MARKER, "utf8");
   const keep = Math.max(0, maxBytes - markerBytes);
-  const content = `${utf8Prefix(json, keep)}${TRUNCATION_MARKER}`;
+  const content = `${utf8Prefix(text, keep)}${TRUNCATION_MARKER}`;
   return {
     content,
     bytes: Buffer.byteLength(content, "utf8"),
