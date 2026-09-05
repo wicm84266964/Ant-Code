@@ -133,14 +133,28 @@ export async function openFile(filePath: string | null | undefined) {
       showImageLightbox(file, images.length ? images : [file], index);
     });
   } else if (file.kind === "pdf") {
-    els.previewBody.innerHTML = `<iframe class="preview-frame" title="${escapeHtml(file.name)}" src="${file.rawUrl}"></iframe>`;
+    els.previewBody.classList.add("document-preview-body");
+    els.previewBody.innerHTML = `
+      <div class="pdf-preview">
+        <header class="office-preview-header">
+          <div>
+            <strong>${escapeHtml(file.name)}</strong>
+            <span>PDF 预览</span>
+          </div>
+          ${localOpenButtonHtml(file.relativePath)}
+        </header>
+        <iframe class="preview-frame" title="${escapeHtml(file.name)}" src="${file.rawUrl}"></iframe>
+      </div>
+    `;
   } else if (file.kind === "office-preview") {
     els.previewBody.classList.add("document-preview-body");
     els.previewBody.replaceChildren(renderOfficePreview(file));
   } else if (file.kind === "table-preview") {
     els.previewBody.classList.add("document-preview-body");
     els.previewBody.replaceChildren(renderTablePreview(file));
-  } else if (file.kind === "office" || file.kind === "binary" || file.kind === "download") {
+  } else if (file.kind === "office") {
+    els.previewBody.innerHTML = `<div class="office-card"><strong>${escapeHtml(file.name)}</strong><p>${escapeHtml(file.message ?? "此文件第一版不直接预览。")}</p><p>${escapeHtml(file.relativePath)}</p>${localOpenButtonHtml(file.relativePath)}</div>`;
+  } else if (file.kind === "binary" || file.kind === "download") {
     const download = file.downloadOnly ? ` download="${escapeHtml(file.name)}"` : "";
     const target = file.downloadOnly ? "" : ` target="_blank"`;
     els.previewBody.innerHTML = `<div class="office-card"><strong>${escapeHtml(file.name)}</strong><p>${escapeHtml(file.message ?? "此文件第一版不直接预览。")}</p><p>${escapeHtml(file.relativePath)}</p><a class="open-file" href="${file.rawUrl}"${download}${target} rel="noopener noreferrer">${file.downloadOnly ? "下载文件" : "打开文件"}</a></div>`;
@@ -166,6 +180,50 @@ export async function openFile(filePath: string | null | undefined) {
   }
 }
 
+export function localOpenButtonHtml(relativePath: string | null | undefined) {
+  return `<button type="button" class="open-file" data-open-local="${escapeAttribute(relativePath ?? "")}" title="用系统应用打开">打开</button>`;
+}
+
+export function handleLocalFileOpenClick(event: Event) {
+  const button = eventTargetOf(event).closest("[data-open-local]");
+  if (!(button instanceof HTMLElement)) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  void openLocalFile(button.getAttribute("data-open-local") ?? "", button);
+}
+
+export async function openLocalFile(filePath: string, button: HTMLElement | null = null) {
+  const relativePath = String(filePath ?? "").trim();
+  if (!relativePath) {
+    showError("没有可打开的本地文件路径");
+    return;
+  }
+  const label = button?.textContent ?? "打开";
+  if (button) {
+    button.setAttribute("disabled", "true");
+    button.textContent = "正在打开…";
+  }
+  try {
+    const result = await postJson("/api/files/open", {
+      path: relativePath,
+      sessionId: state.currentSessionId ?? ""
+    }).catch((error: unknown): DashboardApiResult => ({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error)
+    }));
+    if (!result.ok) {
+      showError(result.error ?? "无法打开本地文件");
+    }
+  } finally {
+    if (button) {
+      button.removeAttribute("disabled");
+      button.textContent = label;
+    }
+  }
+}
+
 export function renderOfficePreview(file: DashboardFile) {
   if (file.table) {
     return renderTablePreview(file);
@@ -175,14 +233,13 @@ export function renderOfficePreview(file: DashboardFile) {
   article.tabIndex = 0;
   article.setAttribute("aria-label", `${file.name} 轻量预览`);
   const meta = officePreviewMeta(file);
-  const openHref = file.rawUrl ?? rawFileUrl(file.relativePath);
   article.innerHTML = `
     <header class="office-preview-header">
       <div>
         <strong>${escapeHtml(file.name)}</strong>
         <span>${escapeHtml(meta)}</span>
       </div>
-      <a class="open-file" href="${openHref}" target="_blank" rel="noreferrer">打开</a>
+      ${localOpenButtonHtml(file.relativePath)}
     </header>
     ${officePreviewBodyHtml(file)}
     ${file.truncated ? `<div class="office-preview-note">仅显示前 ${formatNumber(file.content?.length ?? 0)} 字符，完整内容请打开文件。</div>` : ""}
@@ -211,7 +268,6 @@ export function renderTablePreview(file: DashboardFile) {
   article.tabIndex = 0;
   article.setAttribute("aria-label", `${file.name} 表格预览`);
   const table = normalizeTablePreview(file.table);
-  const openHref = file.rawUrl ?? rawFileUrl(file.relativePath);
   const meta = tablePreviewMeta(file, table);
   article.innerHTML = `
     <header class="office-preview-header">
@@ -221,7 +277,7 @@ export function renderTablePreview(file: DashboardFile) {
       </div>
       <div class="office-preview-actions">
         <button class="open-file table-expand-button" type="button">放大</button>
-        <a class="open-file" href="${openHref}" target="_blank" rel="noreferrer">打开</a>
+        ${localOpenButtonHtml(file.relativePath)}
       </div>
     </header>
     <div class="table-preview-button" role="button" tabindex="0" aria-label="放大查看 ${escapeHtml(file.name)}">
@@ -888,8 +944,10 @@ export function messageDisplayText(content: unknown) {
 
 export function userMessageDisplayText(text: string | null | undefined, attachments: unknown = []) {
   const lines = [String(text ?? "").trim()].filter(Boolean);
-  const imageLines = normalizeAttachmentMetadata(attachments).map(imageAttachmentLine);
-  return [...lines, ...imageLines].join("\n");
+  const meta = normalizeAttachmentMetadata(attachments);
+  const imageLines = meta.filter((item) => item.type === "image").map(imageAttachmentLine);
+  const documentLines = meta.filter((item) => item.type === "document").map(documentAttachmentLine);
+  return [...lines, ...documentLines, ...imageLines].join("\n");
 }
 
 export function normalizeAttachmentMetadata(attachments: unknown) {
@@ -897,13 +955,84 @@ export function normalizeAttachmentMetadata(attachments: unknown) {
     return [];
   }
   return attachments
-    .filter((item) => item && typeof item === "object" && item.type === "image")
+    .filter((item) => item && typeof item === "object" && (item.type === "image" || item.type === "document"))
     .map((item) => ({
-      type: "image",
-      name: String(item.name ?? "image"),
-      mimeType: String(item.mimeType ?? item.mime_type ?? "image"),
-      size: Number.isFinite(Number(item.size)) ? Number(item.size) : Number(item.bytes ?? item.sizeBytes ?? 0)
+      type: item.type === "document" ? "document" : "image",
+      name: String(item.name ?? (item.type === "document" ? "document" : "image")),
+      mimeType: String(item.mimeType ?? item.mime_type ?? (item.type === "document" ? "document" : "image")),
+      size: Number.isFinite(Number(item.size)) ? Number(item.size) : Number(item.bytes ?? item.sizeBytes ?? 0),
+      path: String(item.path ?? "").trim()
     }));
+}
+
+export function transcriptMessageAttachments(message: unknown) {
+  const record = isPlainObject(message) ? message : {};
+  const stored = normalizeAttachmentMetadata(record.attachments);
+  if (stored.length > 0) {
+    return stored;
+  }
+  return attachmentsFromPlaceholderText(messageDisplayText(record.content));
+}
+
+export function userTranscriptDisplayText(content: unknown, attachments: unknown = []) {
+  const chips = normalizeAttachmentMetadata(attachments);
+  if (chips.length === 0) {
+    return messageDisplayText(content);
+  }
+  if (typeof content === "string") {
+    return stripAttachmentPlaceholders(content);
+  }
+  if (!Array.isArray(content)) {
+    return "";
+  }
+  return content.map((item) => {
+    if (typeof item === "string") {
+      return stripAttachmentPlaceholders(item);
+    }
+    if (item && typeof item === "object" && "text" in item) {
+      return stripAttachmentPlaceholders(String(item.text ?? ""));
+    }
+    return "";
+  }).filter(Boolean).join("\n");
+}
+
+function attachmentsFromPlaceholderText(text: string) {
+  const items: Array<{ type: string; name: string; mimeType: string; size: number; path: string }> = [];
+  const pattern = /\[(文档附件|图片附件)：([^\]]+)\]/g;
+  let match = pattern.exec(text);
+  while (match) {
+    const name = String(match[2] ?? "").split(" · ")[0].trim();
+    if (name) {
+      items.push({
+        type: match[1] === "图片附件" ? "image" : "document",
+        name,
+        mimeType: "",
+        size: 0,
+        path: ""
+      });
+    }
+    match = pattern.exec(text);
+  }
+  return items;
+}
+
+function stripAttachmentPlaceholders(text: string) {
+  return String(text ?? "")
+    .split(/\n/)
+    .filter((line) => {
+      const value = line.trim();
+      return !value.startsWith("[文档附件：") && !value.startsWith("[图片附件：");
+    })
+    .join("\n")
+    .trim();
+}
+
+export function documentAttachmentLine(item: Record<string, unknown>) {
+  const parts = [
+    item.name ? String(item.name) : "document",
+    Number.isFinite(Number(item.size)) && Number(item.size) > 0 ? formatBytes(item.size) : ""
+  ].filter(Boolean);
+  return `[文档附件：${parts.join(" · ")}]`;
 }
 
 export function imageAttachmentLine(item: Record<string, unknown>) {

@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+## 2.0.8 - 2026-09-06
+
+This is a small Dashboard workflow release on the 2.0 TypeScript runtime.
+The paperclip can attach PDF, docx, xlsx, pptx, and common text files.
+Documents are saved under `ant-code-uploads/` with a bounded preview for
+the model. The right pane can preview those files, and Open launches the
+workspace copy with the system app. Permission mode ids are unchanged.
+
+### Added
+
+- Dashboard paperclip accepts PDF / Office Open XML / text documents in
+  addition to images. Documents are stored in `ant-code-uploads/` and
+  ingested through `document_intake`.
+- PDF text-layer extraction via `unpdf`. Scanned PDFs are not OCR'd;
+  composer-attached PDFs with no text layer send a few page images to
+  the configured vision model.
+- Right-pane preview for PDF, extracted Office text/tables, and
+  clickable attachment chips after refresh.
+- Open uses the OS file association on the workspace copy.
+- `ant-code-uploads/` is added to the project `.gitignore` on send.
+
+### Upgrade
+
+```sh
+git pull
+npm ci
+npm run verify:install
+npm link
+ant-code --version
+```
+
+`ant-code --version` should print `2.0.8`. Restart a running Dashboard
+and hard-refresh the browser. Gateway config and `.lab-agent` sessions
+do not need to be recreated.
+
 ## 2.0.7 - 2026-09-05
 
 This is a dependency security patch on the 2.0 TypeScript runtime.

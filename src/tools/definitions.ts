@@ -538,7 +538,7 @@ export const BUILT_IN_TOOLS = Object.freeze([
   },
   {
     name: "document_intake",
-    description: "Extract local text or Markdown from txt/md/html/xml/json/csv and lightweight Office documents inside the workspace, or an approved/full-access local path. Returns full extracted content unless maxBytes is explicitly supplied.",
+    description: "Extract local text from txt/md/html/xml/json/csv, lightweight Office (docx/pptx/xlsx), and the text layer of PDF files inside the workspace, or an approved/full-access local path. PDFs default to a 20-page window; pass pageStart/maxPages to continue. Does not OCR scanned pages. Returns extracted content unless maxBytes is explicitly supplied.",
     risk: "document",
     supportsAbort: false,
     inputSchema: {
@@ -546,7 +546,9 @@ export const BUILT_IN_TOOLS = Object.freeze([
       required: ["path"],
       properties: {
         path: { type: "string" },
-        maxBytes: { type: "number" }
+        maxBytes: { type: "number" },
+        pageStart: { type: "number" },
+        maxPages: { type: "number" }
       }
     }
   },

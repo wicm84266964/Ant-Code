@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import zlib from "node:zlib";
 import { Worker } from "node:worker_threads";
+import { extractText, getDocumentProxy } from "unpdf";
 import { isInside } from "../permissions/policy-engine.ts";
 import { normalizeToolPath } from "../permissions/path-utils.ts";
 import { htmlToMarkdown } from "./web-tools.ts";
@@ -13,6 +14,12 @@ const OFFICE_ZIP_LIMITS = Object.freeze({
   maxTotalUncompressedBytes: 64 * 1024 * 1024,
   maxCompressionRatio: 200,
   timeoutMs: 3000
+});
+
+const PDF_LIMITS = Object.freeze({
+  maxBytes: 40 * 1024 * 1024,
+  defaultMaxPages: 20,
+  maxPagesCap: 50
 });
 
 type OfficeZipLimits = {
@@ -36,6 +43,10 @@ type DocumentParseResult = {
     truncatedRows: boolean;
     truncatedColumns: boolean;
   }>;
+  pageStart?: number;
+  pageEnd?: number;
+  totalPages?: number;
+  truncated?: boolean;
 };
 
 type ZipLocalEntry = {
@@ -57,6 +68,8 @@ export async function documentIntakeTool(input: {
   cwd: string;
   path?: unknown;
   maxBytes?: unknown;
+  pageStart?: unknown;
+  maxPages?: unknown;
   policy?: Record<string, unknown>;
 }) {
   const workspace = path.resolve(input.cwd);
@@ -76,7 +89,9 @@ export async function documentIntakeTool(input: {
   const configuredMaxBytes = positiveIntegerOrNull(input.maxBytes);
   const maxBytes = configuredMaxBytes ?? ([".docx", ".pptx", ".xlsx"].includes(ext)
     ? OFFICE_ZIP_LIMITS.maxArchiveBytes
-    : null);
+    : ext === ".pdf"
+      ? PDF_LIMITS.maxBytes
+      : null);
   if (maxBytes && stat.size > maxBytes) {
     return {
       path: toDisplayPath(workspace, target),
@@ -88,15 +103,22 @@ export async function documentIntakeTool(input: {
   }
 
   const buffer = await fs.readFile(target);
-  const parsed = await parseDocumentBufferAsync(buffer, ext);
+  const parsed = await parseDocumentBufferAsync(buffer, ext, {
+    pageStart: input.pageStart,
+    maxPages: input.maxPages
+  });
   return {
     path: toDisplayPath(workspace, target),
     kind: parsed.kind,
     supported: parsed.supported,
     bytes: stat.size,
     content: parsed.content,
-    contentTruncated: false,
-    notes: parsed.notes
+    contentTruncated: parsed.truncated === true,
+    notes: parsed.notes,
+    pageStart: parsed.pageStart,
+    pageEnd: parsed.pageEnd,
+    totalPages: parsed.totalPages,
+    truncated: parsed.truncated
   };
 }
 
@@ -141,10 +163,7 @@ export function parseDocumentBuffer(buffer: Buffer, ext: string, options: Record
       kind: "pdf",
       supported: false,
       content: "",
-      notes: [
-        "PDF binary parsing is not bundled in the Ant Code core.",
-        "Use the document-intake skill with MarkItDown installed, or convert the PDF to text/Markdown first."
-      ]
+      notes: ["PDF text-layer extraction is async; use parseDocumentBufferAsync or document_intake."]
     };
   }
 
@@ -157,11 +176,64 @@ export function parseDocumentBuffer(buffer: Buffer, ext: string, options: Record
 }
 
 export async function parseDocumentBufferAsync(buffer: Buffer, ext: string, options: Record<string, unknown> = EMPTY_RECORD) {
+  if (ext === ".pdf") {
+    return parsePdfTextLayer(buffer, options);
+  }
   if (![".docx", ".pptx", ".xlsx"].includes(ext)) {
     return parseDocumentBuffer(buffer, ext, options);
   }
   const limits = officeZipLimits(options);
   return parseOfficeArchiveInWorker(buffer, ext, limits);
+}
+
+async function parsePdfTextLayer(buffer: Buffer, options: Record<string, unknown> = EMPTY_RECORD): Promise<DocumentParseResult> {
+  try {
+    const pdf = await getDocumentProxy(new Uint8Array(buffer));
+    const extracted = await extractText(pdf, { mergePages: false });
+    const pages = Array.isArray(extracted.text) ? extracted.text.map((page) => String(page ?? "")) : [String(extracted.text ?? "")];
+    const totalPages = extracted.totalPages || pages.length;
+    const pageStart = Math.min(totalPages || 1, positiveIntegerOrNull(options.pageStart) ?? 1);
+    const requestedPages = positiveIntegerOrNull(options.maxPages) ?? PDF_LIMITS.defaultMaxPages;
+    const maxPages = Math.min(PDF_LIMITS.maxPagesCap, requestedPages);
+    const slice = pages.slice(pageStart - 1, pageStart - 1 + maxPages);
+    const pageEnd = pageStart - 1 + slice.length;
+    const truncated = pageStart > 1 || pageEnd < totalPages;
+    const joined = slice
+      .map((page, index) => `--- page ${pageStart + index} ---\n${page.replace(/\s+$/g, "")}`)
+      .join("\n\n")
+      .trim();
+    const visibleChars = joined.replace(/\s+/g, "").length;
+    const notes = [
+      `Extracted the PDF text layer from pages ${pageStart}-${Math.max(pageStart, pageEnd)} of ${totalPages}.`
+    ];
+    if (truncated) {
+      notes.push(`This call was windowed to at most ${maxPages} pages. Pass pageStart=${pageEnd + 1} to continue.`);
+    }
+    if (visibleChars < 40) {
+      notes.push("Very little extractable text was found. This PDF may be scanned images; OCR is not bundled.");
+    }
+    return {
+      kind: "pdf",
+      supported: true,
+      content: joined,
+      notes,
+      pageStart,
+      pageEnd,
+      totalPages,
+      truncated
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      kind: "pdf",
+      supported: false,
+      content: "",
+      notes: [
+        `PDF text-layer extraction failed: ${message}`,
+        "Password-protected or damaged PDFs are not opened. Scanned PDFs need an external OCR converter."
+      ]
+    };
+  }
 }
 
 function officeZipLimits(options: Record<string, unknown> = EMPTY_RECORD): OfficeZipLimits {

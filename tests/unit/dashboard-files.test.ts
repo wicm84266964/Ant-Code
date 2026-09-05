@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { collectSessionFiles, previewFile, readRawFile, resolveWorkspaceFile } from "../../src/dashboard/files.ts";
+import { collectSessionFiles, previewFile, readRawFile, resolveSystemOpenFile, resolveWorkspaceFile } from "../../src/dashboard/files.ts";
 import { parseDocumentBufferAsync } from "../../src/tools/document-tools.ts";
 import { createDocxBuffer, createOfficeZip, createXlsxBuffer } from "../fixtures/office-fixtures.ts";
 
@@ -232,6 +232,28 @@ test("dashboard collects workflow and mentioned files inside workspace", async (
   assert.equal(files.some((file) => file.relativePath === "report.md"), true);
   assert.equal(files.some((file) => file.relativePath === "chart.png"), true);
   assert.equal(files.some((file) => file.path.includes("secret.txt")), false);
+});
+
+test("dashboard only opens document-like workspace files with the system app", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-files-open-"));
+  await fs.writeFile(path.join(cwd, "report.docx"), createDocxBuffer("正文"));
+  await fs.writeFile(path.join(cwd, "evil.exe"), Buffer.from("MZ"));
+  await fs.mkdir(path.join(cwd, "folder"));
+
+  const allowed = await resolveSystemOpenFile(cwd, "report.docx");
+  const blocked = await resolveSystemOpenFile(cwd, "evil.exe");
+  const missing = await resolveSystemOpenFile(cwd, "gone.docx");
+  const directory = await resolveSystemOpenFile(cwd, "folder");
+
+  assert.equal(allowed.ok, true);
+  assert.equal(path.basename(allowed.path), "report.docx");
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.status, 403);
+  assert.equal(blocked.code, "FILE_OPEN_NOT_ALLOWED");
+  assert.equal(missing.ok, false);
+  assert.equal(missing.status, 404);
+  assert.equal(directory.ok, false);
+  assert.equal(directory.status, 404);
 });
 
 test("dashboard skips mentioned image files that do not exist", async () => {

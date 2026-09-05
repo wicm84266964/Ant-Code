@@ -285,16 +285,57 @@ export function normalizeUserTurnMessage(message: SessionMessage | string | Reco
 
 export function persistableUserTurnMessage(prompt: string, attachments: unknown = []): SessionMessage {
   const normalized = normalizeInputAttachments(attachments);
-  if (normalized.length === 0) {
-    return { role: "user", content: prompt };
+  const documents = Array.isArray(attachments)
+    ? attachments.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && item.type === "document")
+    : [];
+  const documentBlocks = documents.map((item) => ({
+    type: "text",
+    text: `[文档附件：${String(item.name ?? "document")}]`
+  }));
+  const chips = persistableAttachmentChips(attachments);
+  const message: SessionMessage = normalized.length === 0 && documentBlocks.length === 0
+    ? { role: "user", content: prompt }
+    : {
+        role: "user",
+        content: [
+          ...(String(prompt ?? "").trim() ? [{ type: "text", text: String(prompt ?? "") }] : []),
+          ...documentBlocks,
+          ...normalized.map(imageAttachmentSummaryBlock)
+        ]
+      };
+  if (chips.length > 0) {
+    message.attachments = chips;
   }
-  return {
-    role: "user",
-    content: [
-      ...(String(prompt ?? "").trim() ? [{ type: "text", text: String(prompt ?? "") }] : []),
-      ...normalized.map(imageAttachmentSummaryBlock)
-    ]
-  };
+  return message;
+}
+
+export function persistableAttachmentChips(attachments: unknown = []): NonNullable<SessionMessage["attachments"]> {
+  if (!Array.isArray(attachments)) {
+    return [];
+  }
+  const chips: NonNullable<SessionMessage["attachments"]> = [];
+  for (const item of attachments) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const record = item as Record<string, unknown>;
+    const type = record.type === "document" ? "document" : record.type === "image" ? "image" : null;
+    if (!type) {
+      continue;
+    }
+    const storedPath = String(record.path ?? "").trim().replace(/\\/g, "/");
+    chips.push({
+      type,
+      name: String(record.name ?? type).trim().slice(0, 160) || type,
+      mimeType: String(record.mimeType ?? record.mime_type ?? "").trim(),
+      size: nonNegativeInteger(record.size ?? record.bytes ?? record.sizeBytes, 0) ?? 0,
+      ...(storedPath ? { path: storedPath } : {})
+    });
+    if (chips.length >= 10) {
+      break;
+    }
+  }
+  return chips;
 }
 
 
@@ -366,7 +407,7 @@ export function messagesForModelContext(messages: unknown = []): SessionMessage[
     if (!message || typeof message !== "object") {
       return [];
     }
-    const { interruptedDraft: _interruptedDraft, ...rest } = message;
+    const { interruptedDraft: _interruptedDraft, attachments: _attachments, ...rest } = message;
     return [rest];
   });
 }

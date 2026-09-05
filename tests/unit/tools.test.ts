@@ -13,6 +13,10 @@ import { tsDiagnosticsTool, tsFindDefinitionTool, tsFindReferencesTool, tsSymbol
 import { scrubEnvironment } from "../../src/tools/env-scrubber.ts";
 import { createMcpRuntime } from "../../src/mcp/runtime.ts";
 import { documentIntakeTool } from "../../src/tools/document-tools.ts";
+import { ingestComposerDocuments, storeComposerAttachments } from "../../src/tools/composer-documents.ts";
+import { persistableUserTurnMessage } from "../../src/core/session-messages.ts";
+import { persistableContextMessages, persistableTranscriptMessages } from "../../src/core/session-persist.ts";
+import { encodePng } from "../../src/tools/png-encode.ts";
 import { serializeToolResult } from "../../src/tools/result.ts";
 import { createToolRuntime } from "../../src/tools/runtime.ts";
 import {
@@ -1960,6 +1964,107 @@ test("document_intake extracts markdown from local HTML documents", async () => 
   assert.match(result.content, /Alpha beta/);
 });
 
+test("document_intake extracts PDF text-layer windows", async () => {
+  const cwd = await makeTempWorkspace();
+  await fs.writeFile(path.join(cwd, "paper.pdf"), twoPageHelloPdf());
+
+  const first = await documentIntakeTool({ cwd, path: "paper.pdf", maxPages: 1 });
+  const second = await documentIntakeTool({ cwd, path: "paper.pdf", pageStart: 2, maxPages: 1 });
+
+  assert.equal(first.supported, true);
+  assert.equal(first.kind, "pdf");
+  assert.equal(first.totalPages, 2);
+  assert.equal(first.truncated, true);
+  assert.match(first.content, /Page One/);
+  assert.doesNotMatch(first.content, /Page Two/);
+  assert.match(second.content, /Page Two/);
+  assert.doesNotMatch(second.content, /Page One/);
+});
+
+test("encodePng writes a PNG signature for raw pixels", () => {
+  const png = encodePng(1, 1, 3, Buffer.from([255, 0, 0]));
+  assert.deepEqual(png.subarray(0, 8), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+});
+
+test("composer document ingest saves an attached PDF and extracts its text layer", async () => {
+  const cwd = await makeTempWorkspace();
+  const pdf = twoPageHelloPdf();
+  const ingested = await ingestComposerDocuments({
+    cwd,
+    attachments: [{
+      type: "document",
+      name: "paper.pdf",
+      mimeType: "application/pdf",
+      size: pdf.length,
+      data: pdf.toString("base64")
+    }]
+  });
+  assert.match(ingested.promptAppendix, /Attached document: paper\.pdf/);
+  assert.match(ingested.promptAppendix, /Page One/);
+  assert.match(ingested.promptAppendix, /Do not glob the workspace/);
+  assert.equal(ingested.visionImages.length, 0);
+  const saved = await fs.readdir(path.join(cwd, "ant-code-uploads"));
+  assert.equal(saved.some((name) => name.endsWith("paper.pdf")), true);
+});
+
+test("composer uploads add gitignore entries so ant-code-uploads stays untracked", async () => {
+  const cwd = await makeTempWorkspace();
+  const pdf = twoPageHelloPdf();
+  await storeComposerAttachments(cwd, [{
+    type: "document",
+    name: "paper.pdf",
+    data: pdf.toString("base64")
+  }]);
+  const rootIgnore = await fs.readFile(path.join(cwd, ".gitignore"), "utf8");
+  const innerIgnore = await fs.readFile(path.join(cwd, "ant-code-uploads", ".gitignore"), "utf8");
+  assert.match(rootIgnore, /ant-code-uploads\//);
+  assert.match(innerIgnore, /^\*\n!\.gitignore\n$/);
+  await storeComposerAttachments(cwd, [{
+    type: "document",
+    name: "second.pdf",
+    data: pdf.toString("base64")
+  }]);
+  const again = await fs.readFile(path.join(cwd, ".gitignore"), "utf8");
+  assert.equal(again.split("ant-code-uploads/").length - 1, 1);
+});
+
+test("transcript persistence keeps composer attachment chips without bytes", () => {
+  const message = persistableUserTurnMessage("总结一下", [{
+    type: "document",
+    name: "note.docx",
+    mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    size: 12,
+    path: "ant-code-uploads/1-note.docx",
+    data: "AAAA"
+  }]);
+  const transcript = persistableTranscriptMessages([message], { goal: { enabled: false } });
+  const model = persistableContextMessages([message]);
+
+  assert.equal(message.attachments[0].path, "ant-code-uploads/1-note.docx");
+  assert.equal(message.attachments[0].data, undefined);
+  assert.equal(transcript[0].attachments[0].path, "ant-code-uploads/1-note.docx");
+  assert.equal(transcript[0].attachments[0].data, undefined);
+  assert.equal(model[0].attachments, undefined);
+});
+
+test("composer document ingest previews large text instead of dumping it into the prompt", async () => {
+  const cwd = await makeTempWorkspace();
+  const csv = `id,name\n${Array.from({ length: 4000 }, (_, index) => `${index},row-${index}`).join("\n")}\n`;
+  const ingested = await ingestComposerDocuments({
+    cwd,
+    attachments: [{
+      type: "document",
+      name: "table.csv",
+      mimeType: "text/csv",
+      size: Buffer.byteLength(csv),
+      data: Buffer.from(csv).toString("base64")
+    }]
+  });
+  assert.match(ingested.promptAppendix, /preview truncated/);
+  assert.equal(ingested.promptAppendix.includes("row-3999"), false);
+  assert.ok(ingested.promptAppendix.length < csv.length);
+});
+
 test("document_intake rejects oversized Office archives before parsing", async () => {
   const cwd = await makeTempWorkspace();
   const target = path.join(cwd, "oversized.docx");
@@ -2613,6 +2718,26 @@ test("background terminal liveness sampling never runs tasklist synchronously", 
   assert.match(source, /processSnapshotInFlight/);
   assert.match(source, /scheduleProcessLivenessSnapshot\(\)/);
 });
+
+function twoPageHelloPdf() {
+  return Buffer.from(`%PDF-1.4
+1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj
+2 0 obj<</Type/Pages/Kids[3 0 R 6 0 R]/Count 2>>endobj
+3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj
+4 0 obj<</Length 51>>stream
+BT /F1 12 Tf 20 100 Td (Page One) Tj ET
+endstream
+endobj
+5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj
+6 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Contents 7 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj
+7 0 obj<</Length 51>>stream
+BT /F1 12 Tf 20 100 Td (Page Two) Tj ET
+endstream
+endobj
+trailer<</Root 1 0 R>>
+%%EOF
+`);
+}
 
 async function makeTempWorkspace() {
   return fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));

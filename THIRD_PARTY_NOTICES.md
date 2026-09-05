@@ -12,6 +12,7 @@ runtime assets from the following third-party packages:
 | `react` | UI runtime dependency | MIT |
 | `katex` | math rendering runtime dependency; Dashboard CSS and font assets | MIT |
 | `mermaid` | Dashboard diagram rendering bundle input | MIT |
+| `unpdf` | PDF text-layer extraction for document_intake and Dashboard paperclip | MIT |
 | `yaml` | Dashboard YAML parsing bundle input | ISC |
 | `esbuild` | development/build tool for Dashboard assets | MIT |
 | `postject` | development/build tool for optional executable packaging | MIT |

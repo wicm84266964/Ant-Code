@@ -41,6 +41,12 @@ const REVIEWED_RUNTIME_DEPENDENCIES = new Map([
     license: "Apache-2.0",
     provenanceMarker: "open_source: TypeScript compiler and language service, Apache-2.0 licensed, public npm package"
   }],
+  ["unpdf", {
+    versionSpec: "^1.8.1",
+    installedVersion: "1.8.1",
+    license: "MIT",
+    provenanceMarker: "open_source: unpdf PDF text extraction library, MIT licensed, public npm package"
+  }],
   ["yaml", {
     versionSpec: "^2.9.0",
     installedVersion: "2.9.0",

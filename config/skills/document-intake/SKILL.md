@@ -15,8 +15,10 @@ argument_hint: 提供文档路径、需要提取的内容类型、摘要粒度�
 2. 优先调用 `document_intake`：
    - 支持 txt/md/json/csv/xml/html。
    - 支持轻量解析 docx/pptx/xlsx。
-   - PDF 在核心实现中只给出边界提示。
-3. 如果用户允许，并且本机安装了 MarkItDown，可通过受权限控制的 shell 命令做额外转换。
+   - PDF 抽取内嵌文本层，默认每次最多 20 页；需要后续页时传 `pageStart`。
+   - Dashboard 回形针也可直接附上这些文件；发送时会写入 `ant-code-uploads/` 并抽文本。
+   - 扫描件没有 OCR。回形针附上的无文本层 PDF 会把前几页内嵌图送给视觉模型。
+3. 只有文本层为空、且用户允许时，才考虑本机 MarkItDown 或其他 OCR 转换器。
 4. 对大文件只提取目录、标题、表格预览和关键段落，不输出全文。
 
 ## 输出要求
