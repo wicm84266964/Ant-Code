@@ -3065,12 +3065,25 @@ button {
   padding: 4px;
 }
 
-.attachment-chip img {
+.attachment-chip img,
+.attachment-chip-file {
   aspect-ratio: 1;
   border-radius: 6px;
   height: 28px;
   object-fit: cover;
   width: 28px;
+}
+
+.attachment-chip-file {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-muted);
+  display: flex;
+  font-size: 10px;
+  font-weight: 700;
+  justify-content: center;
+  letter-spacing: 0.02em;
+  object-fit: unset;
 }
 
 .attachment-chip span {
@@ -3116,6 +3129,29 @@ button {
 .attach-button:hover {
   background: rgba(255, 255, 255, 0.08);
   color: var(--text);
+}
+
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.message-attachments .attachment-chip {
+  align-items: center;
+  cursor: pointer;
+  display: inline-flex;
+  grid-template-columns: none;
+  max-width: min(100%, 280px);
+  min-height: 32px;
+  overflow: hidden;
+  overflow-wrap: normal;
+  padding: 6px 10px;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  word-break: normal;
 }
 
 .composer-footer {
@@ -4366,6 +4402,19 @@ textarea:focus {
   height: 70vh;
 }
 
+.pdf-preview {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+  width: 100%;
+}
+
+.pdf-preview .preview-frame {
+  height: 100%;
+  min-height: 70vh;
+}
+
 .preview-code {
   color: var(--text-soft);
   flex: 1;
@@ -4674,9 +4723,14 @@ textarea:focus {
 }
 
 .open-file {
+  background: transparent;
+  border: 0;
   color: var(--accent-2);
+  cursor: pointer;
   display: inline-flex;
+  font: inherit;
   margin-top: 8px;
+  padding: 0;
   text-decoration: none;
 }
 

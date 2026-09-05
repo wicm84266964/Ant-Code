@@ -654,6 +654,16 @@ test("dashboard renders lightweight office previews in the side panel", async ()
   assert.match(css, /\.expanded-table-scroll\s*\{[^}]*overflow: auto;/s);
   assert.doesNotMatch(css, /\.expanded-sheet-tabs\s*\{/);
   assert.doesNotMatch(css, /\.table-sheet-tabs\s*\{/);
+  assert.match(app, /postJson\("\/api\/files\/open"/);
+  assert.match(app, /data-open-local/);
+  assert.match(app, /function handleLocalFileOpenClick\(/);
+  assert.match(app, /els\.preview\.addEventListener\("click", handleLocalFileOpenClick\)/);
+  assert.match(app, /class="pdf-preview"/);
+  assert.match(app, /function transcriptMessageAttachments\(/);
+  assert.match(app, /function userTranscriptDisplayText\(/);
+  assert.match(css, /\.pdf-preview\s*\{[^}]*grid-template-rows: auto minmax\(0, 1fr\);/s);
+  assert.match(css, /\.message-attachments \.attachment-chip\s*\{[^}]*display: inline-flex;/s);
+  assert.match(css, /\.message-attachments \.attachment-chip\s*\{[^}]*white-space: nowrap;/s);
 });
 
 test("dashboard responsive, composer, focus, and scroll helpers enforce UI behavior", async () => {

@@ -56,6 +56,14 @@ export type CreateSessionOptions = {
   hooksTrusted?: boolean;
 };
 
+export type SessionAttachmentChip = {
+  type: "image" | "document";
+  name: string;
+  mimeType?: string;
+  size?: number;
+  path?: string;
+};
+
 export type SessionMessage = {
   role: string;
   content?: unknown;
@@ -66,6 +74,7 @@ export type SessionMessage = {
   toolCalls?: Array<{ id?: string; name?: string; input?: unknown }>;
   toolCallId?: string;
   interruptedDraft?: boolean;
+  attachments?: SessionAttachmentChip[];
 };
 
 export type AgentSession = {

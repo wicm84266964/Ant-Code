@@ -1,6 +1,6 @@
 {
   "name": "@ant-code/cli",
-  "version": "2.0.7",
+  "version": "2.0.8",
   "description": "AGPL-licensed local coding agent with a terminal UI, local dashboard, tool permissions, skills, MCP integration, and model gateway adapters.",
   "type": "module",
   "private": true,
@@ -96,6 +96,7 @@
     "mermaid": "^11.17.2",
     "react": "^19.2.5",
     "typescript": "6.0.3",
+    "unpdf": "^1.8.1",
     "yaml": "^2.9.0"
   },
   "devDependencies": {

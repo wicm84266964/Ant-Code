@@ -113,7 +113,7 @@ ant-code doctor
 ant-code
 ```
 
-`ant-code --version` should print `2.0.7`. If you previously linked a
+`ant-code --version` should print `2.0.8`. If you previously linked a
 JavaScript install, run `npm link` again so the global command points at
 `src/cli/index.ts`.
 

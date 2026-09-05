@@ -23,6 +23,9 @@ recordings/
 .lab-agent/
 .lab-agent/sessions/
 
+# Composer paperclip uploads in a workspace checkout
+ant-code-uploads/
+
 # Local scratch files created during manual verification
 test.txt
 test_file.txt

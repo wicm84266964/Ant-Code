@@ -59,6 +59,7 @@ import {
   normalizeInputAttachments,
   attachmentMetadataList
 } from "./session-messages.ts";
+import { ingestComposerDocuments } from "../tools/composer-documents.ts";
 import {
   formatAssistantOutput,
   analyzeAssistantOutputHealth,
@@ -110,7 +111,16 @@ import {
 
 export async function runSessionTurn(session: AgentSession, options: RunSessionTurnOptions) {
   const displayPrompt = typeof options.displayPrompt === "string" ? options.displayPrompt : options.prompt;
-  const attachments = normalizeInputAttachments(options.attachments);
+  const ingested = await ingestComposerDocuments({
+    cwd: session.cwd,
+    attachments: options.attachments,
+    existingImageCount: normalizeInputAttachments(options.attachments).length
+  });
+  const modelPrompt = [options.prompt, ingested.promptAppendix].filter((part) => String(part ?? "").trim()).join("\n\n");
+  const attachments = [
+    ...normalizeInputAttachments(options.attachments),
+    ...ingested.visionImages
+  ].slice(0, 6);
   const thinkingCapture = createThinkingCapture();
   const interruptedDraft = createInterruptedDraftCapture();
   const eventOptions = withAntEventOptions(session, {
@@ -281,7 +291,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
     });
   }
 
-  const userMessage = buildUserTurnMessage(options.prompt, session.workflow, visionPreparation.attachments, visionPreparation.analysisText);
+  const userMessage = buildUserTurnMessage(modelPrompt, session.workflow, visionPreparation.attachments, visionPreparation.analysisText);
   let messages: SessionMessage[] = buildTurnMessages(session, userMessage);
   let toolResults: SessionToolResult[] = [];
   const turnMessages: SessionMessage[] = [persistableUserTurnMessage(options.prompt, attachments)];
@@ -309,7 +319,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
     }
     const budgetPreparation = await preparePromptBudgetForGateway({
       session,
-      prompt: options.prompt,
+      prompt: modelPrompt,
       messages,
       toolResults,
       round,

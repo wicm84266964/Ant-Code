@@ -371,6 +371,10 @@ var DASHBOARD_SHUTDOWN_TIMEOUT_MS = 15e3;
 var DASHBOARD_INTERRUPT_TIMEOUT_MS = 5e3;
 var MAX_IMAGE_ATTACHMENTS = 6;
 var MAX_IMAGE_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+var MAX_DOCUMENT_ATTACHMENTS = 4;
+var MAX_DOCUMENT_ATTACHMENT_BYTES = 40 * 1024 * 1024;
+var DOCUMENT_EXTENSIONS = /* @__PURE__ */ new Set([".pdf", ".docx", ".xlsx", ".pptx", ".txt", ".md", ".markdown", ".csv", ".json", ".html", ".htm"]);
+var IMAGE_EXTENSIONS = /* @__PURE__ */ new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 var CURRENT_SESSION_STORAGE_KEY = "ant-code-dashboard-current-session";
 var DASHBOARD_CLIENT_STORAGE_KEY = "ant-code-dashboard-client-id";
 var PREVIEW_WIDTH_STORAGE_KEY = "ant-code-dashboard-preview-width";
@@ -507,6 +511,7 @@ function bindEvents() {
   });
   els.permissionMode.addEventListener("keydown", handlePermissionModeKeydown);
   els.goalMode?.addEventListener("click", () => requestGoalMode());
+  els.preview.addEventListener("click", handleLocalFileOpenClick);
   els.collapsePreview.addEventListener("click", () => {
     if (responsiveLayoutMode() === "desktop") {
       document.body.classList.toggle("preview-collapsed");
@@ -1797,32 +1802,66 @@ async function refreshNewTaskModelState2() {
   rememberNewTaskModelState();
 }
 async function addAttachmentFiles(files) {
-  const list = Array.from(files ?? []);
-  const images = list.filter((file) => file instanceof File && String(file.type ?? "").startsWith("image/"));
-  if (images.length === 0) {
+  const list = Array.from(files ?? []).filter((file) => file instanceof File);
+  if (list.length === 0) {
     return;
   }
-  const slots = Math.max(0, MAX_IMAGE_ATTACHMENTS - state.attachments.length);
-  if (slots <= 0) {
-    showError(`最多可附加 ${MAX_IMAGE_ATTACHMENTS} 张图片`);
-    return;
-  }
-  for (const file of images.slice(0, slots)) {
-    if (file.size > MAX_IMAGE_ATTACHMENT_BYTES) {
-      showError(`${file.name || "图片"} 超过 8MB，暂不发送`);
+  let ignoredUnknown = 0;
+  for (const file of list) {
+    const kind = classifyComposerFile(file);
+    if (kind === "image") {
+      const imageCount = state.attachments.filter((item) => item.type !== "document").length;
+      if (imageCount >= MAX_IMAGE_ATTACHMENTS) {
+        showError(`最多可附加 ${MAX_IMAGE_ATTACHMENTS} 张图片`);
+        continue;
+      }
+      if (file.size > MAX_IMAGE_ATTACHMENT_BYTES) {
+        showError(`${file.name || "图片"} 超过 8MB，暂不发送`);
+        continue;
+      }
+      try {
+        state.attachments.push(await readImageAttachment2(file));
+      } catch (error) {
+        showError(errorMessageOf(error) || "读取图片失败");
+      }
       continue;
     }
-    try {
-      state.attachments.push(await readImageAttachment2(file));
-    } catch (error) {
-      showError(errorMessageOf(error) || "读取图片失败");
+    if (kind === "document") {
+      const documentCount = state.attachments.filter((item) => item.type === "document").length;
+      if (documentCount >= MAX_DOCUMENT_ATTACHMENTS) {
+        showError(`最多可附加 ${MAX_DOCUMENT_ATTACHMENTS} 个文档`);
+        continue;
+      }
+      if (file.size > MAX_DOCUMENT_ATTACHMENT_BYTES) {
+        showError(`${file.name || "文档"} 超过 40MB，暂不发送`);
+        continue;
+      }
+      try {
+        state.attachments.push(await readDocumentAttachment(file));
+      } catch (error) {
+        showError(errorMessageOf(error) || "读取文档失败");
+      }
+      continue;
     }
+    ignoredUnknown += 1;
   }
-  if (images.length > slots) {
-    showError(`最多可附加 ${MAX_IMAGE_ATTACHMENTS} 张图片，已忽略多余图片`);
+  if (ignoredUnknown > 0) {
+    showError("回形针只接收图片和 PDF / Word / Excel / PPT / 文本，不支持旧版 .doc .xls .ppt");
   }
   renderAttachmentStrip2();
   updateSendButton();
+}
+function classifyComposerFile(file) {
+  const name = String(file.name ?? "");
+  const ext = name.includes(".") ? `.${name.split(".").pop()?.toLowerCase() ?? ""}` : "";
+  const mime = String(file.type ?? "").toLowerCase();
+  if (IMAGE_EXTENSIONS.has(ext) || mime === "image/png" || mime === "image/jpeg" || mime === "image/gif" || mime === "image/webp") {
+    return "image";
+  }
+  if (DOCUMENT_EXTENSIONS.has(ext) || mime === "application/pdf") {
+    return "document";
+  }
+  return "unsupported";
 }
 function readImageAttachment2(file) {
   return new Promise((resolve, reject) => {
@@ -1848,6 +1887,30 @@ function readImageAttachment2(file) {
     reader.readAsDataURL(file);
   });
 }
+function readDocumentAttachment(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("error", () => reject(new Error("读取文档失败")));
+    reader.addEventListener("load", () => {
+      const dataUrl = String(reader.result ?? "");
+      const match = dataUrl.match(/^data:([^;,]+);base64,([\s\S]+)$/);
+      if (!match) {
+        reject(new Error("文档格式无法作为附件发送"));
+        return;
+      }
+      resolve({
+        id: `attachment-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        type: "document",
+        name: file.name || "document",
+        mimeType: match[1] || file.type || "application/octet-stream",
+        size: file.size,
+        data: match[2],
+        previewUrl: ""
+      });
+    });
+    reader.readAsDataURL(file);
+  });
+}
 function renderAttachmentStrip2() {
   if (!els.attachmentStrip) {
     return;
@@ -1857,10 +1920,13 @@ function renderAttachmentStrip2() {
   for (const attachment of state.attachments) {
     const item = document.createElement("div");
     item.className = "attachment-chip";
+    const isDocument = attachment.type === "document";
+    const label = attachment.name || (isDocument ? "文档" : "图片");
+    const preview = isDocument || !attachment.previewUrl ? `<span class="attachment-chip-file">${escapeHtml(documentChipLabel(attachment.name))}</span>` : `<img alt="" src="${attachment.previewUrl}" />`;
     item.innerHTML = `
-      <img alt="" src="${attachment.previewUrl}" />
-      <span>${escapeHtml(attachment.name || "图片")}</span>
-      <button type="button" aria-label="移除 ${escapeHtml(attachment.name || "图片")}">×</button>
+      ${preview}
+      <span>${escapeHtml(label)}</span>
+      <button type="button" aria-label="移除 ${escapeHtml(label)}">×</button>
     `;
     item.querySelector("button").addEventListener("click", () => {
       state.attachments = state.attachments.filter((candidate) => candidate.id !== attachment.id);
@@ -1870,9 +1936,13 @@ function renderAttachmentStrip2() {
     els.attachmentStrip.append(item);
   }
 }
+function documentChipLabel(name) {
+  const ext = String(name ?? "").split(".").pop()?.toUpperCase() ?? "FILE";
+  return ext.slice(0, 4);
+}
 function attachmentPayload2(attachment) {
   return {
-    type: "image",
+    type: attachment.type === "document" ? "document" : "image",
     name: attachment.name,
     mimeType: attachment.mimeType,
     size: attachment.size,
@@ -2373,7 +2443,12 @@ function handleDashboardEvent3(event) {
     beginEventTurn3(event);
     updateTurnChangeStats2(null, { reset: true });
     state.lastAssistantFinalSignature = "";
-    appendMessage3("user", event.queuedKind === "guide" ? "引导" : event.queuedKind === "wakeup" ? "子智能体" : event.queuedKind === "goal-continue" ? "Goal" : "你", userMessageDisplayText3(event.text, event.attachments));
+    appendMessage3(
+      "user",
+      event.queuedKind === "guide" ? "引导" : event.queuedKind === "wakeup" ? "子智能体" : event.queuedKind === "goal-continue" ? "Goal" : "你",
+      event.text,
+      event.attachments
+    );
     state.running = true;
     scheduleSessionsRefresh2();
     if (event.queuedKind === "guide") {
@@ -2695,7 +2770,9 @@ function renderTranscriptMessages2(messages, options = {}) {
     if (!role) {
       continue;
     }
-    const node = createMessageNode3(role, role === "assistant" ? "Ant Code" : "你", messageDisplayText3(message.content));
+    const attachments = role === "user" ? transcriptMessageAttachments(message) : [];
+    const text = role === "assistant" ? messageDisplayText3(message.content) : userTranscriptDisplayText(message.content, attachments);
+    const node = createMessageNode3(role, role === "assistant" ? "Ant Code" : "你", text, attachments);
     node.setAttribute("aria-live", "off");
     nodes.push(node);
   }
@@ -2939,14 +3016,14 @@ function summarizeWorkflow3(workflow) {
     cancelled: items.filter((item) => item.status === "cancelled").length
   };
 }
-function appendMessage3(kind, label, text) {
+function appendMessage3(kind, label, text, attachments = []) {
   const wasAtBottom = isTranscriptNearBottom3();
-  const node = createMessageNode3(kind, label, text);
+  const node = createMessageNode3(kind, label, text, attachments);
   appendTranscriptNode3(node);
   scrollTranscript2({ onlyIfNearBottom: true, wasAtBottom });
   if (kind === "assistant") announceStatus("收到新的助手回复");
 }
-function createMessageNode3(kind, label, text) {
+function createMessageNode3(kind, label, text, attachments = []) {
   hideEmptyState3();
   const node = document.createElement("article");
   node.className = `message ${kind}`;
@@ -2957,8 +3034,48 @@ function createMessageNode3(kind, label, text) {
   `;
   const body = node.querySelector(".message-body");
   if (kind === "assistant") renderFinalAssistantBody(body, text);
-  else renderMessageText(body, text ?? "", { markdown: false });
+  else {
+    renderMessageText(body, text ?? "", { markdown: false });
+    appendMessageAttachmentChips(body, attachments);
+  }
   return node;
+}
+function appendMessageAttachmentChips(body, attachments) {
+  if (!body) {
+    return;
+  }
+  const items = normalizeAttachmentMetadata3(attachments);
+  if (items.length === 0) {
+    return;
+  }
+  const row = document.createElement("div");
+  row.className = "message-attachments";
+  for (const item of items) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "file-link attachment-chip";
+    button.dataset.file = resolveAttachedFilePath(item);
+    const name = String(item.name ?? "file");
+    button.textContent = name;
+    button.title = name;
+    row.append(button);
+  }
+  body.append(row);
+  bindRichContent3(row);
+}
+function resolveAttachedFilePath(item) {
+  const stored = String(item.path ?? "").trim().replace(/\\/g, "/");
+  if (stored) {
+    return stored;
+  }
+  const base = String(item.name ?? "").split(/[/\\]/).pop() ?? "";
+  const files = Array.isArray(state.files) ? state.files : [];
+  const match = [...files].reverse().find((file) => {
+    const relative = String(file.relativePath ?? "").replace(/\\/g, "/");
+    const name = String(file.name ?? "");
+    return name === base || relative.endsWith(`/${base}`) || relative.endsWith(base);
+  });
+  return match?.relativePath ?? base;
 }
 function appendTranscriptNode3(node, options = {}) {
   hideEmptyState3();
@@ -4507,11 +4624,11 @@ function renderModelConfigPanel4() {
         </div>
         <label>
           <span>模型 ID</span>
-          <input name="modelId" required spellcheck="false" value="${escapeAttribute2(current.id || "")}" placeholder="example-coding-model" />
+          <input name="modelId" required spellcheck="false" value="${escapeAttribute2(current.id || "")}" placeholder="mimo-v2.5" />
         </label>
         <label>
           <span>显示名称</span>
-          <input name="label" spellcheck="false" value="${escapeAttribute2(current.label || "")}" placeholder="Example Coding Model" />
+          <input name="label" spellcheck="false" value="${escapeAttribute2(current.label || "")}" placeholder="Mimo v2.5" />
         </label>
         <label>
           <span>上下文窗口</span>
@@ -7963,14 +8080,28 @@ async function openFile9(filePath) {
       showImageLightbox9(file, images.length ? images : [file], index);
     });
   } else if (file.kind === "pdf") {
-    els.previewBody.innerHTML = `<iframe class="preview-frame" title="${escapeHtml(file.name)}" src="${file.rawUrl}"></iframe>`;
+    els.previewBody.classList.add("document-preview-body");
+    els.previewBody.innerHTML = `
+      <div class="pdf-preview">
+        <header class="office-preview-header">
+          <div>
+            <strong>${escapeHtml(file.name)}</strong>
+            <span>PDF 预览</span>
+          </div>
+          ${localOpenButtonHtml(file.relativePath)}
+        </header>
+        <iframe class="preview-frame" title="${escapeHtml(file.name)}" src="${file.rawUrl}"></iframe>
+      </div>
+    `;
   } else if (file.kind === "office-preview") {
     els.previewBody.classList.add("document-preview-body");
     els.previewBody.replaceChildren(renderOfficePreview9(file));
   } else if (file.kind === "table-preview") {
     els.previewBody.classList.add("document-preview-body");
     els.previewBody.replaceChildren(renderTablePreview9(file));
-  } else if (file.kind === "office" || file.kind === "binary" || file.kind === "download") {
+  } else if (file.kind === "office") {
+    els.previewBody.innerHTML = `<div class="office-card"><strong>${escapeHtml(file.name)}</strong><p>${escapeHtml(file.message ?? "此文件第一版不直接预览。")}</p><p>${escapeHtml(file.relativePath)}</p>${localOpenButtonHtml(file.relativePath)}</div>`;
+  } else if (file.kind === "binary" || file.kind === "download") {
     const download = file.downloadOnly ? ` download="${escapeHtml(file.name)}"` : "";
     const target = file.downloadOnly ? "" : ` target="_blank"`;
     els.previewBody.innerHTML = `<div class="office-card"><strong>${escapeHtml(file.name)}</strong><p>${escapeHtml(file.message ?? "此文件第一版不直接预览。")}</p><p>${escapeHtml(file.relativePath)}</p><a class="open-file" href="${file.rawUrl}"${download}${target} rel="noopener noreferrer">${file.downloadOnly ? "下载文件" : "打开文件"}</a></div>`;
@@ -7995,6 +8126,47 @@ async function openFile9(filePath) {
     els.previewBody.innerHTML = `<pre class="preview-code" tabindex="0" aria-label="${escapeHtml(file.name)} 文档内容">${escapeHtml(file.content ?? "")}</pre>`;
   }
 }
+function localOpenButtonHtml(relativePath) {
+  return `<button type="button" class="open-file" data-open-local="${escapeAttribute2(relativePath ?? "")}" title="用系统应用打开">打开</button>`;
+}
+function handleLocalFileOpenClick(event) {
+  const button = eventTargetOf(event).closest("[data-open-local]");
+  if (!(button instanceof HTMLElement)) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  void openLocalFile(button.getAttribute("data-open-local") ?? "", button);
+}
+async function openLocalFile(filePath, button = null) {
+  const relativePath = String(filePath ?? "").trim();
+  if (!relativePath) {
+    showError("没有可打开的本地文件路径");
+    return;
+  }
+  const label = button?.textContent ?? "打开";
+  if (button) {
+    button.setAttribute("disabled", "true");
+    button.textContent = "正在打开…";
+  }
+  try {
+    const result = await postJson("/api/files/open", {
+      path: relativePath,
+      sessionId: state.currentSessionId ?? ""
+    }).catch((error) => ({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error)
+    }));
+    if (!result.ok) {
+      showError(result.error ?? "无法打开本地文件");
+    }
+  } finally {
+    if (button) {
+      button.removeAttribute("disabled");
+      button.textContent = label;
+    }
+  }
+}
 function renderOfficePreview9(file) {
   if (file.table) {
     return renderTablePreview9(file);
@@ -8004,14 +8176,13 @@ function renderOfficePreview9(file) {
   article.tabIndex = 0;
   article.setAttribute("aria-label", `${file.name} 轻量预览`);
   const meta = officePreviewMeta9(file);
-  const openHref = file.rawUrl ?? rawFileUrl9(file.relativePath);
   article.innerHTML = `
     <header class="office-preview-header">
       <div>
         <strong>${escapeHtml(file.name)}</strong>
         <span>${escapeHtml(meta)}</span>
       </div>
-      <a class="open-file" href="${openHref}" target="_blank" rel="noreferrer">打开</a>
+      ${localOpenButtonHtml(file.relativePath)}
     </header>
     ${officePreviewBodyHtml9(file)}
     ${file.truncated ? `<div class="office-preview-note">仅显示前 ${formatNumber9(file.content?.length ?? 0)} 字符，完整内容请打开文件。</div>` : ""}
@@ -8037,7 +8208,6 @@ function renderTablePreview9(file) {
   article.tabIndex = 0;
   article.setAttribute("aria-label", `${file.name} 表格预览`);
   const table = normalizeTablePreview9(file.table);
-  const openHref = file.rawUrl ?? rawFileUrl9(file.relativePath);
   const meta = tablePreviewMeta9(file, table);
   article.innerHTML = `
     <header class="office-preview-header">
@@ -8047,7 +8217,7 @@ function renderTablePreview9(file) {
       </div>
       <div class="office-preview-actions">
         <button class="open-file table-expand-button" type="button">放大</button>
-        <a class="open-file" href="${openHref}" target="_blank" rel="noreferrer">打开</a>
+        ${localOpenButtonHtml(file.relativePath)}
       </div>
     </header>
     <div class="table-preview-button" role="button" tabindex="0" aria-label="放大查看 ${escapeHtml(file.name)}">
@@ -8643,21 +8813,85 @@ function messageDisplayText3(content) {
   }
   return lines.filter(Boolean).join("\n");
 }
-function userMessageDisplayText3(text, attachments = []) {
+function userMessageDisplayText9(text, attachments = []) {
   const lines = [String(text ?? "").trim()].filter(Boolean);
-  const imageLines = normalizeAttachmentMetadata9(attachments).map(imageAttachmentLine9);
-  return [...lines, ...imageLines].join("\n");
+  const meta = normalizeAttachmentMetadata3(attachments);
+  const imageLines = meta.filter((item) => item.type === "image").map(imageAttachmentLine9);
+  const documentLines = meta.filter((item) => item.type === "document").map(documentAttachmentLine);
+  return [...lines, ...documentLines, ...imageLines].join("\n");
 }
-function normalizeAttachmentMetadata9(attachments) {
+function normalizeAttachmentMetadata3(attachments) {
   if (!Array.isArray(attachments)) {
     return [];
   }
-  return attachments.filter((item) => item && typeof item === "object" && item.type === "image").map((item) => ({
-    type: "image",
-    name: String(item.name ?? "image"),
-    mimeType: String(item.mimeType ?? item.mime_type ?? "image"),
-    size: Number.isFinite(Number(item.size)) ? Number(item.size) : Number(item.bytes ?? item.sizeBytes ?? 0)
+  return attachments.filter((item) => item && typeof item === "object" && (item.type === "image" || item.type === "document")).map((item) => ({
+    type: item.type === "document" ? "document" : "image",
+    name: String(item.name ?? (item.type === "document" ? "document" : "image")),
+    mimeType: String(item.mimeType ?? item.mime_type ?? (item.type === "document" ? "document" : "image")),
+    size: Number.isFinite(Number(item.size)) ? Number(item.size) : Number(item.bytes ?? item.sizeBytes ?? 0),
+    path: String(item.path ?? "").trim()
   }));
+}
+function transcriptMessageAttachments(message) {
+  const record = isPlainObject(message) ? message : {};
+  const stored = normalizeAttachmentMetadata3(record.attachments);
+  if (stored.length > 0) {
+    return stored;
+  }
+  return attachmentsFromPlaceholderText(messageDisplayText3(record.content));
+}
+function userTranscriptDisplayText(content, attachments = []) {
+  const chips = normalizeAttachmentMetadata3(attachments);
+  if (chips.length === 0) {
+    return messageDisplayText3(content);
+  }
+  if (typeof content === "string") {
+    return stripAttachmentPlaceholders(content);
+  }
+  if (!Array.isArray(content)) {
+    return "";
+  }
+  return content.map((item) => {
+    if (typeof item === "string") {
+      return stripAttachmentPlaceholders(item);
+    }
+    if (item && typeof item === "object" && "text" in item) {
+      return stripAttachmentPlaceholders(String(item.text ?? ""));
+    }
+    return "";
+  }).filter(Boolean).join("\n");
+}
+function attachmentsFromPlaceholderText(text) {
+  const items = [];
+  const pattern = /\[(文档附件|图片附件)：([^\]]+)\]/g;
+  let match = pattern.exec(text);
+  while (match) {
+    const name = String(match[2] ?? "").split(" · ")[0].trim();
+    if (name) {
+      items.push({
+        type: match[1] === "图片附件" ? "image" : "document",
+        name,
+        mimeType: "",
+        size: 0,
+        path: ""
+      });
+    }
+    match = pattern.exec(text);
+  }
+  return items;
+}
+function stripAttachmentPlaceholders(text) {
+  return String(text ?? "").split(/\n/).filter((line) => {
+    const value = line.trim();
+    return !value.startsWith("[文档附件：") && !value.startsWith("[图片附件：");
+  }).join("\n").trim();
+}
+function documentAttachmentLine(item) {
+  const parts = [
+    item.name ? String(item.name) : "document",
+    Number.isFinite(Number(item.size)) && Number(item.size) > 0 ? formatBytes9(item.size) : ""
+  ].filter(Boolean);
+  return `[文档附件：${parts.join(" · ")}]`;
 }
 function imageAttachmentLine9(item) {
   const parts = [
@@ -8675,12 +8909,12 @@ function renderMessageText(node, text, options = {}) {
   if (!options.lightweight) {
     linkifyFileTextNodes9(node, options.basePath);
   }
-  bindRichContent9(node, { lightweight: options.lightweight === true });
+  bindRichContent3(node, { lightweight: options.lightweight === true });
 }
 function renderLinkedText9(node, text) {
   node.textContent = text ?? "";
   linkifyFileTextNodes9(node);
-  bindRichContent9(node);
+  bindRichContent3(node);
 }
 
 // src/dashboard/public/structured-data.ts
@@ -9013,7 +9247,7 @@ async function hydrateData(root) {
       continue;
     }
     const result = renderStructuredData(kind, raw, vendor);
-    output.innerHTML = result.ok ? `<div class="data-summary">${escapeHtml5(result.summary)}</div>${result.html}${result.tsv ? `<button type="button" class="data-copy" data-copy-tsv="${escapeAttribute8(result.tsv)}">复制为 TSV</button>` : ""}` : result.html;
+    output.innerHTML = result.ok ? `<div class="data-summary">${escapeHtml5(result.summary)}</div>${result.html}${result.tsv ? `<button type="button" class="data-copy" data-copy-tsv="${escapeAttribute7(result.tsv)}">复制为 TSV</button>` : ""}` : result.html;
     bindDeferredTree(output, result.ok ? result.expandTreeNode : void 0);
     frame.dataset.rendered = "true";
     output.querySelectorAll(".data-copy").forEach((button) => {
@@ -9113,12 +9347,12 @@ function loadVendor() {
 function escapeHtml5(value) {
   return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
-function escapeAttribute8(value) {
+function escapeAttribute7(value) {
   return escapeHtml5(value).replace(/`/g, "&#96;");
 }
 
 // src/dashboard/public/app-ui10.ts
-function bindRichContent9(node, options = {}) {
+function bindRichContent3(node, options = {}) {
   node.querySelectorAll("[data-file]").forEach((link) => {
     if (!(link instanceof HTMLElement)) {
       return;
@@ -9374,13 +9608,17 @@ export {
   DASHBOARD_LIFECYCLE_TIMEOUT_MS,
   DASHBOARD_REQUEST_TIMEOUT_MS,
   DASHBOARD_SHUTDOWN_TIMEOUT_MS,
+  DOCUMENT_EXTENSIONS,
   EVENT_CONNECT_TIMEOUT_MS,
   EVENT_RECONNECT_MAX_ATTEMPTS,
   EVENT_STALE_AFTER_MS,
   FILE_REFERENCE_PATTERN,
   FOCUSABLE_SELECTOR,
+  IMAGE_EXTENSIONS,
   LOCAL_FILE_EXTENSIONS,
   MANUAL_AGENT_MODEL_VALUE,
+  MAX_DOCUMENT_ATTACHMENTS,
+  MAX_DOCUMENT_ATTACHMENT_BYTES,
   MAX_IMAGE_ATTACHMENTS,
   MAX_IMAGE_ATTACHMENT_BYTES,
   MODE_DESCRIPTIONS,
@@ -9404,6 +9642,7 @@ export {
   appendAssistantDraft3 as appendAssistantDraft,
   appendContextBoundary3 as appendContextBoundary,
   appendMessage3 as appendMessage,
+  appendMessageAttachmentChips,
   appendPlainDraftDelta,
   appendTranscriptNode3 as appendTranscriptNode,
   applyGatewayDiscoveredModel6 as applyGatewayDiscoveredModel,
@@ -9428,7 +9667,7 @@ export {
   beginPreviewResize,
   beginScopedRequest,
   bindEvents,
-  bindRichContent9 as bindRichContent,
+  bindRichContent3 as bindRichContent,
   bindTableLightboxControls9 as bindTableLightboxControls,
   bootstrapDashboard,
   bootstrapFailurePresentation9 as bootstrapFailurePresentation,
@@ -9442,6 +9681,7 @@ export {
   captureTranscriptViewportAnchor3 as captureTranscriptViewportAnchor,
   changedSettingsFields5 as changedSettingsFields,
   clampedPreviewWidth,
+  classifyComposerFile,
   clearAssistantDraftTimers9 as clearAssistantDraftTimers,
   clearAssistantDrafts3 as clearAssistantDrafts,
   clearAttachments2 as clearAttachments,
@@ -9497,6 +9737,8 @@ export {
   deleteModel5 as deleteModel,
   deleteSession2 as deleteSession,
   disconnectEvents2 as disconnectEvents,
+  documentAttachmentLine,
+  documentChipLabel,
   els,
   emptyBackgroundSubagent,
   emptyGoalSnapshot,
@@ -9547,6 +9789,7 @@ export {
   handleBackgroundSubagentActivity3 as handleBackgroundSubagentActivity,
   handleDashboardEvent3 as handleDashboardEvent,
   handleGlobalKeydown,
+  handleLocalFileOpenClick,
   handleModelConfigChange,
   handleModelConfigInput,
   handleModelConfigModelIdChanged5 as handleModelConfigModelIdChanged,
@@ -9607,6 +9850,7 @@ export {
   loadOlderTranscript3 as loadOlderTranscript,
   loadSessions,
   loadTrust,
+  localOpenButtonHtml,
   localizedReasoningEffortLabel7 as localizedReasoningEffortLabel,
   lockClosedDashboard8 as lockClosedDashboard,
   managedFieldHtml5 as managedFieldHtml,
@@ -9637,7 +9881,7 @@ export {
   newTask,
   nonNegativeInteger4 as nonNegativeInteger,
   normalizeAgentModelTiers,
-  normalizeAttachmentMetadata9 as normalizeAttachmentMetadata,
+  normalizeAttachmentMetadata3 as normalizeAttachmentMetadata,
   normalizeChangeStats4 as normalizeChangeStats,
   normalizeComparableText3 as normalizeComparableText,
   normalizeConfigSource7 as normalizeConfigSource,
@@ -9662,6 +9906,7 @@ export {
   officePreviewBodyHtml9 as officePreviewBodyHtml,
   officePreviewMeta9 as officePreviewMeta,
   openFile9 as openFile,
+  openLocalFile,
   openSession2 as openSession,
   parentDirectory9 as parentDirectory,
   permissionIndexForKey,
@@ -9676,6 +9921,7 @@ export {
   questionChoiceButton8 as questionChoiceButton,
   questionResolutionText3 as questionResolutionText,
   rawFileUrl9 as rawFileUrl,
+  readDocumentAttachment,
   readImageAttachment2 as readImageAttachment,
   reasoningCapabilityCandidate6 as reasoningCapabilityCandidate,
   reasoningCapabilityIsActionable6 as reasoningCapabilityIsActionable,
@@ -9748,6 +9994,7 @@ export {
   resizePromptInput,
   resolveApproval2 as resolveApproval,
   resolveAtomicModelSelection7 as resolveAtomicModelSelection,
+  resolveAttachedFilePath,
   resolveDisplayFilePath10 as resolveDisplayFilePath,
   responseJson9 as responseJson,
   responsiveLayoutMode,
@@ -9845,6 +10092,7 @@ export {
   toggleQuestionChoice8 as toggleQuestionChoice,
   toggleSidebar,
   transcriptFirstContentNode3 as transcriptFirstContentNode,
+  transcriptMessageAttachments,
   transcriptNodeTop3 as transcriptNodeTop,
   transcriptRetentionOptionsHtml5 as transcriptRetentionOptionsHtml,
   transcriptSettingsHtml5 as transcriptSettingsHtml,
@@ -9864,7 +10112,8 @@ export {
   updateSessionStatus,
   updateTranscriptJump9 as updateTranscriptJump,
   updateTurnChangeStats2 as updateTurnChangeStats,
-  userMessageDisplayText3 as userMessageDisplayText,
+  userMessageDisplayText9 as userMessageDisplayText,
+  userTranscriptDisplayText,
   workflowItem3 as workflowItem,
   workflowSection3 as workflowSection
 };

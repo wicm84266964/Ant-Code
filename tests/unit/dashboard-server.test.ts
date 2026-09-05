@@ -1117,6 +1117,8 @@ test("dashboard file routes resolve paths through the selected session cwd", asy
     assert.equal(raw.contentType, "image/png");
     assert.match(raw.headers["content-disposition"], /^inline; filename="chart\.png";/);
     assert.equal(raw.headers["x-content-type-options"], "nosniff");
+    assert.equal(raw.headers["x-frame-options"], "DENY");
+    assert.match(raw.headers["content-security-policy"], /frame-ancestors 'none'/);
     assert.deepEqual(Array.from(raw.body.subarray(0, 4)), [0x89, 0x50, 0x4e, 0x47]);
     assert.equal(svg.status, 200);
     assert.equal(svg.contentType, "application/octet-stream");
@@ -1124,6 +1126,79 @@ test("dashboard file routes resolve paths through the selected session cwd", asy
     assert.equal(svg.headers["x-content-type-options"], "nosniff");
     assert.notEqual(svg.contentType, "image/svg+xml");
     assert.equal(missing.status, 404);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard raw PDF responses allow same-origin iframe preview", async () => {
+  const dashboardCwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-pdf-"));
+  await fs.writeFile(path.join(dashboardCwd, "note.pdf"), Buffer.from("%PDF-1.4\n%%EOF\n"));
+  const server = createDashboardServer({
+    cwd: dashboardCwd,
+    runtime: createRuntimeStub()
+  });
+  await listen(server, "127.0.0.1", 0);
+
+  try {
+    const preview = await fetchJson(server, "/api/files?path=note.pdf");
+    const raw = await fetchBuffer(server, "/api/files/raw?path=note.pdf");
+    const page = await fetchBuffer(server, "/");
+
+    assert.equal(preview.status, 200);
+    assert.equal(preview.body.file.kind, "pdf");
+    assert.equal(preview.body.file.embeddable, true);
+    assert.equal(raw.status, 200);
+    assert.equal(raw.contentType, "application/pdf");
+    assert.match(raw.headers["content-disposition"], /^inline;/);
+    assert.equal(raw.headers["x-frame-options"], "SAMEORIGIN");
+    assert.match(raw.headers["content-security-policy"], /frame-ancestors 'self'/);
+    assert.match(raw.headers["content-security-policy"], /object-src 'self'/);
+    assert.doesNotMatch(raw.headers["content-security-policy"], /frame-ancestors 'none'/);
+    assert.equal(page.headers["x-frame-options"], "DENY");
+    assert.match(page.headers["content-security-policy"], /frame-ancestors 'none'/);
+    assert.match(page.headers["content-security-policy"], /object-src 'none'/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard open route launches workspace documents with the system app", async () => {
+  const dashboardCwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-open-"));
+  await fs.writeFile(path.join(dashboardCwd, "note.docx"), Buffer.from("PK"));
+  await fs.writeFile(path.join(dashboardCwd, "evil.exe"), Buffer.from("MZ"));
+  const opened = [];
+  const server = createDashboardServer({
+    cwd: dashboardCwd,
+    runtime: createRuntimeStub(),
+    openLocalPath: (filePath) => {
+      opened.push(filePath);
+    }
+  });
+  await listen(server, "127.0.0.1", 0);
+
+  try {
+    const ok = await fetchJson(server, "/api/files/open", {
+      method: "POST",
+      body: { path: "note.docx" }
+    });
+    const blocked = await fetchJson(server, "/api/files/open", {
+      method: "POST",
+      body: { path: "evil.exe" }
+    });
+    const missing = await fetchJson(server, "/api/files/open", {
+      method: "POST",
+      body: { path: "gone.docx" }
+    });
+
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.ok, true);
+    assert.equal(opened.length, 1);
+    assert.equal(path.basename(opened[0]), "note.docx");
+    assert.equal(blocked.status, 403);
+    assert.equal(blocked.body.code, "FILE_OPEN_NOT_ALLOWED");
+    assert.equal(missing.status, 404);
+    assert.equal(opened.length, 1);
   } finally {
     await close(server);
   }

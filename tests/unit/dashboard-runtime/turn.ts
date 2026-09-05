@@ -243,6 +243,54 @@ test("dashboard runtime rejects malformed and oversized turn attachments before 
   assert.equal(promptTooLarge.status, 413);
   assert.equal(promptTooLarge.code, "PROMPT_TOO_LARGE");
   assert.equal(runtime.active.size, 0);
+
+  const oldWord = await runtime.startTurn({
+    prompt: "old word",
+    attachments: [{
+      type: "document",
+      name: "legacy.doc",
+      mimeType: "application/msword",
+      size: 4,
+      data: Buffer.from("ABCD").toString("base64")
+    }]
+  });
+  assert.equal(oldWord.ok, false);
+  assert.equal(oldWord.code, "UNSUPPORTED_DOCUMENT_TYPE");
+  assert.equal(runtime.active.size, 0);
+});
+
+test("dashboard runtime accepts composer PDF attachments and rejects them from the image budget", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-docs-"));
+  const seen = deferred();
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: { USERPROFILE: cwd },
+    runTurn: async (_session, options) => {
+      seen.resolve(options.attachments ?? []);
+      await options.onEvent({ type: "turn_complete", status: "completed" });
+      return { output: "done" };
+    }
+  });
+  await runtime.trustWorkspace();
+  const pdf = Buffer.from("%PDF-1.4\ntrailer<</Root 1 0 R>>\n%%EOF\n");
+  const started = await runtime.startTurn({
+    prompt: "read attached pdf",
+    attachments: [{
+      type: "document",
+      name: "note.pdf",
+      mimeType: "application/pdf",
+      size: pdf.length,
+      data: pdf.toString("base64")
+    }],
+    permissionMode: "plan"
+  });
+  assert.equal(started.ok, true);
+  assert.equal(runtime.active.get(started.sessionId).currentAttachmentBytes, 0);
+  const received = await seen.promise;
+  assert.equal(received.length, 1);
+  assert.equal(received[0].type, "document");
+  assert.equal(received[0].name, "note.pdf");
+  assert.match(String(received[0].path ?? ""), /ant-code-uploads[/\\].*note\.pdf$/);
 });
 
 test("dashboard runtime includes the active turn in the queued attachment budget", async () => {

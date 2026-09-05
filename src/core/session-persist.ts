@@ -52,7 +52,8 @@ import type {
   SessionTurnMetadata
 } from "./session-types.ts";
 import {
-  imageAttachmentSummaryBlock
+  imageAttachmentSummaryBlock,
+  persistableAttachmentChips
 } from "./session-messages.ts";
 import {
   isPlainObject
@@ -326,6 +327,7 @@ export function persistableTranscriptMessages(messages: unknown, session: AgentS
   return persistableMessagesWithOptions(messages, {
     includeThinking: true,
     includeToolCalls: false,
+    includeAttachments: true,
     stripGoalStatus: session?.goal?.enabled === true
   });
 }
@@ -698,6 +700,12 @@ export function persistableMessage(message: unknown, options: Record<string, unk
     }
     if (typeof message.name === "string" && message.name) {
       persisted.name = message.name;
+    }
+  }
+  if (options.includeAttachments === true && role === "user") {
+    const chips = persistableAttachmentChips(message.attachments);
+    if (chips && chips.length > 0) {
+      persisted.attachments = chips;
     }
   }
   return persisted;

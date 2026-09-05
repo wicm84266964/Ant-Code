@@ -71,10 +71,13 @@ import {
   ActiveSessionCapacityError,
   ActiveSessionMap,
   DASHBOARD_ACTIVE_SESSION_DEFAULTS,
+  MAX_DOCUMENT_BYTES,
   MAX_IMAGE_BYTES,
   MAX_PROMPT_BYTES,
   MAX_QUEUE,
   MAX_TOTAL_IMAGE_BYTES,
+  MAX_TURN_ATTACHMENTS,
+  MAX_TURN_DOCUMENTS,
   MAX_TURN_IMAGES,
   MAX_TURN_REQUESTS,
   TURN_REQUEST_TTL_MS
@@ -105,6 +108,12 @@ import {
   queueBackgroundWakePrompt,
   scheduleBackgroundSubagentSnapshot
 } from "./background.ts";
+import {
+  isAllowedDocumentExtension,
+  extensionOfName,
+  mimeTypeForDocumentExt,
+  storeComposerAttachments
+} from "../../tools/composer-documents.ts";
 import {
   dropGoalContinueItems,
   emitGoalState,
@@ -216,29 +225,65 @@ export function validateTurnSubmission(input: DashboardRequestInput = {}): TurnS
   if (!Array.isArray(source)) {
     return { ok: false, status: 400, code: "INVALID_ATTACHMENTS", error: "attachments 必须是数组" };
   }
-  if (source.length > MAX_TURN_IMAGES) {
-    return { ok: false, status: 400, code: "TOO_MANY_IMAGES", error: "每次任务最多上传 6 张图片" };
+  if (source.length > MAX_TURN_ATTACHMENTS) {
+    return { ok: false, status: 400, code: "TOO_MANY_ATTACHMENTS", error: "每次任务最多上传 10 个附件" };
   }
   const attachments = [];
-  let totalBytes = 0;
+  let imageBytes = 0;
+  let imageCount = 0;
+  let documentCount = 0;
   for (const item of source) {
-    if (!isPlainObject(item) || item.type !== "image") {
-      return { ok: false, status: 400, code: "INVALID_IMAGE", error: "附件只允许图片" };
+    if (!isPlainObject(item)) {
+      return { ok: false, status: 400, code: "INVALID_IMAGE", error: "附件只允许图片或办公文档" };
+    }
+    const type = String(item.type ?? "image").trim().toLowerCase();
+    const data = String(item.data ?? "");
+    if (!isCanonicalBase64(data)) {
+      return { ok: false, status: 400, code: type === "document" ? "INVALID_DOCUMENT_BASE64" : "INVALID_IMAGE_BASE64", error: type === "document" ? "文档内容不是有效的 base64" : "图片内容不是有效的 base64" };
+    }
+    const decoded = Buffer.from(data, "base64");
+    const name = String(item.name ?? (type === "document" ? "document" : "image")).trim().slice(0, 160)
+      || (type === "document" ? "document" : "image");
+    if (type === "document") {
+      documentCount += 1;
+      if (documentCount > MAX_TURN_DOCUMENTS) {
+        return { ok: false, status: 400, code: "TOO_MANY_DOCUMENTS", error: "每次任务最多上传 4 个文档" };
+      }
+      const ext = extensionOfName(name);
+      if (!isAllowedDocumentExtension(ext)) {
+        return { ok: false, status: 400, code: "UNSUPPORTED_DOCUMENT_TYPE", error: "文档只支持 PDF、docx、xlsx、pptx 和常见文本" };
+      }
+      if (decoded.length > MAX_DOCUMENT_BYTES) {
+        return { ok: false, status: 413, code: "DOCUMENT_TOO_LARGE", error: "单个文档不能超过 40 MiB" };
+      }
+      if (!matchesDocumentSignature(decoded, ext)) {
+        return { ok: false, status: 400, code: "DOCUMENT_SIGNATURE_MISMATCH", error: "文档内容与文件名类型不匹配" };
+      }
+      attachments.push({
+        type: "document",
+        data,
+        mimeType: mimeTypeForDocumentExt(ext),
+        name,
+        size: decoded.length
+      });
+      continue;
+    }
+    if (type !== "image") {
+      return { ok: false, status: 400, code: "INVALID_IMAGE", error: "附件只允许图片或办公文档" };
+    }
+    imageCount += 1;
+    if (imageCount > MAX_TURN_IMAGES) {
+      return { ok: false, status: 400, code: "TOO_MANY_IMAGES", error: "每次任务最多上传 6 张图片" };
     }
     const mimeType = String(item.mimeType ?? item.mime_type ?? "").trim().toLowerCase();
     if (!ALLOWED_IMAGE_MIME_TYPES.has(mimeType)) {
       return { ok: false, status: 400, code: "UNSUPPORTED_IMAGE_TYPE", error: "图片只支持 PNG、JPEG、GIF 或 WebP" };
     }
-    const data = String(item.data ?? "");
-    if (!isCanonicalBase64(data)) {
-      return { ok: false, status: 400, code: "INVALID_IMAGE_BASE64", error: "图片内容不是有效的 base64" };
-    }
-    const decoded = Buffer.from(data, "base64");
     if (decoded.length > MAX_IMAGE_BYTES) {
       return { ok: false, status: 413, code: "IMAGE_TOO_LARGE", error: "单张图片不能超过 8 MiB" };
     }
-    totalBytes += decoded.length;
-    if (totalBytes > MAX_TOTAL_IMAGE_BYTES) {
+    imageBytes += decoded.length;
+    if (imageBytes > MAX_TOTAL_IMAGE_BYTES) {
       return { ok: false, status: 413, code: "IMAGES_TOO_LARGE", error: "图片总量不能超过 24 MiB" };
     }
     if (!matchesImageSignature(decoded, mimeType)) {
@@ -248,11 +293,30 @@ export function validateTurnSubmission(input: DashboardRequestInput = {}): TurnS
       type: "image",
       data,
       mimeType,
-      name: String(item.name ?? "image").trim().slice(0, 160) || "image",
+      name,
       size: decoded.length
     });
   }
   return { ok: true, prompt, attachments };
+}
+
+export function matchesDocumentSignature(buffer: Buffer, ext: string) {
+  if (ext === ".pdf") {
+    return buffer.length >= 5 && buffer.subarray(0, 5).toString("ascii") === "%PDF-";
+  }
+  if (ext === ".docx" || ext === ".xlsx" || ext === ".pptx") {
+    return buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b;
+  }
+  if (buffer.includes(0)) {
+    return false;
+  }
+  return buffer.length > 0;
+}
+
+function imageAttachmentBytes(attachments: Array<{ type?: string; size?: number }> = []) {
+  return attachments.reduce((total, attachment) => (
+    String(attachment.type ?? "image") === "image" ? total + nonNegativeInteger(attachment.size) : total
+  ), 0);
 }
 
 
@@ -378,7 +442,8 @@ export async function startDashboardTurn(context: DashboardRuntimeContext, input
   if (!validated.ok) {
     return validated;
   }
-  const { prompt, attachments } = validated;
+  const prompt = validated.prompt;
+  const attachments = await storeComposerAttachments(context.cwd, validated.attachments);
   if (!prompt && attachments.length === 0) {
     return { ok: false, status: 400, error: "请输入任务需求" };
   }
@@ -485,9 +550,9 @@ export async function startDashboardTurn(context: DashboardRuntimeContext, input
 
     if (state.running) {
       const queuedAttachmentBytes = state.queuedPrompts.reduce((total, queued) => (
-        total + (queued.attachments ?? []).reduce((sum, attachment) => sum + nonNegativeInteger(attachment.size), 0)
+        total + imageAttachmentBytes(queued.attachments ?? [])
       ), 0);
-      const newAttachmentBytes = attachments.reduce((total, attachment) => total + nonNegativeInteger(attachment.size), 0);
+      const newAttachmentBytes = imageAttachmentBytes(attachments);
       if (state.currentAttachmentBytes + queuedAttachmentBytes + newAttachmentBytes > MAX_TOTAL_IMAGE_BYTES) {
         return {
           ok: false,
@@ -787,7 +852,7 @@ export function beginPrompt(state: DashboardActiveSessionState, item: DashboardQ
   state.status = "running";
   state.currentPrompt = String(item.prompt ?? "");
   state.currentTurnId = eventId("turn");
-  state.currentAttachmentBytes = (item.attachments ?? []).reduce((total, attachment) => total + nonNegativeInteger(attachment.size), 0);
+  state.currentAttachmentBytes = imageAttachmentBytes(item.attachments ?? []);
   state.currentTranscriptStart = activeTranscriptMessages(state).length;
   state.currentPermissionMode = item.permissionMode ?? "plan";
   state.turnChangeStats = emptyChangeStats();
@@ -1118,7 +1183,7 @@ export function publicQueueItem(item: DashboardQueueItem) {
     kind: item.kind,
     preview: previewText([
       item.title || (item.kind === "guide" ? item.guidance : item.kind === GOAL_CONTINUE_KIND ? "Goal 续跑" : item.prompt),
-      attachments.length > 0 ? `${attachments.length} 张图片` : ""
+      attachments.length > 0 ? `${attachments.length} 个附件` : ""
     ].filter(Boolean).join(" · ")),
     attachments,
     permissionMode: item.permissionMode,
@@ -1156,35 +1221,61 @@ export function normalizeTurnAttachments(value: unknown): DashboardTurnAttachmen
   return value
     .map(normalizeTurnAttachment)
     .filter((item): item is DashboardTurnAttachment => item != null)
-    .slice(0, 6);
+    .slice(0, MAX_TURN_ATTACHMENTS);
 }
 
 
 export function normalizeTurnAttachment(item: unknown): DashboardTurnAttachment | null {
-  if (!isPlainObject(item) || item.type !== "image") {
+  if (!isPlainObject(item)) {
     return null;
   }
+  const type = String(item.type ?? "image").trim().toLowerCase();
   const data = String(item.data ?? "").replace(/\s+/g, "");
-  const mimeType = String(item.mimeType ?? item.mime_type ?? "").trim().toLowerCase();
-  if (!data || !/^image\/[a-z0-9.+-]+$/i.test(mimeType)) {
+  if (!data) {
     return null;
   }
+  if (type === "document") {
+    const name = String(item.name ?? "document").trim().slice(0, 160) || "document";
+    const ext = extensionOfName(name);
+    if (!isAllowedDocumentExtension(ext)) {
+      return null;
+    }
+    const storedPath = String(item.path ?? "").trim().replace(/\\/g, "/");
+    return {
+      type: "document",
+      data,
+      mimeType: mimeTypeForDocumentExt(ext),
+      name,
+      size: nonNegativeInteger(item.size ?? item.bytes ?? item.sizeBytes),
+      ...(storedPath ? { path: storedPath } : {})
+    };
+  }
+  if (type !== "image") {
+    return null;
+  }
+  const mimeType = String(item.mimeType ?? item.mime_type ?? "").trim().toLowerCase();
+  if (!/^image\/[a-z0-9.+-]+$/i.test(mimeType)) {
+    return null;
+  }
+  const storedPath = String(item.path ?? "").trim().replace(/\\/g, "/");
   return {
     type: "image",
     data,
     mimeType,
     name: String(item.name ?? "image").trim().slice(0, 160),
-    size: nonNegativeInteger(item.size ?? item.bytes ?? item.sizeBytes)
+    size: nonNegativeInteger(item.size ?? item.bytes ?? item.sizeBytes),
+    ...(storedPath ? { path: storedPath } : {})
   };
 }
 
 
 export function publicAttachments(attachments: unknown) {
   return normalizeTurnAttachments(attachments).map((item) => ({
-    type: "image",
+    type: item.type === "document" ? "document" : "image",
     name: item.name,
     mimeType: item.mimeType,
-    size: item.size
+    size: item.size,
+    ...(item.path ? { path: item.path } : {})
   }));
 }
 
