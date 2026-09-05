@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const FALLBACK_VERSION = "2.0.6";
+const FALLBACK_VERSION = "2.0.7";
 
 /**
  * @param {NodeJS.ProcessEnv} [env]
