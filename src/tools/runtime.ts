@@ -437,6 +437,11 @@ export function createToolRuntime(options: ToolRuntimeOptions) {
             approvedOutsideWorkspace: approvedByUser && asResultRecord(decision).outsideWorkspace === true
           }
         });
+        if (isPlainObject(rawResult) && rawResult.ok === false) {
+          return finishTool(options, name, input, definition, options.signal?.aborted
+            ? interruptedToolExecution(name, input, definition, rawResult)
+            : rawResult);
+        }
         const result = Array.isArray(rawResult) ? rawResult : asResultRecord(rawResult);
         const resultFields = asResultRecord(Array.isArray(rawResult) ? EMPTY_RECORD : rawResult);
         if (name === "background_shell" && resultFields.started === true) {

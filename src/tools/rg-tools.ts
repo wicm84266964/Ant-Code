@@ -2,10 +2,12 @@ import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import { isInside } from "../permissions/policy-engine.ts";
 import { normalizeToolPath } from "../permissions/path-utils.ts";
 
 const require = createRequire(import.meta.url);
+const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_RESULTS = 100;
 const DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -286,8 +288,9 @@ async function runRg(cwd: string, args: string[], input: Record<string, unknown>
   const startedAt = Date.now();
   const timeoutMs = positiveInteger(input.timeoutMs, DEFAULT_TIMEOUT_MS);
   const maxOutputBytes = positiveInteger(input.maxOutputBytes, DEFAULT_MAX_OUTPUT_BYTES);
+  const spawnArgs = usesWindowsExecutable(executable) ? args.map((arg) => toWindowsPathIfWslMount(arg)) : args;
   return new Promise((resolve) => {
-    const child = spawn(executable, args, { cwd, windowsHide: true });
+    const child = spawn(executable, spawnArgs, { cwd, windowsHide: true });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     let stdoutBytes = 0;
@@ -387,26 +390,113 @@ async function findRgExecutable(input: Record<string, unknown>) {
   const candidates = [
     input.rgPath,
     process.env.ANT_CODE_RG_PATH,
-    bundledRgPath(),
-    "rg"
+    ...bundledRgCandidates(),
+    ...pathRgCandidates(),
+    ...wslWindowsRgCandidates()
   ].filter(Boolean).map(String);
+  const seen = new Set<string>();
   for (const candidate of candidates) {
-    if (candidate === "rg") {
-      return candidate;
-    }
     const resolved = path.resolve(candidate);
-    if (await fs.access(resolved).then(() => true).catch(() => false)) {
+    const key = process.platform === "win32" ? resolved.toLowerCase() : resolved;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    if (await pathExists(resolved)) {
       return resolved;
     }
   }
   return null;
 }
 
-function bundledRgPath() {
+export function bundledRgCandidates(env: NodeJS.ProcessEnv = process.env) {
+  const binary = process.platform === "win32" ? "rg.exe" : "rg";
+  const platformPkg = `@vscode/ripgrep-${process.platform}-${process.arch}`;
+  const roots = [
+    env.LAB_AGENT_PACKAGE_ROOT,
+    PACKAGE_ROOT
+  ].filter(Boolean).map((root) => path.resolve(String(root)));
+  const candidates: string[] = [];
   try {
-    return require("@vscode/ripgrep").rgPath;
+    const fromModule = require("@vscode/ripgrep").rgPath;
+    if (typeof fromModule === "string" && fromModule) {
+      candidates.push(fromModule);
+    }
   } catch {
-    return null;
+    // Fall through to filesystem lookup. Dashboard cwd is the project, not
+    // the package root, so module resolution can miss the optional platform
+    // package even when rg.exe is installed beside it.
+  }
+  for (const root of roots) {
+    candidates.push(path.join(root, "node_modules", platformPkg, "bin", binary));
+    candidates.push(path.join(root, "node_modules", "@vscode", "ripgrep", "bin", binary));
+  }
+  return candidates;
+}
+
+export function wslWindowsRgCandidates(env: NodeJS.ProcessEnv = process.env) {
+  if (!isWslEnvironment(env)) {
+    return [];
+  }
+  const roots = [
+    env.LAB_AGENT_PACKAGE_ROOT,
+    PACKAGE_ROOT
+  ].filter(Boolean).map((root) => path.resolve(String(root)));
+  const candidates: string[] = [];
+  for (const root of roots) {
+    candidates.push(path.join(root, "node_modules", "@vscode", "ripgrep-win32-x64", "bin", "rg.exe"));
+    candidates.push(path.join(root, "node_modules", "@vscode", "ripgrep-win32-arm64", "bin", "rg.exe"));
+  }
+  return candidates;
+}
+
+export function isWslEnvironment(env: NodeJS.ProcessEnv = process.env) {
+  if (env.WSL_DISTRO_NAME || env.WSL_INTEROP) {
+    return true;
+  }
+  return false;
+}
+
+export function toWindowsPathIfWslMount(value: string) {
+  const text = String(value ?? "");
+  const match = text.match(/^\/mnt\/([a-zA-Z])\/(.*)$/);
+  if (!match) {
+    return text;
+  }
+  return `${match[1].toUpperCase()}:\\${match[2].replace(/\//g, "\\")}`;
+}
+
+function usesWindowsExecutable(executable: string) {
+  return process.platform !== "win32" && String(executable ?? "").toLowerCase().endsWith(".exe");
+}
+
+function pathRgCandidates() {
+  const names = process.platform === "win32" ? ["rg.exe", "rg"] : ["rg"];
+  const extensions = process.platform === "win32"
+    ? String(process.env.PATHEXT || ".EXE;.CMD;.BAT").split(";").filter(Boolean)
+    : [""];
+  const dirs = String(process.env.PATH || "").split(path.delimiter).filter(Boolean);
+  const candidates: string[] = [];
+  for (const dir of dirs) {
+    for (const name of names) {
+      if (process.platform === "win32" && !path.extname(name)) {
+        for (const ext of extensions) {
+          candidates.push(path.join(dir, `${name}${ext}`));
+        }
+      } else {
+        candidates.push(path.join(dir, name));
+      }
+    }
+  }
+  return candidates;
+}
+
+async function pathExists(filePath: string) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
   }
 }
 

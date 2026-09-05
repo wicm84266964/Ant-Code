@@ -103,6 +103,36 @@ test("agent_run model view keeps the report and drops nested tool dumps", () => 
   assert.doesNotMatch(view.text, /xxxx/);
 });
 
+test("skill_list, todo_read, rg_count, and empty mcp_list keep array payloads", () => {
+  const skills = renderToolResultView("skill_list", {
+    ok: true,
+    result: [
+      { name: "codebase-orientation", description: "orient" },
+      { name: "web-research", description: "search" }
+    ]
+  });
+  assert.match(skills.text, /skills=2/);
+  assert.match(skills.text, /codebase-orientation/);
+  assert.equal(skills.text.includes("\n{}"), false);
+
+  const todos = renderToolResultView("todo_read", {
+    ok: true,
+    result: [{ id: "1", status: "pending", content: "inspect workspace" }]
+  });
+  assert.match(todos.text, /todos=1/);
+  assert.match(todos.text, /inspect workspace/);
+
+  const count = renderToolResultView("rg_count", {
+    ok: true,
+    result: { command: "rg --count-matches", mode: "matches", count: 9 }
+  });
+  assert.match(count.text, /count=9/);
+  assert.equal(count.text.includes("matches=0"), false);
+
+  const mcp = renderToolResultView("mcp_list", { ok: true, result: [] });
+  assert.match(mcp.text, /servers=0/);
+});
+
 test("hard safety valve still truncates a huge view", () => {
   const serialized = formatToolResultForModel("bash", {
     ok: true,

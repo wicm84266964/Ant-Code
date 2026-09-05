@@ -8,7 +8,7 @@ import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { editFileTool, globTool, grepTool, listFilesTool, readFileTool, writeFileTool } from "../../src/tools/file-tools.ts";
-import { formatRgCloseResult, rgCountTool, rgFilesTool, rgFilesWithMatchesTool, rgSearchTool, windowsReservedDeviceGlobArgs } from "../../src/tools/rg-tools.ts";
+import { bundledRgCandidates, formatRgCloseResult, rgCountTool, rgFilesTool, rgFilesWithMatchesTool, rgSearchTool, windowsReservedDeviceGlobArgs } from "../../src/tools/rg-tools.ts";
 import { tsDiagnosticsTool, tsFindDefinitionTool, tsFindReferencesTool, tsSymbolsTool } from "../../src/tools/semantic-tools.ts";
 import { scrubEnvironment } from "../../src/tools/env-scrubber.ts";
 import { createMcpRuntime } from "../../src/mcp/runtime.ts";
@@ -17,7 +17,10 @@ import { serializeToolResult } from "../../src/tools/result.ts";
 import { createToolRuntime } from "../../src/tools/runtime.ts";
 import {
   collectRawHttpResponse,
+  parseBingHtml,
   parseDuckDuckGoHtml,
+  parseWikipediaQueryJson,
+  wikipediaLanguageForQuery,
   readResponseText,
   WEB_FETCH_DEFAULT_MAX_BYTES,
   webFetchTool
@@ -205,7 +208,9 @@ test("rg_search can use bundled ripgrep when PATH is unavailable", async () => {
   const previousPath = process.env.PATH;
   try {
     process.env.PATH = "";
+    assert.equal(bundledRgCandidates().some((item) => item.endsWith("rg.exe") || item.endsWith(`${path.sep}rg`)), true);
     const result = await rgSearchTool({ cwd, pattern: "marker", glob: ["*.ts"] });
+    assert.equal("error" in result, false);
     assert.equal(result.matches.some((item) => item.path === "sample.ts"), true);
   } finally {
     process.env.PATH = previousPath;
@@ -1900,6 +1905,47 @@ test("duckduckgo html parser extracts result titles and URLs", () => {
   assert.equal(results[0].title, "Example Docs");
   assert.equal(results[0].url, "https://example.com/docs");
   assert.match(results[0].snippet, /Official documentation/);
+});
+
+test("wikipedia search parser maps MediaWiki JSON to article URLs", () => {
+  const results = parseWikipediaQueryJson({
+    query: {
+      search: [
+        {
+          title: "Camponotus",
+          snippet: "A genus of <span class=\"searchmatch\">ants</span> in the subfamily Formicinae."
+        }
+      ]
+    }
+  }, "en");
+
+  assert.equal(wikipediaLanguageForQuery("Camponotus japonicus"), "en");
+  assert.equal(wikipediaLanguageForQuery("日本弓背蚁"), "zh");
+  assert.equal(results.length, 1);
+  assert.equal(results[0].title, "Camponotus");
+  assert.equal(results[0].url, "https://en.wikipedia.org/wiki/Camponotus");
+  assert.equal(results[0].engine, "wikipedia");
+  assert.match(results[0].snippet, /genus of ants/);
+});
+
+test("bing html parser extracts result titles and URLs", () => {
+  const results = parseBingHtml(`
+    <li class="b_algo">
+      <h2><a href="https://www.antweb.org/description.do?genus=solenopsis">Solenopsis invicta</a></h2>
+      <cite>https://www.antweb.org › description</cite>
+      <p>Red imported fire ant species page.</p>
+    </li>
+    <li class="b_algo">
+      <h2><a href="https://www.bing.com/ck/a?u=abc">Tracker</a></h2>
+      <cite>www.example.com/fire-ants</cite>
+      <p>Wrapped result.</p>
+    </li>
+  `);
+
+  assert.equal(results.length, 2);
+  assert.equal(results[0].url, "https://www.antweb.org/description.do?genus=solenopsis");
+  assert.equal(results[0].engine, "bing");
+  assert.equal(results[1].url, "https://www.example.com/fire-ants");
 });
 
 test("document_intake extracts markdown from local HTML documents", async () => {

@@ -29,7 +29,14 @@
   ],
   "networkMode": "lab-only",
   "allowedHosts": [
-    "gateway.example.com"
+    "gateway.example.com",
+    "en.wikipedia.org",
+    "zh.wikipedia.org",
+    "bing.com",
+    "www.bing.com",
+    "duckduckgo.com",
+    "html.duckduckgo.com",
+    "lite.duckduckgo.com"
   ],
   "lab": {
     "gatewayUrl": "https://gateway.example.com/v1/chat/completions",
