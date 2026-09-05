@@ -24,8 +24,8 @@ const REVIEWED_RUNTIME_DEPENDENCIES = new Map([
     provenanceMarker: "open_source: KaTeX math rendering library, MIT licensed, public npm package"
   }],
   ["mermaid", {
-    versionSpec: "^11.15.0",
-    installedVersion: "11.15.0",
+    versionSpec: "^11.17.2",
+    installedVersion: "11.17.2",
     license: "MIT",
     provenanceMarker: "open_source: Mermaid diagram rendering library, MIT licensed, public npm package"
   }],

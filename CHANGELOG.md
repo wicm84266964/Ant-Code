@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+## 2.0.7 - 2026-09-05
+
+This is a dependency security patch on the 2.0 TypeScript runtime.
+Dashboard Mermaid is updated to `11.17.2` with DOMPurify `3.4.14`.
+The TUI `ink` stack now uses `ws` `8.21.3`. The Dashboard asset bundler
+`esbuild` is `0.28.2`. Permission mode ids, search, and tool behavior are
+unchanged.
+
+### Fixed
+
+- Mermaid `11.17.2` and DOMPurify `3.4.14` close the stacked Dashboard
+  diagram/sanitizer advisories.
+- `ws` `8.21.3` closes the high-severity WebSocket memory-exhaustion issue
+  pulled in by `ink`.
+- `esbuild` `0.28.2` closes the Windows development-server advisory. This
+  package is not on the user runtime path.
+
+### Upgrade
+
+```sh
+git pull
+npm ci
+npm run verify:install
+npm link
+ant-code --version
+```
+
+`ant-code --version` should print `2.0.7`. Restart a running Dashboard so it
+loads the rebuilt local Mermaid bundle. Gateway config and `.lab-agent`
+sessions do not need to be recreated.
+
 ## 2.0.6 - 2026-09-05
 
 This is a small reliability release on the 2.0 TypeScript runtime.
