@@ -4624,11 +4624,11 @@ function renderModelConfigPanel4() {
         </div>
         <label>
           <span>模型 ID</span>
-          <input name="modelId" required spellcheck="false" value="${escapeAttribute2(current.id || "")}" placeholder="mimo-v2.5" />
+          <input name="modelId" required spellcheck="false" value="${escapeAttribute2(current.id || "")}" placeholder="example-coding-model" />
         </label>
         <label>
           <span>显示名称</span>
-          <input name="label" spellcheck="false" value="${escapeAttribute2(current.label || "")}" placeholder="Mimo v2.5" />
+          <input name="label" spellcheck="false" value="${escapeAttribute2(current.label || "")}" placeholder="Example Coding Model" />
         </label>
         <label>
           <span>上下文窗口</span>
