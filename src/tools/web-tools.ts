@@ -12,6 +12,12 @@ const SEARCH_HEADERS = Object.freeze({
   accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
   "accept-language": "en-US,en;q=0.9"
 });
+const WIKIMEDIA_USER_AGENT = "Ant-Code/2.0.5 (https://github.com/wicm84266964/Ant-Code; local research agent)";
+const WIKIMEDIA_HEADERS = Object.freeze({
+  "user-agent": WIKIMEDIA_USER_AGENT,
+  accept: "application/json"
+});
+const WIKIPEDIA_TIMEOUT_MS = 8_000;
 const RAW_HTTP_HEADER_MAX_BYTES = 64 * 1024;
 const MAX_SEARCH_RESULTS = 10;
 const MAX_REDIRECTS = 5;
@@ -100,22 +106,39 @@ export async function webSearchTool(input: Record<string, unknown>) {
   const searxngUrl = normalizeOptionalUrl(input.searxngUrl ?? asRecord(config.web).searxngUrl ?? env?.LAB_AGENT_SEARXNG_URL);
 
   const errors: string[] = [];
-  const attempts: Array<[string, () => Promise<{ provider: string; query: string; url: string; results: SearchResult[]; truncated: boolean }>]> = [];
+  const batches: Array<{ provider: string; query: string; url: string; results: SearchResult[]; truncated: boolean }> = [];
+  const attempts: Array<[string, () => Promise<{ provider: string; query: string; url: string; results: SearchResult[]; truncated: boolean }>]> = [
+    ["wikipedia", () => searchWikipedia({ query, maxResults, timeoutMs, config, env, signal })]
+  ];
   if (searxngUrl) {
     attempts.push(["searxng", () => searchSearxng({ query, maxResults, timeoutMs, searxngUrl, config, env, signal })]);
   }
+  attempts.push(["bing", () => searchBing({ query, maxResults, timeoutMs, config, env, signal })]);
   attempts.push(["duckduckgo", () => searchDuckDuckGo({ query, maxResults, timeoutMs, config, env, signal })]);
 
   for (const [label, run] of attempts) {
     try {
       const result = await run();
       if (result.results.length > 0) {
-        return result;
+        batches.push(result);
+      } else {
+        errors.push(`${label}: empty`);
       }
-      errors.push(`${label}: empty`);
     } catch (error) {
       errors.push(`${label}: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+
+  const merged = dedupeResults(batches.flatMap((batch) => batch.results)).slice(0, maxResults);
+  if (merged.length > 0) {
+    const total = batches.reduce((count, batch) => count + batch.results.length, 0);
+    return {
+      provider: batches.map((batch) => batch.provider).join("+"),
+      query,
+      url: batches[0]?.url ?? "",
+      results: merged,
+      truncated: batches.some((batch) => batch.truncated) || total > maxResults
+    };
   }
 
   throw Object.assign(new Error(`Web search fetch failed (${errors.join("; ")})`), {
@@ -132,12 +155,148 @@ export function networkHostsForWebTool(name: string, input: Record<string, unkno
     const searxngUrl = normalizeOptionalUrl(input.searxngUrl ?? asRecord(config.web).searxngUrl ?? env.LAB_AGENT_SEARXNG_URL);
     return [
       ...(searxngUrl ? [searxngUrl] : []),
+      "https://en.wikipedia.org/",
+      "https://zh.wikipedia.org/",
+      "https://www.bing.com/",
       "https://html.duckduckgo.com/",
       "https://lite.duckduckgo.com/",
       "https://duckduckgo.com/"
     ];
   }
   return [];
+}
+
+async function searchWikipedia({ query, maxResults, timeoutMs, config, env, signal }: { query: string; maxResults: number; timeoutMs: number; config?: Record<string, unknown>; env?: NodeJS.ProcessEnv; signal?: AbortSignal }) {
+  const lang = wikipediaLanguageForQuery(query);
+  const endpoint = new URL(`https://${lang}.wikipedia.org/w/api.php`);
+  endpoint.searchParams.set("action", "query");
+  endpoint.searchParams.set("list", "search");
+  endpoint.searchParams.set("srsearch", query);
+  endpoint.searchParams.set("srlimit", String(maxResults));
+  endpoint.searchParams.set("srprop", "snippet");
+  endpoint.searchParams.set("format", "json");
+  endpoint.searchParams.set("utf8", "1");
+  const { body } = await fetchTextWithTimeout(endpoint.href, {
+    timeoutMs: Math.min(timeoutMs, WIKIPEDIA_TIMEOUT_MS),
+    maxBytes: DEFAULT_SEARCH_MAX_BYTES,
+    truncateOnLimit: true,
+    headers: WIKIMEDIA_HEADERS,
+    config,
+    env,
+    signal
+  });
+  let json: unknown = {};
+  try {
+    json = JSON.parse(body.text);
+  } catch {
+    json = {};
+  }
+  const results = parseWikipediaQueryJson(json, lang).slice(0, maxResults);
+  return {
+    provider: `wikipedia-${lang}`,
+    query,
+    url: endpoint.href,
+    results,
+    truncated: body.truncated || results.length >= maxResults
+  };
+}
+
+export function wikipediaLanguageForQuery(query: string) {
+  return /[\u3400-\u9fff]/.test(query) ? "zh" : "en";
+}
+
+export function parseWikipediaQueryJson(json: unknown, lang: string) {
+  const search = asRecord(asRecord(json).query).search;
+  const rows = Array.isArray(search) ? search : [];
+  const results: SearchResult[] = [];
+  for (const item of rows) {
+    const row = asRecord(item);
+    const title = cleanText(row.title);
+    if (!title) {
+      continue;
+    }
+    results.push({
+      title,
+      url: wikipediaArticleUrl(lang, title),
+      snippet: cleanText(stripHtml(row.snippet ?? "")),
+      engine: "wikipedia"
+    });
+  }
+  return dedupeResults(results);
+}
+
+function wikipediaArticleUrl(lang: string, title: string) {
+  return `https://${lang}.wikipedia.org/wiki/${encodeURIComponent(title.replace(/ /g, "_"))}`;
+}
+
+function bingResultUrl(href: string, citeHtml: string) {
+  const direct = decodeHtml(href);
+  if (/^https?:\/\//i.test(direct) && !/\bbing\.com\b/i.test(direct)) {
+    return direct;
+  }
+  const cite = cleanText(stripHtml(citeHtml)).split(/[›·|]/)[0].trim();
+  if (/^https?:\/\//i.test(cite)) {
+    return cite;
+  }
+  if (/^(www\.)?[\w.-]+\.[a-z]{2,}(\/.*)?$/i.test(cite)) {
+    return `https://${cite.replace(/^\/\//, "")}`;
+  }
+  return "";
+}
+
+async function searchBing({ query, maxResults, timeoutMs, config, env, signal }: { query: string; maxResults: number; timeoutMs: number; config?: Record<string, unknown>; env?: NodeJS.ProcessEnv; signal?: AbortSignal }) {
+  const endpoint = new URL("https://www.bing.com/search");
+  endpoint.searchParams.set("q", query);
+  if (wikipediaLanguageForQuery(query) === "zh") {
+    endpoint.searchParams.set("setlang", "zh-CN");
+  }
+  const { body } = await fetchTextWithTimeout(endpoint.href, {
+    timeoutMs,
+    maxBytes: DEFAULT_SEARCH_MAX_BYTES,
+    truncateOnLimit: true,
+    headers: {
+      ...SEARCH_HEADERS,
+      "accept-language": wikipediaLanguageForQuery(query) === "zh" ? "zh-CN,zh;q=0.9,en;q=0.5" : SEARCH_HEADERS["accept-language"]
+    },
+    config,
+    env,
+    signal
+  });
+  const results = parseBingHtml(body.text).slice(0, maxResults);
+  return {
+    provider: "bing-html",
+    query,
+    url: endpoint.href,
+    results,
+    truncated: body.truncated || results.length >= maxResults
+  };
+}
+
+export function parseBingHtml(html: unknown) {
+  const text = String(html ?? "");
+  const results: SearchResult[] = [];
+  const blocks = Array.from(text.matchAll(/<li[^>]*class=["'][^"']*b_algo[^"']*["'][^>]*>([\s\S]*?)<\/li>/gi));
+  for (const block of blocks) {
+    const body = block[1];
+    const link = body.match(/<h2[^>]*>\s*<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/i);
+    if (!link) {
+      continue;
+    }
+    const cite = body.match(/<cite[^>]*>([\s\S]*?)<\/cite>/i);
+    const url = bingResultUrl(link[1], cite?.[1] ?? "");
+    const title = cleanText(stripHtml(link[2]));
+    const snippetMatch = body.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
+    if (!title || !url) {
+      continue;
+    }
+    results.push({
+      title,
+      url,
+      snippet: cleanText(stripHtml(snippetMatch?.[1] ?? "")),
+      engine: "bing"
+    });
+  }
+  return dedupeResults(results);
 }
 
 async function searchSearxng({ query, maxResults, timeoutMs, searxngUrl, config, env, signal }: { query: string; maxResults: number; timeoutMs: number; searxngUrl: string; config?: Record<string, unknown>; env?: NodeJS.ProcessEnv; signal?: AbortSignal }) {

@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+## 2.0.6 - 2026-09-05
+
+This is a small reliability release on the 2.0 TypeScript runtime.
+`web_search` now queries Wikipedia's open MediaWiki API, then Bing HTML, then
+DuckDuckGo HTML. Wikipedia is encyclopedia-only; Bing is the no-key web
+fallback when Wikipedia is unreachable. Bundled ripgrep is used for `rg_*`
+tools so Windows no longer depends on a system `rg`. Array tool results such as
+`skill_list` keep their payloads in the model-facing short view. Permission
+mode ids are unchanged.
+
+### Fixed
+
+- `web_search` merges Wikipedia, Bing HTML, and DuckDuckGo HTML (optional
+  SearXNG still works). Wikipedia requests are capped at about eight seconds.
+- `rg_search`, `rg_files`, and `rg_count` prefer the bundled ripgrep binary.
+- `skill_list`, `todo_read`, `mcp_list`, and `rg_count` short views no longer
+  collapse arrays to `{}`.
+
+### Upgrade
+
+```sh
+git pull
+npm ci
+npm run verify:install
+npm link
+ant-code --version
+```
+
+`ant-code --version` should print `2.0.6`. Restart a running Dashboard so it
+loads this runtime. Gateway config and `.lab-agent` sessions do not need to
+be recreated.
+
 ## 2.0.5 - 2026-09-04
 
 This is a small reliability release on the 2.0 TypeScript runtime. Tool

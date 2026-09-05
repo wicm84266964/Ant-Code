@@ -62,8 +62,11 @@ function bodyForTool(name: string, execution: ToolResultValue, result: Record<st
   if (name === "read_file") {
     return formatReadFile(result);
   }
-  if (name === "grep" || name === "rg_search" || name === "rg_files_with_matches" || name === "rg_count") {
+  if (name === "grep" || name === "rg_search" || name === "rg_files_with_matches") {
     return formatSearch(result);
+  }
+  if (name === "rg_count") {
+    return formatRgCount(result);
   }
   if (name === "glob" || name === "rg_files") {
     return formatPathList(result, "matches", SEARCH_VIEW_MATCHES);
@@ -90,7 +93,13 @@ function bodyForTool(name: string, execution: ToolResultValue, result: Record<st
     return formatAgent(execution, result);
   }
   if (name === "mcp_call" || name === "mcp_list") {
-    return formatMcp(result);
+    return formatMcpList(name, execution, result);
+  }
+  if (name === "skill_list") {
+    return formatSkillList(execution);
+  }
+  if (name === "todo_read") {
+    return formatTodoList(execution);
   }
   if (name === "document_intake" || name === "skill_read") {
     return formatDocument(result);
@@ -190,6 +199,50 @@ function formatReadFile(result: Record<string, unknown>): ViewDraft {
     ].filter(Boolean).join("\n"),
     truncated: excerpt.truncated || result.truncated === true
   };
+}
+
+function formatRgCount(result: Record<string, unknown>): ViewDraft {
+  const count = Number.isFinite(Number(result.count)) ? Number(result.count) : 0;
+  const mode = stringField(result.mode) || "matches";
+  return {
+    text: [
+      `count=${count}`,
+      `mode=${mode}`
+    ].join("\n"),
+    truncated: result.truncated === true
+  };
+}
+
+function formatSkillList(execution: ToolResultValue): ViewDraft {
+  const skills = Array.isArray(execution.result) ? execution.result : asArray(asRecord(execution.result).skills);
+  const shown = skills.slice(0, SEARCH_VIEW_MATCHES);
+  const truncated = skills.length > shown.length;
+  const lines = [
+    `skills=${skills.length}${truncated ? " truncated=true" : ""}`,
+    ...shown.map((item) => {
+      const skill = asRecord(item);
+      const name = stringField(skill.name) || "?";
+      const description = stringField(skill.description);
+      return `- ${name}${description ? `: ${truncateClean(description, SEARCH_LINE_CHARS)}` : ""}`;
+    })
+  ];
+  return { text: lines.join("\n"), truncated };
+}
+
+function formatTodoList(execution: ToolResultValue): ViewDraft {
+  const todos = Array.isArray(execution.result) ? execution.result : asArray(asRecord(execution.result).todos);
+  const shown = todos.slice(0, SEARCH_VIEW_MATCHES);
+  const truncated = todos.length > shown.length;
+  const lines = [
+    `todos=${todos.length}${truncated ? " truncated=true" : ""}`,
+    ...shown.map((item) => {
+      const todo = asRecord(item);
+      const status = stringField(todo.status) || "unknown";
+      const content = stringField(todo.content) || stringField(todo.id) || "?";
+      return `- [${status}] ${truncateClean(content, SEARCH_LINE_CHARS)}`;
+    })
+  ];
+  return { text: lines.join("\n"), truncated };
 }
 
 function formatSearch(result: Record<string, unknown>): ViewDraft {
@@ -329,6 +382,21 @@ function formatAgent(execution: ToolResultValue, result: Record<string, unknown>
     text: excerpt.text || "no output",
     truncated: excerpt.truncated || result.outputTruncated === true
   };
+}
+
+function formatMcpList(name: string, execution: ToolResultValue, result: Record<string, unknown>): ViewDraft {
+  if (name === "mcp_list" && Array.isArray(execution.result)) {
+    const servers = execution.result;
+    const shown = servers.slice(0, SEARCH_VIEW_MATCHES);
+    return {
+      text: [
+        `servers=${servers.length}`,
+        ...shown.map((item) => `- ${typeof item === "string" ? item : stringifyCompact(item)}`)
+      ].join("\n"),
+      truncated: servers.length > shown.length
+    };
+  }
+  return formatMcp(result);
 }
 
 function formatMcp(result: Record<string, unknown>): ViewDraft {

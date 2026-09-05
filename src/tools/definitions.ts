@@ -522,7 +522,7 @@ export const BUILT_IN_TOOLS = Object.freeze([
   },
   {
     name: "web_search",
-    description: "Search the public web through a configured SearXNG endpoint or DuckDuckGo HTML fallback. Results are best-effort and must be cited.",
+    description: "Search the public web through Wikipedia, Bing HTML, and DuckDuckGo HTML, or a configured SearXNG endpoint. Results are best-effort and must be cited.",
     risk: "network",
     supportsAbort: true,
     inputSchema: {
