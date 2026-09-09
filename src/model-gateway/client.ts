@@ -89,6 +89,9 @@ export function createLabModelGateway(config: import("../config/load-config.ts")
      * @param {{ messages: Array<Record<string, any>>; tools?: Array<Record<string, any>>; toolResults?: Array<Record<string, any>>; sessionId?: string; stream?: boolean; signal?: AbortSignal; onEvent?: (event: Record<string, any>) => void | Promise<void> }} request
      */
     async sendChat(request: { messages: Array<Record<string, unknown>>; tools?: Array<Record<string, unknown>>; toolResults?: Array<Record<string, unknown>>; sessionId?: string; stream?: boolean; signal?: AbortSignal; onEvent?: (event: Record<string, unknown>) => void | Promise<void> }): Promise<GatewayChatResult> {
+      if (config.lab.sourceCredentialSelectionRequired) {
+        throw new Error("请先在设置页为当前 URL 来源选择生效凭据；未发送模型请求。");
+      }
       if (!config.lab.gatewayUrl) {
         return {
           ok: false,

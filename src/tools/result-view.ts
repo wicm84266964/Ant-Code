@@ -1,9 +1,7 @@
 import { capToolResultText, DEFAULT_TOOL_RESULT_MAX_BYTES, type SerializedToolResult, type ToolResultValue } from "./result.ts";
 
-const READ_FILE_VIEW_CHARS = 12_000;
 const SEARCH_VIEW_MATCHES = 40;
 const SEARCH_LINE_CHARS = 200;
-const LIST_VIEW_ENTRIES = 40;
 const SHELL_HEAD_CHARS = 4_000;
 const SHELL_TAIL_CHARS = 4_000;
 const FETCH_EXCERPT_CHARS = 8_000;
@@ -23,7 +21,7 @@ export function formatToolResultForModel(
   execution: ToolResultValue,
   options: { maxBytes?: number; evidence?: Array<{ id?: string; name?: string; bytes?: number }> } = {}
 ): SerializedToolResult {
-  const view = renderToolResultView(String(name ?? "unknown"), execution, options.evidence);
+  const view = renderToolResultView(String(name ?? "unknown"), execution, options.evidence, options.maxBytes);
   return capToolResultText(view.text, {
     maxBytes: options.maxBytes ?? DEFAULT_TOOL_RESULT_MAX_BYTES,
     truncated: view.truncated
@@ -33,7 +31,8 @@ export function formatToolResultForModel(
 export function renderToolResultView(
   name: string,
   execution: ToolResultValue,
-  evidence: Array<{ id?: string; name?: string; bytes?: number }> = []
+  evidence: Array<{ id?: string; name?: string; bytes?: number }> = [],
+  maxBytes: number = DEFAULT_TOOL_RESULT_MAX_BYTES
 ): ViewDraft {
   const result = asRecord(execution?.result);
   const lines = [
@@ -41,7 +40,8 @@ export function renderToolResultView(
     ...locatorLines(name, execution, result),
     ...evidenceLines(evidence)
   ];
-  const body = bodyForTool(name, execution, result);
+  const bodyBudget = Math.max(0, maxBytes - Buffer.byteLength(lines.join("\n"), "utf8") - 512 - Buffer.byteLength(stringField(result.systemReminder), "utf8"));
+  const body = bodyForTool(name, execution, result, bodyBudget);
   if (body.text) {
     lines.push(body.text);
   }
@@ -58,21 +58,21 @@ export function renderToolResultView(
   };
 }
 
-function bodyForTool(name: string, execution: ToolResultValue, result: Record<string, unknown>): ViewDraft {
+function bodyForTool(name: string, execution: ToolResultValue, result: Record<string, unknown>, budget: number): ViewDraft {
   if (name === "read_file") {
-    return formatReadFile(result);
+    return formatReadFile(result, budget);
   }
   if (name === "grep" || name === "rg_search" || name === "rg_files_with_matches") {
-    return formatSearch(result);
+    return formatSearch(result, budget);
   }
   if (name === "rg_count") {
     return formatRgCount(result);
   }
   if (name === "glob" || name === "rg_files") {
-    return formatPathList(result, "matches", SEARCH_VIEW_MATCHES);
+    return formatPathList(result, "matches", budget);
   }
   if (name === "list_files") {
-    return formatListFiles(result);
+    return formatListFiles(result, budget);
   }
   if (name === "powershell" || name === "bash") {
     return formatShell(result);
@@ -186,18 +186,45 @@ function evidenceLines(evidence: Array<{ id?: string; name?: string; bytes?: num
   ));
 }
 
-function formatReadFile(result: Record<string, unknown>): ViewDraft {
+function formatReadFile(result: Record<string, unknown>, budget: number): ViewDraft {
   const content = String(result.content ?? "");
   const bytes = Number.isFinite(Number(result.bytesRead))
     ? Number(result.bytesRead)
     : Buffer.byteLength(content, "utf8");
-  const excerpt = headTail(numberLines(content), READ_FILE_VIEW_CHARS / 2, READ_FILE_VIEW_CHARS / 2);
+  const startLine = Math.max(1, Number(result.startLine) || 1);
+  const startColumn = Math.max(1, Number(result.startColumn) || 1);
+  const sourceLines = content ? content.split(/\r\n|\n|\r/) : [];
+  const shown: string[] = [];
+  let remaining = Math.max(0, budget - 180);
+  let nextStartLine: number | null = null;
+  let nextStartColumn: number | null = null;
+  for (const [index, line] of sourceLines.entries()) {
+    const prefix = `${startLine + index}: `;
+    const column = index === 0 ? startColumn : 1;
+    const lineBudget = Math.max(0, remaining - Buffer.byteLength(prefix) - 1);
+    const excerpt = new TextDecoder("utf-8").decode(Buffer.from(line).subarray(0, lineBudget), { stream: true });
+    if (remaining < Buffer.byteLength(prefix) + 1 || excerpt.length < line.length) {
+      if (excerpt) shown.push(prefix + excerpt);
+      nextStartLine = startLine + index;
+      nextStartColumn = column + excerpt.length;
+      break;
+    }
+    shown.push(prefix + line);
+    remaining -= Buffer.byteLength(prefix + line) + 1;
+  }
+  if (nextStartLine === null && result.truncated === true) {
+    nextStartLine = Number(result.nextStartLine) || startLine + Math.max(0, sourceLines.length - 1);
+    nextStartColumn = Number(result.nextStartColumn) || (sourceLines.at(-1)?.length ?? 0) + (sourceLines.length <= 1 ? startColumn : 1);
+  }
+  const truncated = nextStartLine !== null;
   return {
     text: [
-      `bytes=${bytes}${result.truncated === true || excerpt.truncated ? " truncated=true" : ""}`,
-      excerpt.text
+      `bytes=${bytes} startLine=${startLine} startColumn=${startColumn}${truncated ? " truncated=true" : ""}`,
+      truncated && shown.length ? `nextStartLine=${nextStartLine} nextStartColumn=${nextStartColumn}` : "",
+      truncated && !shown.length ? "No content fits the model output budget; increase maxToolResultBytes. Repeating this range will not advance." : "",
+      shown.join("\n")
     ].filter(Boolean).join("\n"),
-    truncated: excerpt.truncated || result.truncated === true
+    truncated
   };
 }
 
@@ -245,20 +272,14 @@ function formatTodoList(execution: ToolResultValue): ViewDraft {
   return { text: lines.join("\n"), truncated };
 }
 
-function formatSearch(result: Record<string, unknown>): ViewDraft {
-  const matches = asArray(result.matches);
-  const shown = matches.slice(0, SEARCH_VIEW_MATCHES);
-  const truncated = result.truncated === true || matches.length > shown.length;
-  const lines = [
-    `matches=${matches.length}${truncated ? " truncated=true" : ""}`,
-    ...shown.map((item) => formatSearchMatch(item))
-  ];
-  return { text: lines.join("\n"), truncated };
+function formatSearch(result: Record<string, unknown>, budget: number): ViewDraft {
+  const matches = asArray(result.matches ?? result.files);
+  return formatPage(result, matches.map(formatSearchMatch), "matches", budget);
 }
 
 function formatSearchMatch(item: unknown): string {
   if (typeof item === "string") {
-    return `- ${truncateClean(item, SEARCH_LINE_CHARS)}`;
+    return `- ${item}`;
   }
   const record = asRecord(item);
   const pathValue = stringField(record.path) || stringField(record.file);
@@ -267,34 +288,42 @@ function formatSearchMatch(item: unknown): string {
   return `- ${pathValue || "?"}${line != null ? `:${line}` : ""}${text ? ` ${truncateClean(text, SEARCH_LINE_CHARS)}` : ""}`;
 }
 
-function formatPathList(result: Record<string, unknown>, key: string, limit: number): ViewDraft {
+function formatPathList(result: Record<string, unknown>, key: string, budget: number): ViewDraft {
   const matches = asArray(result[key] ?? result.files ?? result.matches).map((item) => (
     typeof item === "string" ? item : stringField(asRecord(item).path) || JSON.stringify(item)
   ));
-  const shown = matches.slice(0, limit);
-  const truncated = result.truncated === true || matches.length > shown.length;
-  return {
-    text: [
-      `${key}=${matches.length}${truncated ? " truncated=true" : ""}`,
-      ...shown.map((item) => `- ${truncateClean(item, SEARCH_LINE_CHARS)}`)
-    ].join("\n"),
-    truncated
-  };
+  return formatPage(result, matches.map((item) => `- ${item}`), key, budget);
 }
 
-function formatListFiles(result: Record<string, unknown>): ViewDraft {
+function formatListFiles(result: Record<string, unknown>, budget: number): ViewDraft {
   const entries = asArray(result.entries);
-  const shown = entries.slice(0, LIST_VIEW_ENTRIES);
-  const truncated = result.truncated === true || entries.length > shown.length;
-  const total = Number.isFinite(Number(result.total)) ? Number(result.total) : entries.length;
+  return formatPage(result, entries.map((item) => {
+    const record = asRecord(item);
+    return `- ${record.type ?? "file"} ${stringField(record.name) || "?"}`;
+  }), "entries", budget);
+}
+
+function formatPage(result: Record<string, unknown>, rows: string[], label: string, budget: number): ViewDraft {
+  const shown: string[] = [];
+  let used = 0;
+  for (const row of rows) {
+    const bytes = Buffer.byteLength(row) + 1;
+    if (used + bytes > Math.max(0, budget - 180)) break;
+    shown.push(row);
+    used += bytes;
+  }
+  const offset = Number(result.offset) || 0;
+  const truncated = shown.length < rows.length || result.truncated === true;
+  const nextOffset = shown.length === 0 && rows.length > 0 ? null : shown.length < rows.length ? offset + shown.length : result.nextOffset;
   return {
     text: [
-      `entries=${shown.length}/${total}${truncated ? " truncated=true" : ""}`,
-      ...shown.map((item) => {
-        const record = asRecord(item);
-        return `- ${record.type ?? "file"} ${stringField(record.name) || "?"}`;
-      })
-    ].join("\n"),
+      `${label}=${rows.length} shown=${shown.length} offset=${offset}${truncated ? " truncated=true" : ""}`,
+      result.total !== undefined ? `total=${result.total}` : "",
+      nextOffset != null ? `nextOffset=${nextOffset}` : "",
+      shown.length === 0 && rows.length > 0 ? "No row fits the output budget; increase maxToolResultBytes or narrow the scope. Repeating this offset will not advance." : "",
+      truncated && nextOffset == null ? "Source output incomplete; narrow the search scope." : "",
+      ...shown
+    ].filter(Boolean).join("\n"),
     truncated
   };
 }
@@ -479,13 +508,6 @@ function isImageLike(value: Record<string, unknown>): boolean {
   }
   const data = String(value.data ?? "");
   return data.length > 200 && /^[A-Za-z0-9+/=\s]+$/.test(data) && Boolean(value.width || value.height || value.mimeType);
-}
-
-function numberLines(content: string): string {
-  if (!content) {
-    return "";
-  }
-  return content.split(/\r?\n/).map((line, index) => `${index + 1}: ${line}`).join("\n");
 }
 
 function headTail(text: string, headChars: number, tailChars: number): ViewDraft {

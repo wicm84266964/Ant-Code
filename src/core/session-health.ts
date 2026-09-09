@@ -448,7 +448,6 @@ export async function preparePromptBudgetForGateway(input: PromptBudgetInput) {
     )
   );
 
-  messages = pruneStaleInflightForGateway(input, messages);
   let estimate = estimateOf(messages);
   if (!needsCompaction(estimate)) {
     return { messages, estimate, blocked: false };
@@ -541,20 +540,6 @@ async function compactHistoryForGateway(
   return nextMessages;
 }
 
-function pruneStaleInflightForGateway(input: PromptBudgetInput, messages: SessionMessage[]) {
-  const inflight = compactInFlightToolMessages(messages as Array<Record<string, unknown>>, {
-    maxTokens: input.session.contextWindow?.maxTokens,
-    keepRecentTools: input.session.config.context?.inFlightKeepRecentTools ?? undefined,
-    pruneStale: true,
-    currentTurnOnly: true
-  });
-  if (!inflight.compacted) {
-    return messages;
-  }
-  syncCompactedToolResults(input.toolResults, messages);
-  return messages;
-}
-
 async function compactInflightForGateway(
   input: PromptBudgetInput,
   messages: SessionMessage[],
@@ -564,7 +549,14 @@ async function compactInflightForGateway(
     maxTokens: input.session.contextWindow?.maxTokens,
     triggerRatio: boundedContextRatio(input.session.config.context?.inFlightCompactRatio, DEFAULT_IN_FLIGHT_COMPACT_RATIO),
     keepRecentTools: input.session.config.context?.inFlightKeepRecentTools ?? undefined,
-    force
+    force,
+    needsCompaction: () => {
+      syncCompactedToolResults(input.toolResults, messages);
+      return promptEstimateNeedsCompaction(estimatePromptPayload({
+        model: input.session.model, messages, tools: input.session.context.tools,
+        toolResults: input.toolResults, gatewayProtocol: sessionGatewayProtocol(input.session)
+      }), input.session.contextWindow, input.session.config.context?.promptCompactRatio);
+    }
   });
   if (!inflight.compacted) {
     return messages;

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Ant Code Dashboard</title>
     <link rel="stylesheet" href="/assets/vendor/katex.min.css" />
-    <link rel="stylesheet" href="/assets/styles.css?v=2.0.7-chips-pdf-ignore" />
+    <link rel="stylesheet" href="/assets/styles.css?v=2.0.9" />
   </head>
   <body data-dashboard-view="conversation">
     <div class="atmosphere" aria-hidden="true"></div>
@@ -43,9 +43,9 @@
 
       <main class="workspace">
         <header class="workspace-header">
-          <button class="connection-status" id="connection-status" type="button" data-state="idle" title="仅此电脑可打开。本地网关未连接。点击重新连接" aria-label="本地网关未连接，点击重新连接">
+          <button class="connection-status" id="connection-status" type="button" data-state="idle" title="正在读取本地网关配置" aria-label="正在读取本地网关配置">
             <span class="connection-dot" aria-hidden="true"></span>
-            <span class="connection-label">本地网关未连接</span>
+            <span class="connection-label">正在读取配置</span>
           </button>
           <div class="header-actions">
             <button class="header-settings" id="settings-button" type="button" aria-label="打开设置" aria-controls="settings-view" aria-pressed="false" title="设置">
@@ -126,7 +126,6 @@
               <button type="button" id="shutdown-confirm">确认关闭</button>
             </div>
           </div>
-          <div class="approval-panel hidden" id="approval-panel"></div>
           <div class="question-panel hidden" id="question-panel"></div>
           <div class="live-status hidden" id="live-status">
             <button class="live-main" id="activity-toggle" type="button" aria-expanded="false" aria-controls="live-subtasks" disabled>
@@ -135,6 +134,7 @@
             </button>
             <div class="live-subtasks" id="live-subtasks"></div>
           </div>
+          <div class="approval-panel hidden" id="approval-panel"></div>
           <div class="trust-panel hidden" id="trust-panel"></div>
           <div class="permission-confirm-panel hidden" id="permission-confirm-panel"></div>
           <div class="permission-confirm-panel hidden" id="goal-confirm-panel"></div>
@@ -225,6 +225,6 @@
         </div>
       </div>
     </div>
-    <script src="/assets/app.js?v=2.0.7-chips-pdf-ignore" type="module"></script>
+    <script src="/assets/app.js?v=2.0.9" type="module"></script>
   </body>
 </html>

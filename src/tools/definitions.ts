@@ -1,7 +1,7 @@
 export const BUILT_IN_TOOLS = Object.freeze([
   {
     name: "read_file",
-    description: "Read a UTF-8 text file inside the active workspace, or an approved/full-access local path. Returns the full file unless maxBytes is explicitly supplied.",
+    description: "Read a UTF-8 text file inside the active workspace, or an approved/full-access local path. Model output is a bounded continuous excerpt. Continue with returned nextStartLine/nextStartColumn as startLine/startColumn; maxLines defaults to 200 for range reads. Reuse retained results unless the file changed or another range is needed.",
     risk: "read",
     supportsAbort: false,
     inputSchema: {
@@ -9,7 +9,10 @@ export const BUILT_IN_TOOLS = Object.freeze([
       required: ["path"],
       properties: {
         path: { type: "string" },
-        maxBytes: { type: "number" }
+        maxBytes: { type: "number" },
+        startLine: { type: "integer", minimum: 1 },
+        startColumn: { type: "integer", minimum: 1, description: "1-based UTF-16 column on startLine; use the returned continuation value for long lines." },
+        maxLines: { type: "integer", minimum: 1 }
       }
     }
   },
@@ -22,7 +25,8 @@ export const BUILT_IN_TOOLS = Object.freeze([
       type: "object",
       properties: {
         path: { type: "string" },
-        maxEntries: { type: "number" }
+        maxEntries: { type: "number" },
+        offset: { type: "integer", minimum: 0, description: "Continue with the returned nextOffset. Results reflect current directory contents." }
       }
     }
   },
@@ -37,7 +41,8 @@ export const BUILT_IN_TOOLS = Object.freeze([
       properties: {
         pattern: { type: "string" },
         path: { type: "string" },
-        maxMatches: { type: "number" }
+        maxMatches: { type: "number" },
+        offset: { type: "integer", minimum: 0, description: "Continue with the returned nextOffset; reruns against current files." }
       }
     }
   },
@@ -52,7 +57,8 @@ export const BUILT_IN_TOOLS = Object.freeze([
       properties: {
         pattern: { type: "string" },
         path: { type: "string" },
-        maxMatches: { type: "number" }
+        maxMatches: { type: "number" },
+        offset: { type: "integer", minimum: 0, description: "Continue with the returned nextOffset; reruns against current files." }
       }
     }
   },
@@ -75,9 +81,10 @@ export const BUILT_IN_TOOLS = Object.freeze([
         multiline: { type: "boolean" },
         hidden: { type: "boolean" },
         noIgnore: { type: "boolean" },
+        offset: { type: "integer", minimum: 0, description: "Skip this many result rows, including context rows. Continue with nextOffset." },
         beforeContext: { type: "number" },
         afterContext: { type: "number" },
-        maxResults: { type: "number" },
+        maxResults: { type: "number", description: "Maximum returned rows, including context rows; default 100." },
         timeoutMs: { type: "number" }
       }
     }
@@ -91,6 +98,7 @@ export const BUILT_IN_TOOLS = Object.freeze([
       type: "object",
       properties: {
         path: { type: "string" },
+        offset: { type: "integer", minimum: 0, description: "Continue with nextOffset." },
         glob: { type: "array" },
         hidden: { type: "boolean" },
         noIgnore: { type: "boolean" },
@@ -109,6 +117,7 @@ export const BUILT_IN_TOOLS = Object.freeze([
       required: ["pattern"],
       properties: {
         pattern: { type: "string" },
+        offset: { type: "integer", minimum: 0, description: "Continue with nextOffset." },
         path: { type: "string" },
         glob: { type: "array" },
         ignoreCase: { type: "boolean" },

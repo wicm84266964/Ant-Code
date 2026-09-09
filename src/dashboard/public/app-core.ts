@@ -580,6 +580,7 @@ export type DashboardUiState = {
   };
   goalSubmitting: boolean;
   pendingApproval: DashboardApproval | null;
+  approvalQueue: DashboardApproval[];
   approvalSubmitting: boolean;
   pendingQuestion: DashboardPendingQuestion | null;
   questionSubmitting: boolean;
@@ -748,6 +749,7 @@ export const state: DashboardUiState = {
   },
   goalSubmitting: false,
   pendingApproval: null,
+  approvalQueue: [],
   approvalSubmitting: false,
   pendingQuestion: null,
   questionSubmitting: false,

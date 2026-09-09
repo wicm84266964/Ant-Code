@@ -4,7 +4,29 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { atomicWriteFileSync } from "../../src/storage/durable-file.ts";
+import { atomicWriteFileSync, withFileMutationLock } from "../../src/storage/durable-file.ts";
+
+test("lock release retries sharing violations and permits the next mutation", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "durable-lock-release-"));
+  const file = path.join(root, "state.json");
+  const rename = fs.rename;
+  let failures = 0;
+  fs.rename = async (source, target) => {
+    if (String(target).includes(".released.") && failures++ < 2) {
+      throw Object.assign(new Error("sharing violation"), { code: "EPERM" });
+    }
+    return rename(source, target);
+  };
+  try {
+    await withFileMutationLock(file, async () => {});
+    await withFileMutationLock(file, async () => {});
+    assert.equal(failures, 4);
+    assert.deepEqual(await fs.readdir(root), []);
+  } finally {
+    fs.rename = rename;
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
 
 test("synchronous atomic writes preserve the committed file after a partial write failure", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "durable-file-sync-"));

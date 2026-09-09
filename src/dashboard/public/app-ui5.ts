@@ -1,4 +1,5 @@
 import { renderMarkdown } from "./markdown.ts";
+import { modelConnectionGroups } from "./model-groups.ts";
 import { hydrateRichContent } from "./rich-renderers.ts";
 import { visibleTranscriptRole } from "./transcript.ts";
 import { MANUAL_AGENT_MODEL_VALUE, state, els, MODE_DESCRIPTIONS, LOCAL_FILE_EXTENSIONS, FILE_REFERENCE_PATTERN, TRANSCRIPT_DOM_LIMIT, EVENT_STALE_AFTER_MS, EVENT_CONNECT_TIMEOUT_MS, EVENT_RECONNECT_MAX_ATTEMPTS, DASHBOARD_REQUEST_TIMEOUT_MS, DASHBOARD_API_VERSION, DASHBOARD_LIFECYCLE_TIMEOUT_MS, DASHBOARD_SHUTDOWN_TIMEOUT_MS, DASHBOARD_INTERRUPT_TIMEOUT_MS, MAX_IMAGE_ATTACHMENTS, MAX_IMAGE_ATTACHMENT_BYTES, CURRENT_SESSION_STORAGE_KEY, DASHBOARD_CLIENT_STORAGE_KEY, PREVIEW_WIDTH_STORAGE_KEY, PREVIEW_WIDTH_DEFAULT, PREVIEW_WIDTH_MIN, PREVIEW_WIDTH_MAX, PREVIEW_WORKSPACE_MIN , emptySessionStatus, emptyBackgroundSubagent } from "./app-core.ts";
@@ -29,7 +30,7 @@ export async function handleModelPanelChange(event: Event) {
     const modelId = profile?.modelAlias || profile?.models?.[0]?.id || "";
     await switchModel(modelId, { profileId: profile?.id || "", keepPanelOpen: true });
   } else if (select.dataset.action === "switch-model") {
-    await switchModel(select.value, { profileId: currentModelSelection().profile?.id || "" });
+    await switchModel(select.value, { profileId: select.selectedOptions[0]?.dataset.profileId || currentModelSelection().profile?.id || "" });
   }
 }
 
@@ -92,7 +93,7 @@ export function modelSettingsHtml() {
         <span>${escapeHtml(inspectedProfile?.gatewayUrl || "未配置网关")}</span>
       </div>
       <div class="settings-profile-list">
-        ${profiles.map((profile) => settingsGatewayProfileHtml(profile)).join("") || `<div class="settings-empty">尚未保存模型来源</div>`}
+        ${modelConnectionGroups(profiles).map((group) => `<div class="settings-source-group"><h3>${escapeHtml(group.label)}</h3>${group.profiles[0].credentialSelectionRequired ? `<p role="status">请选择生效凭据</p>` : ""}${group.profiles.map((profile) => settingsGatewayProfileHtml(profile)).join("")}</div>`).join("") || `<div class="settings-empty">尚未保存模型来源</div>`}
       </div>
     </section>
     <section class="settings-section" aria-labelledby="settings-models-title">
@@ -316,6 +317,7 @@ export function settingsGatewayProfileHtml(profile: DashboardGatewayProfile) {
           : `${protocolDisplayName(profile.gatewayProtocol)} · ${profile.apiKeyConfigured ? "Key 已配置" : "无 Key"} · ${count} 模型`)}</small>
       </div>
       <div class="settings-row-actions">
+        <label title="使用此配置保存的凭据；保存范围由上方项目/全局选项决定"><input type="radio" name="credential-${escapeAttribute(String(profile.connectionGroupId || profile.id))}" data-action="select-source-credential" data-profile-id="${escapeAttribute(profile.id)}" ${profile.activeCredentialProfileId === profile.id ? "checked" : ""} ${state.running || state.settingsRefreshing ? "disabled" : ""}>生效凭据</label>
         <button type="button" data-action="inspect-profile" data-profile-id="${escapeAttribute(profile.id)}" aria-pressed="${inspected}" ${state.settingsRefreshing ? "disabled" : ""}>${inspected ? "正在查看" : "查看模型"}</button>
         <button type="button" data-action="use-profile" data-profile-id="${escapeAttribute(profile.id)}" ${profile.ready === false || state.settingsRefreshing || state.running || state.modelSwitching ? "disabled" : ""}>设为默认</button>
         <button type="button" data-action="edit-gateway-profile" data-profile-id="${escapeAttribute(profile.id)}"${profile.editable === false ? ` title="${escapeAttribute(gatewayProfileReadonlyLabel(profile))}"` : ""} ${profile.editable === false || state.settingsRefreshing || state.running || Boolean(state.deletingGatewayProfileId) ? "disabled" : ""}>${profile.editable === false ? "只读" : "编辑"}</button>
@@ -546,6 +548,19 @@ export async function handleSettingsClick(event: Event) {
     state.modelDefaultScope = configScope(action.dataset.scope, "project");
     state.settingsFeedback = null;
     renderSettingsView();
+  } else if (action.dataset.action === "select-source-credential") {
+    state.settingsRefreshing = true;
+    try {
+      const result = await postJson("/api/settings-config", { section: "source-credential", settings: { profileId: action.dataset.profileId }, saveTarget: state.modelDefaultScope, sessionId: state.currentSessionId || undefined });
+      if (!result.ok) throw new Error(result.error || "切换凭据失败");
+      state.settingsRefreshing = false;
+      await refreshSettingsConfiguration();
+    } catch (error) {
+      state.settingsFeedback = { tone: "error", message: errorMessageOf(error) };
+    } finally {
+      state.settingsRefreshing = false;
+      renderSettingsView();
+    }
   } else if (action.dataset.action === "inspect-profile") {
     state.settingsProviderId = action.dataset.profileId || "";
     state.deleteConfirmModelKey = "";
@@ -764,8 +779,8 @@ export function renderModelConfigPanel() {
           <input name="modelId" required spellcheck="false" value="${escapeAttribute(current.id || "")}" placeholder="example-coding-model" />
         </label>
         <label>
-          <span>显示名称</span>
-          <input name="label" spellcheck="false" value="${escapeAttribute(current.label || "")}" placeholder="Example Coding Model" />
+          <span>模型备注</span>
+          <input name="label" maxlength="160" spellcheck="false" value="${escapeAttribute(current.label === current.id ? "" : current.label || "")}" placeholder="例如：科研分析、代码开发" />
         </label>
         <label>
           <span>上下文窗口</span>

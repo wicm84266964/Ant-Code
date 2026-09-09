@@ -17,8 +17,8 @@ test("read_file model view is numbered excerpt instead of pretty JSON envelope",
   assert.doesNotMatch(view.text, /"bytesRead"/);
 });
 
-test("read_file model view head-tails oversized files", () => {
-  const content = "head-content\n" + "y".repeat(20_000) + "\ntail-content";
+test("read_file model view keeps a continuous prefix and a long-line continuation", () => {
+  const content = "head-content\n" + "y".repeat(80_000) + "\ntail-content";
   const view = renderToolResultView("read_file", {
     ok: true,
     result: { path: "big.txt", content, bytesRead: content.length }
@@ -27,8 +27,9 @@ test("read_file model view head-tails oversized files", () => {
   assert.equal(view.truncated, true);
   assert.match(view.text, /truncated=true/);
   assert.match(view.text, /head-content/);
-  assert.match(view.text, /tail-content/);
-  assert.match(view.text, /chars omitted/);
+  assert.doesNotMatch(view.text, /tail-content|chars omitted/);
+  assert.match(view.text, /nextStartLine=2 nextStartColumn=\d+/);
+  assert.ok(Buffer.byteLength(view.text) <= 32_000);
 });
 
 test("grep model view keeps a bounded match list", () => {
@@ -42,10 +43,10 @@ test("grep model view keeps a bounded match list", () => {
     result: { matches, truncated: true }
   });
 
-  assert.match(view.text, /matches=80 truncated=true/);
-  assert.equal(view.text.split("\n").filter((line) => line.startsWith("- ")).length, 40);
+  assert.match(view.text, /matches=80 shown=80 offset=0 truncated=true/);
+  assert.equal(view.text.split("\n").filter((line) => line.startsWith("- ")).length, 80);
   assert.match(view.text, /src\/file-0\.ts:1/);
-  assert.doesNotMatch(view.text, /src\/file-79\.ts/);
+  assert.match(view.text, /src\/file-79\.ts/);
 });
 
 test("write_file model view drops the full diff", () => {
@@ -144,7 +145,7 @@ test("hard safety valve still truncates a huge view", () => {
   assert.match(serialized.content, /\[tool result truncated\]/);
 });
 
-test("stale prune stubs older current-turn tools without waiting for the window", () => {
+test("budget pruning retains all current-turn evidence while the window has room", () => {
   const messages = [
     { role: "user", content: "previous turn" },
     {
@@ -169,11 +170,41 @@ test("stale prune stubs older current-turn tools without waiting for the window"
     currentTurnOnly: true
   });
 
-  assert.equal(result.compacted, true);
-  assert.equal(result.compactedTools, 1);
+  assert.equal(result.compacted, false);
+  assert.equal(result.compactedTools, 0);
   assert.match(String(messages[1].content[0].text), /previous-turn-body/);
-  assert.match(String(messages[3].content[0].text), new RegExp(STALE_TOOL_MARKER.replace(/[[\]]/g, "\\$&")));
+  assert.match(String(messages[3].content[0].text), /body/);
   assert.match(String(messages[3].content[0].text), /src\/0\.ts/);
   assert.match(String(messages[7].content[0].text), /src\/4\.ts/);
   assert.equal(String(messages[7].content[0].text).includes(STALE_TOOL_MARKER), false);
+});
+
+test("tool budget compacts a low-value result first and stops when sufficient", () => {
+  const messages = [
+    { role: "user", name: "", content: [{ type: "text", text: "analyze" }] },
+    ...["read_file", "list_files", "bash", "read_file", "read_file", "read_file"].map((name, index) => ({
+      role: "tool", name,
+      content: [{ type: "text", text: `ok=true tool=${name}\npath=${index}.txt\n${"evidence ".repeat(400)}` }]
+    }))
+  ];
+  const before = structuredClone(messages);
+  const result = compactInFlightToolMessages(messages, {
+    maxTokens: 5_300, keepRecentTools: 4, pruneStale: true, currentTurnOnly: true
+  });
+  assert.equal(result.compactedTools, 1);
+  assert.match(messages[2].content[0].text, /\[compacted tool result\]/);
+  assert.deepEqual(messages[1], before[1]);
+  assert.deepEqual(messages.slice(3), before.slice(3));
+});
+
+test("search byte budget returns whole entries with a resumable offset", () => {
+  const result = formatToolResultForModel("grep", {
+    ok: true,
+    result: { offset: 30, matches: Array.from({ length: 100 }, (_, i) => ({ path: `file-${i}.ts`, line: 1, text: "x".repeat(100) })) }
+  }, { maxBytes: 2000 });
+  const shown = Number(/shown=(\d+)/.exec(result.content)?.[1]);
+  assert.ok(shown > 0 && shown < 100);
+  assert.match(result.content, new RegExp(`nextOffset=${30 + shown}\\b`));
+  assert.ok(result.bytes <= 2000);
+  assert.doesNotMatch(result.content, /\[tool result truncated\]/);
 });

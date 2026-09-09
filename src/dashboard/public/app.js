@@ -66,6 +66,7 @@ var state = {
   },
   goalSubmitting: false,
   pendingApproval: null,
+  approvalQueue: [],
   approvalSubmitting: false,
   pendingQuestion: null,
   questionSubmitting: false,
@@ -2397,9 +2398,11 @@ function setConnectionState(next) {
     error: "本地网关异常",
     stale: "本地网关连接过期"
   };
-  const label = labels[next] ?? labels.idle;
-  els.connectionStatus.dataset.state = next;
-  els.connectionStatus.title = `仅此电脑可打开，文件访问按当前权限执行。${label}。点击重新连接`;
+  const configured = state.gatewayConfig?.apiKeyConfigured === true || (state.gatewayProfiles ?? []).some((profile) => profile.apiKeyConfigured === true && profile.credentialSelectionRequired !== true);
+  const displayState = next === "idle" && configured ? "connected" : next;
+  const label = labels[displayState] ?? labels.idle;
+  els.connectionStatus.dataset.state = displayState;
+  els.connectionStatus.title = `仅此电脑可打开，文件访问按当前权限执行。${label}。${next === "idle" && configured ? "凭据已配置，尚未验证上游请求。" : ""}点击重新连接`;
   els.connectionStatus.setAttribute("aria-label", `${label}，点击重新连接`);
   const text = els.connectionStatus.querySelector(".connection-label");
   if (text) text.textContent = label;
@@ -2675,7 +2678,14 @@ function handleDashboardEvent3(event) {
     return;
   }
   if (event.type === "approval_resolved") {
-    hideApproval2();
+    hideApproval2({ approvalId: event.approvalId });
+    if (state.pendingApproval) {
+      els.runStatus.textContent = "等待确认";
+      setLiveTitle("等待权限确认");
+      updateSendButton();
+      return;
+    }
+    clearPermissionWaitActivity();
     if (event.interrupted && state.pendingGuide) {
       els.runStatus.textContent = "引导中";
       setLiveTitle("引导已接管，等待当前轮次收束");
@@ -3105,6 +3115,37 @@ function isProtectedTranscriptNode3(node) {
   return node === els.emptyState || node === state.transcriptHistoryNode || node === state.workflowNode || node === state.transcriptWindow.olderNode || node === state.transcriptWindow.newerNode || node.classList.contains("draft-message");
 }
 
+// src/dashboard/public/model-groups.ts
+function modelPickerLabel(model, models) {
+  const remark = model.label && model.label !== model.id ? model.label : "";
+  const label = remark ? `${model.id} (${remark})` : model.id;
+  const duplicates = models.filter((other) => other.id === model.id && (other.label || other.id) === (model.label || model.id));
+  if (duplicates.length < 2) return label;
+  return `${label} (配置 ${duplicates.findIndex((other) => other.switchProfileId === model.switchProfileId) + 1})`;
+}
+function modelConnectionGroups(profiles) {
+  const groups = /* @__PURE__ */ new Map();
+  for (const profile of profiles) {
+    const id = String(profile.connectionGroupId || profile.id);
+    let group = groups.get(id);
+    if (!group) {
+      group = { id, label: profile.gatewayUrl || profile.label || profile.id, profiles: [] };
+      groups.set(id, group);
+    }
+    group.profiles.push(profile);
+  }
+  const result = [...groups.values()];
+  const counts = /* @__PURE__ */ new Map();
+  for (const group of result) counts.set(group.label, (counts.get(group.label) || 0) + 1);
+  for (const group of result) {
+    if ((counts.get(group.label) || 0) > 1) {
+      const profile = group.profiles[0];
+      group.label += ` (${profile.gatewayUrl || profile.id}; ${profile.id})`;
+    }
+  }
+  return result;
+}
+
 // src/dashboard/public/app-ui4.ts
 function renderTranscriptWindowMarker3(side) {
   const countKey = side === "newer" ? "unloadedNewer" : "unloadedOlder";
@@ -3409,6 +3450,10 @@ function setLiveTitle(title) {
   updateLiveStatus3();
 }
 function toggleLiveStatusDetails() {
+  if (state.pendingApproval) {
+    showApproval3(state.pendingApproval);
+    return;
+  }
   if (state.backgroundSubagents.size === 0) {
     return;
   }
@@ -3421,13 +3466,15 @@ function updateLiveStatus3() {
   if (background.length === 0) {
     state.liveStatusExpanded = false;
   }
-  const visible = state.running || active.length > 0 || background.length > 0 || state.liveTitle;
+  const waitingApproval = Boolean(state.pendingApproval);
+  const visible = state.running || active.length > 0 || background.length > 0 || waitingApproval || state.liveTitle;
   els.liveStatus.classList.toggle("hidden", !visible);
   els.liveStatus.classList.toggle("has-background-subagents", background.length > 0);
+  els.liveStatus.classList.toggle("has-pending-approval", waitingApproval);
   els.liveStatus.classList.toggle("expanded", state.liveStatusExpanded && background.length > 0);
-  els.activityToggle.disabled = background.length === 0;
+  els.activityToggle.disabled = background.length === 0 && !waitingApproval;
   els.activityToggle.setAttribute("aria-expanded", String(state.liveStatusExpanded && background.length > 0));
-  els.activityToggle.setAttribute("aria-label", background.length > 0 ? `${state.liveStatusExpanded ? "收起" : "展开"}后台活动详情` : "当前活动");
+  els.activityToggle.setAttribute("aria-label", waitingApproval ? "打开权限确认" : background.length > 0 ? `${state.liveStatusExpanded ? "收起" : "展开"}后台活动详情` : "当前活动");
   if (!visible) {
     els.liveTitle.textContent = "";
     els.liveSubtasks.innerHTML = "";
@@ -3452,6 +3499,9 @@ function updateLiveStatus3() {
   renderBackgroundSubagentStatus4(background);
 }
 function liveStatusTitle4(primary, subtasks, background) {
+  if (state.pendingApproval) {
+    return state.approvalQueue.length > 0 ? `等待权限确认 · 还有 ${state.approvalQueue.length} 个排队` : "等待权限确认";
+  }
   if (primary?.rawType === "gateway_retry") {
     return "网关响应异常，正在自动重试";
   }
@@ -3703,6 +3753,7 @@ function normalizeChangeStats4(stats) {
   };
 }
 function renderComposerStatus() {
+  setConnectionState(state.connectionState);
   if (!els.modelStatus || !els.contextStatus || !els.changeStatus) {
     return;
   }
@@ -3944,7 +3995,9 @@ function renderModelPanel4() {
   const unresolved = selection.resolved === false;
   const activeProfileId = selection.profile?.id || "";
   const activeModelId = selection.model?.id || "";
-  const models = selection.profile?.models ?? (profiles.length === 0 ? state.models ?? [] : []);
+  const groups = modelConnectionGroups(profiles);
+  const activeGroup = groups.find((group) => group.profiles.some((profile) => profile.id === activeProfileId));
+  const models = activeGroup ? activeGroup.profiles.flatMap((profile) => (profile.models ?? []).map((model) => ({ ...model, switchProfileId: profile.id, switchReady: profile.ready !== false }))) : (profiles.length === 0 ? state.models ?? [] : []).map((model) => ({ ...model, switchProfileId: "", switchReady: true }));
   els.modelPanel.innerHTML = `
     <div class="model-panel-head">
       <div class="model-panel-title">模型</div>
@@ -3954,13 +4007,13 @@ function renderModelPanel4() {
       <label>
         <span>模型来源</span>
         <select data-action="switch-source" ${state.running || state.modelSwitching || profiles.length === 0 ? "disabled" : ""}>
-          ${profiles.length > 0 ? `${unresolved ? `<option value="" selected disabled>请选择模型来源</option>` : ""}${profiles.map((profile) => `<option value="${escapeAttribute2(profile.id)}"${!unresolved && profile.id === activeProfileId ? " selected" : ""}${profile.ready === false ? " disabled" : ""}>${escapeHtml(profile.label || profile.gatewayUrl || profile.id)}${profile.ready === false ? "（需配置）" : ""}</option>`).join("")}` : `<option value="">${unresolved ? "没有可用模型来源" : escapeHtml(modelSourceLabel4(selection.model))}</option>`}
+          ${profiles.length > 0 ? `${unresolved ? `<option value="" selected disabled>请选择模型来源</option>` : ""}${groups.map((group) => `<option value="${escapeAttribute2(group.profiles.find((profile) => profile.ready !== false)?.id || group.profiles[0].id)}"${!unresolved && group.id === activeGroup?.id ? " selected" : ""}${group.profiles.every((profile) => profile.ready === false) ? " disabled" : ""}>${escapeHtml(group.label)}</option>`).join("")}` : `<option value="">${unresolved ? "没有可用模型来源" : escapeHtml(modelSourceLabel4(selection.model))}</option>`}
         </select>
       </label>
       <label>
         <span>模型名称</span>
         <select data-action="switch-model" ${state.running || state.modelSwitching || unresolved || models.length === 0 ? "disabled" : ""}>
-          ${unresolved ? `<option value="" selected>请先选择模型来源</option>` : models.map((model) => `<option value="${escapeAttribute2(model.id)}"${model.id === activeModelId ? " selected" : ""}>${escapeHtml(model.label || model.id)}</option>`).join("") || `<option value="">未配置模型</option>`}
+          ${unresolved ? `<option value="" selected>请先选择模型来源</option>` : models.map((model) => `<option value="${escapeAttribute2(model.id)}" data-profile-id="${escapeAttribute2(model.switchProfileId)}"${model.id === activeModelId && model.switchProfileId === activeProfileId ? " selected" : ""}${model.switchReady ? "" : " disabled"}>${escapeHtml(modelPickerLabel(model, models))}</option>`).join("") || `<option value="">未配置模型</option>`}
         </select>
       </label>
     </div>
@@ -3991,7 +4044,7 @@ async function handleModelPanelChange(event) {
     const modelId = profile?.modelAlias || profile?.models?.[0]?.id || "";
     await switchModel5(modelId, { profileId: profile?.id || "", keepPanelOpen: true });
   } else if (select.dataset.action === "switch-model") {
-    await switchModel5(select.value, { profileId: currentModelSelection4().profile?.id || "" });
+    await switchModel5(select.value, { profileId: select.selectedOptions[0]?.dataset.profileId || currentModelSelection4().profile?.id || "" });
   }
 }
 function renderSettingsView4() {
@@ -4046,7 +4099,7 @@ function modelSettingsHtml5() {
         <span>${escapeHtml(inspectedProfile?.gatewayUrl || "未配置网关")}</span>
       </div>
       <div class="settings-profile-list">
-        ${profiles.map((profile) => settingsGatewayProfileHtml5(profile)).join("") || `<div class="settings-empty">尚未保存模型来源</div>`}
+        ${modelConnectionGroups(profiles).map((group) => `<div class="settings-source-group"><h3>${escapeHtml(group.label)}</h3>${group.profiles[0].credentialSelectionRequired ? `<p role="status">请选择生效凭据</p>` : ""}${group.profiles.map((profile) => settingsGatewayProfileHtml5(profile)).join("")}</div>`).join("") || `<div class="settings-empty">尚未保存模型来源</div>`}
       </div>
     </section>
     <section class="settings-section" aria-labelledby="settings-models-title">
@@ -4246,6 +4299,7 @@ function settingsGatewayProfileHtml5(profile) {
         <small>${escapeHtml(profile.ready === false ? `${protocolDisplayName5(profile.gatewayProtocol)} · 配置不完整` : `${protocolDisplayName5(profile.gatewayProtocol)} · ${profile.apiKeyConfigured ? "Key 已配置" : "无 Key"} · ${count} 模型`)}</small>
       </div>
       <div class="settings-row-actions">
+        <label title="使用此配置保存的凭据；保存范围由上方项目/全局选项决定"><input type="radio" name="credential-${escapeAttribute2(String(profile.connectionGroupId || profile.id))}" data-action="select-source-credential" data-profile-id="${escapeAttribute2(profile.id)}" ${profile.activeCredentialProfileId === profile.id ? "checked" : ""} ${state.running || state.settingsRefreshing ? "disabled" : ""}>生效凭据</label>
         <button type="button" data-action="inspect-profile" data-profile-id="${escapeAttribute2(profile.id)}" aria-pressed="${inspected}" ${state.settingsRefreshing ? "disabled" : ""}>${inspected ? "正在查看" : "查看模型"}</button>
         <button type="button" data-action="use-profile" data-profile-id="${escapeAttribute2(profile.id)}" ${profile.ready === false || state.settingsRefreshing || state.running || state.modelSwitching ? "disabled" : ""}>设为默认</button>
         <button type="button" data-action="edit-gateway-profile" data-profile-id="${escapeAttribute2(profile.id)}"${profile.editable === false ? ` title="${escapeAttribute2(gatewayProfileReadonlyLabel5(profile))}"` : ""} ${profile.editable === false || state.settingsRefreshing || state.running || Boolean(state.deletingGatewayProfileId) ? "disabled" : ""}>${profile.editable === false ? "只读" : "编辑"}</button>
@@ -4438,6 +4492,19 @@ async function handleSettingsClick(event) {
     state.modelDefaultScope = configScope5(action.dataset.scope, "project");
     state.settingsFeedback = null;
     renderSettingsView4();
+  } else if (action.dataset.action === "select-source-credential") {
+    state.settingsRefreshing = true;
+    try {
+      const result = await postJson("/api/settings-config", { section: "source-credential", settings: { profileId: action.dataset.profileId }, saveTarget: state.modelDefaultScope, sessionId: state.currentSessionId || void 0 });
+      if (!result.ok) throw new Error(result.error || "切换凭据失败");
+      state.settingsRefreshing = false;
+      await refreshSettingsConfiguration4();
+    } catch (error) {
+      state.settingsFeedback = { tone: "error", message: errorMessageOf(error) };
+    } finally {
+      state.settingsRefreshing = false;
+      renderSettingsView4();
+    }
   } else if (action.dataset.action === "inspect-profile") {
     state.settingsProviderId = action.dataset.profileId || "";
     state.deleteConfirmModelKey = "";
@@ -4627,8 +4694,8 @@ function renderModelConfigPanel4() {
           <input name="modelId" required spellcheck="false" value="${escapeAttribute2(current.id || "")}" placeholder="example-coding-model" />
         </label>
         <label>
-          <span>显示名称</span>
-          <input name="label" spellcheck="false" value="${escapeAttribute2(current.label || "")}" placeholder="Example Coding Model" />
+          <span>模型备注</span>
+          <input name="label" maxlength="160" spellcheck="false" value="${escapeAttribute2(current.label === current.id ? "" : current.label || "")}" placeholder="例如：科研分析、代码开发" />
         </label>
         <label>
           <span>上下文窗口</span>
@@ -6144,6 +6211,9 @@ function normalizeGatewayProfiles(value) {
     const transport = isPlainObject(profile.transport) ? profile.transport : {};
     return {
       id: String(profile.id ?? profile.providerId ?? ""),
+      connectionGroupId: String(profile.connectionGroupId ?? profile.id ?? profile.providerId ?? ""),
+      activeCredentialProfileId: String(profile.activeCredentialProfileId ?? ""),
+      credentialSelectionRequired: profile.credentialSelectionRequired === true,
       label: String(profile.label ?? profile.displayName ?? profile.id ?? profile.providerId ?? ""),
       gatewayUrl: String(profile.gatewayUrl ?? transport.baseURL ?? ""),
       gatewayHealthUrl: String(profile.gatewayHealthUrl ?? transport.healthURL ?? ""),
@@ -6638,17 +6708,35 @@ function normalizeComparableText3(text) {
 }
 function showApproval3(approval) {
   if (!approval) return;
+  if (state.pendingApproval?.id && approval.id && state.pendingApproval.id === approval.id) {
+    renderApprovalPanel(approval);
+    return;
+  }
+  if (state.pendingApproval) {
+    if (approval.id && !state.approvalQueue.some((item) => item.id === approval.id)) {
+      state.approvalQueue.push(approval);
+    }
+    refreshApprovalQueueLabel();
+    updateLiveStatus3();
+    return;
+  }
+  renderApprovalPanel(approval);
+}
+function renderApprovalPanel(approval) {
   state.pendingApproval = approval;
   state.approvalSubmitting = false;
+  mountApprovalPanelOverlay();
   els.approvalPanel.classList.remove("hidden");
   els.approvalPanel.setAttribute("tabindex", "-1");
   els.approvalPanel.setAttribute("role", "dialog");
   els.approvalPanel.setAttribute("aria-modal", "true");
   els.approvalPanel.setAttribute("aria-labelledby", "approval-title");
+  const queued = state.approvalQueue.length;
   els.approvalPanel.innerHTML = `
-    <div class="approval-title" id="approval-title">需要权限确认 · ${escapeHtml(approval.toolName)}</div>
+    <div class="approval-title" id="approval-title">需要权限确认 · ${escapeHtml(approval.toolName)}${queued > 0 ? ` · 还有 ${queued} 个排队` : ""}</div>
     <div class="approval-preview">${escapeHtml([
     approval.reason,
+    queued > 0 ? `还有 ${queued} 个权限请求排队。` : "",
     approval.sensitive ? "敏感信息强确认：批准后相关内容可能进入模型上下文。" : "",
     approval.outsideWorkspace ? "目标位于工作区外，需要明确确认。" : "",
     ...Array.isArray(approval.preview) ? approval.preview : []
@@ -6665,6 +6753,7 @@ function showApproval3(approval) {
   });
   activateModal(els.approvalPanel, { initialFocus: "button[data-action='allow-once']" });
   revealInteractionPanel8(els.approvalPanel, "button[data-action]");
+  updateLiveStatus3();
   announceStatus(`需要确认 ${approval.toolName ?? "工具"} 权限`);
 }
 async function resolveApproval2(action) {
@@ -6684,15 +6773,66 @@ async function resolveApproval2(action) {
     showError(result.error ?? "权限确认提交失败");
     return;
   }
-  hideApproval2();
-  els.runStatus.textContent = state.running ? "运行中" : "处理中";
+  hideApproval2({ approvalId: approval.id });
+  els.runStatus.textContent = state.pendingApproval ? "等待确认" : state.running ? "运行中" : "处理中";
 }
-function hideApproval2() {
+function hideApproval2(options = {}) {
+  const approvalId = options.approvalId == null || options.approvalId === "" ? "" : String(options.approvalId);
+  if (approvalId) {
+    if (state.pendingApproval?.id && state.pendingApproval.id !== approvalId) {
+      state.approvalQueue = state.approvalQueue.filter((item) => item.id !== approvalId);
+      return;
+    }
+  } else {
+    state.approvalQueue = [];
+  }
   deactivateModal(els.approvalPanel);
   state.pendingApproval = null;
   state.approvalSubmitting = false;
+  const next = state.approvalQueue.shift();
+  if (next) {
+    renderApprovalPanel(next);
+    return;
+  }
+  restoreApprovalPanelHome();
   els.approvalPanel.classList.add("hidden");
   els.approvalPanel.innerHTML = "";
+  updateLiveStatus3();
+}
+function refreshApprovalQueueLabel() {
+  const title = els.approvalPanel?.querySelector("#approval-title");
+  if (!title || !state.pendingApproval) {
+    return;
+  }
+  const queued = state.approvalQueue.length;
+  title.textContent = `需要权限确认 · ${state.pendingApproval.toolName ?? "工具"}${queued > 0 ? ` · 还有 ${queued} 个排队` : ""}`;
+}
+function mountApprovalPanelOverlay() {
+  if (!els.approvalPanel || !document.body) {
+    return;
+  }
+  if (els.approvalPanel.parentElement !== document.body) {
+    document.body.appendChild(els.approvalPanel);
+  }
+}
+function restoreApprovalPanelHome() {
+  if (!els.approvalPanel || !els.liveStatus?.parentNode) {
+    return;
+  }
+  if (els.approvalPanel.previousElementSibling !== els.liveStatus) {
+    els.liveStatus.after(els.approvalPanel);
+  }
+}
+function clearPermissionWaitActivity() {
+  for (const [key, activity] of Array.from(state.liveActivities.entries())) {
+    if (activity.source === "permission" || activity.title === "等待权限确认") {
+      state.liveActivities.delete(key);
+    }
+  }
+  if (state.liveTitle === "等待权限确认") {
+    state.liveTitle = state.running ? "运行中" : "";
+  }
+  updateLiveStatus3();
 }
 function showQuestion3(question) {
   if (!question) return;
@@ -6715,7 +6855,7 @@ function revealInteractionPanel8(panel, focusSelector) {
   if (!panel || panel.classList.contains("hidden")) {
     return;
   }
-  panel.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  panel.scrollIntoView?.({ block: panel === els.approvalPanel ? "center" : "nearest", inline: "nearest" });
   const target = focusSelector ? panel.querySelector(focusSelector) : null;
   const focusTarget = target ?? panel;
   if (typeof focusTarget.focus === "function") {
@@ -9692,6 +9832,7 @@ export {
   clearEventStaleTimer3 as clearEventStaleTimer,
   clearModelConfigFailure6 as clearModelConfigFailure,
   clearPendingGuide2 as clearPendingGuide,
+  clearPermissionWaitActivity,
   clearReasoningCapabilityControls6 as clearReasoningCapabilityControls,
   clearTranscript2 as clearTranscript,
   closeActiveModal2 as closeActiveModal,
@@ -9943,6 +10084,7 @@ export {
   removeLiveActivity4 as removeLiveActivity,
   removeTranscriptHistoryStatus3 as removeTranscriptHistoryStatus,
   renderAgentModelPickers5 as renderAgentModelPickers,
+  renderApprovalPanel,
   renderAssistantDraft4 as renderAssistantDraft,
   renderAttachmentStrip2 as renderAttachmentStrip,
   renderBackgroundSubagentStatus4 as renderBackgroundSubagentStatus,

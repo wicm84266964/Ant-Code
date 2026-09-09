@@ -25,6 +25,26 @@ if (typeof globalThis.document === "undefined") {
   };
 }
 
+test("configured idle gateway shows connected without masking event failures", async () => {
+  const app = await loadAppExports(["state", "els", "setConnectionState"]);
+  const label = { textContent: "" };
+  const node = { dataset: {}, title: "", querySelector: () => label, setAttribute() {} };
+  app.els.connectionStatus = node;
+  app.state.gatewayConfig = { apiKeyConfigured: true };
+  app.setConnectionState("idle");
+  assert.equal(label.textContent, "本地网关已连接");
+  assert.equal(app.state.connectionState, "idle");
+  assert.equal(node.dataset.state, "connected");
+  app.setConnectionState("error");
+  assert.equal(label.textContent, "本地网关异常");
+  app.setConnectionState("offline");
+  assert.equal(label.textContent, "本地网关离线");
+  app.state.gatewayConfig = { apiKeyConfigured: false };
+  app.state.gatewayProfiles = [];
+  app.setConnectionState("idle");
+  assert.equal(label.textContent, "本地网关未连接");
+});
+
 async function publicTsSource() {
   const dir = path.resolve("src/dashboard/public");
   const names = (await fs.readdir(dir)).filter((name) => name === "app-core.ts" || /^app-ui\d+\.ts$/.test(name));
@@ -482,12 +502,19 @@ test("dashboard composer controls keep confirmations reviewable and critical sta
 
   assert.match(app, /<span class="model-status-caret" aria-hidden="true">▾<\/span>/);
   assert.ok(html.indexOf('id="question-panel"') < html.indexOf('id="live-status"'));
-  assert.ok(html.indexOf('id="approval-panel"') < html.indexOf('id="live-status"'));
+  assert.ok(html.indexOf('id="live-status"') < html.indexOf('id="approval-panel"'));
   assert.match(app, /function revealInteractionPanel\(/);
   assert.match(app, /showApproval[\s\S]*revealInteractionPanel\(els\.approvalPanel, "button\[data-action\]"\)/);
   assert.match(app, /showQuestion[\s\S]*revealInteractionPanel\(els\.questionPanel, "\.question-input, button\[data-choice\], button\[data-action='submit'\]"\)/);
-  assert.match(app, /scrollIntoView\?\.\(\{ block: "nearest", inline: "nearest" \}\)/);
+  assert.match(app, /scrollIntoView\?\.\(\{ block: panel === els\.approvalPanel \? "center" : "nearest", inline: "nearest" \}\)/);
   assert.match(app, /focus\(\{ preventScroll: true \}\)/);
+  assert.match(app, /state\.approvalQueue\.push\(approval\)/);
+  assert.match(app, /function clearPermissionWaitActivity\(/);
+  assert.match(app, /document\.body\.appendChild\(els\.approvalPanel\)/);
+  assert.match(app, /hideApproval\(\{ approvalId: event\.approvalId \}\)/);
+  assert.match(app, /if \(state\.pendingApproval\) \{\s*showApproval\(state\.pendingApproval\)/);
+  assert.match(css, /body > \.approval-panel:not\(\.hidden\),\s*\.approval-panel\.modal-interaction/s);
+  assert.match(css, /\.live-status\.has-pending-approval/);
   assert.match(questionRender, /<div class="question-read-pane">[\s\S]*question-copy[\s\S]*question-input[\s\S]*<div class="question-actions">/);
   assert.match(questionReadPane, /question-title/);
   assert.match(questionReadPane, /question-copy/);
@@ -875,7 +902,7 @@ test("dashboard exposes responsive navigation and accessible interaction semanti
 
   const header = html.slice(html.indexOf("workspace-header"), html.indexOf("workflow-strip"));
   assert.match(header, /id="connection-status"/);
-  assert.match(header, /本地网关未连接/);
+  assert.match(header, /正在读取配置/);
   assert.doesNotMatch(header, /本地通用智能体|workspace-local|local-dot/);
   assert.ok(header.indexOf("connection-status") < header.indexOf("header-actions"));
   assert.doesNotMatch(header.slice(header.indexOf("header-actions")), /connection-status/);

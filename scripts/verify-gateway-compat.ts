@@ -54,6 +54,7 @@ async function verifyMockGateway() {
       mode: "mock",
       env: {
         ...process.env,
+        LAB_MODEL_GATEWAY_PROTOCOL: "lab-agent-gateway",
         LAB_MODEL_GATEWAY_URL: `${baseUrl}/v1/chat`,
         LAB_MODEL_GATEWAY_HEALTH_URL: `${baseUrl}/health`,
         LAB_AGENT_MODEL: "compatibility-mock",

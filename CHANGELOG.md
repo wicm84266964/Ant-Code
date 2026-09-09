@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 2.0.9 - 2026-09-10
+
+- Preserve tool evidence until the complete request reaches its context budget; add continuous file excerpts and byte-budgeted search pagination.
+- Group Dashboard models by source URL and select one active credential per source while preserving each model's agent routes.
+- Require remarks for new same-source duplicate models and show readable remarks instead of internal configuration IDs.
+- Show configured idle gateways as connected, with real connection errors still reported.
+
+Release candidate validation and limitations: [Chinese release note](docs/releases/2.0.9-context-source-credentials_zh.md).
+
 ## 2.0.8 - 2026-09-06
 
 This is a small Dashboard workflow release on the 2.0 TypeScript runtime.

@@ -654,6 +654,38 @@ test("OpenAI-compatible prompt repair drops partially returned tool blocks", asy
   }
 });
 
+test("session retains eight source and analysis results in the actual gateway request", async (t) => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "ant-evidence-session-"));
+  t.after(() => fs.rm(cwd, { recursive: true, force: true }));
+  const evidence = Array.from({ length: 8 }, (_, i) => `dataset-${i}: n=${100 + i}, mean=${i}.125, method=paired; ${"source details ".repeat(100)}`);
+  await Promise.all(evidence.map((text, i) => fs.writeFile(path.join(cwd, `${i}.txt`), text)));
+  const requests: any[] = [];
+  const server = await listen(http.createServer(async (request, response) => {
+    const body = await readRequestJson(request);
+    requests.push(body);
+    const round = requests.length - 1;
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      id: `evidence-${round}`, model: body.model,
+      content: round < 8 ? [] : [{ type: "text", text: "evidence retained" }],
+      toolCalls: round < 8 ? [{ id: `read-${round}`, name: "read_file", input: { path: `${round}.txt` } }] : [],
+      stopReason: round < 8 ? "tool_calls" : "stop"
+    }));
+  }), "127.0.0.1");
+  try {
+    const env = mockGatewayEnv(serverUrl(server));
+    const session = await createSession({ cwd, mode: "interactive", env });
+    const result = await runSessionTurn(session, { prompt: "Compare all eight datasets and their source definitions.", env });
+    assert.equal(result.output, "evidence retained");
+    assert.equal(requests.length, 9);
+    const payload = JSON.stringify(requests.at(-1));
+    for (const text of evidence) assert.ok(payload.includes(text));
+    assert.doesNotMatch(payload, /\[stale tool result\]|\[compacted tool result\]/);
+  } finally {
+    await close(server);
+  }
+});
+
 test("session compactes oversized in-flight tool results before later gateway rounds", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
   await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({

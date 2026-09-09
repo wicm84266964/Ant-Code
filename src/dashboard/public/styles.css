@@ -2048,8 +2048,13 @@ button {
   padding: 9px 14px;
 }
 
-.live-status.has-background-subagents {
+.live-status.has-background-subagents,
+.live-status.has-pending-approval {
   cursor: pointer;
+}
+
+.live-status.has-pending-approval {
+  border-color: rgba(246, 200, 111, 0.55);
 }
 
 .live-status.has-background-subagents:focus-visible {
@@ -2266,6 +2271,25 @@ button {
   margin: 0 auto 12px;
   max-width: 860px;
   padding: 14px 16px;
+  position: sticky;
+  bottom: 0;
+  z-index: 6;
+}
+
+body > .approval-panel:not(.hidden),
+.approval-panel.modal-interaction {
+  bottom: auto;
+  left: 50%;
+  margin: 0;
+  max-height: min(82dvh, 720px);
+  max-width: min(680px, calc(100vw - 32px));
+  overflow: auto;
+  position: fixed;
+  right: auto;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(680px, calc(100vw - 32px));
+  z-index: 100;
 }
 
 .trust-panel,
