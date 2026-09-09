@@ -94,10 +94,13 @@ export async function rgSearchTool(input: RgToolInput) {
   if (!result.ok) {
     return result;
   }
-  const parsed = parseJsonSearchOutput(input.cwd, result.stdout, maxResults);
+  const offset = positiveInteger(input.offset, 0);
+  const parsed = parseJsonSearchOutput(input.cwd, result.stdout, maxResults, offset);
   return {
     command: result.command,
     matches: parsed.matches,
+    offset,
+    nextOffset: parsed.truncated ? offset + parsed.matches.length : null,
     stats: parsed.stats,
     warning: result.warning,
     partialFailure: result.partialFailure,
@@ -115,7 +118,7 @@ export async function rgFilesTool(input: RgToolInput) {
   if (!result.ok) {
     return result;
   }
-  return lineListResult(input.cwd, result, maxResults, "files");
+  return lineListResult(input.cwd, result, maxResults, "files", positiveInteger(input.offset, 0));
 }
 
 export async function rgFilesWithMatchesTool(input: RgToolInput) {
@@ -126,7 +129,7 @@ export async function rgFilesWithMatchesTool(input: RgToolInput) {
   if (!result.ok) {
     return result;
   }
-  return lineListResult(input.cwd, result, maxResults, "files");
+  return lineListResult(input.cwd, result, maxResults, "files", positiveInteger(input.offset, 0));
 }
 
 export async function rgCountTool(input: RgToolInput) {
@@ -175,7 +178,7 @@ export async function rgCountTool(input: RgToolInput) {
 }
 
 function commonRgArgs(input: Record<string, unknown>) {
-  const args: string[] = [];
+  const args: string[] = ["--sort", "path"];
   if (input.ignoreCase === true) args.push("--ignore-case");
   if (input.caseSensitive === true) args.push("--case-sensitive");
   if (input.fixedStrings === true) args.push("--fixed-strings");
@@ -194,7 +197,7 @@ function commonRgArgs(input: Record<string, unknown>) {
 }
 
 function fileRgArgs(input: Record<string, unknown>) {
-  const args: string[] = [];
+  const args: string[] = ["--sort", "path"];
   if (input.hidden === true) args.push("--hidden");
   if (input.noIgnore === true) args.push("--no-ignore");
   for (const glob of normalizeStringArray(input.glob)) {
@@ -217,10 +220,11 @@ export function windowsReservedDeviceGlobArgs(platform: unknown = process.platfo
   return args;
 }
 
-function parseJsonSearchOutput(cwd: string, stdout: string, maxResults: number) {
+function parseJsonSearchOutput(cwd: string, stdout: string, maxResults: number, offset: number) {
   const matches: RgMatch[] = [];
   const stats: unknown[] = [];
   let truncated = false;
+  let seen = 0;
   for (const line of stdout.split(/\r?\n/)) {
     if (!line.trim()) continue;
     let event: Record<string, unknown>;
@@ -230,7 +234,8 @@ function parseJsonSearchOutput(cwd: string, stdout: string, maxResults: number) 
       continue;
     }
     if (event.type === "match" || event.type === "context") {
-      if (event.type === "match" && matches.filter((item) => item.type === "match").length >= maxResults) {
+      if (seen++ < offset) continue;
+      if (matches.length >= maxResults) {
         truncated = true;
         continue;
       }
@@ -260,15 +265,17 @@ function parseJsonSearchOutput(cwd: string, stdout: string, maxResults: number) 
   return { matches, stats: stats[0] ?? {}, truncated };
 }
 
-function lineListResult(cwd: string, result: Extract<RgRunResult, { ok: true }>, maxResults: number, key: string) {
+function lineListResult(cwd: string, result: Extract<RgRunResult, { ok: true }>, maxResults: number, key: string, offset: number) {
   const lines = result.stdout.split(/\r?\n/).filter(Boolean).map((item) => toDisplayPath(cwd, item));
-  const values = lines.slice(0, maxResults);
+  const values = lines.slice(offset, offset + maxResults);
   return {
     command: result.command,
     [key]: values,
+    offset,
+    nextOffset: lines.length > offset + values.length ? offset + values.length : null,
     warning: result.warning,
     partialFailure: result.partialFailure,
-    truncated: result.truncated || lines.length > values.length,
+    truncated: result.truncated || lines.length > offset + values.length,
     timedOut: result.timedOut,
     durationMs: result.durationMs
   };

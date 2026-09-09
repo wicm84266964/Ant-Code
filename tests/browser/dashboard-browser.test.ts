@@ -1571,6 +1571,73 @@ test("archived gateway failures show the upstream reason after reopening", async
   }
 });
 
+test("model picker groups connections and switches the original provider on desktop and mobile", async () => {
+  const originalStatus = runtime.status;
+  const originalSwitch = runtime.switchModel;
+  const originalSettings = runtime.settingsConfig;
+  const originalSave = runtime.saveSettingsConfig;
+  const base = await originalStatus();
+  let current = "local-a";
+  const profiles = ["local-a", "local-b", "local-c"].map((id, index) => ({
+    id, label: "127.0.0.1", connectionGroupId: index < 2 ? "local-a" : "local-c",
+    gatewayUrl: index < 2 ? "http://127.0.0.1:9000/v1" : "http://127.0.0.1:9001/v1", gatewayProtocol: "openai-chat", ready: true,
+    activeCredentialProfileId: index < 2 ? "local-a" : "local-c",
+    modelAlias: `model-${index}`, models: [{ ...browserModel(), id: `model-${index}`, label: `Model ${index}`, source: { id, profileId: id, label: "127.0.0.1" } }]
+  }));
+  const status = () => {
+    const profile = profiles.find((item) => item.id === current);
+    return { ...base, sessionStatus: { ...base.sessionStatus, model: profile.modelAlias, providerId: current, selectionResolved: true },
+      gatewayConfig: { ...base.gatewayConfig, activeProfileId: current },
+      gatewayProfiles: profiles.map((item) => ({ ...item, current: item.id === current })), models: profile.models };
+  };
+  runtime.status = async () => status();
+  let credential = "local-a";
+  runtime.settingsConfig = async () => ({ ...(await originalSettings.call(runtime)), gatewayProfiles: status().gatewayProfiles.map((p) => ({ ...p, activeCredentialProfileId: p.id === "local-c" ? "local-c" : credential })) });
+  runtime.saveSettingsConfig = async (body) => {
+    assert.equal(body.section, "source-credential");
+    assert.equal(body.settings.profileId, "local-b");
+    assert.equal(body.saveTarget, "project");
+    credential = "local-b";
+    return { ok: true };
+  };
+  runtime.switchModel = async (body) => {
+    assert.equal(body.providerId, "local-b");
+    assert.equal(body.modelId, "model-1");
+    current = body.providerId;
+    return { ok: true, ...status() };
+  };
+  try {
+    for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
+      current = "local-a";
+      credential = "local-a";
+      await withDashboardPage(viewport, async (page) => {
+        await page.locator("#model-status-toggle").click();
+        const panel = page.locator("#model-panel");
+        const sources = panel.locator("select[data-action='switch-source'] option");
+        assert.equal(await sources.count(), 2);
+        assert.equal(new Set(await sources.allTextContents()).size, 2);
+        const models = panel.locator("select[data-action='switch-model']");
+        assert.deepEqual(await models.locator("option").allTextContents(), ["model-0 (Model 0)", "model-1 (Model 1)"]);
+        await models.selectOption("model-1");
+        await waitUntil(() => current === "local-b");
+        await page.waitForFunction(() => document.querySelector("#model-status")?.textContent?.includes("Model 1"));
+        await page.locator("#settings-button").click();
+        await page.waitForFunction(() => document.querySelector("#settings-content")?.getAttribute("aria-busy") !== "true");
+        const key = page.locator("input[data-action='select-source-credential'][data-profile-id='local-b']");
+        await key.check();
+        await waitUntil(() => credential === "local-b");
+        await page.waitForFunction(() => document.querySelector("#settings-content")?.getAttribute("aria-busy") !== "true");
+        assert.equal(await key.isChecked(), true);
+      });
+    }
+  } finally {
+    runtime.status = originalStatus;
+    runtime.switchModel = originalSwitch;
+    runtime.settingsConfig = originalSettings;
+    runtime.saveSettingsConfig = originalSave;
+  }
+});
+
 test("legacy sessions keep provider, model list, and reasoning effort atomic", async () => {
   const originalStatus = runtime.status;
   const originalSwitchModel = runtime.switchModel;
@@ -1687,11 +1754,11 @@ test("legacy sessions keep provider, model list, and reasoning effort atomic", a
       await page.locator("#model-status-toggle").click();
       const panel = page.locator("#model-panel");
       const sourceSelect = panel.locator("select[data-action='switch-source']");
-      assert.deepEqual(await sourceSelect.locator("option").allTextContents(), ["Grok", "DeepSeek"]);
+      assert.deepEqual(await sourceSelect.locator("option").allTextContents(), ["https://grok.test/v1/responses", "https://deepseek.test/v1/chat/completions"]);
       await sourceSelect.selectOption("deepseek");
       await page.waitForFunction(() => /DeepSeek\s*·\s*DeepSeek V4 Pro/.test(document.querySelector("#model-status")?.textContent ?? ""));
       assert.equal(await page.locator("#reasoning-effort-select option[value='max']").count(), 1);
-      assert.deepEqual(await sourceSelect.locator("option").allTextContents(), ["Grok", "DeepSeek"]);
+      assert.deepEqual(await sourceSelect.locator("option").allTextContents(), ["https://grok.test/v1/responses", "https://deepseek.test/v1/chat/completions"]);
 
       await page.locator("#settings-button").click();
       await page.waitForFunction(() => document.querySelector("#settings-content")?.getAttribute("aria-busy") !== "true");
@@ -1712,7 +1779,7 @@ test("legacy sessions keep provider, model list, and reasoning effort atomic", a
       assert.equal(await panel.locator("select[data-action='switch-model']").inputValue(), "glm-5.2");
       assert.deepEqual(
         await panel.locator("select[data-action='switch-model'] option").allTextContents(),
-        ["DeepSeek V4 Pro", "GLM 5.2", "Shared model"]
+        ["deepseek-v4-pro (DeepSeek V4 Pro)", "glm-5.2 (GLM 5.2)", "shared-model (Shared model)"]
       );
 
       runtime.reasoningEffortCalls.length = 0;
@@ -1785,7 +1852,7 @@ test("legacy sessions keep provider, model list, and reasoning effort atomic", a
       const sourceSelect = panel.locator("select[data-action='switch-source']");
       const modelSelect = panel.locator("select[data-action='switch-model']");
       assert.equal(await sourceSelect.inputValue(), "");
-      assert.deepEqual(await sourceSelect.locator("option").allTextContents(), ["请选择模型来源", "Grok", "DeepSeek"]);
+      assert.deepEqual(await sourceSelect.locator("option").allTextContents(), ["请选择模型来源", "https://grok.test/v1/responses", "https://deepseek.test/v1/chat/completions"]);
       assert.equal(await modelSelect.isDisabled(), true);
       assert.deepEqual(await modelSelect.locator("option").allTextContents(), ["请先选择模型来源"]);
 
@@ -2011,6 +2078,121 @@ test("question review preserves the draft while allowing transcript-only inspect
     assert.ok(mobileReviewBounds.y + mobileReviewBounds.height < 844 - 48, "review bar overlaps mobile navigation");
     assert.equal(await page.locator(".transcript-stage").evaluate((node) => node.inert), false);
     await assertNoPageOverflow(page, "mobile question review");
+    }, { fakeEventSource: true });
+  } finally {
+    runtime.activeSessionIds.delete("session-b");
+  }
+});
+
+test("permission approval dialog stays on screen and does not leave a stuck wait bar", async () => {
+  runtime.activeSessionIds.add("session-b");
+  try {
+    await withDashboardPage({ width: 1280, height: 900 }, async (page) => {
+      await page.locator(".thread-open", { hasText: "Session B" }).click();
+      await page.waitForFunction(() => globalThis.__dashboardEventSources?.length > 0);
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.waitForFunction(() => document.body.dataset.dashboardView === "conversation");
+      await page.evaluate(() => {
+        const source = globalThis.__dashboardEventSources.at(-1);
+        source.emit("dashboard", {
+          sequence: 1,
+          id: "approval-1",
+          type: "approval_required",
+          approval: {
+            id: "approval-1",
+            toolName: "web_search",
+            reason: "子智能体需要搜索 GitHub 项目",
+            preview: ["q=ant-code"]
+          },
+          activity: {
+            id: "activity-approval-1",
+            title: "等待权限确认",
+            detail: "web_search",
+            status: "waiting",
+            source: "permission"
+          }
+        });
+        source.emit("dashboard", {
+          sequence: 2,
+          id: "approval-2",
+          type: "approval_required",
+          approval: {
+            id: "approval-2",
+            toolName: "web_fetch",
+            reason: "子智能体需要打开搜索结果",
+            preview: ["https://github.com/example"]
+          },
+          activity: {
+            id: "activity-approval-2",
+            title: "等待权限确认",
+            detail: "web_fetch",
+            status: "waiting",
+            source: "permission"
+          }
+        });
+      });
+
+      const panel = page.locator("#approval-panel");
+      await panel.locator("button[data-action='allow-once']").waitFor();
+      const first = await panel.evaluate((node) => {
+        const bounds = node.getBoundingClientRect();
+        return {
+          parent: node.parentElement?.tagName,
+          hidden: node.classList.contains("hidden"),
+          modal: node.classList.contains("modal-interaction"),
+          title: node.querySelector("#approval-title")?.textContent ?? "",
+          left: bounds.left,
+          top: bounds.top,
+          right: bounds.right,
+          bottom: bounds.bottom
+        };
+      });
+      assert.equal(first.parent, "BODY");
+      assert.equal(first.hidden, false);
+      assert.equal(first.modal, true);
+      assert.match(first.title, /web_search/);
+      assert.match(first.title, /还有 1 个排队/);
+      assert.ok(first.left >= 0 && first.top >= 0, `approval dialog clipped at origin: ${JSON.stringify(first)}`);
+      assert.ok(first.right <= 390 && first.bottom <= 844, `approval dialog outside mobile viewport: ${JSON.stringify(first)}`);
+      assert.equal(await page.locator("#live-title").textContent(), "等待权限确认 · 还有 1 个排队");
+
+      await page.evaluate(() => {
+        globalThis.__dashboardEventSources.at(-1).emit("dashboard", {
+          sequence: 3,
+          id: "approval-resolved-1",
+          type: "approval_resolved",
+          approvalId: "approval-1",
+          allowed: true
+        });
+      });
+      await page.waitForFunction(() => document.querySelector("#approval-title")?.textContent?.includes("web_fetch"));
+      assert.match(await panel.locator("#approval-title").textContent(), /web_fetch/);
+      assert.equal(await page.locator("#live-title").textContent(), "等待权限确认");
+
+      await page.evaluate(() => {
+        globalThis.__dashboardEventSources.at(-1).emit("dashboard", {
+          sequence: 4,
+          id: "approval-resolved-2",
+          type: "approval_resolved",
+          approvalId: "approval-2",
+          allowed: true
+        });
+      });
+      await panel.waitFor({ state: "hidden" });
+      const after = await page.evaluate(() => {
+        const panel = document.querySelector("#approval-panel");
+        return {
+          parentClass: panel?.parentElement?.className ?? "",
+          previousId: panel?.previousElementSibling?.id ?? "",
+          liveTitle: document.querySelector("#live-title")?.textContent ?? "",
+          waiting: document.querySelector("#live-status")?.classList.contains("has-pending-approval")
+        };
+      });
+      assert.match(after.parentClass, /composer-shell/);
+      assert.equal(after.previousId, "live-status");
+      assert.equal(after.waiting, false);
+      assert.notEqual(after.liveTitle, "等待权限确认");
+      await assertNoPageOverflow(page, "mobile approval dialog");
     }, { fakeEventSource: true });
   } finally {
     runtime.activeSessionIds.delete("session-b");

@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { sourceCredentialState } from "../../config/source-credentials.ts";
 import path from "node:path";
 import { createHash, createHmac, randomBytes, type Hash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -218,7 +219,13 @@ export function publicDashboardSettings(config: LabAgentConfig, env: NodeJS.Proc
 
 export function publicGatewayProfiles(config: LabAgentConfig) {
   const active = activeGatewayProfileId(config);
+  // Compare credentials only on the server. Expose a representative profile
+  // ID, never the credential or a credential-derived fingerprint.
+  const groups = new Map<string, string>();
+  const credentialSelections = sourceCredentialState(config);
   return gatewayProfilesFromConfig(config).map((profile) => {
+    const connection = String(profile.gatewayUrl || profile.id);
+    if (!groups.has(connection)) groups.set(connection, profile.id);
     const owner = gatewayProfileOwner(config, profile.id);
     const ownerScope = String(owner?.type ?? "").trim();
     const profileConfig = {
@@ -238,6 +245,9 @@ export function publicGatewayProfiles(config: LabAgentConfig) {
     ));
     return {
       id: profile.id,
+      connectionGroupId: groups.get(connection),
+      activeCredentialProfileId: credentialSelections[profile.gatewayUrl] ?? "",
+      credentialSelectionRequired: !credentialSelections[profile.gatewayUrl],
       label: profile.label || profile.id,
       gatewayUrl: publicGatewayUrl(profile.gatewayUrl),
       gatewayHealthUrl: publicGatewayUrl(profile.gatewayHealthUrl),

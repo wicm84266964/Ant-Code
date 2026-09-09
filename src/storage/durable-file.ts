@@ -223,17 +223,31 @@ async function acquireFileMutationLock(filePath: string, options: { timeoutMs?: 
 }
 
 async function releaseOwnedLock(lockPath: string, token: string) {
-  const owner = await readLockOwner(lockPath);
+  // A transient Windows sharing violation must not strand a lock we own.
+  const owner = await retryLockRelease(() => fs.readFile(path.join(lockPath, "owner.json"), "utf8"))
+    .then((text) => JSON.parse(text) as { token?: unknown })
+    .catch((error) => { if (errorCode(error) === "ENOENT") return null; throw error; });
   if (owner?.token !== token) {
     return;
   }
   const released = `${lockPath}.released.${process.pid}.${randomBytes(8).toString("hex")}`;
   try {
-    await fs.rename(lockPath, released);
-    await fs.rm(released, { recursive: true, force: true });
+    await retryLockRelease(() => fs.rename(lockPath, released));
+    await fs.rm(released, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   } catch (error) {
     if (errorCode(error) !== "ENOENT") {
       throw error;
+    }
+  }
+}
+
+async function retryLockRelease<T>(operation: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (attempt >= 5 || !["EPERM", "EACCES", "EBUSY"].includes(errorCode(error) ?? "")) throw error;
+      await delay(20 * (attempt + 1));
     }
   }
 }

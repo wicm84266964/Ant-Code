@@ -1,4 +1,5 @@
 import { renderMarkdown } from "./markdown.ts";
+import { modelConnectionGroups, modelPickerLabel } from "./model-groups.ts";
 import { hydrateRichContent } from "./rich-renderers.ts";
 import { visibleTranscriptRole } from "./transcript.ts";
 import { MANUAL_AGENT_MODEL_VALUE, state, els, MODE_DESCRIPTIONS, LOCAL_FILE_EXTENSIONS, FILE_REFERENCE_PATTERN, TRANSCRIPT_DOM_LIMIT, EVENT_STALE_AFTER_MS, EVENT_CONNECT_TIMEOUT_MS, EVENT_RECONNECT_MAX_ATTEMPTS, DASHBOARD_REQUEST_TIMEOUT_MS, DASHBOARD_API_VERSION, DASHBOARD_LIFECYCLE_TIMEOUT_MS, DASHBOARD_SHUTDOWN_TIMEOUT_MS, DASHBOARD_INTERRUPT_TIMEOUT_MS, MAX_IMAGE_ATTACHMENTS, MAX_IMAGE_ATTACHMENT_BYTES, CURRENT_SESSION_STORAGE_KEY, DASHBOARD_CLIENT_STORAGE_KEY, PREVIEW_WIDTH_STORAGE_KEY, PREVIEW_WIDTH_DEFAULT, PREVIEW_WIDTH_MIN, PREVIEW_WIDTH_MAX, PREVIEW_WORKSPACE_MIN , emptySessionStatus, emptyBackgroundSubagent } from "./app-core.ts";
@@ -355,6 +356,10 @@ export function setLiveTitle(title: string) {
 }
 
 export function toggleLiveStatusDetails() {
+  if (state.pendingApproval) {
+    showApproval(state.pendingApproval);
+    return;
+  }
   if (state.backgroundSubagents.size === 0) {
     return;
   }
@@ -368,15 +373,19 @@ export function updateLiveStatus() {
   if (background.length === 0) {
     state.liveStatusExpanded = false;
   }
-  const visible = state.running || active.length > 0 || background.length > 0 || state.liveTitle;
+  const waitingApproval = Boolean(state.pendingApproval);
+  const visible = state.running || active.length > 0 || background.length > 0 || waitingApproval || state.liveTitle;
   els.liveStatus.classList.toggle("hidden", !visible);
   els.liveStatus.classList.toggle("has-background-subagents", background.length > 0);
+  els.liveStatus.classList.toggle("has-pending-approval", waitingApproval);
   els.liveStatus.classList.toggle("expanded", state.liveStatusExpanded && background.length > 0);
-  els.activityToggle.disabled = background.length === 0;
+  els.activityToggle.disabled = background.length === 0 && !waitingApproval;
   els.activityToggle.setAttribute("aria-expanded", String(state.liveStatusExpanded && background.length > 0));
-  els.activityToggle.setAttribute("aria-label", background.length > 0
-    ? `${state.liveStatusExpanded ? "收起" : "展开"}后台活动详情`
-    : "当前活动");
+  els.activityToggle.setAttribute("aria-label", waitingApproval
+    ? "打开权限确认"
+    : background.length > 0
+      ? `${state.liveStatusExpanded ? "收起" : "展开"}后台活动详情`
+      : "当前活动");
   if (!visible) {
     els.liveTitle.textContent = "";
     els.liveSubtasks.innerHTML = "";
@@ -402,6 +411,11 @@ export function updateLiveStatus() {
 }
 
 export function liveStatusTitle(primary: DashboardActivity | undefined, subtasks: DashboardActivity[], background: DashboardActivity[]) {
+  if (state.pendingApproval) {
+    return state.approvalQueue.length > 0
+      ? `等待权限确认 · 还有 ${state.approvalQueue.length} 个排队`
+      : "等待权限确认";
+  }
   if (primary?.rawType === "gateway_retry") {
     return "网关响应异常，正在自动重试";
   }
@@ -676,6 +690,7 @@ export function normalizeChangeStats(stats: DashboardTurnChangeStats | Record<st
 }
 
 export function renderComposerStatus() {
+  setConnectionState(state.connectionState);
   if (!els.modelStatus || !els.contextStatus || !els.changeStatus) {
     return;
   }
@@ -949,7 +964,11 @@ export function renderModelPanel() {
   const unresolved = selection.resolved === false;
   const activeProfileId = selection.profile?.id || "";
   const activeModelId = selection.model?.id || "";
-  const models = selection.profile?.models ?? (profiles.length === 0 ? state.models ?? [] : []);
+  const groups = modelConnectionGroups(profiles);
+  const activeGroup = groups.find((group) => group.profiles.some((profile) => profile.id === activeProfileId));
+  const models = activeGroup
+    ? activeGroup.profiles.flatMap((profile) => (profile.models ?? []).map((model) => ({ ...model, switchProfileId: profile.id, switchReady: profile.ready !== false })))
+    : (profiles.length === 0 ? state.models ?? [] : []).map((model) => ({ ...model, switchProfileId: "", switchReady: true }));
   els.modelPanel.innerHTML = `
     <div class="model-panel-head">
       <div class="model-panel-title">模型</div>
@@ -960,14 +979,14 @@ export function renderModelPanel() {
         <span>模型来源</span>
         <select data-action="switch-source" ${state.running || state.modelSwitching || profiles.length === 0 ? "disabled" : ""}>
           ${profiles.length > 0
-            ? `${unresolved ? `<option value="" selected disabled>请选择模型来源</option>` : ""}${profiles.map((profile) => `<option value="${escapeAttribute(profile.id)}"${!unresolved && profile.id === activeProfileId ? " selected" : ""}${profile.ready === false ? " disabled" : ""}>${escapeHtml(profile.label || profile.gatewayUrl || profile.id)}${profile.ready === false ? "（需配置）" : ""}</option>`).join("")}`
+            ? `${unresolved ? `<option value="" selected disabled>请选择模型来源</option>` : ""}${groups.map((group) => `<option value="${escapeAttribute(group.profiles.find((profile) => profile.ready !== false)?.id || group.profiles[0].id)}"${!unresolved && group.id === activeGroup?.id ? " selected" : ""}${group.profiles.every((profile) => profile.ready === false) ? " disabled" : ""}>${escapeHtml(group.label)}</option>`).join("")}`
             : `<option value="">${unresolved ? "没有可用模型来源" : escapeHtml(modelSourceLabel(selection.model))}</option>`}
         </select>
       </label>
       <label>
         <span>模型名称</span>
         <select data-action="switch-model" ${state.running || state.modelSwitching || unresolved || models.length === 0 ? "disabled" : ""}>
-          ${unresolved ? `<option value="" selected>请先选择模型来源</option>` : models.map((model) => `<option value="${escapeAttribute(model.id)}"${model.id === activeModelId ? " selected" : ""}>${escapeHtml(model.label || model.id)}</option>`).join("") || `<option value="">未配置模型</option>`}
+          ${unresolved ? `<option value="" selected>请先选择模型来源</option>` : models.map((model) => `<option value="${escapeAttribute(model.id)}" data-profile-id="${escapeAttribute(model.switchProfileId)}"${model.id === activeModelId && model.switchProfileId === activeProfileId ? " selected" : ""}${model.switchReady ? "" : " disabled"}>${escapeHtml(modelPickerLabel(model, models))}</option>`).join("") || `<option value="">未配置模型</option>`}
         </select>
       </label>
     </div>

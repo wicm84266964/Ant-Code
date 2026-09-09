@@ -19,7 +19,7 @@ const BINARY_EXTENSIONS = new Set([
 /**
  * @param {{ cwd: string; path: string; maxBytes?: number; policy?: Record<string, any> }} input
  */
-export async function readFileTool(input: { cwd: string; path: string; maxBytes?: number; policy?: Record<string, unknown> }) {
+export async function readFileTool(input: { cwd: string; path: string; maxBytes?: number; startLine?: number; maxLines?: number; startColumn?: number; policy?: Record<string, unknown> }) {
   const filePath = await resolveWorkspacePath(input.cwd, input.path, { allowOutsideWorkspace: canUseOutsideWorkspace(input.policy) });
   await fs.access(filePath).catch((error: unknown) => {
     if (isNotFoundError(error)) {
@@ -28,6 +28,55 @@ export async function readFileTool(input: { cwd: string; path: string; maxBytes?
     throw error;
   });
   const explicitMaxBytes = positiveIntegerOrNull(input.maxBytes);
+  if (input.startLine !== undefined || input.maxLines !== undefined || input.startColumn !== undefined) {
+    const startLine = positiveIntegerOrNull(input.startLine) ?? 1;
+    const startColumn = positiveIntegerOrNull(input.startColumn) ?? 1;
+    const maxLines = positiveIntegerOrNull(input.maxLines) ?? 200;
+    const maxBytes = explicitMaxBytes ?? 32_000;
+    const selected: string[] = [];
+    let lineNumber = 0;
+    let bytesRead = 0;
+    let nextStartLine: number | null = null;
+    let nextStartColumn: number | null = null;
+    for await (const line of readLines(filePath)) {
+      lineNumber += 1;
+      if (lineNumber < startLine) continue;
+      if (selected.length >= maxLines) {
+        nextStartLine = lineNumber;
+        nextStartColumn = 1;
+        break;
+      }
+      const column = lineNumber === startLine ? startColumn : 1;
+      if (column > line.length + 1 || (column > 1 && /[\uDC00-\uDFFF]/.test(line.charAt(column - 1)))) {
+        throw new Error("Invalid startColumn; use the returned nextStartColumn on an unchanged file.");
+      }
+      const source = line.slice(column - 1);
+      const separatorBytes = selected.length ? 1 : 0;
+      const remaining = maxBytes - bytesRead - separatorBytes;
+      if (remaining <= 0) {
+        nextStartLine = lineNumber;
+        nextStartColumn = column;
+        break;
+      }
+      const decoder = new TextDecoder("utf-8");
+      const excerpt = decoder.decode(Buffer.from(source).subarray(0, remaining), { stream: true });
+      if (!excerpt && source && selected.length === 0) {
+        throw new Error("maxBytes is too small to read one UTF-8 character; increase maxBytes.");
+      }
+      selected.push(excerpt);
+      bytesRead += separatorBytes + Buffer.byteLength(excerpt);
+      if (excerpt.length < source.length) {
+        nextStartLine = lineNumber;
+        nextStartColumn = column + excerpt.length;
+        break;
+      }
+    }
+    return {
+      path: toDisplayPath(input.cwd, filePath), startLine, startColumn,
+      bytesRead, content: selected.join("\n"),
+      truncated: nextStartLine !== null, nextStartLine, nextStartColumn
+    };
+  }
   if (!explicitMaxBytes) {
     const content = await fs.readFile(filePath, "utf8");
     return {
@@ -42,11 +91,15 @@ export async function readFileTool(input: { cwd: string; path: string; maxBytes?
     const buffer = Buffer.alloc(explicitMaxBytes);
     const result = await handle.read(buffer, 0, explicitMaxBytes, 0);
     const stat = await handle.stat();
+    const content = new TextDecoder("utf-8").decode(buffer.subarray(0, result.bytesRead), { stream: true });
+    if (!content && result.bytesRead > 0) {
+      throw new Error("maxBytes is too small to read one UTF-8 character; increase maxBytes.");
+    }
     return {
       path: toDisplayPath(input.cwd, filePath),
       bytesRead: result.bytesRead,
       truncated: stat.size > result.bytesRead,
-      content: buffer.subarray(0, result.bytesRead).toString("utf8")
+      content
     };
   } finally {
     await handle.close();
@@ -56,7 +109,7 @@ export async function readFileTool(input: { cwd: string; path: string; maxBytes?
 /**
  * @param {{ cwd: string; path?: string; policy?: Record<string, any> }} input
  */
-export async function listFilesTool(input: { cwd: string; path?: string; maxEntries?: number; policy?: Record<string, unknown> }) {
+export async function listFilesTool(input: { cwd: string; path?: string; maxEntries?: number; offset?: number; policy?: Record<string, unknown> }) {
   const dirPath = await resolveWorkspacePath(input.cwd, input.path ?? ".", { allowOutsideWorkspace: canUseOutsideWorkspace(input.policy) });
   const entries = await fs.readdir(dirPath, { withFileTypes: true }).catch((error: unknown) => {
     if (isNotFoundError(error)) {
@@ -69,47 +122,57 @@ export async function listFilesTool(input: { cwd: string; path?: string; maxEntr
     type: entry.isDirectory() ? "directory" : entry.isFile() ? "file" : "other"
   }));
   const maxEntries = positiveIntegerOrNull(input.maxEntries) ?? DEFAULT_FILE_LIST_MAX_ENTRIES;
+  mapped.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+  const offset = positiveIntegerOrNull(input.offset) ?? 0;
   return {
     path: toDisplayPath(input.cwd, dirPath),
-    entries: mapped.slice(0, maxEntries),
+    entries: mapped.slice(offset, offset + maxEntries),
+    offset,
+    nextOffset: mapped.length > offset + maxEntries ? offset + maxEntries : null,
     total: mapped.length,
-    truncated: mapped.length > maxEntries
+    truncated: mapped.length > offset + maxEntries
   };
 }
 
 /**
  * @param {{ cwd: string; pattern: string; path?: string; maxMatches?: number; policy?: Record<string, any> }} input
  */
-export async function globTool(input: { cwd: string; pattern: string; path?: string; maxMatches?: number; policy?: Record<string, unknown> }) {
+export async function globTool(input: { cwd: string; pattern: string; path?: string; maxMatches?: number; offset?: number; policy?: Record<string, unknown> }) {
   const root = await resolveWorkspacePath(input.cwd, input.path ?? ".", { allowOutsideWorkspace: canUseOutsideWorkspace(input.policy) });
   const maxMatches = positiveIntegerOrNull(input.maxMatches) ?? DEFAULT_FILE_SEARCH_MAX_MATCHES;
   const regex = globToRegex(input.pattern);
   const matches: string[] = [];
+  const offset = positiveIntegerOrNull(input.offset) ?? 0;
+  let seen = 0;
 
   for await (const filePath of walkPaths(root)) {
     const relativeToRoot = toPosix(path.relative(root, filePath));
     const relativeToCwd = toDisplayPath(input.cwd, filePath);
     if (regex.test(relativeToRoot) || regex.test(relativeToCwd)) {
+      if (seen++ < offset) continue;
       matches.push(relativeToCwd);
-      if (maxMatches && matches.length >= maxMatches) {
+      if (matches.length > maxMatches) {
         break;
       }
     }
   }
 
-  return { matches, truncated: Boolean(maxMatches && matches.length >= maxMatches) };
+  const truncated = matches.length > maxMatches;
+  return { matches: matches.slice(0, maxMatches), offset, nextOffset: truncated ? offset + maxMatches : null, truncated };
 }
 
 /**
  * @param {{ cwd: string; pattern: string; path?: string; maxMatches?: number; policy?: Record<string, any> }} input
  */
-export async function grepTool(input: { cwd: string; pattern: string; path?: string; maxMatches?: number; policy?: Record<string, unknown> }) {
+export async function grepTool(input: { cwd: string; pattern: string; path?: string; maxMatches?: number; offset?: number; policy?: Record<string, unknown> }) {
   const root = await resolveWorkspacePath(input.cwd, input.path ?? ".", { allowOutsideWorkspace: canUseOutsideWorkspace(input.policy) });
   const maxMatches = positiveIntegerOrNull(input.maxMatches) ?? DEFAULT_FILE_SEARCH_MAX_MATCHES;
   const matches: Array<{ path: string; line: number; text: string }> = [];
+  const offset = positiveIntegerOrNull(input.offset) ?? 0;
+  let seen = 0;
 
   for await (const filePath of walkTextFiles(root)) {
-    if (maxMatches && matches.length >= maxMatches) {
+    if (matches.length > maxMatches) {
       break;
     }
     let lineNumber = 0;
@@ -119,12 +182,13 @@ export async function grepTool(input: { cwd: string; pattern: string; path?: str
         if (!line.includes(input.pattern)) {
           continue;
         }
+        if (seen++ < offset) continue;
         matches.push({
           path: toDisplayPath(input.cwd, filePath),
           line: lineNumber,
           text: line
         });
-        if (maxMatches && matches.length >= maxMatches) {
+        if (matches.length > maxMatches) {
           break;
         }
       }
@@ -133,7 +197,8 @@ export async function grepTool(input: { cwd: string; pattern: string; path?: str
     }
   }
 
-  return { matches, truncated: Boolean(maxMatches && matches.length >= maxMatches) };
+  const truncated = matches.length > maxMatches;
+  return { matches: matches.slice(0, maxMatches), offset, nextOffset: truncated ? offset + maxMatches : null, truncated };
 }
 
 /**
@@ -329,6 +394,7 @@ async function* walkPaths(root: string): AsyncGenerator<string> {
     return;
   }
   const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
+  entries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
   for (const entry of entries) {
     const fullPath = path.join(root, entry.name);
     if (entry.isDirectory()) {
@@ -370,11 +436,18 @@ async function hasBinaryHeader(fileName: string) {
   }
 }
 
-function readLines(fileName: string) {
-  return createInterface({
-    input: createReadStream(fileName, { encoding: "utf8" }),
+async function* readLines(fileName: string) {
+  const stream = createReadStream(fileName, { encoding: "utf8" });
+  const lines = createInterface({
+    input: stream,
     crlfDelay: Infinity
   });
+  try {
+    yield* lines;
+  } finally {
+    lines.close();
+    stream.destroy();
+  }
 }
 
 /**

@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { applySourceCredentials } from "../../config/source-credentials.ts";
 import path from "node:path";
 import { createHash, createHmac, randomBytes, type Hash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -722,7 +723,7 @@ export function configForGatewayProfileSelection(config: LabAgentConfig, profile
     return config;
   }
   const agents = isPlainObject(profile.agents) ? profile.agents : {};
-  return {
+  return applySourceCredentials({
     ...config,
     modelAlias,
     defaultModelAlias: modelAlias,
@@ -738,7 +739,7 @@ export function configForGatewayProfileSelection(config: LabAgentConfig, profile
       gatewayApiKey: profile.gatewayApiKey,
       gatewayApiKeyDisabled: profile.gatewayApiKeyDisabled === true
     }
-  } as LabAgentConfig;
+  } as LabAgentConfig);
 }
 
 /** @param {Map<string, Record<string, any>>} selections @param {unknown} clientId @param {Record<string, any>} fallback */

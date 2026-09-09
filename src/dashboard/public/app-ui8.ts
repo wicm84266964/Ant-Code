@@ -181,17 +181,36 @@ export function normalizeComparableText(text: unknown) {
 
 export function showApproval(approval: DashboardApproval | null | undefined) {
   if (!approval) return;
+  if (state.pendingApproval?.id && approval.id && state.pendingApproval.id === approval.id) {
+    renderApprovalPanel(approval);
+    return;
+  }
+  if (state.pendingApproval) {
+    if (approval.id && !state.approvalQueue.some((item) => item.id === approval.id)) {
+      state.approvalQueue.push(approval);
+    }
+    refreshApprovalQueueLabel();
+    updateLiveStatus();
+    return;
+  }
+  renderApprovalPanel(approval);
+}
+
+export function renderApprovalPanel(approval: DashboardApproval) {
   state.pendingApproval = approval;
   state.approvalSubmitting = false;
+  mountApprovalPanelOverlay();
   els.approvalPanel.classList.remove("hidden");
   els.approvalPanel.setAttribute("tabindex", "-1");
   els.approvalPanel.setAttribute("role", "dialog");
   els.approvalPanel.setAttribute("aria-modal", "true");
   els.approvalPanel.setAttribute("aria-labelledby", "approval-title");
+  const queued = state.approvalQueue.length;
   els.approvalPanel.innerHTML = `
-    <div class="approval-title" id="approval-title">需要权限确认 · ${escapeHtml(approval.toolName)}</div>
+    <div class="approval-title" id="approval-title">需要权限确认 · ${escapeHtml(approval.toolName)}${queued > 0 ? ` · 还有 ${queued} 个排队` : ""}</div>
     <div class="approval-preview">${escapeHtml([
       approval.reason,
+      queued > 0 ? `还有 ${queued} 个权限请求排队。` : "",
       approval.sensitive ? "敏感信息强确认：批准后相关内容可能进入模型上下文。" : "",
       approval.outsideWorkspace ? "目标位于工作区外，需要明确确认。" : "",
       ...(Array.isArray(approval.preview) ? approval.preview : [])
@@ -208,6 +227,7 @@ export function showApproval(approval: DashboardApproval | null | undefined) {
   });
   activateModal(els.approvalPanel, { initialFocus: "button[data-action='allow-once']" });
   revealInteractionPanel(els.approvalPanel, "button[data-action]");
+  updateLiveStatus();
   announceStatus(`需要确认 ${approval.toolName ?? "工具"} 权限`);
 }
 
@@ -226,16 +246,71 @@ export async function resolveApproval(action: unknown) {
     showError(result.error ?? "权限确认提交失败");
     return;
   }
-  hideApproval();
-  els.runStatus.textContent = state.running ? "运行中" : "处理中";
+  hideApproval({ approvalId: approval.id });
+  els.runStatus.textContent = state.pendingApproval ? "等待确认" : state.running ? "运行中" : "处理中";
 }
 
-export function hideApproval() {
+export function hideApproval(options: { approvalId?: unknown } = {}) {
+  const approvalId = options.approvalId == null || options.approvalId === "" ? "" : String(options.approvalId);
+  if (approvalId) {
+    if (state.pendingApproval?.id && state.pendingApproval.id !== approvalId) {
+      state.approvalQueue = state.approvalQueue.filter((item) => item.id !== approvalId);
+      return;
+    }
+  } else {
+    state.approvalQueue = [];
+  }
   deactivateModal(els.approvalPanel);
   state.pendingApproval = null;
   state.approvalSubmitting = false;
+  const next = state.approvalQueue.shift();
+  if (next) {
+    renderApprovalPanel(next);
+    return;
+  }
+  restoreApprovalPanelHome();
   els.approvalPanel.classList.add("hidden");
   els.approvalPanel.innerHTML = "";
+  updateLiveStatus();
+}
+
+function refreshApprovalQueueLabel() {
+  const title = els.approvalPanel?.querySelector("#approval-title");
+  if (!title || !state.pendingApproval) {
+    return;
+  }
+  const queued = state.approvalQueue.length;
+  title.textContent = `需要权限确认 · ${state.pendingApproval.toolName ?? "工具"}${queued > 0 ? ` · 还有 ${queued} 个排队` : ""}`;
+}
+
+function mountApprovalPanelOverlay() {
+  if (!els.approvalPanel || !document.body) {
+    return;
+  }
+  if (els.approvalPanel.parentElement !== document.body) {
+    document.body.appendChild(els.approvalPanel);
+  }
+}
+
+function restoreApprovalPanelHome() {
+  if (!els.approvalPanel || !els.liveStatus?.parentNode) {
+    return;
+  }
+  if (els.approvalPanel.previousElementSibling !== els.liveStatus) {
+    els.liveStatus.after(els.approvalPanel);
+  }
+}
+
+export function clearPermissionWaitActivity() {
+  for (const [key, activity] of Array.from(state.liveActivities.entries())) {
+    if (activity.source === "permission" || activity.title === "等待权限确认") {
+      state.liveActivities.delete(key);
+    }
+  }
+  if (state.liveTitle === "等待权限确认") {
+    state.liveTitle = state.running ? "运行中" : "";
+  }
+  updateLiveStatus();
 }
 
 export function showQuestion(question: DashboardPendingQuestion | null | undefined) {
@@ -260,7 +335,7 @@ export function revealInteractionPanel(panel: HTMLElement | null | undefined, fo
   if (!panel || panel.classList.contains("hidden")) {
     return;
   }
-  panel.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  panel.scrollIntoView?.({ block: panel === els.approvalPanel ? "center" : "nearest", inline: "nearest" });
   const target = focusSelector ? panel.querySelector(focusSelector) : null;
   const focusTarget = target ?? panel;
   if (typeof focusTarget.focus === "function") {

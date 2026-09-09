@@ -217,6 +217,9 @@ export type LabAgentConfig = Mutable<typeof DEFAULT_CONFIG> & {
   lab: Mutable<typeof DEFAULT_CONFIG.lab> & {
     configPath: string | null;
     gatewayApiKeyDisabled?: boolean;
+    sourceCredentialSelections?: Record<string, string>;
+    resolvedSourceCredentials?: Record<string, string | null>;
+    sourceCredentialSelectionRequired?: boolean;
     activeGatewayProfile?: string;
     gatewayProfiles?: Array<JsonObject>;
     sources?: {

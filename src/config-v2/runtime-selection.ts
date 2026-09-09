@@ -1,4 +1,5 @@
 import { applyModelContextBudget, contextTokensForConfig } from "../config/context-budget.ts";
+import { applySourceCredentials } from "../config/source-credentials.ts";
 import { projectLegacyRuntimeConfig } from "./legacy-projection.ts";
 
 const UNRESOLVED_CODE = "SESSION_MODEL_SELECTION_UNRESOLVED";
@@ -282,7 +283,7 @@ export function applyRuntimeModelSelection(
     status: "resolved" as const,
     source: validated.source,
     selection: validated.selection,
-    config: nextConfig
+    config: applySourceCredentials(nextConfig)
   };
 }
 
@@ -524,7 +525,7 @@ function materializeRuntimeProfileSelection(config: RuntimeConfig, profile: Gate
     }
   };
   applyModelContextBudget(nextConfig, config, contextTokensForConfig(nextConfig));
-  return nextConfig;
+  return applySourceCredentials(nextConfig);
 }
 
 /**

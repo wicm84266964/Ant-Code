@@ -538,6 +538,9 @@ export function normalizeGatewayProfiles(value: unknown): DashboardGatewayProfil
     const transport = isPlainObject(profile.transport) ? profile.transport : {};
     return {
     id: String(profile.id ?? profile.providerId ?? ""),
+    connectionGroupId: String(profile.connectionGroupId ?? profile.id ?? profile.providerId ?? ""),
+    activeCredentialProfileId: String(profile.activeCredentialProfileId ?? ""),
+    credentialSelectionRequired: profile.credentialSelectionRequired === true,
     label: String(profile.label ?? profile.displayName ?? profile.id ?? profile.providerId ?? ""),
     gatewayUrl: String(profile.gatewayUrl ?? transport.baseURL ?? ""),
     gatewayHealthUrl: String(profile.gatewayHealthUrl ?? transport.healthURL ?? ""),
@@ -948,4 +951,3 @@ export function sourceBadge(source: DashboardConfigSource | string | null | unde
   if (type === "bundled") return "内置";
   return "默认";
 }
-
