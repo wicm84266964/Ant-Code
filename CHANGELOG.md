@@ -4,6 +4,9 @@
 
 ## 2.0.9 - 2026-09-10
 
+Published 2026-09-09 17:37:09 UTC (2026-09-10 01:37:09 UTC+08:00): [v2.0.9](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.9).
+Release commit: `3f1a49b736c1f6ec1fbeba2d7854553382865f64`. PR and main CI passed; local release verification passed 1,304 unit/integration tests and 37 browser tests, with no failures or skips.
+
 - Preserve tool evidence until the complete request reaches its context budget; add continuous file excerpts and byte-budgeted search pagination.
 - Group Dashboard models by source URL and select one active credential per source while preserving each model's agent routes.
 - Require remarks for new same-source duplicate models and show readable remarks instead of internal configuration IDs.
