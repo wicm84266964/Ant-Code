@@ -7,36 +7,102 @@
 Published 2026-09-10 09:14:36 UTC (2026-09-10 17:14:36 UTC+08:00): [v2.0.11](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.11).
 Release commit: `474930e346a48f0ea919f0aaa1839498b067efc9`. PR #51 and main CI passed; local release verification passed 1,331 unit/integration tests and 38 browser tests, with no failures or skips. Additional process tests passed; cross-repository parity verified 27 exact paths and 13 reviewed differences.
 
-- Text-layer PDFs are answered from extracted text; scanned PDFs render the first few full pages for vision and cite those page numbers.
-- Full visual PDF reading is explicit: set start and end pages on the paperclip and resend. PNG pastes without MIME are classified by extension.
-- Joining a background subagent group can strengthen wakeup (`wakeParent` OR, `waitForGroup` all > any > none) but cannot disable an existing wakeup request.
-- Windows executable distributions include `@napi-rs/canvas` and the Windows x64 native binary beside the exe.
+This is a small Dashboard document and background-task release on the 2.0 TypeScript runtime.
+Composer PDFs with a text layer are answered from extracted text. Scanned PDFs render the first few full pages for vision and cite those pages. Full visual reading is explicit. Background subagent groups merge wakeup settings so a later disable cannot cancel an existing wakeup. Permission mode ids are unchanged.
 
-Validation, upgrade steps and limitations: [Chinese release note](docs/releases/2.0.11-pdf-scan-vision-wakeup_zh.md).
+### Added
+
+- Scanned paperclip PDFs render the first two full pages (text, vectors, and embedded images) for vision. Text-layer PDFs stay on extracted text.
+- PDF chips accept optional start and end pages. Empty fields use the default window; filling both pages is the explicit full visual read.
+- PNG pastes without a MIME type are classified by file extension.
+
+### Fixed
+
+- Joining a background subagent group merges `wakeParent` with OR and `waitForGroup` as all > any > none, so dispatch order cannot disable an existing wakeup.
+- Sparse PDF text detection no longer counts synthetic page headings as body text.
+
+### Upgrade
+
+```sh
+git pull
+npm ci
+npm run verify:install
+npm link
+ant-code --version
+```
+
+`ant-code --version` should print `2.0.11`. Restart a running Dashboard
+and hard-refresh the browser. Gateway config and `.lab-agent` sessions
+do not need to be recreated. Windows exe distributions now include
+`@napi-rs/canvas` and the Windows x64 native binary; do not copy only
+the exe.
 
 ## 2.0.10 - 2026-09-10
 
 Published 2026-09-10 03:38:31 UTC (2026-09-10 11:38:31 UTC+08:00): [v2.0.10](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.10).
 Release commit: `e51b203038a44d72575c99d0bf87a9ab98a7c8eb`. PR #49 and main CI passed; local release verification passed 1,312 unit/integration tests and 37 browser tests, with no failures or skips. Additional process tests passed; cross-repository parity verified 23 exact paths and 6 reviewed differences.
 
-- Summarize older tool results in bounded model batches after the full request reaches its configured context budget; target a dynamic 10-20% reserve.
-- Retrieve pre-summary tool text through session-scoped `tool_result_read`, with existing transcript encryption, redaction, retention and deletion policies.
-- Distinguish tool summaries from conversation compaction in Dashboard and TUI; tool summaries no longer insert conversation boundaries.
-- Preserve original text on summary failure, cancellation or insufficient savings; protect recent results and error diagnostics.
+This is a small context-window release on the 2.0 TypeScript runtime.
+After the full request reaches its configured budget, older tool results are summarized in bounded model batches instead of a fixed character clip. Tool summaries are distinct from conversation compaction. Permission mode ids are unchanged.
 
-Validation, upgrade steps and limitations: [Chinese release note](docs/releases/2.0.10-tool-summary-budget_zh.md).
+### Added
+
+- Bounded model-batch summaries of older tool results, targeting a 10-20% context reserve.
+- `tool_result_read` retrieves pre-summary tool text through a session-scoped evidence reference.
+
+### Fixed
+
+- Tool summaries no longer insert conversation compaction boundaries in Dashboard and TUI.
+- Original tool text is kept when a summary fails, is cancelled, or does not save enough space.
+- Config replacement retries transient file sharing on Windows.
+
+### Upgrade
+
+```sh
+git pull
+npm ci
+npm run verify:install
+npm link
+ant-code --version
+```
+
+`ant-code --version` should print `2.0.10`. Restart a running Dashboard
+and hard-refresh the browser. Gateway config and `.lab-agent` sessions
+do not need to be recreated.
 
 ## 2.0.9 - 2026-09-10
 
 Published 2026-09-09 17:37:09 UTC (2026-09-10 01:37:09 UTC+08:00): [v2.0.9](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.9).
 Release commit: `3f1a49b736c1f6ec1fbeba2d7854553382865f64`. PR and main CI passed; local release verification passed 1,304 unit/integration tests and 37 browser tests, with no failures or skips.
 
-- Preserve tool evidence until the complete request reaches its context budget; add continuous file excerpts and byte-budgeted search pagination.
-- Group Dashboard models by source URL and select one active credential per source while preserving each model's agent routes.
-- Require remarks for new same-source duplicate models and show readable remarks instead of internal configuration IDs.
-- Show configured idle gateways as connected, with real connection errors still reported.
+This is a small reliability and Dashboard model-source release on the 2.0 TypeScript runtime.
+Tool evidence stays until the full request reaches its context budget. Dashboard groups models by source URL and selects one active credential per source. Permission mode ids are unchanged.
 
-Release candidate validation and limitations: [Chinese release note](docs/releases/2.0.9-context-source-credentials_zh.md).
+### Added
+
+- Continuous file excerpts with original line numbers, plus byte-budgeted search and directory pagination.
+- Dashboard model picker groups connections by source URL. New same-source duplicate models require a remark.
+- Per-source active credential selection, saved as `lab.sourceCredentialSelections`.
+
+### Fixed
+
+- Tool results are no longer stubbed before the complete request reaches its context budget.
+- Permission confirmation stays on screen and queues instead of being clipped by the composer.
+- Windows storage lock release retries transient sharing violations.
+
+### Upgrade
+
+```sh
+git pull
+npm ci
+npm run verify:install
+npm link
+ant-code --version
+```
+
+`ant-code --version` should print `2.0.9`. Restart a running Dashboard
+and hard-refresh the browser. Gateway config and `.lab-agent` sessions
+do not need to be recreated.
 
 ## 2.0.8 - 2026-09-06
 
