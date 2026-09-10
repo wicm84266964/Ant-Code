@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { renderPdfBatches, type PdfVisionDocument } from "../tools/pdf-render.ts";
 import { buildInitialContext } from "../context/builder.ts";
 import { loadConfig, type LabAgentConfig } from "../config/load-config.ts";
 import {
@@ -84,6 +85,8 @@ export function buildTurnMessages(session: AgentSession, userMessage: SessionMes
 export async function prepareVisionAttachmentsForTurn(options: {
   session: AgentSession;
   attachments?: unknown;
+  pdfDocuments?: PdfVisionDocument[];
+  forceVisionAnalysis?: boolean;
   prompt?: string;
   gateway?: unknown;
   signal?: AbortSignal;
@@ -93,16 +96,52 @@ export async function prepareVisionAttachmentsForTurn(options: {
     antEventNormalizer?: ReturnType<typeof createAntEventNormalizer>;
   };
   metadata?: SessionTurnMetadata;
-}) {
+}): Promise<{ ok: boolean; attachments?: InputImageAttachment[]; analysisText?: string; status?: string; output?: string }> {
   const attachments = normalizeInputAttachments(options.attachments);
+  if (options.pdfDocuments?.length) {
+    const reports: string[] = [];
+    let reportChars = 0;
+    try {
+      // Check routing before rendering potentially large documents.
+      if (!modelSupportsImages(options.session.config, options.session.model) && !resolveVisionAgentModel(options.session.config)) {
+        return { ok: false, status: "vision_unavailable", output: "PDF 按页识别需要视觉模型。请切换到支持图片的主模型，或启用同网关的视觉模型后重试。" };
+      }
+      for (const document of options.pdfDocuments) {
+        await emitEvent(options.eventOptions, { type: "pdf_vision_progress", name: document.name, stage: "rendering" });
+        for await (const batch of renderPdfBatches(document, { signal: options.signal })) {
+          await emitEvent(options.eventOptions, { type: "pdf_vision_progress", name: document.name, pageStart: batch.pageStart, pageEnd: batch.pageEnd, totalPages: batch.totalPages, stage: "analyzing" });
+          const prepared = await prepareVisionAttachmentsForTurn({
+            ...options, pdfDocuments: undefined, forceVisionAnalysis: true, attachments: batch.images,
+            prompt: `${options.prompt ?? ""}\nPDF: ${document.name}; pages ${batch.pageStart}-${batch.pageEnd} of ${batch.totalPages}. Analyze only these supplied pages, cite page numbers, preserve table/figure values relevant to the request, and mark unreadable details. These may be the first pages of a scan and are not necessarily the abstract. Do not claim to have read other pages.`
+          });
+          if (!prepared.ok) return prepared;
+          const report = `PDF ${document.name}, pages ${batch.pageStart}-${batch.pageEnd} of ${batch.totalPages}:\n${prepared.analysisText}`;
+          reportChars += report.length;
+          if (reportChars > 240_000) throw new Error("PDF visual reports exceed the context budget; select a smaller page range and retry.");
+          reports.push(report);
+          await emitEvent(options.eventOptions, { type: "pdf_vision_progress", name: document.name, pageStart: batch.pageStart, pageEnd: batch.pageEnd, totalPages: batch.totalPages, stage: "completed" });
+        }
+      }
+      const images = await prepareVisionAttachmentsForTurn({ ...options, pdfDocuments: undefined });
+      if (!images.ok) return images;
+      return { ...images, analysisText: [...reports, images.analysisText].filter(Boolean).join("\n\n") };
+    } catch (error) {
+      const interrupted = options.signal?.aborted;
+      const output = interrupted ? "PDF 视觉识别已取消，未完成的页面没有被当作已识别。" : `PDF 视觉识别失败，未生成完整报告：${error instanceof Error ? error.message : String(error)}`;
+      await emitEvent(options.eventOptions, { type: "pdf_vision_error", interrupted, output });
+      return { ok: false, status: interrupted ? "interrupted" : "vision_error", output };
+    }
+  }
   if (attachments.length === 0) {
     return { ok: true, attachments, analysisText: "" };
   }
-  if (modelSupportsImages(options.session.config, options.session.model)) {
+  if (!options.forceVisionAnalysis && modelSupportsImages(options.session.config, options.session.model)) {
     return { ok: true, attachments, analysisText: "" };
   }
 
-  const visionModel = resolveVisionAgentModel(options.session.config);
+  const visionModel = options.forceVisionAnalysis && modelSupportsImages(options.session.config, options.session.model)
+    ? { id: options.session.model }
+    : resolveVisionAgentModel(options.session.config);
   if (!visionModel) {
     const output = [
       "当前主模型不支持图片输入，且当前网关配置里没有可用的视觉模型。",
@@ -158,7 +197,10 @@ export async function prepareVisionAttachmentsForTurn(options: {
     return { ok: false, status: "vision_error", output };
   }
 
-  const analysisText = formatAssistantOutput(response.data).trim();
+  const analysisText = response.data.text.trim();
+  if (!analysisText) {
+    return { ok: false, status: "vision_error", output: "视觉模型未返回有效识别内容，请重试或检查视觉模型配置。" };
+  }
   await emitEvent(options.eventOptions, {
     type: "vision_analysis_complete",
     model: response.data.model ?? visionModel.id,
@@ -179,7 +221,7 @@ export function buildVisionAnalysisMessage(prompt: string, attachments: InputIma
       {
         type: "text",
         text: [
-          "你是 Ant Code visual-verifier 视觉复核子智能体。当前主模型不支持图片输入，请你先处理用户上传的图片，输出可供另一个文本模型继续工作的中文视觉证据报告。",
+          "你是 Ant Code visual-verifier 视觉复核子智能体。请先处理用户上传的图片或 PDF 渲染页面，输出可供主智能体继续工作的中文视觉证据报告。",
           "职责：把截图/图片当作证据，识别任务类型（UI/前端截图、代码或错误截图、表格/图表、文档、前后对比等），提取可见事实、OCR 文字、界面元素、布局状态、异常现象和不确定点。",
           "前端/UI 任务需重点复核：布局完整性、响应式视口、重叠/遮挡/裁切、对齐/间距、可读性/对比度、加载/错误/空状态、交互线索与用户验收目标是否一致。",
           "输出结构：target、visualEvidence、findings、result、residualRisks、recommendedFollowup。发现问题时 findings 优先；没有问题时明确 pass/uncertain。",

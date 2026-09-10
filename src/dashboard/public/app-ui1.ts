@@ -1,4 +1,5 @@
 import { renderMarkdown } from "./markdown.ts";
+import { classifyComposerFile } from "./app-ui2.ts";
 import { hydrateRichContent } from "./rich-renderers.ts";
 import { visibleTranscriptRole } from "./transcript.ts";
 import { MANUAL_AGENT_MODEL_VALUE, state, els, MODE_DESCRIPTIONS, LOCAL_FILE_EXTENSIONS, FILE_REFERENCE_PATTERN, TRANSCRIPT_DOM_LIMIT, EVENT_STALE_AFTER_MS, EVENT_CONNECT_TIMEOUT_MS, EVENT_RECONNECT_MAX_ATTEMPTS, DASHBOARD_REQUEST_TIMEOUT_MS, DASHBOARD_API_VERSION, DASHBOARD_LIFECYCLE_TIMEOUT_MS, DASHBOARD_SHUTDOWN_TIMEOUT_MS, DASHBOARD_INTERRUPT_TIMEOUT_MS, MAX_IMAGE_ATTACHMENTS, MAX_IMAGE_ATTACHMENT_BYTES, CURRENT_SESSION_STORAGE_KEY, DASHBOARD_CLIENT_STORAGE_KEY, PREVIEW_WIDTH_STORAGE_KEY, PREVIEW_WIDTH_DEFAULT, PREVIEW_WIDTH_MIN, PREVIEW_WIDTH_MAX, PREVIEW_WORKSPACE_MIN , emptySessionStatus, emptyBackgroundSubagent } from "./app-core.ts";
@@ -120,7 +121,7 @@ export function bindEvents() {
     els.attachmentInput.value = "";
   });
   els.promptInput.addEventListener("paste", async (event: ClipboardEvent) => {
-    const files = Array.from(event.clipboardData?.files ?? []).filter((file) => file.type.startsWith("image/"));
+    const files = Array.from(event.clipboardData?.files ?? []).filter((file) => classifyComposerFile(file) === "image");
     if (files.length === 0) {
       return;
     }
@@ -944,4 +945,3 @@ export function modalFocusableElements(modal: HTMLElement | null | undefined): H
     node.getAttribute("aria-hidden") !== "true" && !node.closest("[inert]")
   ));
 }
-

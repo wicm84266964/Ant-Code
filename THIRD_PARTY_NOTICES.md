@@ -13,6 +13,7 @@ runtime assets from the following third-party packages:
 | `katex` | math rendering runtime dependency; Dashboard CSS and font assets | MIT |
 | `mermaid` | Dashboard diagram rendering bundle input | MIT |
 | `unpdf` | PDF text-layer extraction for document_intake and Dashboard paperclip | MIT |
+| `@napi-rs/canvas` | PDF full-page rendering backend for scanned composer attachments | MIT |
 | `yaml` | Dashboard YAML parsing bundle input | ISC |
 | `esbuild` | development/build tool for Dashboard assets | MIT |
 | `postject` | development/build tool for optional executable packaging | MIT |

@@ -31,6 +31,8 @@ import {
 } from "../../src/tools/web-tools.ts";
 import { createWorkflowState, syncWorkflowCompletionOnFinal } from "../../src/tools/workflow-tools.ts";
 import { listBackgroundAgentTasks } from "../../src/agents/background-registry.ts";
+import { createAgentTaskGroupStore } from "../../src/agents/task-group-store.ts";
+import { createAgentTaskStore } from "../../src/agents/task-store.ts";
 import { listBackgroundTerminalTasks } from "../../src/agents/background-terminal-registry.ts";
 import { resolveBashInvocation } from "../../src/tools/shell-tools.ts";
 
@@ -1185,6 +1187,58 @@ test("background agent_run returns task and group immediately", async () => {
   assert.equal(wakeup?.wakeParent, true);
 });
 
+for (const enabledFirst of [true, false]) {
+  test(`background agent_run wakes a mixed-policy group: enabledFirst=${enabledFirst}`, async (t) => {
+    const cwd = await makeTempWorkspace();
+    const parentSessionId = `mixed-wake-${enabledFirst}`;
+    const events = [];
+    t.after(async () => {
+      await waitFor(async () => listBackgroundAgentTasks({ parentSessionId }).length === 0);
+      await fs.rm(cwd, { recursive: true, force: true });
+    });
+    const store = createAgentTaskGroupStore({ cwd });
+    await createAgentTaskStore({ cwd }).createTask({
+      id: "first", groupId: "mixed", parentSessionId, profile: "explorer", status: "completed", output: "first result"
+    });
+    await store.ensureGroup({
+      id: "mixed", parentSessionId, taskIds: ["first"],
+      waitFor: enabledFirst ? "all" : "none", wakeParent: enabledFirst, wakeReason: "collect results"
+    });
+    const runtime = createToolRuntime({
+      cwd,
+      env: { LAB_AGENT_TRANSCRIPT_ENABLED: "false" },
+      config: {
+        networkMode: "offline", allowedHosts: [],
+        lab: { gatewayUrl: "", gatewayProtocol: "lab-agent-gateway", gatewayApiKey: null },
+        agents: { backgroundWakeup: { enabled: true, autoQueueParentPrompt: true, defaultWaitFor: "all" }, profiles: [] },
+        mcp: { servers: [] }
+      },
+      policy: { fullAccess: true }, parentSessionId,
+      onBackgroundAgentEvent: (event) => events.push(event)
+    });
+    const result = await runtime.execute("agent_run", {
+      profile: "explorer", taskId: "second", groupId: "mixed", background: true,
+      waitForGroup: enabledFirst ? "none" : "all", wakeParent: !enabledFirst,
+      query: "inspect in background"
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.result.waitForGroup, "all");
+    assert.equal(result.result.wakeParent, true);
+    assert.equal(result.result.wakePolicyMerged, enabledFirst);
+    await waitFor(async () => listBackgroundAgentTasks({ parentSessionId }).length === 0);
+    const read = await store.readGroup("mixed");
+    assert.equal(read.ok, true);
+    if (!read.ok) return;
+    assert.ok(read.group.wakePromptQueuedAt);
+    assert.match(read.group.wakePrompt, /first/);
+    assert.match(read.group.wakePrompt, /second/);
+    const wakes = events.filter((event) => event.type === "subagent_group_wakeup");
+    assert.equal(wakes.length, 1);
+    assert.equal(wakes[0].waitFor, "all");
+    assert.equal(wakes[0].wakeParent, true);
+  });
+}
+
 test("background agent_run persists a failed child when the gateway fetch fails", async () => {
   const cwd = await makeTempWorkspace();
   const runtime = createToolRuntime({
@@ -2002,7 +2056,9 @@ test("composer document ingest saves an attached PDF and extracts its text layer
   assert.match(ingested.promptAppendix, /Attached document: paper\.pdf/);
   assert.match(ingested.promptAppendix, /Page One/);
   assert.match(ingested.promptAppendix, /Do not glob the workspace/);
+  assert.match(ingested.promptAppendix, /usable text layer/);
   assert.equal(ingested.visionImages.length, 0);
+  assert.equal(ingested.pdfDocuments.length, 0);
   const saved = await fs.readdir(path.join(cwd, "ant-code-uploads"));
   assert.equal(saved.some((name) => name.endsWith("paper.pdf")), true);
 });
@@ -2724,14 +2780,14 @@ function twoPageHelloPdf() {
 1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj
 2 0 obj<</Type/Pages/Kids[3 0 R 6 0 R]/Count 2>>endobj
 3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj
-4 0 obj<</Length 51>>stream
-BT /F1 12 Tf 20 100 Td (Page One) Tj ET
+4 0 obj<</Length 75>>stream
+BT /F1 12 Tf 20 100 Td (Page One has a usable extracted text layer.) Tj ET
 endstream
 endobj
 5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj
 6 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Contents 7 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj
-7 0 obj<</Length 51>>stream
-BT /F1 12 Tf 20 100 Td (Page Two) Tj ET
+7 0 obj<</Length 76>>stream
+BT /F1 12 Tf 20 100 Td (Page Two continues the extracted text layer.) Tj ET
 endstream
 endobj
 trailer<</Root 1 0 R>>

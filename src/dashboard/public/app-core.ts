@@ -616,6 +616,8 @@ export type DashboardUiState = {
     type?: string;
     data?: string;
     previewUrl?: string;
+    pageStart?: number;
+    pageEnd?: number;
   }>;
   workflow: {
     todos?: Array<{ status?: string; content?: string; title?: string }>;
@@ -979,5 +981,4 @@ export const PREVIEW_WIDTH_DEFAULT = 360;
 export const PREVIEW_WIDTH_MIN = 300;
 export const PREVIEW_WIDTH_MAX = 640;
 export const PREVIEW_WORKSPACE_MIN = 520;
-
 

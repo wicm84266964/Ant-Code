@@ -268,6 +268,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
     prompt: options.prompt,
     attachments,
     gateway,
+    pdfDocuments: ingested.pdfDocuments,
     signal: options.signal,
     eventOptions,
     metadata
@@ -296,8 +297,8 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
   const userMessage = buildUserTurnMessage(modelPrompt, session.workflow, visionPreparation.attachments, visionPreparation.analysisText);
   let messages: SessionMessage[] = buildTurnMessages(session, userMessage);
   let toolResults: SessionToolResult[] = [];
-  const turnMessages: SessionMessage[] = [persistableUserTurnMessage(options.prompt, attachments)];
-  const transcriptTurnMessages: SessionMessage[] = [persistableUserTurnMessage(displayPrompt, attachments)];
+  const turnMessages: SessionMessage[] = [persistableUserTurnMessage(options.prompt, options.attachments ?? attachments)];
+  const transcriptTurnMessages: SessionMessage[] = [persistableUserTurnMessage(displayPrompt, options.attachments ?? attachments)];
   const maxToolRounds = resolveMainToolRounds(session.config);
   const turnChangeTracker = createTurnChangeTracker();
 

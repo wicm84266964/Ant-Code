@@ -259,8 +259,14 @@ export function validateTurnSubmission(input: DashboardRequestInput = {}): TurnS
       if (!matchesDocumentSignature(decoded, ext)) {
         return { ok: false, status: 400, code: "DOCUMENT_SIGNATURE_MISMATCH", error: "文档内容与文件名类型不匹配" };
       }
+      const pageStart = item.pageStart === undefined ? undefined : Number(item.pageStart);
+      const pageEnd = item.pageEnd === undefined ? undefined : Number(item.pageEnd);
+      if ([pageStart, pageEnd].some((page) => page !== undefined && (!Number.isSafeInteger(page) || page < 1)) || (pageStart !== undefined && pageEnd !== undefined && pageEnd < pageStart)) {
+        return { ok: false, status: 400, code: "INVALID_PDF_PAGE_RANGE", error: "PDF 页码必须为正整数，结束页不能小于起始页" };
+      }
       attachments.push({
         type: "document",
+        ...(ext === ".pdf" ? { pageStart, pageEnd } : {}),
         data,
         mimeType: mimeTypeForDocumentExt(ext),
         name,
@@ -390,6 +396,8 @@ export function turnRequestFingerprint(input: DashboardRequestInput = {}) {
     updateFingerprintField(hash, `${index}:name`, String(attachment.name ?? ""));
     updateFingerprintField(hash, `${index}:mimeType`, String(attachment.mimeType ?? attachment.mime_type ?? ""));
     updateFingerprintField(hash, `${index}:size`, String(attachment.size ?? ""));
+    updateFingerprintField(hash, `${index}:pageStart`, String(attachment.pageStart ?? ""));
+    updateFingerprintField(hash, `${index}:pageEnd`, String(attachment.pageEnd ?? ""));
     updateFingerprintField(hash, `${index}:data`, String(attachment.data ?? ""));
   }
   return hash.digest("hex");

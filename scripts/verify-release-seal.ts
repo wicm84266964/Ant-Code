@@ -5,6 +5,12 @@ import { ROOT, collectFiles, rel } from "./audit-common.ts";
 
 const failures: string[] = [];
 const REVIEWED_RUNTIME_DEPENDENCIES = new Map([
+  ["@napi-rs/canvas", {
+    versionSpec: "1.0.9",
+    installedVersion: "1.0.9",
+    license: "MIT",
+    provenanceMarker: "open_source: napi-rs canvas PDF page rendering backend, MIT licensed, public npm package"
+  }],
   ["@vscode/ripgrep", {
     versionSpec: "1.18.0",
     installedVersion: "1.18.0",

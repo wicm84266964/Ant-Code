@@ -1,17 +1,13 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { parseDocumentBufferAsync } from "./document-tools.ts";
-import { encodePng } from "./png-encode.ts";
-import { extractImages, getDocumentProxy } from "unpdf";
+import type { PdfVisionDocument } from "./pdf-render.ts";
 
 export const COMPOSER_UPLOAD_DIR = "ant-code-uploads";
 export const MAX_DOCUMENT_ATTACHMENTS = 4;
 export const MAX_DOCUMENT_BYTES = 40 * 1024 * 1024;
-export const MAX_VISION_PDF_PAGES = 2;
-export const PDF_SPARSE_TEXT_CHARS = 40;
 export const COMPOSER_DOCUMENT_PREVIEW_CHARS = 4000;
-export const MAX_VISION_PAGE_EDGE = 1280;
-export const MAX_VISION_PAGE_PNG_BYTES = 1_500_000;
+export const MAX_VISION_PDF_PAGES = 2;
 
 export const ALLOWED_DOCUMENT_EXTENSIONS = new Set([
   ".pdf", ".docx", ".xlsx", ".pptx", ".txt", ".md", ".markdown", ".csv", ".json", ".html", ".htm"
@@ -47,6 +43,8 @@ type ComposerDocument = {
   data: string;
   ext: string;
   path?: string;
+  pageStart?: number;
+  pageEnd?: number;
 };
 
 export function extensionOfName(name: unknown) {
@@ -88,7 +86,9 @@ export function normalizeComposerDocuments(value: unknown): ComposerDocument[] {
       size: Number(record.size ?? 0) || 0,
       data,
       ext,
-      path: String(record.path ?? "").trim() || undefined
+      path: String(record.path ?? "").trim() || undefined,
+      pageStart: record.pageStart === undefined ? undefined : Number(record.pageStart),
+      pageEnd: record.pageEnd === undefined ? undefined : Number(record.pageEnd)
     });
     if (documents.length >= MAX_DOCUMENT_ATTACHMENTS) {
       break;
@@ -130,10 +130,11 @@ export async function ingestComposerDocuments(input: {
   cwd: string;
   attachments?: unknown;
   existingImageCount?: number;
-}): Promise<{ promptAppendix: string; visionImages: ComposerImage[] }> {
+  signal?: AbortSignal;
+}): Promise<{ promptAppendix: string; visionImages: ComposerImage[]; pdfDocuments: PdfVisionDocument[] }> {
   const documents = normalizeComposerDocuments(input.attachments);
   if (documents.length === 0) {
-    return { promptAppendix: "", visionImages: [] };
+    return { promptAppendix: "", visionImages: [], pdfDocuments: [] };
   }
   const uploadRoot = path.join(path.resolve(input.cwd), COMPOSER_UPLOAD_DIR);
   await fs.mkdir(uploadRoot, { recursive: true });
@@ -142,10 +143,10 @@ export async function ingestComposerDocuments(input: {
     "Composer attached the following files. They are already saved. Do not search the whole workspace to find them. Use document_intake or read_file on the saved paths if you need more than the preview."
   ];
   const visionImages: ComposerImage[] = [];
-  const existingImages = Math.max(0, Number(input.existingImageCount) || 0);
-  const remainingVisionSlots = Math.max(0, 6 - existingImages);
+  const pdfDocuments: PdfVisionDocument[] = [];
 
   for (const document of documents) {
+    input.signal?.throwIfAborted();
     const relativePath = typeof document.path === "string" && document.path.trim()
       ? document.path.replace(/\\/g, "/")
       : `${COMPOSER_UPLOAD_DIR}/${uniqueUploadName(document.name)}`;
@@ -156,68 +157,21 @@ export async function ingestComposerDocuments(input: {
     if (!document.path) {
       await fs.writeFile(savedAbs, buffer);
     }
-    const parsed = await parseDocumentBufferAsync(buffer, document.ext);
-    const sparsePdf = document.ext === ".pdf" && parsed.content.replace(/\s+/g, "").length < PDF_SPARSE_TEXT_CHARS;
-    if (sparsePdf && remainingVisionSlots - visionImages.length > 0) {
-      const pageBudget = Math.min(MAX_VISION_PDF_PAGES, remainingVisionSlots - visionImages.length, existingImages > 0 ? 1 : MAX_VISION_PDF_PAGES);
-      const pages = await pdfEmbeddedImagesAsPng(buffer, pageBudget);
-      visionImages.push(...pages.images.slice(0, pageBudget));
-      parsed.notes.push(...pages.notes);
+    const parsed = await parseDocumentBufferAsync(buffer, document.ext, {
+      pageStart: document.pageStart,
+      maxPages: document.pageEnd === undefined ? undefined : document.pageEnd - (document.pageStart ?? 1) + 1
+    });
+    if (document.ext === ".pdf") {
+      schedulePdfVision(document, parsed, savedAbs, pdfDocuments);
     }
     sections.push(formatDocumentSection(relativePath, document.name, parsed.content, parsed.notes, parsed.supported));
   }
 
   return {
     promptAppendix: sections.join("\n\n"),
-    visionImages: visionImages.slice(0, remainingVisionSlots)
+    visionImages,
+    pdfDocuments
   };
-}
-
-export async function pdfEmbeddedImagesAsPng(buffer: Buffer, maxPages: number) {
-  const notes: string[] = [];
-  const images: ComposerImage[] = [];
-  try {
-    const pdf = await getDocumentProxy(new Uint8Array(buffer));
-    const pageCount = Number(pdf.numPages) || 0;
-    const limit = Math.min(Math.max(1, maxPages), pageCount, MAX_VISION_PDF_PAGES);
-    for (let page = 1; page <= limit; page += 1) {
-      const extracted = await extractImages(pdf, page);
-      const best = pickLargestImage(extracted);
-      if (!best || !best.data || !best.width || !best.height) {
-        continue;
-      }
-      const channels = best.channels === 1 || best.channels === 3 || best.channels === 4 ? best.channels : 4;
-      const scaled = downscaleRawImage(best.width, best.height, channels, best.data, MAX_VISION_PAGE_EDGE);
-      const png = encodePng(scaled.width, scaled.height, channels, scaled.data);
-      if (png.length > MAX_VISION_PAGE_PNG_BYTES) {
-        notes.push(`Page ${page} image was still larger than ${MAX_VISION_PAGE_PNG_BYTES} bytes after downscale and was skipped.`);
-        continue;
-      }
-      images.push({
-        type: "image",
-        name: `pdf-page-${page}.png`,
-        mimeType: "image/png",
-        size: png.length,
-        data: png.toString("base64")
-      });
-    }
-    if (images.length > 0) {
-      notes.push(`No usable PDF text layer; sent ${images.length} embedded page image(s) to the vision model (pages 1-${images.length}).`);
-    } else {
-      notes.push("No usable PDF text layer and no embedded page images. Vision was not given raster pages; OCR is not bundled.");
-    }
-  } catch (error) {
-    notes.push(`PDF page-image extraction failed: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  return { images, notes };
-}
-
-function pickLargestImage(images: Array<{ width?: number; height?: number; data?: Uint8ClampedArray; channels?: number }>) {
-  return [...images].sort((left, right) => {
-    const leftArea = Number(left.width ?? 0) * Number(left.height ?? 0);
-    const rightArea = Number(right.width ?? 0) * Number(right.height ?? 0);
-    return rightArea - leftArea;
-  })[0];
 }
 
 export async function ensureComposerUploadIgnore(cwd: string) {
@@ -268,31 +222,56 @@ function uniqueUploadName(name: string) {
   return `${Date.now()}-${stem}${ext}`;
 }
 
-function downscaleRawImage(
-  width: number,
-  height: number,
-  channels: 1 | 3 | 4,
-  data: Uint8Array | Uint8ClampedArray | Buffer,
-  maxEdge: number
+export function resolvePdfVisionWindow(input: { pageStart?: number; pageEnd?: number; totalPages: number }) {
+  const totalPages = Math.max(1, Number(input.totalPages) || 1);
+  const explicitStart = Number.isInteger(input.pageStart) && Number(input.pageStart) >= 1;
+  const explicitEnd = Number.isInteger(input.pageEnd) && Number(input.pageEnd) >= 1;
+  const pageStart = Math.min(totalPages, explicitStart ? Number(input.pageStart) : 1);
+  const requestedEnd = explicitEnd ? Number(input.pageEnd) : pageStart + MAX_VISION_PDF_PAGES - 1;
+  return {
+    pageStart,
+    pageEnd: Math.min(totalPages, Math.max(pageStart, requestedEnd)),
+    explicit: explicitStart || explicitEnd
+  };
+}
+
+function schedulePdfVision(
+  document: ComposerDocument,
+  parsed: { supported?: boolean; sparseText?: boolean; totalPages?: number; notes: string[] },
+  savedAbs: string,
+  pdfDocuments: PdfVisionDocument[]
 ) {
-  const edge = Math.max(width, height);
-  if (edge <= maxEdge) {
-    return { width, height, data };
+  if (!parsed.supported) {
+    return;
   }
-  const scale = maxEdge / edge;
-  const nextWidth = Math.max(1, Math.round(width * scale));
-  const nextHeight = Math.max(1, Math.round(height * scale));
-  const next = new Uint8Array(nextWidth * nextHeight * channels);
-  for (let y = 0; y < nextHeight; y += 1) {
-    const sourceY = Math.min(height - 1, Math.floor(y / scale));
-    for (let x = 0; x < nextWidth; x += 1) {
-      const sourceX = Math.min(width - 1, Math.floor(x / scale));
-      const sourceIndex = (sourceY * width + sourceX) * channels;
-      const destIndex = (y * nextWidth + x) * channels;
-      next.set(data.subarray(sourceIndex, sourceIndex + channels), destIndex);
-    }
+  if (!parsed.sparseText) {
+    parsed.notes.push("This PDF has a usable text layer. Answer from the extracted text. If the preview is insufficient, call document_intake or read_file on the saved path. Do not send pages to vision automatically.");
+    return;
   }
-  return { width: nextWidth, height: nextHeight, data: next };
+  const totalPages = Number(parsed.totalPages) || 0;
+  if (totalPages < 1) {
+    return;
+  }
+  const window = resolvePdfVisionWindow({
+    pageStart: document.pageStart,
+    pageEnd: document.pageEnd,
+    totalPages
+  });
+  pdfDocuments.push({
+    name: document.name,
+    path: savedAbs,
+    pageStart: window.pageStart,
+    pageEnd: window.pageEnd
+  });
+  const unreadFrom = window.pageEnd + 1;
+  parsed.notes.push(
+    `No usable text layer; rendered pages ${window.pageStart}-${window.pageEnd} of ${totalPages} as full pages for vision. Cite those page numbers. Do not assume they contain the abstract or summary.`
+  );
+  if (unreadFrom <= totalPages) {
+    parsed.notes.push(
+      `Pages ${unreadFrom}-${totalPages} have not been visually read. If more is needed, state that uncovered range, ask whether to continue the next pages or do a full visual read, and mention extra time and model cost. Full visual read is explicit: the user must set start and end pages on the paperclip and resend this PDF.`
+    );
+  }
 }
 
 function formatDocumentSection(relativePath: string, originalName: string, content: string, notes: string[], supported: boolean) {

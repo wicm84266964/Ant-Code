@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 2.0.11 - 2026-09-10
+
+Candidate small release for scanned PDF visual preview and background subagent wakeup merging. GitHub CI, tag and Release status will be recorded after publication.
+
+- Text-layer PDFs are answered from extracted text; scanned PDFs render the first few full pages for vision and cite those page numbers.
+- Full visual PDF reading is explicit: set start and end pages on the paperclip and resend. PNG pastes without MIME are classified by extension.
+- Joining a background subagent group can strengthen wakeup (`wakeParent` OR, `waitForGroup` all > any > none) but cannot disable an existing wakeup request.
+- Windows executable distributions include `@napi-rs/canvas` and the Windows x64 native binary beside the exe.
+
+Validation, upgrade steps and limitations: [Chinese release note](docs/releases/2.0.11-pdf-scan-vision-wakeup_zh.md).
+
 ## 2.0.10 - 2026-09-10
 
 Published 2026-09-10 03:38:31 UTC (2026-09-10 11:38:31 UTC+08:00): [v2.0.10](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.10).

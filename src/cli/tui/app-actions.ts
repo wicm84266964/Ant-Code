@@ -1051,6 +1051,8 @@ export function useTuiAppActions(s: ReturnType<typeof useTuiAppPanels>) {
         void loadTaskRecords();
         setSideView("tasks");
       }
+    } else if (event.type === "pdf_vision_progress") {
+      setActivity((current) => ({ ...current, status: `PDF ${event.pageEnd ?? ""}/${event.totalPages ?? ""} ${event.stage === "completed" ? "已识别" : "识别中"}`, lastTool: "PDF vision" }));
     } else if (event.type === "subagent_group_started") {
       const body = [
         `group=${event.groupId}`,

@@ -21,6 +21,7 @@ const PDF_LIMITS = Object.freeze({
   defaultMaxPages: 20,
   maxPagesCap: 50
 });
+const PDF_SPARSE_TEXT_CHARS = 40;
 
 type OfficeZipLimits = {
   maxArchiveBytes: number;
@@ -47,6 +48,7 @@ type DocumentParseResult = {
   pageEnd?: number;
   totalPages?: number;
   truncated?: boolean;
+  sparseText?: boolean;
 };
 
 type ZipLocalEntry = {
@@ -187,8 +189,9 @@ export async function parseDocumentBufferAsync(buffer: Buffer, ext: string, opti
 }
 
 async function parsePdfTextLayer(buffer: Buffer, options: Record<string, unknown> = EMPTY_RECORD): Promise<DocumentParseResult> {
+  let pdf: Awaited<ReturnType<typeof getDocumentProxy>> | undefined;
   try {
-    const pdf = await getDocumentProxy(new Uint8Array(buffer));
+    pdf = await getDocumentProxy(new Uint8Array(buffer));
     const extracted = await extractText(pdf, { mergePages: false });
     const pages = Array.isArray(extracted.text) ? extracted.text.map((page) => String(page ?? "")) : [String(extracted.text ?? "")];
     const totalPages = extracted.totalPages || pages.length;
@@ -202,14 +205,15 @@ async function parsePdfTextLayer(buffer: Buffer, options: Record<string, unknown
       .map((page, index) => `--- page ${pageStart + index} ---\n${page.replace(/\s+$/g, "")}`)
       .join("\n\n")
       .trim();
-    const visibleChars = joined.replace(/\s+/g, "").length;
+    const visibleChars = slice.join("").replace(/\s+/g, "").length;
     const notes = [
       `Extracted the PDF text layer from pages ${pageStart}-${Math.max(pageStart, pageEnd)} of ${totalPages}.`
     ];
     if (truncated) {
       notes.push(`This call was windowed to at most ${maxPages} pages. Pass pageStart=${pageEnd + 1} to continue.`);
     }
-    if (visibleChars < 40) {
+    const sparseText = visibleChars < PDF_SPARSE_TEXT_CHARS;
+    if (sparseText) {
       notes.push("Very little extractable text was found. This PDF may be scanned images; OCR is not bundled.");
     }
     return {
@@ -220,7 +224,8 @@ async function parsePdfTextLayer(buffer: Buffer, options: Record<string, unknown
       pageStart,
       pageEnd,
       totalPages,
-      truncated
+      truncated,
+      sparseText
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -233,6 +238,8 @@ async function parsePdfTextLayer(buffer: Buffer, options: Record<string, unknown
         "Password-protected or damaged PDFs are not opened. Scanned PDFs need an external OCR converter."
       ]
     };
+  } finally {
+    await pdf?.loadingTask.destroy();
   }
 }
 
