@@ -1288,17 +1288,17 @@ async function startBackgroundAgentTool(
     ? input.taskId.trim()
     : `task-${crypto.randomUUID()}`;
   const groupId = normalizeGroupId(input.groupId) ?? `group-${crypto.randomUUID()}`;
-  const waitFor = pickEnum(
+  let waitFor = pickEnum(
     input.waitForGroup,
     ["all", "any", "none"] as const,
     pickEnum(options.config?.agents?.backgroundWakeup?.defaultWaitFor, ["all", "any", "none"] as const, "all") ?? "all"
   ) ?? "all";
-  const wakeParent = input.wakeParent !== false && options.config?.agents?.backgroundWakeup?.autoQueueParentPrompt !== false;
+  let wakeParent = input.wakeParent !== false && options.config?.agents?.backgroundWakeup?.autoQueueParentPrompt !== false;
   const wakeReason = typeof input.wakeReason === "string" && input.wakeReason.trim()
     ? input.wakeReason.trim()
     : "后台子任务完成后继续主控编排";
   const groupStore = createAgentTaskGroupStore({ cwd: options.cwd });
-  await groupStore.ensureGroup({
+  const ensuredGroup = await groupStore.ensureGroup({
     id: groupId,
     parentSessionId: options.parentSessionId ?? null,
     status: "running",
@@ -1312,6 +1312,12 @@ async function startBackgroundAgentTool(
       background: true
     }
   });
+  if (!ensuredGroup.ok) {
+    return { ok: false, error: ensuredGroup.error };
+  }
+  const wakePolicyMerged = ensuredGroup.group.waitFor !== waitFor || ensuredGroup.group.wakeParent !== wakeParent;
+  waitFor = ensuredGroup.group.waitFor as "all" | "any" | "none";
+  wakeParent = ensuredGroup.group.wakeParent;
   await runHooks({
     config: options.config,
     cwd: options.cwd,
@@ -1410,7 +1416,7 @@ async function startBackgroundAgentTool(
     taskId,
     groupId,
     taskStatus: "running",
-    outputSummary: `后台子智能体 ${profile.name} 已启动；group=${groupId}，完成后将${wakeParent ? "自动唤醒主控" : "记录结果" }。`,
+    outputSummary: `后台子智能体 ${profile.name} 已启动；group=${groupId}，完成后将${wakeParent && waitFor !== "none" ? "自动唤醒主控" : "记录结果" }。${wakePolicyMerged ? "同组唤醒设置已合并，保留已开启的唤醒并采用更严格的等待条件。" : ""}`,
     result: {
       taskId,
       groupId,
@@ -1418,7 +1424,8 @@ async function startBackgroundAgentTool(
       status: "running",
       background: true,
       waitForGroup: waitFor,
-      wakeParent
+      wakeParent,
+      wakePolicyMerged
     }
   };
 }
@@ -1484,8 +1491,8 @@ async function finalizeBackgroundAgentTool(options: ToolRuntimeOptions, state: {
     taskId: state.taskId,
     profile: state.profile.name,
     status: group.status,
-    waitFor: state.waitFor,
-    wakeParent: state.wakeParent,
+    waitFor: group.waitFor,
+    wakeParent: group.wakeParent,
     completed: summary.completed,
     summary: summary.summary
   });
@@ -1529,8 +1536,8 @@ async function finalizeBackgroundAgentTool(options: ToolRuntimeOptions, state: {
     taskId: state.taskId,
     profile: state.profile.name,
     status: group?.status,
-    waitFor: state.waitFor,
-    wakeParent: state.wakeParent,
+    waitFor: group?.waitFor,
+    wakeParent: group?.wakeParent,
     wakePrompt,
     summary: group?.summary
   });

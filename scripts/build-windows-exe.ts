@@ -111,6 +111,10 @@ run(process.execPath, [
 for (const relativePath of RESOURCE_PATHS) {
   await copyResource(relativePath);
 }
+// Native canvas cannot be embedded in the JS SEA asset.
+await copyResource("node_modules/@napi-rs/canvas");
+await copyResource("node_modules/@napi-rs/canvas-win32-x64-msvc");
+await fs.access(path.join(RELEASE, "node_modules/@napi-rs/canvas-win32-x64-msvc/skia.win32-x64-msvc.node"));
 
 await writeLauncher("ant-code.cmd", "ant-code.exe");
 await writeLauncher("lab-agent.cmd", "ant-code.exe");
@@ -127,7 +131,8 @@ const manifest = [
   "This external package is the Windows executable distribution. It includes",
   "a bundled runtime executable plus configuration templates, deployment docs,",
   "skills, and audit evidence. It does not include the repository src/ tree,",
-  "tests, npm tarball, node_modules, handoff notes, or planning notes.",
+  "tests, npm tarball, handoff notes, or planning notes. The node_modules directory",
+  "contains only the native PDF canvas runtime and its Windows x64 binary.",
   "",
   "Run:",
   "",

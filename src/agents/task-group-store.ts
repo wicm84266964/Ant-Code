@@ -78,9 +78,19 @@ export function createAgentTaskGroupStore(options: { cwd: string; onListScan?: (
         const existing = await readGroupFile(path.join(directory, `${id}.json`));
         if (existing.ok) {
           const taskIds = mergeUnique(existing.group.taskIds, group.taskIds);
+          const incoming = normalizeGroup({ ...existing.group, ...group });
+          // Joining tasks may strengthen the group's wake contract, never disable it.
+          const waitFor = ["all", "any", "none"].find((value) => (
+            value === existing.group.waitFor || value === incoming.waitFor
+          ));
           const record = normalizeGroup({
             ...existing.group,
             ...group,
+            waitFor,
+            wakeParent: existing.group.wakeParent || incoming.wakeParent,
+            wakeReason: existing.group.wakeParent && existing.group.waitFor !== "none"
+              ? existing.group.wakeReason || incoming.wakeReason
+              : incoming.wakeReason || existing.group.wakeReason,
             id,
             taskIds,
             status: existing.group.status === "queued" ? "running" : existing.group.status,
@@ -89,7 +99,7 @@ export function createAgentTaskGroupStore(options: { cwd: string; onListScan?: (
           });
           await writeGroup(directory, record);
           invalidateGroupListCache(directory);
-          return { ok: true, group: record };
+          return { ok: true as const, group: record };
         }
         if (existing.error.code !== "AGENT_TASK_GROUP_NOT_FOUND") {
           return existing;
@@ -105,7 +115,7 @@ export function createAgentTaskGroupStore(options: { cwd: string; onListScan?: (
         });
         await writeGroup(directory, record);
         invalidateGroupListCache(directory);
-        return { ok: true, group: record };
+        return { ok: true as const, group: record };
       });
     },
     async updateGroup(groupId: unknown, patch: Record<string, unknown>) {

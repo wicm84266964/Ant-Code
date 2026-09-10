@@ -101,6 +101,51 @@ test("ensureGroup preserves concurrent task ids for the same group", async () =>
   assert.deepEqual(read.group.taskIds.sort(), ["task-a", "task-b"]);
 });
 
+for (const order of ["enabled-first", "disabled-first", "concurrent"] as const) {
+  test(`ensureGroup preserves wakeup with conflicting policies: ${order}`, async (t) => {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-group-wake-"));
+    t.after(() => fs.rm(cwd, { recursive: true, force: true }));
+    const enabled = { id: "mixed", taskIds: ["enabled"], waitFor: "all", wakeParent: true, wakeReason: "collect results" };
+    const disabled = { id: "mixed", taskIds: ["disabled"], waitFor: "none", wakeParent: false, wakeReason: "no wake" };
+    const stores = [createAgentTaskGroupStore({ cwd }), createAgentTaskGroupStore({ cwd })];
+    if (order === "concurrent") {
+      await Promise.all([stores[0].ensureGroup(enabled), stores[1].ensureGroup(disabled)]);
+    } else {
+      const policies = order === "enabled-first" ? [enabled, disabled] : [disabled, enabled];
+      await stores[0].ensureGroup(policies[0]);
+      await stores[1].ensureGroup(policies[1]);
+    }
+    const read = await stores[0].readGroup("mixed");
+    assert.equal(read.ok, true);
+    if (!read.ok) return;
+    assert.deepEqual(read.group.taskIds.sort(), ["disabled", "enabled"]);
+    assert.equal(read.group.wakeParent, true);
+    assert.equal(read.group.waitFor, "all");
+    assert.equal(read.group.wakeReason, "collect results");
+    assert.equal(summarizeGroupStatus([{ status: "completed" }, { status: "running" }], read.group).completed, false);
+    assert.equal(summarizeGroupStatus([{ status: "completed" }, { status: "completed" }], read.group).completed, true);
+  });
+}
+
+test("ensureGroup merges wait policies without enabling explicitly silent groups", async (t) => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-group-policy-"));
+  t.after(() => fs.rm(cwd, { recursive: true, force: true }));
+  const store = createAgentTaskGroupStore({ cwd });
+  for (const [first, second, expected] of [
+    ["none", "none", "none"], ["none", "any", "any"], ["any", "none", "any"],
+    ["any", "all", "all"], ["all", "any", "all"]
+  ]) {
+    const id = `${first}-${second}`;
+    await store.ensureGroup({ id, waitFor: first, wakeParent: false, taskIds: ["a"] });
+    await store.ensureGroup({ id, waitFor: second, wakeParent: false, taskIds: ["b"] });
+    const read = await store.readGroup(id);
+    assert.equal(read.ok, true);
+    if (!read.ok) continue;
+    assert.equal(read.group.waitFor, expected);
+    assert.equal(read.group.wakeParent, false);
+  }
+});
+
 test("task group stores coalesce one history scan across active sessions", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-group-scan-cache-"));
   const root = path.join(cwd, ".lab-agent", "task-groups");

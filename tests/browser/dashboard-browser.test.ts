@@ -6,6 +6,7 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import test, { after, before } from "node:test";
 import { createDashboardServer } from "../../src/dashboard/server.ts";
+import { visualPdf } from "../fixtures/pdf-vision.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const BROWSER_PATH = process.env.ANT_CODE_BROWSER_EXECUTABLE ?? {
@@ -81,6 +82,39 @@ after(async () => {
     closeServer(embedServer),
     closeServer(mediaServer)
   ]);
+});
+
+test("composer accepts PNG without MIME and sends PDF page ranges on desktop and mobile", async () => {
+  for (const width of [390, 1280]) {
+    await withDashboardPage({ width, height: 900 }, async (page) => {
+      let sent;
+      await page.route("**/api/turns", async (route) => {
+        sent = route.request().postDataJSON();
+        await route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ ok: false, error: "test capture" }) });
+      });
+      await page.locator("#attachment-input").setInputFiles({ name: "paper.pdf", mimeType: "application/pdf", buffer: visualPdf() });
+      await page.getByRole("spinbutton", { name: "paper.pdf 起始页" }).fill("3");
+      await page.getByRole("spinbutton", { name: "paper.pdf 结束页" }).fill("5");
+      await page.evaluate(() => {
+        const clipboardData = new DataTransfer();
+        const bytes = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="), (value) => value.charCodeAt(0));
+        clipboardData.items.add(new File([bytes], "pasted.png", { type: "" }));
+        document.querySelector("#prompt-input").dispatchEvent(new ClipboardEvent("paste", { clipboardData, bubbles: true, cancelable: true }));
+      });
+      await page.locator('.attachment-chip:has-text("pasted.png")').waitFor();
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+      await fs.mkdir(path.join(ROOT, ".tmp_validation"), { recursive: true });
+      await page.screenshot({ path: path.join(ROOT, ".tmp_validation", `pdf-composer-${width}.png`) });
+      await page.locator("#prompt-input").fill("Read the selected PDF pages and image");
+      await Promise.all([
+        page.waitForResponse((response) => response.url().endsWith("/api/turns")),
+        page.locator("#send-button").click()
+      ]);
+      assert.equal(sent.attachments[0].pageStart, 3);
+      assert.equal(sent.attachments[0].pageEnd, 5);
+      assert.equal(sent.attachments[1].mimeType, "image/png");
+    });
+  }
 });
 
 test("dashboard has no page overflow and keeps core navigation reachable from 320 to 1440", async () => {

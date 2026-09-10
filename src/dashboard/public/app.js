@@ -384,864 +384,17 @@ var PREVIEW_WIDTH_MIN = 300;
 var PREVIEW_WIDTH_MAX = 640;
 var PREVIEW_WORKSPACE_MIN = 520;
 
-// src/dashboard/public/app-ui1.ts
-async function init() {
-  restorePreviewWidth();
-  bindEvents();
-  observeRunStatus();
-  await bootstrapDashboard();
-}
-async function bootstrapDashboard() {
-  const request = beginScopedRequest("bootstrap");
-  renderBootstrapLoading();
-  try {
-    const status = await getJson(statusUrl(), { signal: request.signal });
-    if (!isCurrentScopedRequest(request)) return;
-    if (!status.ok) {
-      throw dashboardPayloadError(status, "Dashboard 初始化失败");
-    }
-    if (status.version !== DASHBOARD_API_VERSION) {
-      throw new Error("Dashboard 前后端版本不一致，请重启 Dashboard 服务后刷新页面");
-    }
-    state.cwd = String(status.cwd ?? "");
-    state.models = normalizeModels(status.models);
-    state.gatewayConfig = normalizeGatewayConfig(status.gatewayConfig);
-    state.gatewayProfiles = normalizeGatewayProfiles(status.gatewayProfiles);
-    state.agentModelTiers = normalizeAgentModelTiers(status.agentModelTiers);
-    state.visionAgent = normalizeVisionAgent(status.visionAgent);
-    state.settings = normalizeDashboardSettings(status.settings);
-    updateConfigRevisions(status);
-    state.applyAgentDefaultsOnSwitch = Boolean(state.settings?.agents?.syncModelTiersOnSwitch);
-    updateSessionStatus({
-      ...status.sessionStatus,
-      providerId: status.sessionStatus?.providerId ?? state.gatewayConfig?.activeProfileId ?? ""
-    });
-    rememberNewTaskModelState();
-    if (els.projectPath) {
-      els.projectPath.textContent = String(status.cwd ?? "");
-    }
-    const trust = await loadTrust({ signal: request.signal, silent: true });
-    if (!trust?.ok) {
-      throw dashboardPayloadError(trust, "无法读取工作区信任状态");
-    }
-    if (!isCurrentScopedRequest(request)) return;
-    await loadSessions();
-    if (!isCurrentScopedRequest(request)) return;
-    await restoreInitialSession();
-    if (!isCurrentScopedRequest(request)) return;
-    updateSendButton();
-    renderComposerStatus();
-    clearBootstrapStatus();
-  } catch (error) {
-    if (!isAbortError(error) && isCurrentScopedRequest(request)) {
-      renderBootstrapFailure(error);
-    }
-  } finally {
-    finishScopedRequest(request);
-  }
-}
-function observeRunStatus() {
-  updateRunStatusTone();
-  new MutationObserver(updateRunStatusTone).observe(els.runStatus, { childList: true, characterData: true, subtree: true });
-}
-function updateRunStatusTone() {
-  const status = els.runStatus.textContent.trim();
-  let tone = "idle";
-  if (/失败|拒绝/.test(status)) {
-    tone = "error";
-  } else if (/等待|待/.test(status)) {
-    tone = "waiting";
-  } else if (/运行|启动|引导|中断|停止|收尾|排队|压缩/.test(status)) {
-    tone = "running";
-  } else if (/完成/.test(status)) {
-    tone = "done";
-  }
-  els.runStatus.dataset.tone = tone;
-}
-function bindEvents() {
-  els.refreshSessions.addEventListener("click", () => loadSessions({ feedback: true }));
-  els.collapseSidebar.addEventListener("click", () => {
-    if (responsiveLayoutMode() === "desktop") {
-      toggleSidebar();
-    } else {
-      setResponsiveView("conversation");
-    }
-  });
-  els.newTask.addEventListener("click", () => {
-    newTask();
-    setResponsiveView("conversation");
-  });
-  els.sendButton.addEventListener("click", () => {
-    if (state.turnSubmitting) {
-      return;
-    }
-    if (state.running) {
-      interruptTurn();
-      return;
-    }
-    sendPrompt();
-  });
-  els.promptInput.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
-      event.preventDefault();
-      sendPrompt();
-    }
-  });
-  els.promptInput.addEventListener("input", () => {
-    syncGuideButton();
-    resizePromptInput();
-  });
-  els.attachButton.addEventListener("click", () => els.attachmentInput.click());
-  els.attachmentInput.addEventListener("change", async () => {
-    await addAttachmentFiles(Array.from(els.attachmentInput.files ?? []));
-    els.attachmentInput.value = "";
-  });
-  els.promptInput.addEventListener("paste", async (event) => {
-    const files = Array.from(event.clipboardData?.files ?? []).filter((file) => file.type.startsWith("image/"));
-    if (files.length === 0) {
-      return;
-    }
-    event.preventDefault();
-    await addAttachmentFiles(files);
-  });
-  document.addEventListener("keydown", handleGlobalKeydown);
-  els.permissionMode.addEventListener("click", (event) => {
-    const button = eventElement(event)?.closest("button[data-mode]");
-    if (!(button instanceof HTMLButtonElement)) return;
-    requestPermissionMode(button.dataset.mode, button);
-  });
-  els.permissionMode.addEventListener("keydown", handlePermissionModeKeydown);
-  els.goalMode?.addEventListener("click", () => requestGoalMode());
-  els.preview.addEventListener("click", handleLocalFileOpenClick);
-  els.collapsePreview.addEventListener("click", () => {
-    if (responsiveLayoutMode() === "desktop") {
-      document.body.classList.toggle("preview-collapsed");
-      syncPreviewResizeHandle();
-    } else {
-      setResponsiveView("conversation");
-    }
-  });
-  els.previewResizeHandle?.addEventListener("pointerdown", (event) => beginPreviewResize(event));
-  els.previewResizeHandle?.addEventListener("pointermove", (event) => updatePreviewResize(event));
-  els.previewResizeHandle?.addEventListener("pointerup", (event) => finishPreviewResize(event));
-  els.previewResizeHandle?.addEventListener("pointercancel", (event) => finishPreviewResize(event));
-  els.previewResizeHandle?.addEventListener("keydown", (event) => handlePreviewResizeKeydown(event));
-  els.previewResizeHandle?.addEventListener("dblclick", () => {
-    setPreviewWidth(PREVIEW_WIDTH_DEFAULT, { persist: true, announce: true });
-  });
-  els.shutdownButton.addEventListener("click", showShutdownPanel);
-  els.headerShutdownButton.addEventListener("click", showShutdownPanel);
-  els.shutdownCancel.addEventListener("click", hideShutdownPanel);
-  els.shutdownConfirm.addEventListener("click", shutdownDashboard);
-  els.lightboxBackdrop.addEventListener("click", hideLightbox);
-  els.lightboxClose.addEventListener("click", hideLightbox);
-  els.lightboxPrevious.addEventListener("click", () => moveLightbox(-1));
-  els.lightboxNext.addEventListener("click", () => moveLightbox(1));
-  els.contextClear.addEventListener("click", () => showContextConfirm("clear"));
-  els.contextCompact.addEventListener("click", () => showContextConfirm("compact"));
-  els.modelStatus.addEventListener("click", handleModelStatusActivate);
-  els.modelStatus.addEventListener("keydown", handleModelStatusKeydown);
-  els.modelStatus.addEventListener("change", handleReasoningEffortChange);
-  els.modelPanel.addEventListener("click", handleModelPanelClick);
-  els.modelPanel.addEventListener("change", handleModelPanelChange);
-  els.modelConfigPanel.addEventListener("click", handleModelConfigPanelClick);
-  els.modelConfigPanel.addEventListener("input", handleModelConfigInput);
-  els.modelConfigPanel.addEventListener("change", handleModelConfigChange);
-  els.modelConfigPanel.addEventListener("submit", saveModelConfig);
-  els.settingsButton?.addEventListener("click", () => {
-    if (state.settingsOpen) hideSettingsWorkspace();
-    else showSettingsWorkspace();
-  });
-  els.settingsBack?.addEventListener("click", () => hideSettingsWorkspace());
-  els.settingsRail?.addEventListener("click", handleSettingsRailClick);
-  els.settingsContent?.addEventListener("click", handleSettingsClick);
-  els.settingsContent?.addEventListener("input", handleSettingsFormChange);
-  els.settingsContent?.addEventListener("change", handleSettingsFormChange);
-  els.settingsContent?.addEventListener("submit", saveSettingsConfig);
-  els.liveSubtasks.addEventListener("click", (event) => {
-    const button = eventTargetOf(event).closest("button[data-background-cancel]");
-    if (!button) {
-      return;
-    }
-    event.preventDefault();
-    event.stopPropagation();
-    cancelBackgroundSubagent(button.dataset.groupId, button.dataset.taskId);
-  });
-  document.addEventListener("click", (event) => {
-    if (!state.modelPanelOpen) {
-      return;
-    }
-    if (eventTargetOf(event).closest("#model-panel") || eventTargetOf(event).closest("#model-config-panel") || eventTargetOf(event).closest("#model-status-toggle")) {
-      return;
-    }
-    hideModelPanel();
-  });
-  els.transcript.addEventListener("scroll", handleTranscriptScroll);
-  els.workflowStrip.addEventListener("click", (event) => {
-    if (!eventTargetOf(event).closest("button[data-action='toggle-workflow']")) {
-      return;
-    }
-    state.workflowExpanded = !state.workflowExpanded;
-    renderWorkflowStrip();
-  });
-  els.activityToggle.addEventListener("click", toggleLiveStatusDetails);
-  els.transcriptJump.addEventListener("click", followTranscript);
-  els.responsiveNavigation.querySelectorAll("button[data-dashboard-view]").forEach((button) => {
-    button.addEventListener("click", () => {
-      if (button.dataset.dashboardView === "settings") {
-        showSettingsWorkspace();
-        return;
-      }
-      if (state.settingsOpen) hideSettingsWorkspace({ restoreFocus: false });
-      setResponsiveView(button.dataset.dashboardView);
-    });
-  });
-  els.responsiveScrim.addEventListener("click", () => setResponsiveView("conversation"));
-  els.threadList.addEventListener("click", (event) => {
-    if (eventTargetOf(event).closest(".thread-open")) {
-      setResponsiveView("conversation");
-    }
-  });
-  document.addEventListener("click", handleResponsiveFileNavigation);
-  els.connectionStatus?.addEventListener("click", reconnectEventsManually);
-  window.addEventListener?.("online", () => {
-    if (state.currentSessionId && state.connectionState !== "connected") {
-      reconnectEventsManually();
-    }
-  });
-  window.addEventListener?.("offline", () => {
-    clearEventReconnectTimer();
-    closeEventSource();
-    setConnectionState("offline");
-  });
-  window.addEventListener?.("resize", () => {
-    syncResponsiveNavigation();
-    setPreviewWidth(state.previewPreferredWidth, { updatePreference: false });
-  });
-  window.visualViewport?.addEventListener?.("resize", syncVisualViewport);
-  window.visualViewport?.addEventListener?.("scroll", syncVisualViewport);
-  resizePromptInput();
-  syncVisualViewport();
-  syncResponsiveNavigation();
-}
-function normalizedResponsiveView(width, requestedView) {
-  if (requestedView === "settings") return "settings";
-  if (Number(width) >= 1200) return "conversation";
-  return typeof requestedView === "string" && ["sessions", "conversation", "files"].includes(requestedView) ? requestedView : "conversation";
-}
-function composerHeightFor(scrollHeight, minimum = 52, maximum = 160) {
-  const measured = Number(scrollHeight);
-  const safeMinimum = Math.max(1, Number(minimum) || 52);
-  const safeMaximum = Math.max(safeMinimum, Number(maximum) || 160);
-  return Math.min(safeMaximum, Math.max(safeMinimum, Number.isFinite(measured) ? measured : safeMinimum));
-}
-function previewWidthBounds(viewportWidth, sidebarCollapsed = false) {
-  const viewport = Math.max(0, Number(viewportWidth) || 0);
-  const sidebarWidth = sidebarCollapsed ? 56 : 280;
-  const available = viewport - 20 - 20 - sidebarWidth - PREVIEW_WORKSPACE_MIN;
-  return {
-    min: PREVIEW_WIDTH_MIN,
-    max: Math.max(PREVIEW_WIDTH_MIN, Math.min(PREVIEW_WIDTH_MAX, available))
-  };
-}
-function clampedPreviewWidth(width, bounds) {
-  const minimum = Math.max(0, Number(bounds?.min) || PREVIEW_WIDTH_MIN);
-  const maximum = Math.max(minimum, Number(bounds?.max) || PREVIEW_WIDTH_MAX);
-  const value = Number(width);
-  return Math.min(maximum, Math.max(minimum, Number.isFinite(value) ? value : PREVIEW_WIDTH_DEFAULT));
-}
-function permissionIndexForKey(currentIndex, key, length) {
-  const count = Math.max(0, Number(length) || 0);
-  if (count === 0) return -1;
-  if (key === "Home") return 0;
-  if (key === "End") return count - 1;
-  if (key === "ArrowRight" || key === "ArrowDown") return (Math.max(0, currentIndex) + 1) % count;
-  if (key === "ArrowLeft" || key === "ArrowUp") return (Math.max(0, currentIndex) - 1 + count) % count;
-  return currentIndex;
-}
-function focusTrapTarget(focusables, activeElement, shiftKey = false) {
-  const items = Array.from(focusables ?? []);
-  if (items.length === 0) return null;
-  const current = activeElement ? items.indexOf(activeElement) : -1;
-  if (current < 0) return shiftKey ? items.at(-1) : items[0];
-  return items[(current + (shiftKey ? -1 : 1) + items.length) % items.length];
-}
-function shouldFollowTranscript({ force = false, following = true, onlyIfNearBottom = false, wasAtBottom = true } = {}) {
-  if (force) return true;
-  if (!following) return false;
-  return !onlyIfNearBottom || wasAtBottom !== false;
-}
-function scheduleAnimationFrameOnce(holder, key, callback, scheduler = requestAnimationFrame) {
-  if (holder[key] != null) return false;
-  const frame = scheduler(() => {
-    holder[key] = null;
-    callback();
-  });
-  holder[key] = frame ?? true;
-  return true;
-}
-function cancelScheduledAnimationFrame(holder, key, cancel = cancelAnimationFrame) {
-  const frame = holder[key];
-  if (frame == null) return false;
-  holder[key] = null;
-  if (frame !== true) cancel(Number(frame));
-  return true;
-}
-function appendPlainDraftDelta(body, text, renderedLength = 0, createTextNode = (value) => document.createTextNode(value)) {
-  const value = String(text ?? "");
-  const start = Math.min(value.length, Math.max(0, Number(renderedLength) || 0));
-  const pending = value.slice(start);
-  if (pending) {
-    if (typeof body?.append === "function") body.append(createTextNode(pending));
-    else if (body) body.textContent = `${body.textContent ?? ""}${pending}`;
-  }
-  return value.length;
-}
-function renderFinalAssistantBody(body, text, renderer = renderMessageText) {
-  renderer(body, text ?? "", { markdown: true });
-}
-function selectTranscriptNodesToRemove(nodes, limit, direction = "append", isProtected = () => false) {
-  const values = Array.from(nodes ?? []);
-  let overflow = Math.max(0, values.length - Math.max(0, Number(limit) || 0));
-  if (overflow === 0) return [];
-  const ordered = direction === "prepend" ? values.slice().reverse() : values;
-  const selected = [];
-  for (const node of ordered) {
-    if (overflow === 0) break;
-    if (isProtected(node)) continue;
-    selected.push(node);
-    overflow -= 1;
-  }
-  return selected;
-}
-function responsiveLayoutMode() {
-  const width = Number(window.innerWidth) || Number(document.documentElement?.clientWidth) || 1200;
-  if (width >= 1200) return "desktop";
-  return width >= 768 ? "tablet" : "mobile";
-}
-function restorePreviewWidth() {
-  let saved = PREVIEW_WIDTH_DEFAULT;
-  try {
-    saved = Number(window.localStorage?.getItem(PREVIEW_WIDTH_STORAGE_KEY)) || PREVIEW_WIDTH_DEFAULT;
-  } catch {
-  }
-  setPreviewWidth(saved);
-}
-function setPreviewWidth(width, options = {}) {
-  const bounds = previewWidthBounds(Number(window.innerWidth) || 1200, state.sidebarCollapsed);
-  if (options.updatePreference !== false) {
-    state.previewPreferredWidth = clampedPreviewWidth(width, { min: PREVIEW_WIDTH_MIN, max: PREVIEW_WIDTH_MAX });
-  }
-  state.previewWidth = clampedPreviewWidth(state.previewPreferredWidth, bounds);
-  document.documentElement?.style?.setProperty("--preview-width", `${state.previewWidth}px`);
-  syncPreviewResizeHandle(bounds);
-  if (options.persist) {
-    try {
-      window.localStorage?.setItem(PREVIEW_WIDTH_STORAGE_KEY, String(state.previewPreferredWidth));
-    } catch {
-    }
-  }
-  if (options.announce) announceStatus(`文件栏宽度 ${state.previewWidth} 像素`);
-  return state.previewWidth;
-}
-function syncPreviewResizeHandle(bounds = previewWidthBounds(Number(window.innerWidth) || 1200, state.sidebarCollapsed)) {
-  const handle = els.previewResizeHandle;
-  if (!handle) return;
-  handle.setAttribute("aria-valuemin", String(bounds.min));
-  handle.setAttribute("aria-valuemax", String(bounds.max));
-  handle.setAttribute("aria-valuenow", String(state.previewWidth));
-  handle.setAttribute("aria-valuetext", `${state.previewWidth} 像素`);
-  handle.setAttribute("aria-disabled", responsiveLayoutMode() !== "desktop" || document.body.classList.contains("preview-collapsed") ? "true" : "false");
-}
-function beginPreviewResize(event) {
-  const handle = els.previewResizeHandle;
-  if (!handle) return;
-  if (responsiveLayoutMode() !== "desktop" || document.body.classList.contains("preview-collapsed")) return;
-  event.preventDefault();
-  state.previewResizeStartX = Number(event.clientX);
-  state.previewResizeStartWidth = state.previewWidth;
-  handle.setPointerCapture?.(event.pointerId);
-  document.body.classList.add("preview-resizing");
-}
-function updatePreviewResize(event) {
-  if (state.previewResizeStartX === null || state.previewResizeStartWidth === null) return;
-  const delta = Number(event.clientX) - state.previewResizeStartX;
-  setPreviewWidth(state.previewResizeStartWidth - delta);
-}
-function finishPreviewResize(event) {
-  const handle = els.previewResizeHandle;
-  if (!handle) return;
-  if (state.previewResizeStartX === null) return;
-  handle.releasePointerCapture?.(event.pointerId);
-  state.previewResizeStartX = null;
-  state.previewResizeStartWidth = null;
-  document.body.classList.remove("preview-resizing");
-  setPreviewWidth(state.previewWidth, { persist: true, announce: true });
-}
-function handlePreviewResizeKeydown(event) {
-  if (responsiveLayoutMode() !== "desktop" || document.body.classList.contains("preview-collapsed")) return;
-  let next = state.previewWidth;
-  const step = event.shiftKey ? 48 : 16;
-  if (event.key === "ArrowLeft") next += step;
-  else if (event.key === "ArrowRight") next -= step;
-  else if (event.key === "Home") next = previewWidthBounds(Number(window.innerWidth) || 1200, state.sidebarCollapsed).min;
-  else if (event.key === "End") next = previewWidthBounds(Number(window.innerWidth) || 1200, state.sidebarCollapsed).max;
-  else return;
-  event.preventDefault();
-  setPreviewWidth(next, { persist: true, announce: true });
-}
-function setResponsiveView(view) {
-  if (view !== "settings" && state.settingsOpen) {
-    hideSettingsWorkspace({ restoreFocus: false });
-  }
-  state.responsiveView = normalizedResponsiveView(Number(window.innerWidth) || 1200, view);
-  syncResponsiveNavigation();
-}
-function syncResponsiveNavigation() {
-  const width = Number(window.innerWidth) || Number(document.documentElement?.clientWidth) || 1200;
-  const view = normalizedResponsiveView(width, state.responsiveView);
-  state.responsiveView = view;
-  if (width < 1200) {
-    state.sidebarCollapsed = false;
-    document.body.classList.remove("sidebar-collapsed", "preview-collapsed");
-  }
-  document.body.dataset.dashboardView = view;
-  els.responsiveNavigation?.querySelectorAll("button[data-dashboard-view]").forEach((button) => {
-    const active = button.dataset.dashboardView === (state.settingsOpen ? "settings" : view);
-    button.classList.toggle("active", active);
-    if (active) button.setAttribute("aria-current", "page");
-    else button.removeAttribute("aria-current");
-  });
-  if (state.modalContext) return;
-  const desktop = width >= 1200;
-  setResponsiveSurfaceInert(els.sidebar, !desktop && view !== "sessions");
-  setResponsiveSurfaceInert(els.workspace, !desktop && !["conversation", "settings"].includes(view));
-  setResponsiveSurfaceInert(els.preview, !desktop && view !== "files");
-}
-function setResponsiveSurfaceInert(element, inert) {
-  if (!element) return;
-  element.inert = Boolean(inert);
-}
-function handleResponsiveFileNavigation(event) {
-  if (responsiveLayoutMode() === "desktop") return;
-  if (eventTargetOf(event).closest(".file-item, .file-link, [data-file]")) {
-    setResponsiveView("files");
-  }
-}
-function syncVisualViewport() {
-  const viewportHeight = Number(window.visualViewport?.height) || Number(window.innerHeight) || 0;
-  if (viewportHeight > 0) {
-    document.documentElement?.style?.setProperty("--dashboard-viewport-height", `${Math.round(viewportHeight)}px`);
-  }
-  const keyboardVisible = Boolean(window.visualViewport) && Number(window.innerHeight) - viewportHeight > 120;
-  document.body.classList.toggle("keyboard-visible", keyboardVisible);
-}
-function resizePromptInput() {
-  if (!els.promptInput) return;
-  els.promptInput.style.height = "auto";
-  const height = composerHeightFor(els.promptInput.scrollHeight);
-  els.promptInput.style.height = `${height}px`;
-  els.promptInput.style.overflowY = Number(els.promptInput.scrollHeight) > height ? "auto" : "hidden";
-}
-function handlePermissionModeKeydown(event) {
-  const keys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"];
-  if (!keys.includes(event.key)) return;
-  const buttons = Array.from(els.permissionMode.querySelectorAll("button[data-mode]"));
-  const current = Math.max(0, buttons.indexOf(eventTargetOf(event).closest("button[data-mode]")));
-  const next = permissionIndexForKey(current, event.key, buttons.length);
-  const button = buttons[next];
-  if (!button) return;
-  event.preventDefault();
-  event.stopPropagation();
-  button.focus();
-  requestPermissionMode(button.dataset.mode, button);
-}
-function requestPermissionMode(mode, trigger = document.activeElement) {
-  if (state.goal.enabled && mode !== "fullAccess") {
-    showError("Goal 开启时不能降低权限。请先退出 Goal。");
-    return;
-  }
-  if (mode === "fullAccess" && state.permissionMode !== "fullAccess") {
-    showPermissionConfirm(trigger);
-    return;
-  }
-  hidePermissionConfirm({ restoreFocus: false });
-  setPermissionMode(mode);
-}
-function defaultGoalMaxAutoContinues() {
-  const value = Number(state.settings?.agents?.goalMaxAutoContinues);
-  return Number.isInteger(value) && value >= 1 && value <= 100 ? value : 12;
-}
-function emptyGoalSnapshot() {
-  return {
-    enabled: false,
-    status: "off",
-    text: "",
-    previousPermissionMode: "plan",
-    roundCount: 0,
-    continueCount: 0,
-    maxAutoContinues: defaultGoalMaxAutoContinues(),
-    lastContinueReason: "",
-    lastBlockReason: "",
-    lastEvidence: null,
-    hasWrites: false,
-    recap: null
-  };
-}
-function applyGoalSnapshot(goal, options = {}) {
-  const snapshot = isPlainObject(goal) ? goal : {};
-  const enabled = snapshot.enabled === true;
-  state.goal = {
-    ...emptyGoalSnapshot(),
-    enabled,
-    text: String(snapshot.text ?? ""),
-    status: enabled ? String(snapshot.status || "active") : "off",
-    previousPermissionMode: String(snapshot.previousPermissionMode ?? state.goal.previousPermissionMode ?? "plan"),
-    roundCount: Number(snapshot.roundCount) || 0,
-    continueCount: Number(snapshot.continueCount) || 0,
-    maxAutoContinues: Number(snapshot.maxAutoContinues) || defaultGoalMaxAutoContinues(),
-    lastContinueReason: String(snapshot.lastContinueReason ?? ""),
-    lastBlockReason: String(snapshot.lastBlockReason ?? ""),
-    lastEvidence: snapshot.lastEvidence ?? null,
-    hasWrites: snapshot.hasWrites === true,
-    recap: isPlainObject(snapshot.recap) ? snapshot.recap : null
-  };
-  const permissionSource = options.permissionMode || (state.goal.enabled ? "fullAccess" : state.permissionMode);
-  if (state.goal.enabled) {
-    setPermissionMode("fullAccess");
-  } else if (options.permissionMode) {
-    setPermissionMode(options.permissionMode);
-  } else {
-    setPermissionMode(permissionSource);
-  }
-  renderGoalControls();
-  syncPromptPlaceholder();
-}
-var DEFAULT_PROMPT_PLACEHOLDER = "输入任务需求，例如：整理这批实验数据并生成一份简洁报告";
-function syncPromptPlaceholder() {
-  if (!els.promptInput) return;
-  els.promptInput.placeholder = DEFAULT_PROMPT_PLACEHOLDER;
-}
-function renderGoalControls() {
-  const enabled = state.goal.enabled === true;
-  const readonlyLocked = state.sessionStatus?.readonlyLocked === true || state.trust?.readonlyLocked === true;
-  if (els.goalMode) {
-    els.goalMode.setAttribute("aria-pressed", String(enabled));
-    els.goalMode.classList.toggle("active", enabled);
-    els.goalMode.disabled = readonlyLocked && !enabled;
-    els.goalMode.title = readonlyLocked && !enabled ? "只读锁定会话不能启用 Goal" : "Goal 模式";
-  }
-  document.body.classList.toggle("goal-mode-active", enabled);
-  els.permissionMode?.querySelectorAll("button[data-mode]").forEach((button) => {
-    button.disabled = enabled && button.dataset.mode !== "fullAccess";
-  });
-  if (enabled) {
-    els.modeDescription.textContent = MODE_DESCRIPTIONS.goal;
-  }
-  renderGoalStatusBar();
-}
-function renderGoalStatusBar() {
-  const bar = els.goalStatusBar;
-  if (!bar) return;
-  if (!state.goal.enabled) {
-    bar.classList.add("hidden");
-    bar.replaceChildren();
-    return;
-  }
-  bar.classList.remove("hidden");
-  const statusLabel = {
-    active: "进行中",
-    running: "进行中",
-    paused: "已暂停",
-    verifying: "核验中",
-    complete: "已完成",
-    failed: "失败",
-    off: "关闭"
-  }[state.goal.status] ?? state.goal.status;
-  const recapLine = String(state.goal.recap?.line ?? "").trim();
-  const showRecap = recapLine.length > 0;
-  const canResume = state.goal.status === "paused" || state.goal.status === "failed";
-  const showPause = !canResume && state.goal.status !== "complete";
-  const objectiveClass = ["goal-objective", showRecap ? "goal-objective-ellipsis" : ""].filter(Boolean).join(" ");
-  const continueReason = String(state.goal.lastContinueReason ?? "").trim();
-  bar.innerHTML = `
-    <div class="goal-copy">
-      <div class="goal-title">Goal · ${escapeHtml(statusLabel)}</div>
-      <div class="${objectiveClass}" title="${escapeHtml(state.goal.text || "")}">${escapeHtml(state.goal.text || "")}</div>
-      ${showRecap ? `<div class="goal-recap">${escapeHtml(recapLine)}</div>` : `<div class="goal-continue-meta">${Number(state.goal.continueCount) || 0} / ${Number(state.goal.maxAutoContinues) || defaultGoalMaxAutoContinues()} 次续跑${continueReason ? ` · ${escapeHtml(continueReason)}` : ""}</div>`}
-    </div>
-    <div class="goal-status-actions">
-      ${canResume ? `<button type="button" data-goal-action="resume">继续</button>` : ""}
-      ${showPause ? `<button type="button" data-goal-action="pause">暂停</button>` : ""}
-      <button type="button" data-goal-action="disable">退出 Goal</button>
-    </div>
-  `;
-  bar.querySelectorAll("[data-goal-action]").forEach((button) => {
-    button.addEventListener("click", () => submitGoalAction(String(button.dataset.goalAction ?? "")));
-  });
-}
-function requestGoalMode() {
-  if (state.goal.enabled) {
-    submitGoalAction("disable");
-    return;
-  }
-  if (!state.trust?.trusted) {
-    showTrustPanel();
-    return;
-  }
-  showGoalConfirm(els.goalMode);
-}
-function showGoalConfirm(trigger) {
-  const panel = els.goalConfirmPanel;
-  if (!panel) return;
-  panel.classList.remove("hidden");
-  panel.innerHTML = `
-    <div>
-      <div class="context-title" id="goal-confirm-title">启用 Goal 模式？</div>
-      <div class="context-copy">Goal 模式会在本会话朝着你给出的目标自动连续执行，直到完成、暂停、失败或预算用尽。<br><br>开启后当前会话将使用「完全访问」：本机工具、工作区外文件和网络操作将自动获准，并且不会在每个工具调用时停下等你批准。<br><br>这是无人值守自动执行，不是普通聊天。请确认本机工作区可被连续修改。你随时可以暂停、中断或退出 Goal。</div>
-    </div>
-    <div class="context-confirm-actions">
-      <button type="button" data-action="cancel">取消</button>
-      <button type="button" data-action="confirm" class="danger">确认 Goal 并完全访问</button>
-    </div>
-  `;
-  panel.setAttribute("role", "dialog");
-  panel.setAttribute("aria-modal", "true");
-  panel.setAttribute("aria-labelledby", "goal-confirm-title");
-  panel.setAttribute("tabindex", "-1");
-  panel.querySelector("button[data-action='cancel']")?.addEventListener("click", () => hideGoalConfirm());
-  panel.querySelector("button[data-action='confirm']")?.addEventListener("click", () => {
-    hideGoalConfirm({ restoreFocus: false });
-    showGoalTextPanel(trigger);
-  });
-  activateModal(panel, { initialFocus: "button[data-action='cancel']", returnFocus: trigger });
-}
-function hideGoalConfirm(options = {}) {
-  const panel = els.goalConfirmPanel;
-  if (!panel || panel.classList.contains("hidden")) return;
-  deactivateModal(panel, options);
-  panel.classList.add("hidden");
-  panel.replaceChildren();
-}
-function showGoalTextPanel(trigger) {
-  const panel = els.goalTextPanel;
-  if (!panel) return;
-  panel.classList.remove("hidden");
-  panel.innerHTML = `
-    <div>
-      <div class="context-title" id="goal-text-title">输入 Goal 目标</div>
-      <div class="context-copy">用一句话写清要完成的目标。提交后才会进入无人值守执行。</div>
-      <label class="visually-hidden" for="goal-objective-input">目标</label>
-      <textarea id="goal-objective-input" rows="3" placeholder="例如：给会话列表加上运行态筛选并补测试"></textarea>
-      <div class="context-copy" id="goal-text-error" hidden>请输入目标</div>
-    </div>
-    <div class="context-confirm-actions">
-      <button type="button" data-action="cancel">取消</button>
-      <button type="button" data-action="confirm" class="danger">开始 Goal</button>
-    </div>
-  `;
-  panel.setAttribute("role", "dialog");
-  panel.setAttribute("aria-modal", "true");
-  panel.setAttribute("aria-labelledby", "goal-text-title");
-  const input = panel.querySelector("#goal-objective-input");
-  panel.querySelector("button[data-action='cancel']")?.addEventListener("click", () => hideGoalTextPanel());
-  panel.querySelector("button[data-action='confirm']")?.addEventListener("click", () => {
-    const text = String(input?.value ?? "").trim();
-    if (!text) {
-      const error = panel.querySelector("#goal-text-error");
-      if (error) error.hidden = false;
-      input?.focus();
-      return;
-    }
-    hideGoalTextPanel({ restoreFocus: false });
-    enableGoalWithObjective(text);
-  });
-  activateModal(panel, { initialFocus: "#goal-objective-input", returnFocus: trigger });
-}
-function hideGoalTextPanel(options = {}) {
-  const panel = els.goalTextPanel;
-  if (!panel || panel.classList.contains("hidden")) return;
-  deactivateModal(panel, options);
-  panel.classList.add("hidden");
-  panel.replaceChildren();
-}
-async function enableGoalWithObjective(text) {
-  const previous = state.permissionMode;
-  applyGoalSnapshot({
-    enabled: true,
-    status: "active",
-    text,
-    previousPermissionMode: previous
-  });
-  if (!state.currentSessionId) {
-    if (currentSessionNeedsModelSelection()) {
-      applyGoalSnapshot(null, { permissionMode: previous });
-      showError("请先重新选择模型来源和模型");
-      return;
-    }
-    state.turnSubmitting = true;
-    updateSendButton();
-    els.runStatus.textContent = "启动中";
-    let result;
-    try {
-      result = await postJson("/api/turns", {
-        requestId: dashboardRequestId(),
-        prompt: text,
-        permissionMode: "fullAccess",
-        goalMode: true,
-        goalText: text,
-        clientPreviousPermissionMode: previous,
-        clientId: dashboardClientId()
-      });
-    } catch (error) {
-      result = { ok: false, error: errorMessageOf(error) };
-    } finally {
-      state.turnSubmitting = false;
-      updateSendButton();
-    }
-    if (!result.ok) {
-      applyGoalSnapshot(null, { permissionMode: previous });
-      if (result.trust) {
-        state.trust = result.trust;
-        renderTrustPanel();
-      }
-      showError(result.error ?? "Goal 启动失败");
-      els.runStatus.textContent = result.status === 403 ? "待信任" : "失败";
-      updateSendButton();
-      return;
-    }
-    adoptGoalRunResult(result);
-    await loadSessions();
-    return;
-  }
-  await submitGoalAction("enable", { objective: text });
-}
-async function submitGoalAction(action, extra = {}) {
-  if (state.goalSubmitting) return;
-  if (!state.currentSessionId) {
-    if (action === "disable" || action === "clear") {
-      applyGoalSnapshot(null, { permissionMode: state.goal.previousPermissionMode || "plan" });
-    }
-    return;
-  }
-  state.goalSubmitting = true;
-  const result = await postJson("/api/goal", {
-    sessionId: state.currentSessionId,
-    action,
-    objective: extra.objective,
-    clientPreviousPermissionMode: state.goal.enabled ? state.goal.previousPermissionMode : state.permissionMode,
-    permissionMode: state.permissionMode
-  }).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) }));
-  state.goalSubmitting = false;
-  if (!result.ok) {
-    showError(result.error ?? "Goal 操作失败");
-    return;
-  }
-  adoptGoalRunResult(result);
-  if (result.running === true) {
-    await loadSessions();
-  }
-}
-function adoptGoalRunResult(result) {
-  applyGoalSnapshot(result.goal ?? state.goal, { permissionMode: result.permission?.mode ?? state.permissionMode });
-  if (result.sessionStatus) {
-    updateSessionStatus(result.sessionStatus);
-  }
-  state.queue = result.queue ?? state.queue;
-  renderQueuePanel();
-  const previousSessionId = state.currentSessionId;
-  if (result.sessionId) {
-    state.currentSessionId = result.sessionId;
-    rememberCurrentSession(result.sessionId);
-    if (previousSessionId !== result.sessionId) {
-      resetEventReplayState();
-    }
-    rememberEventCursor(result.eventCursor);
-    ensureEventsConnected(result.sessionId);
-  }
-  if (result.running === true) {
-    state.running = true;
-    els.runStatus.textContent = "运行中";
-    setLiveTitle("正在推进 Goal");
-  }
-  updateSendButton();
-}
-function showPermissionConfirm(trigger = document.activeElement) {
-  const panel = els.permissionConfirmPanel;
-  if (!panel) return;
-  panel.classList.remove("hidden");
-  panel.innerHTML = `
-    <div>
-      <div class="context-title" id="permission-confirm-title">启用完全访问？</div>
-      <div class="context-copy">当前会话的本机工具、工作区外文件和网络操作将自动获准，直到你切换权限或离开该会话。</div>
-    </div>
-    <div class="context-confirm-actions">
-      <button type="button" data-action="cancel">取消</button>
-      <button type="button" data-action="confirm" class="danger">确认完全访问</button>
-    </div>
-  `;
-  panel.setAttribute("role", "dialog");
-  panel.setAttribute("aria-modal", "true");
-  panel.setAttribute("aria-labelledby", "permission-confirm-title");
-  panel.setAttribute("tabindex", "-1");
-  panel.querySelector("button[data-action='cancel']")?.addEventListener("click", () => hidePermissionConfirm());
-  panel.querySelector("button[data-action='confirm']")?.addEventListener("click", () => {
-    hidePermissionConfirm({ restoreFocus: false });
-    setPermissionMode("fullAccess");
-    els.permissionMode.querySelector("button[data-mode='fullAccess']")?.focus();
-  });
-  activateModal(panel, { initialFocus: "button[data-action='cancel']", returnFocus: trigger });
-}
-function hidePermissionConfirm(options = {}) {
-  const panel = els.permissionConfirmPanel;
-  if (!panel || panel.classList.contains("hidden")) return;
-  deactivateModal(panel, options);
-  panel.classList.add("hidden");
-  panel.replaceChildren();
-}
-function updateContextActions() {
-  const noSession = !state.currentSessionId;
-  const busy = state.running || state.turnSubmitting;
-  const disabled = noSession || busy;
-  const hint = noSession ? "请先打开一个空闲会话" : busy ? "任务运行期间不能清空或压缩上下文" : "可管理当前会话上下文";
-  for (const button of [els.contextClear, els.contextCompact]) {
-    if (!button) continue;
-    button.disabled = disabled;
-    button.title = hint;
-  }
-  if (els.contextActionHint) els.contextActionHint.textContent = hint;
-}
-function announceStatus(message) {
-  if (!els.dashboardLiveRegion || !message) return;
-  els.dashboardLiveRegion.textContent = "";
-  requestAnimationFrame(() => {
-    els.dashboardLiveRegion.textContent = String(message);
-  });
-}
-var FOCUSABLE_SELECTOR = [
-  "a[href]",
-  "button:not([disabled])",
-  "input:not([disabled])",
-  "select:not([disabled])",
-  "textarea:not([disabled])",
-  "[tabindex]:not([tabindex='-1'])"
-].join(",");
-function modalFocusableElements(modal) {
-  if (!modal) return [];
-  return Array.from(modal.querySelectorAll(FOCUSABLE_SELECTOR)).filter((node) => node.getAttribute("aria-hidden") !== "true" && !node.closest("[inert]"));
-}
-
 // src/dashboard/public/app-ui2.ts
 function activateModal(modal, options = {}) {
   if (!modal) return;
   if (state.modalContext?.modal === modal) {
-    focusModalInitialTarget2(modal, options.initialFocus);
+    focusModalInitialTarget(modal, options.initialFocus);
     return;
   }
   if (state.modalContext) {
     deactivateModal(state.modalContext.modal, { restoreFocus: false });
   }
-  const inertEntries = collectModalBackground2(modal);
+  const inertEntries = collectModalBackground(modal);
   const returnFocus = options.returnFocus ?? document.activeElement;
   state.modalContext = {
     modal,
@@ -1258,9 +411,9 @@ function activateModal(modal, options = {}) {
     modal.classList.add("modal-interaction");
   }
   for (const entry of inertEntries) entry.node.inert = true;
-  focusModalInitialTarget2(modal, options.initialFocus);
+  focusModalInitialTarget(modal, options.initialFocus);
 }
-function collectModalBackground2(modal) {
+function collectModalBackground(modal) {
   const entries = [];
   const seen = /* @__PURE__ */ new Set();
   let branch = modal;
@@ -1276,7 +429,7 @@ function collectModalBackground2(modal) {
   }
   return entries;
 }
-function focusModalInitialTarget2(modal, selector) {
+function focusModalInitialTarget(modal, selector) {
   requestAnimationFrame(() => {
     if (!modal || state.modalContext?.modal !== modal) return;
     const target = typeof selector === "string" ? modal.querySelector(selector) : modalFocusableElements(modal)[0];
@@ -1289,16 +442,16 @@ function deactivateModal(modal, options = {}) {
   state.modalContext = null;
   for (const entry of context.inertEntries) entry.node.inert = entry.inert;
   modal.classList.remove("modal-interaction");
-  restoreModalAttribute2(modal, "role", context.previousRole);
-  restoreModalAttribute2(modal, "aria-modal", context.previousAriaModal);
-  restoreModalAttribute2(modal, "tabindex", context.previousTabIndex);
+  restoreModalAttribute(modal, "role", context.previousRole);
+  restoreModalAttribute(modal, "aria-modal", context.previousAriaModal);
+  restoreModalAttribute(modal, "tabindex", context.previousTabIndex);
   syncResponsiveNavigation();
   if (options.restoreFocus === false) return;
   const fallback = typeof options.fallbackFocus === "string" ? document.querySelector(options.fallbackFocus) : options.fallbackFocus;
   const target = context.returnFocus?.isConnected === false ? fallback : context.returnFocus ?? fallback;
   requestAnimationFrame(() => target?.focus?.({ preventScroll: true }));
 }
-function restoreModalAttribute2(element, name, value) {
+function restoreModalAttribute(element, name, value) {
   if (!element) return;
   if (value === null || typeof value === "undefined") element.removeAttribute(name);
   else element.setAttribute(name, String(value));
@@ -1315,7 +468,7 @@ function handleGlobalKeydown(event) {
     }
     if (event.key === "Escape") {
       event.preventDefault();
-      closeActiveModal2(activeModal);
+      closeActiveModal(activeModal);
       return;
     }
     if (activeModal === els.imageLightbox && event.key === "ArrowLeft") {
@@ -1329,7 +482,7 @@ function handleGlobalKeydown(event) {
   }
   if (state.questionReviewMode && event.key === "Escape") {
     event.preventDefault();
-    returnToQuestion2();
+    returnToQuestion();
     return;
   }
   if (event.key === "Escape") {
@@ -1338,16 +491,16 @@ function handleGlobalKeydown(event) {
     else if (state.responsiveView !== "conversation") setResponsiveView("conversation");
   }
 }
-function closeActiveModal2(modal) {
-  if (modal === els.modelConfigPanel) hideModelConfigPanel2();
+function closeActiveModal(modal) {
+  if (modal === els.modelConfigPanel) hideModelConfigPanel();
   else if (modal === els.imageLightbox) hideLightbox();
   else if (modal === els.shutdownPanel) hideShutdownPanel();
-  else if (modal === els.contextPanel) hideContextConfirm2();
+  else if (modal === els.contextPanel) hideContextConfirm();
   else if (modal === els.permissionConfirmPanel) hidePermissionConfirm();
   else if (modal === els.goalConfirmPanel) hideGoalConfirm();
   else if (modal === els.goalTextPanel) hideGoalTextPanel();
-  else if (modal === els.approvalPanel) resolveApproval2("cancel");
-  else if (modal === els.questionPanel) cancelQuestion2();
+  else if (modal === els.approvalPanel) resolveApproval("cancel");
+  else if (modal === els.questionPanel) cancelQuestion();
 }
 async function loadTrust(options = {}) {
   const result = await getJson("/api/trust", { signal: options.signal }).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error), aborted: isAbortError(error) }));
@@ -1368,7 +521,7 @@ async function loadSessions(options = {}) {
   }
   const request = beginScopedRequest("sessions");
   if (feedback) {
-    setSessionsRefreshState2("loading", "刷新中");
+    setSessionsRefreshState("loading", "刷新中");
   }
   try {
     const result = await getJson("/api/sessions", { signal: request.signal });
@@ -1377,18 +530,18 @@ async function loadSessions(options = {}) {
       throw new Error(result.error ?? "刷新会话失败");
     }
     state.sessions = result.sessions ?? [];
-    renderSessions2();
-    if (sessionsNeedRefresh2()) {
-      scheduleSessionsRefresh2(4e3);
+    renderSessions();
+    if (sessionsNeedRefresh()) {
+      scheduleSessionsRefresh(4e3);
     }
     if (feedback) {
-      setSessionsRefreshState2("success", `已刷新 ${state.sessions.length} 个会话`);
+      setSessionsRefreshState("success", `已刷新 ${state.sessions.length} 个会话`);
     }
     return result;
   } catch (error) {
     if (isAbortError(error) || !isCurrentScopedRequest(request)) return null;
     if (feedback) {
-      setSessionsRefreshState2("error", "刷新失败");
+      setSessionsRefreshState("error", "刷新失败");
     }
     showError(errorMessageOf(error) || "刷新会话失败");
     return { ok: false, error: errorMessageOf(error) };
@@ -1400,16 +553,16 @@ async function restoreInitialSession() {
   if (state.currentSessionId) {
     return;
   }
-  const sessionId = initialSessionId2() || latestBackgroundSessionId2();
+  const sessionId = initialSessionId() || latestBackgroundSessionId();
   if (!sessionId || !state.sessions.some((session) => session.id === sessionId)) {
     return;
   }
-  await openSession2(sessionId);
+  await openSession(sessionId);
 }
-function latestBackgroundSessionId2() {
+function latestBackgroundSessionId() {
   return state.sessions.find((session) => session.backgroundVisible === true)?.id ?? "";
 }
-function initialSessionId2() {
+function initialSessionId() {
   try {
     const params = new URLSearchParams(window.location?.search ?? "");
     return params.get("sessionId") || window.localStorage?.getItem(CURRENT_SESSION_STORAGE_KEY) || "";
@@ -1428,7 +581,7 @@ function rememberCurrentSession(sessionId) {
   } catch {
   }
 }
-function renderSessions2() {
+function renderSessions() {
   const threadList = els.threadList;
   if (!threadList) return;
   threadList.innerHTML = "";
@@ -1440,14 +593,14 @@ function renderSessions2() {
     return;
   }
   for (const session of state.sessions) {
-    const status = sessionStatusView2(session);
+    const status = sessionStatusView(session);
     const title = session.title || "未命名任务";
-    const meta = sessionMeta2(session, status);
+    const meta = sessionMeta(session, status);
     const item = document.createElement("div");
     item.className = `thread-item${session.id === state.currentSessionId ? " active" : ""}`;
     item.dataset.tone = status.tone;
     item.innerHTML = `
-      <button type="button" class="thread-open" title="${escapeAttribute2(`${title} · ${status.label}`)}" aria-label="${escapeAttribute2(`${title}，${status.label}${meta ? `，${meta}` : ""}`)}">
+      <button type="button" class="thread-open" title="${escapeAttribute(`${title} · ${status.label}`)}" aria-label="${escapeAttribute(`${title}，${status.label}${meta ? `，${meta}` : ""}`)}">
         <span class="thread-status-dot" aria-hidden="true"></span>
         <div class="thread-main">
           <div class="thread-title">${escapeHtml(title)}</div>
@@ -1470,26 +623,26 @@ function renderSessions2() {
           </div>
         `}
     `;
-    item.querySelector(".thread-open")?.addEventListener("click", () => openSession2(session.id));
+    item.querySelector(".thread-open")?.addEventListener("click", () => openSession(session.id));
     item.querySelectorAll("button[data-action]").forEach((button) => {
       button.addEventListener("click", (event) => {
         event.stopPropagation();
-        handleSessionAction2(String(button.dataset.action ?? ""), String(button.dataset.sessionId ?? ""));
+        handleSessionAction(String(button.dataset.action ?? ""), String(button.dataset.sessionId ?? ""));
       });
     });
     threadList.append(item);
   }
 }
-function sessionMeta2(session, status = sessionStatusView2(session)) {
+function sessionMeta(session, status = sessionStatusView(session)) {
   const parts = [
     Number(session.queueLength ?? 0) > 0 ? `${session.queueLength} 排队` : null,
     status.detail,
     session.model || null,
-    formatTime2(session.modifiedAt)
+    formatTime(session.modifiedAt)
   ].filter(Boolean);
   return parts.join(" · ");
 }
-function sessionStatusView2(session) {
+function sessionStatusView(session) {
   const raw = String(session.status ?? "").toLowerCase();
   if (session.running || raw === "running") {
     return { label: "运行中", tone: "running", detail: Number(session.queueLength ?? 0) > 0 ? "有排队" : "" };
@@ -1525,9 +678,9 @@ function sessionStatusView2(session) {
   return { label: "历史", tone: "idle", detail: raw && raw !== "unknown" ? session.status : "" };
 }
 function toggleSidebar() {
-  setSidebarCollapsed2(!state.sidebarCollapsed);
+  setSidebarCollapsed(!state.sidebarCollapsed);
 }
-function setSidebarCollapsed2(collapsed) {
+function setSidebarCollapsed(collapsed) {
   state.sidebarCollapsed = Boolean(collapsed);
   document.body.classList.toggle("sidebar-collapsed", state.sidebarCollapsed);
   els.collapseSidebar.textContent = state.sidebarCollapsed ? "›" : "‹";
@@ -1535,12 +688,12 @@ function setSidebarCollapsed2(collapsed) {
   els.collapseSidebar.setAttribute("aria-label", els.collapseSidebar.title);
   setPreviewWidth(state.previewPreferredWidth, { updatePreference: false });
 }
-function sessionsNeedRefresh2() {
+function sessionsNeedRefresh() {
   return state.sessions.some(
     (session) => session.running || session.backgroundVisible || Number(session.queueLength) > 0 || String(session.status ?? "").toLowerCase() === "running"
   );
 }
-function scheduleSessionsRefresh2(delayMs = 800) {
+function scheduleSessionsRefresh(delayMs = 800) {
   const normalizedDelay = Math.max(0, Number(delayMs) || 0);
   const dueAt = Date.now() + normalizedDelay;
   if (state.sessionsRefreshTimer && state.sessionsRefreshDueAt <= dueAt) {
@@ -1556,33 +709,33 @@ function scheduleSessionsRefresh2(delayMs = 800) {
     loadSessions().catch(() => null);
   }, normalizedDelay);
 }
-function handleSessionAction2(action, sessionId) {
+function handleSessionAction(action, sessionId) {
   if (!sessionId) {
     return;
   }
   if (action === "delete") {
     state.deleteConfirmSessionId = sessionId;
-    renderSessions2();
+    renderSessions();
     return;
   }
   if (action === "cancel-delete") {
     state.deleteConfirmSessionId = "";
-    renderSessions2();
+    renderSessions();
     return;
   }
   if (action === "confirm-delete") {
-    deleteSession2(sessionId);
+    deleteSession(sessionId);
     return;
   }
   if (action === "copy-id") {
-    copySessionId2(sessionId);
+    copySessionId(sessionId);
   }
 }
-async function openSession2(id) {
+async function openSession(id) {
   state.turnRequest = null;
   const request = beginScopedRequest("session", id);
-  cancelScopedRequest2("transcript");
-  cancelScopedRequest2("file");
+  cancelScopedRequest("transcript");
+  cancelScopedRequest("file");
   els.runStatus.textContent = "加载会话";
   let result;
   try {
@@ -1609,37 +762,37 @@ async function openSession2(id) {
   applyGoalSnapshot(loadedSession.goal, { permissionMode: loadedSession.permission?.mode ?? "plan" });
   state.running = loadedSession.active === true && loadedSession.running === true;
   rememberCurrentSession(id);
-  disconnectEvents2();
-  hideApproval2();
-  hideQuestion2();
-  hideContextConfirm2();
-  clearTranscript2();
-  resetLiveStatus2();
+  disconnectEvents();
+  hideApproval();
+  hideQuestion();
+  hideContextConfirm();
+  clearTranscript();
+  resetLiveStatus();
   state.queue = [];
   state.queueCancelling.clear();
   state.backgroundCancelling.clear();
-  clearPendingGuide2();
+  clearPendingGuide();
   state.activeTurnId = "";
   resetEventReplayState();
   state.deleteConfirmSessionId = "";
   renderQueuePanel();
-  state.models = markCurrentModel2(state.models, loadedSession.sessionStatus?.model ?? loadedSession.model);
+  state.models = markCurrentModel(state.models, loadedSession.sessionStatus?.model ?? loadedSession.model);
   state.sessionStatus = null;
   updateSessionStatus(loadedSession.sessionStatus ?? {
     model: loadedSession.model,
     context: isPlainObject(loadedSession.context) ? loadedSession.context : null
   });
   updateSendButton();
-  resetTurnChangeStats2();
+  resetTurnChangeStats();
   state.files = Array.isArray(loadedSession.files) ? loadedSession.files : [];
-  renderFiles2();
-  resetPreview2();
+  renderFiles();
+  resetPreview();
   els.runStatus.textContent = loadedSession.status || "历史";
-  setTranscriptPaging2(loadedSession.transcriptPage);
-  renderTranscriptMessages2(loadedSession.transcript ?? []);
-  renderSessionFailure2(loadedSession.failure);
-  scrollTranscript2({ force: true });
-  const hasBackground = restoreBackgroundSnapshot2(loadedSession.backgroundSnapshot);
+  setTranscriptPaging(loadedSession.transcriptPage);
+  renderTranscriptMessages(loadedSession.transcript ?? []);
+  renderSessionFailure(loadedSession.failure);
+  scrollTranscript({ force: true });
+  const hasBackground = restoreBackgroundSnapshot(loadedSession.backgroundSnapshot);
   if (loadedSession.active && loadedSession.running) {
     rememberEventCursor(loadedSession.eventCursor);
     ensureEventsConnected(id);
@@ -1650,30 +803,30 @@ async function openSession2(id) {
   } else if (loadedSession.active && hasBackground) {
     rememberEventCursor(loadedSession.eventCursor);
     ensureEventsConnected(id);
-    applyIdleRunStatus2("完成");
+    applyIdleRunStatus("完成");
     updateSendButton();
   }
-  renderSessions2();
+  renderSessions();
 }
-function restoreBackgroundSnapshot2(snapshot) {
+function restoreBackgroundSnapshot(snapshot) {
   if (!isPlainObject(snapshot) || !Array.isArray(snapshot.groups)) {
     return false;
   }
-  reconcileBackgroundSubagentSnapshot2(snapshot.groups);
+  reconcileBackgroundSubagentSnapshot(snapshot.groups);
   return state.backgroundSubagents.size > 0;
 }
-async function deleteSession2(sessionId) {
+async function deleteSession(sessionId) {
   if (!sessionId || state.deletingSessions.has(sessionId)) {
     return;
   }
   state.deletingSessions.add(sessionId);
-  renderSessions2();
-  const result = await deleteJson2(`/api/sessions/${encodeURIComponent(sessionId)}`).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+  renderSessions();
+  const result = await deleteJson(`/api/sessions/${encodeURIComponent(sessionId)}`).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) }));
   state.deletingSessions.delete(sessionId);
   state.deleteConfirmSessionId = "";
   if (!result.ok) {
     showError(result.error ?? "删除会话失败");
-    renderSessions2();
+    renderSessions();
     return;
   }
   if (state.currentSessionId === sessionId) {
@@ -1682,7 +835,7 @@ async function deleteSession2(sessionId) {
   }
   await loadSessions();
 }
-function setSessionsRefreshState2(tone, message = "") {
+function setSessionsRefreshState(tone, message = "") {
   if (state.sessionsStatusTimer) {
     clearTimeout(state.sessionsStatusTimer);
     state.sessionsStatusTimer = null;
@@ -1709,10 +862,10 @@ function setSessionsRefreshState2(tone, message = "") {
     }, 1800);
   }
 }
-async function copySessionId2(sessionId) {
+async function copySessionId(sessionId) {
   try {
     await navigator.clipboard.writeText(sessionId);
-    appendActivity2({
+    appendActivity({
       title: "会话 ID 已复制",
       detail: sessionId,
       severity: "success",
@@ -1723,40 +876,40 @@ async function copySessionId2(sessionId) {
   }
 }
 function newTask() {
-  cancelScopedRequest2("session");
-  cancelScopedRequest2("transcript");
-  cancelScopedRequest2("file");
+  cancelScopedRequest("session");
+  cancelScopedRequest("transcript");
+  cancelScopedRequest("file");
   state.turnRequest = null;
   state.currentSessionId = null;
   applyGoalSnapshot(null, { permissionMode: "plan" });
   state.running = false;
   rememberCurrentSession(null);
-  disconnectEvents2();
-  hideApproval2();
-  hideQuestion2();
-  hideContextConfirm2();
-  clearTranscript2();
+  disconnectEvents();
+  hideApproval();
+  hideQuestion();
+  hideContextConfirm();
+  clearTranscript();
   state.files = [];
   state.queue = [];
   state.queueCancelling.clear();
   state.backgroundCancelling.clear();
   state.completedActivities = [];
-  clearPendingGuide2();
+  clearPendingGuide();
   state.activeTurnId = "";
   resetEventReplayState();
   state.deleteConfirmSessionId = "";
-  resetLiveStatus2();
-  resetTurnChangeStats2();
-  restoreNewTaskModelState2();
-  clearAttachments2();
+  resetLiveStatus();
+  resetTurnChangeStats();
+  restoreNewTaskModelState();
+  clearAttachments();
   renderQueuePanel();
-  renderFiles2();
-  resetPreview2();
+  renderFiles();
+  resetPreview();
   els.runStatus.textContent = "空闲";
   updateSendButton();
   resizePromptInput();
   els.promptInput.focus();
-  refreshNewTaskModelState2().catch(() => null);
+  refreshNewTaskModelState().catch(() => null);
 }
 function rememberNewTaskModelState() {
   state.newTaskModelState = {
@@ -1771,7 +924,7 @@ function rememberNewTaskModelState() {
     }
   };
 }
-function restoreNewTaskModelState2() {
+function restoreNewTaskModelState() {
   const snapshot = state.newTaskModelState;
   if (!snapshot) {
     return;
@@ -1784,7 +937,7 @@ function restoreNewTaskModelState2() {
   state.sessionStatus = null;
   updateSessionStatus(snapshot.sessionStatus);
 }
-async function refreshNewTaskModelState2() {
+async function refreshNewTaskModelState() {
   const result = await getJson(statusUrl());
   if (!result.ok || state.currentSessionId) {
     return;
@@ -1821,7 +974,7 @@ async function addAttachmentFiles(files) {
         continue;
       }
       try {
-        state.attachments.push(await readImageAttachment2(file));
+        state.attachments.push(await readImageAttachment(file));
       } catch (error) {
         showError(errorMessageOf(error) || "读取图片失败");
       }
@@ -1849,7 +1002,7 @@ async function addAttachmentFiles(files) {
   if (ignoredUnknown > 0) {
     showError("回形针只接收图片和 PDF / Word / Excel / PPT / 文本，不支持旧版 .doc .xls .ppt");
   }
-  renderAttachmentStrip2();
+  renderAttachmentStrip();
   updateSendButton();
 }
 function classifyComposerFile(file) {
@@ -1864,7 +1017,7 @@ function classifyComposerFile(file) {
   }
   return "unsupported";
 }
-function readImageAttachment2(file) {
+function readImageAttachment(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.addEventListener("error", () => reject(new Error("读取图片失败")));
@@ -1879,7 +1032,7 @@ function readImageAttachment2(file) {
         id: `attachment-${Date.now()}-${Math.random().toString(16).slice(2)}`,
         type: "image",
         name: file.name || "image",
-        mimeType: match[1] || file.type || "image/png",
+        mimeType: /^(image\/(png|jpeg|gif|webp))$/i.test(match[1]) ? match[1].toLowerCase() : imageMimeFromName(file.name),
         size: file.size,
         data: match[2],
         previewUrl: dataUrl
@@ -1912,7 +1065,7 @@ function readDocumentAttachment(file) {
     reader.readAsDataURL(file);
   });
 }
-function renderAttachmentStrip2() {
+function renderAttachmentStrip() {
   if (!els.attachmentStrip) {
     return;
   }
@@ -1931,9 +1084,28 @@ function renderAttachmentStrip2() {
     `;
     item.querySelector("button").addEventListener("click", () => {
       state.attachments = state.attachments.filter((candidate) => candidate.id !== attachment.id);
-      renderAttachmentStrip2();
+      renderAttachmentStrip();
       updateSendButton();
     });
+    if (isDocument && /\.pdf$/i.test(label)) {
+      const range = document.createElement("div");
+      range.className = "attachment-page-range";
+      for (const [key, labelText, placeholder] of [["pageStart", "起始页", "默认"], ["pageEnd", "结束页", "默认"]]) {
+        const input = document.createElement("input");
+        input.type = "number";
+        input.min = "1";
+        input.step = "1";
+        input.placeholder = placeholder;
+        input.title = key === "pageEnd" ? "扫描件不填则只视觉识别前几页；全量视觉请填写结束页" : "不填则从第 1 页开始";
+        input.setAttribute("aria-label", `${label} ${labelText}`);
+        input.value = attachment[key] === void 0 ? "" : String(attachment[key]);
+        input.addEventListener("input", () => {
+          attachment[key] = input.value ? Number(input.value) : void 0;
+        });
+        range.append(input);
+      }
+      item.append(range);
+    }
     els.attachmentStrip.append(item);
   }
 }
@@ -1941,21 +1113,27 @@ function documentChipLabel(name) {
   const ext = String(name ?? "").split(".").pop()?.toUpperCase() ?? "FILE";
   return ext.slice(0, 4);
 }
-function attachmentPayload2(attachment) {
+function imageMimeFromName(name) {
+  const extension = name.split(".").pop()?.toLowerCase();
+  return { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" }[extension ?? ""] || "application/octet-stream";
+}
+function attachmentPayload(attachment) {
   return {
     type: attachment.type === "document" ? "document" : "image",
     name: attachment.name,
     mimeType: attachment.mimeType,
     size: attachment.size,
-    data: attachment.data
+    data: attachment.data,
+    pageStart: attachment.pageStart,
+    pageEnd: attachment.pageEnd
   };
 }
-function clearAttachments2() {
+function clearAttachments() {
   state.attachments = [];
   if (els.attachmentInput) {
     els.attachmentInput.value = "";
   }
-  renderAttachmentStrip2();
+  renderAttachmentStrip();
 }
 async function sendPrompt() {
   if (state.turnSubmitting) {
@@ -1977,13 +1155,13 @@ async function sendPrompt() {
   state.turnSubmitting = true;
   updateSendButton();
   els.runStatus.textContent = state.running ? "已排队" : "启动中";
-  const turnRequest = stableTurnRequest2(prompt, attachments);
+  const turnRequest = stableTurnRequest(prompt, attachments);
   let result;
   try {
     result = await postJson("/api/turns", {
       requestId: turnRequest.id,
       prompt,
-      attachments: attachments.map(attachmentPayload2),
+      attachments: attachments.map(attachmentPayload),
       sessionId: state.currentSessionId,
       clientId: state.currentSessionId ? void 0 : dashboardClientId(),
       permissionMode: state.permissionMode,
@@ -2013,12 +1191,12 @@ async function sendPrompt() {
   state.turnRequest = null;
   els.promptInput.value = "";
   resizePromptInput();
-  clearAttachments2();
+  clearAttachments();
   state.queue = result.queue ?? state.queue;
   state.running = result.running === true || state.running;
   applyGoalSnapshot(result.goal ?? state.goal, { permissionMode: result.permission?.mode ?? state.permissionMode });
   updateSessionStatus(result.sessionStatus);
-  updateTurnChangeStats2(result.changeStats, { replace: true });
+  updateTurnChangeStats(result.changeStats, { replace: true });
   renderQueuePanel();
   if (result.running === true) {
     els.runStatus.textContent = "运行中";
@@ -2037,12 +1215,12 @@ async function sendPrompt() {
   }
   await loadSessions();
 }
-function stableTurnRequest2(prompt, attachments) {
+function stableTurnRequest(prompt, attachments) {
   const signature = JSON.stringify({
     prompt,
     sessionId: state.currentSessionId,
     permissionMode: state.permissionMode,
-    attachments: attachments.map((item) => [item.id, item.name, item.mimeType, item.size])
+    attachments: attachments.map((item) => [item.id, item.name, item.mimeType, item.size, item.pageStart, item.pageEnd])
   });
   if (state.turnRequest?.signature === signature) {
     return state.turnRequest;
@@ -2100,21 +1278,21 @@ async function interruptTurn() {
   updateSessionStatus(result.sessionStatus);
   updateSendButton();
 }
-async function guideTurn2(queueItemId = "") {
-  const source = guideSource2(queueItemId);
+async function guideTurn(queueItemId = "") {
+  const source = guideSource(queueItemId);
   if (!source || !state.currentSessionId || !state.running || state.guideSubmitting) {
     return;
   }
   const clientId = `guide-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   state.guideSubmitting = true;
-  setPendingGuide2({
+  setPendingGuide({
     clientId,
     sessionId: state.currentSessionId,
     phase: "registering",
     preview: source.preview
   });
-  hideApproval2();
-  hideQuestion2();
+  hideApproval();
+  hideQuestion();
   els.runStatus.textContent = "引导中";
   setLiveTitle("正在登记引导");
   const result = await postJson("/api/turns/guide", {
@@ -2126,7 +1304,7 @@ async function guideTurn2(queueItemId = "") {
   state.guideSubmitting = false;
   if (!result.ok) {
     if (state.pendingGuide?.clientId === clientId) {
-      clearPendingGuide2();
+      clearPendingGuide();
     } else {
       renderQueuePanel();
     }
@@ -2136,9 +1314,9 @@ async function guideTurn2(queueItemId = "") {
   els.promptInput.value = "";
   state.queue = result.queue ?? state.queue;
   updateSessionStatus(result.sessionStatus);
-  hideApproval2();
-  hideQuestion2();
-  setPendingGuide2({
+  hideApproval();
+  hideQuestion();
+  setPendingGuide({
     clientId,
     sessionId: state.currentSessionId,
     phase: result.stopped ? "stopped" : "registered",
@@ -2146,7 +1324,7 @@ async function guideTurn2(queueItemId = "") {
   });
   syncGuideButton();
 }
-async function cancelQueuedTurn2(queueItemId) {
+async function cancelQueuedTurn(queueItemId) {
   if (!queueItemId || !state.currentSessionId || state.queueCancelling.has(queueItemId)) {
     return;
   }
@@ -2165,11 +1343,858 @@ async function cancelQueuedTurn2(queueItemId) {
   state.queue = result.queue ?? state.queue.filter((item) => item.id !== queueItemId);
   updateSessionStatus(result.sessionStatus);
   if (result.item?.kind === "guide" && state.pendingGuide?.phase !== "continuing") {
-    clearPendingGuide2();
+    clearPendingGuide();
   } else {
     renderQueuePanel();
   }
   syncGuideButton();
+}
+
+// src/dashboard/public/app-ui1.ts
+async function init2() {
+  restorePreviewWidth2();
+  bindEvents2();
+  observeRunStatus2();
+  await bootstrapDashboard2();
+}
+async function bootstrapDashboard2() {
+  const request = beginScopedRequest("bootstrap");
+  renderBootstrapLoading2();
+  try {
+    const status = await getJson(statusUrl(), { signal: request.signal });
+    if (!isCurrentScopedRequest(request)) return;
+    if (!status.ok) {
+      throw dashboardPayloadError2(status, "Dashboard 初始化失败");
+    }
+    if (status.version !== DASHBOARD_API_VERSION) {
+      throw new Error("Dashboard 前后端版本不一致，请重启 Dashboard 服务后刷新页面");
+    }
+    state.cwd = String(status.cwd ?? "");
+    state.models = normalizeModels(status.models);
+    state.gatewayConfig = normalizeGatewayConfig(status.gatewayConfig);
+    state.gatewayProfiles = normalizeGatewayProfiles(status.gatewayProfiles);
+    state.agentModelTiers = normalizeAgentModelTiers(status.agentModelTiers);
+    state.visionAgent = normalizeVisionAgent(status.visionAgent);
+    state.settings = normalizeDashboardSettings2(status.settings);
+    updateConfigRevisions(status);
+    state.applyAgentDefaultsOnSwitch = Boolean(state.settings?.agents?.syncModelTiersOnSwitch);
+    updateSessionStatus({
+      ...status.sessionStatus,
+      providerId: status.sessionStatus?.providerId ?? state.gatewayConfig?.activeProfileId ?? ""
+    });
+    rememberNewTaskModelState();
+    if (els.projectPath) {
+      els.projectPath.textContent = String(status.cwd ?? "");
+    }
+    const trust = await loadTrust({ signal: request.signal, silent: true });
+    if (!trust?.ok) {
+      throw dashboardPayloadError2(trust, "无法读取工作区信任状态");
+    }
+    if (!isCurrentScopedRequest(request)) return;
+    await loadSessions();
+    if (!isCurrentScopedRequest(request)) return;
+    await restoreInitialSession();
+    if (!isCurrentScopedRequest(request)) return;
+    updateSendButton();
+    renderComposerStatus2();
+    clearBootstrapStatus2();
+  } catch (error) {
+    if (!isAbortError(error) && isCurrentScopedRequest(request)) {
+      renderBootstrapFailure2(error);
+    }
+  } finally {
+    finishScopedRequest(request);
+  }
+}
+function observeRunStatus2() {
+  updateRunStatusTone2();
+  new MutationObserver(updateRunStatusTone2).observe(els.runStatus, { childList: true, characterData: true, subtree: true });
+}
+function updateRunStatusTone2() {
+  const status = els.runStatus.textContent.trim();
+  let tone = "idle";
+  if (/失败|拒绝/.test(status)) {
+    tone = "error";
+  } else if (/等待|待/.test(status)) {
+    tone = "waiting";
+  } else if (/运行|启动|引导|中断|停止|收尾|排队|压缩/.test(status)) {
+    tone = "running";
+  } else if (/完成/.test(status)) {
+    tone = "done";
+  }
+  els.runStatus.dataset.tone = tone;
+}
+function bindEvents2() {
+  els.refreshSessions.addEventListener("click", () => loadSessions({ feedback: true }));
+  els.collapseSidebar.addEventListener("click", () => {
+    if (responsiveLayoutMode2() === "desktop") {
+      toggleSidebar();
+    } else {
+      setResponsiveView("conversation");
+    }
+  });
+  els.newTask.addEventListener("click", () => {
+    newTask();
+    setResponsiveView("conversation");
+  });
+  els.sendButton.addEventListener("click", () => {
+    if (state.turnSubmitting) {
+      return;
+    }
+    if (state.running) {
+      interruptTurn();
+      return;
+    }
+    sendPrompt();
+  });
+  els.promptInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      sendPrompt();
+    }
+  });
+  els.promptInput.addEventListener("input", () => {
+    syncGuideButton();
+    resizePromptInput();
+  });
+  els.attachButton.addEventListener("click", () => els.attachmentInput.click());
+  els.attachmentInput.addEventListener("change", async () => {
+    await addAttachmentFiles(Array.from(els.attachmentInput.files ?? []));
+    els.attachmentInput.value = "";
+  });
+  els.promptInput.addEventListener("paste", async (event) => {
+    const files = Array.from(event.clipboardData?.files ?? []).filter((file) => classifyComposerFile(file) === "image");
+    if (files.length === 0) {
+      return;
+    }
+    event.preventDefault();
+    await addAttachmentFiles(files);
+  });
+  document.addEventListener("keydown", handleGlobalKeydown);
+  els.permissionMode.addEventListener("click", (event) => {
+    const button = eventElement(event)?.closest("button[data-mode]");
+    if (!(button instanceof HTMLButtonElement)) return;
+    requestPermissionMode2(button.dataset.mode, button);
+  });
+  els.permissionMode.addEventListener("keydown", handlePermissionModeKeydown2);
+  els.goalMode?.addEventListener("click", () => requestGoalMode2());
+  els.preview.addEventListener("click", handleLocalFileOpenClick);
+  els.collapsePreview.addEventListener("click", () => {
+    if (responsiveLayoutMode2() === "desktop") {
+      document.body.classList.toggle("preview-collapsed");
+      syncPreviewResizeHandle2();
+    } else {
+      setResponsiveView("conversation");
+    }
+  });
+  els.previewResizeHandle?.addEventListener("pointerdown", (event) => beginPreviewResize2(event));
+  els.previewResizeHandle?.addEventListener("pointermove", (event) => updatePreviewResize2(event));
+  els.previewResizeHandle?.addEventListener("pointerup", (event) => finishPreviewResize2(event));
+  els.previewResizeHandle?.addEventListener("pointercancel", (event) => finishPreviewResize2(event));
+  els.previewResizeHandle?.addEventListener("keydown", (event) => handlePreviewResizeKeydown2(event));
+  els.previewResizeHandle?.addEventListener("dblclick", () => {
+    setPreviewWidth(PREVIEW_WIDTH_DEFAULT, { persist: true, announce: true });
+  });
+  els.shutdownButton.addEventListener("click", showShutdownPanel2);
+  els.headerShutdownButton.addEventListener("click", showShutdownPanel2);
+  els.shutdownCancel.addEventListener("click", hideShutdownPanel);
+  els.shutdownConfirm.addEventListener("click", shutdownDashboard2);
+  els.lightboxBackdrop.addEventListener("click", hideLightbox);
+  els.lightboxClose.addEventListener("click", hideLightbox);
+  els.lightboxPrevious.addEventListener("click", () => moveLightbox(-1));
+  els.lightboxNext.addEventListener("click", () => moveLightbox(1));
+  els.contextClear.addEventListener("click", () => showContextConfirm2("clear"));
+  els.contextCompact.addEventListener("click", () => showContextConfirm2("compact"));
+  els.modelStatus.addEventListener("click", handleModelStatusActivate2);
+  els.modelStatus.addEventListener("keydown", handleModelStatusKeydown2);
+  els.modelStatus.addEventListener("change", handleReasoningEffortChange2);
+  els.modelPanel.addEventListener("click", handleModelPanelClick2);
+  els.modelPanel.addEventListener("change", handleModelPanelChange2);
+  els.modelConfigPanel.addEventListener("click", handleModelConfigPanelClick2);
+  els.modelConfigPanel.addEventListener("input", handleModelConfigInput2);
+  els.modelConfigPanel.addEventListener("change", handleModelConfigChange2);
+  els.modelConfigPanel.addEventListener("submit", saveModelConfig2);
+  els.settingsButton?.addEventListener("click", () => {
+    if (state.settingsOpen) hideSettingsWorkspace();
+    else showSettingsWorkspace2();
+  });
+  els.settingsBack?.addEventListener("click", () => hideSettingsWorkspace());
+  els.settingsRail?.addEventListener("click", handleSettingsRailClick2);
+  els.settingsContent?.addEventListener("click", handleSettingsClick2);
+  els.settingsContent?.addEventListener("input", handleSettingsFormChange2);
+  els.settingsContent?.addEventListener("change", handleSettingsFormChange2);
+  els.settingsContent?.addEventListener("submit", saveSettingsConfig2);
+  els.liveSubtasks.addEventListener("click", (event) => {
+    const button = eventTargetOf(event).closest("button[data-background-cancel]");
+    if (!button) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    cancelBackgroundSubagent2(button.dataset.groupId, button.dataset.taskId);
+  });
+  document.addEventListener("click", (event) => {
+    if (!state.modelPanelOpen) {
+      return;
+    }
+    if (eventTargetOf(event).closest("#model-panel") || eventTargetOf(event).closest("#model-config-panel") || eventTargetOf(event).closest("#model-status-toggle")) {
+      return;
+    }
+    hideModelPanel();
+  });
+  els.transcript.addEventListener("scroll", handleTranscriptScroll2);
+  els.workflowStrip.addEventListener("click", (event) => {
+    if (!eventTargetOf(event).closest("button[data-action='toggle-workflow']")) {
+      return;
+    }
+    state.workflowExpanded = !state.workflowExpanded;
+    renderWorkflowStrip2();
+  });
+  els.activityToggle.addEventListener("click", toggleLiveStatusDetails2);
+  els.transcriptJump.addEventListener("click", followTranscript2);
+  els.responsiveNavigation.querySelectorAll("button[data-dashboard-view]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (button.dataset.dashboardView === "settings") {
+        showSettingsWorkspace2();
+        return;
+      }
+      if (state.settingsOpen) hideSettingsWorkspace({ restoreFocus: false });
+      setResponsiveView(button.dataset.dashboardView);
+    });
+  });
+  els.responsiveScrim.addEventListener("click", () => setResponsiveView("conversation"));
+  els.threadList.addEventListener("click", (event) => {
+    if (eventTargetOf(event).closest(".thread-open")) {
+      setResponsiveView("conversation");
+    }
+  });
+  document.addEventListener("click", handleResponsiveFileNavigation2);
+  els.connectionStatus?.addEventListener("click", reconnectEventsManually2);
+  window.addEventListener?.("online", () => {
+    if (state.currentSessionId && state.connectionState !== "connected") {
+      reconnectEventsManually2();
+    }
+  });
+  window.addEventListener?.("offline", () => {
+    clearEventReconnectTimer2();
+    closeEventSource2();
+    setConnectionState2("offline");
+  });
+  window.addEventListener?.("resize", () => {
+    syncResponsiveNavigation();
+    setPreviewWidth(state.previewPreferredWidth, { updatePreference: false });
+  });
+  window.visualViewport?.addEventListener?.("resize", syncVisualViewport2);
+  window.visualViewport?.addEventListener?.("scroll", syncVisualViewport2);
+  resizePromptInput();
+  syncVisualViewport2();
+  syncResponsiveNavigation();
+}
+function normalizedResponsiveView2(width, requestedView) {
+  if (requestedView === "settings") return "settings";
+  if (Number(width) >= 1200) return "conversation";
+  return typeof requestedView === "string" && ["sessions", "conversation", "files"].includes(requestedView) ? requestedView : "conversation";
+}
+function composerHeightFor2(scrollHeight, minimum = 52, maximum = 160) {
+  const measured = Number(scrollHeight);
+  const safeMinimum = Math.max(1, Number(minimum) || 52);
+  const safeMaximum = Math.max(safeMinimum, Number(maximum) || 160);
+  return Math.min(safeMaximum, Math.max(safeMinimum, Number.isFinite(measured) ? measured : safeMinimum));
+}
+function previewWidthBounds2(viewportWidth, sidebarCollapsed = false) {
+  const viewport = Math.max(0, Number(viewportWidth) || 0);
+  const sidebarWidth = sidebarCollapsed ? 56 : 280;
+  const available = viewport - 20 - 20 - sidebarWidth - PREVIEW_WORKSPACE_MIN;
+  return {
+    min: PREVIEW_WIDTH_MIN,
+    max: Math.max(PREVIEW_WIDTH_MIN, Math.min(PREVIEW_WIDTH_MAX, available))
+  };
+}
+function clampedPreviewWidth2(width, bounds) {
+  const minimum = Math.max(0, Number(bounds?.min) || PREVIEW_WIDTH_MIN);
+  const maximum = Math.max(minimum, Number(bounds?.max) || PREVIEW_WIDTH_MAX);
+  const value = Number(width);
+  return Math.min(maximum, Math.max(minimum, Number.isFinite(value) ? value : PREVIEW_WIDTH_DEFAULT));
+}
+function permissionIndexForKey2(currentIndex, key, length) {
+  const count = Math.max(0, Number(length) || 0);
+  if (count === 0) return -1;
+  if (key === "Home") return 0;
+  if (key === "End") return count - 1;
+  if (key === "ArrowRight" || key === "ArrowDown") return (Math.max(0, currentIndex) + 1) % count;
+  if (key === "ArrowLeft" || key === "ArrowUp") return (Math.max(0, currentIndex) - 1 + count) % count;
+  return currentIndex;
+}
+function focusTrapTarget(focusables, activeElement, shiftKey = false) {
+  const items = Array.from(focusables ?? []);
+  if (items.length === 0) return null;
+  const current = activeElement ? items.indexOf(activeElement) : -1;
+  if (current < 0) return shiftKey ? items.at(-1) : items[0];
+  return items[(current + (shiftKey ? -1 : 1) + items.length) % items.length];
+}
+function shouldFollowTranscript2({ force = false, following = true, onlyIfNearBottom = false, wasAtBottom = true } = {}) {
+  if (force) return true;
+  if (!following) return false;
+  return !onlyIfNearBottom || wasAtBottom !== false;
+}
+function scheduleAnimationFrameOnce2(holder, key, callback, scheduler = requestAnimationFrame) {
+  if (holder[key] != null) return false;
+  const frame = scheduler(() => {
+    holder[key] = null;
+    callback();
+  });
+  holder[key] = frame ?? true;
+  return true;
+}
+function cancelScheduledAnimationFrame2(holder, key, cancel = cancelAnimationFrame) {
+  const frame = holder[key];
+  if (frame == null) return false;
+  holder[key] = null;
+  if (frame !== true) cancel(Number(frame));
+  return true;
+}
+function appendPlainDraftDelta2(body, text, renderedLength = 0, createTextNode = (value) => document.createTextNode(value)) {
+  const value = String(text ?? "");
+  const start = Math.min(value.length, Math.max(0, Number(renderedLength) || 0));
+  const pending = value.slice(start);
+  if (pending) {
+    if (typeof body?.append === "function") body.append(createTextNode(pending));
+    else if (body) body.textContent = `${body.textContent ?? ""}${pending}`;
+  }
+  return value.length;
+}
+function renderFinalAssistantBody2(body, text, renderer = renderMessageText2) {
+  renderer(body, text ?? "", { markdown: true });
+}
+function selectTranscriptNodesToRemove2(nodes, limit, direction = "append", isProtected = () => false) {
+  const values = Array.from(nodes ?? []);
+  let overflow = Math.max(0, values.length - Math.max(0, Number(limit) || 0));
+  if (overflow === 0) return [];
+  const ordered = direction === "prepend" ? values.slice().reverse() : values;
+  const selected = [];
+  for (const node of ordered) {
+    if (overflow === 0) break;
+    if (isProtected(node)) continue;
+    selected.push(node);
+    overflow -= 1;
+  }
+  return selected;
+}
+function responsiveLayoutMode2() {
+  const width = Number(window.innerWidth) || Number(document.documentElement?.clientWidth) || 1200;
+  if (width >= 1200) return "desktop";
+  return width >= 768 ? "tablet" : "mobile";
+}
+function restorePreviewWidth2() {
+  let saved = PREVIEW_WIDTH_DEFAULT;
+  try {
+    saved = Number(window.localStorage?.getItem(PREVIEW_WIDTH_STORAGE_KEY)) || PREVIEW_WIDTH_DEFAULT;
+  } catch {
+  }
+  setPreviewWidth(saved);
+}
+function setPreviewWidth(width, options = {}) {
+  const bounds = previewWidthBounds2(Number(window.innerWidth) || 1200, state.sidebarCollapsed);
+  if (options.updatePreference !== false) {
+    state.previewPreferredWidth = clampedPreviewWidth2(width, { min: PREVIEW_WIDTH_MIN, max: PREVIEW_WIDTH_MAX });
+  }
+  state.previewWidth = clampedPreviewWidth2(state.previewPreferredWidth, bounds);
+  document.documentElement?.style?.setProperty("--preview-width", `${state.previewWidth}px`);
+  syncPreviewResizeHandle2(bounds);
+  if (options.persist) {
+    try {
+      window.localStorage?.setItem(PREVIEW_WIDTH_STORAGE_KEY, String(state.previewPreferredWidth));
+    } catch {
+    }
+  }
+  if (options.announce) announceStatus2(`文件栏宽度 ${state.previewWidth} 像素`);
+  return state.previewWidth;
+}
+function syncPreviewResizeHandle2(bounds = previewWidthBounds2(Number(window.innerWidth) || 1200, state.sidebarCollapsed)) {
+  const handle = els.previewResizeHandle;
+  if (!handle) return;
+  handle.setAttribute("aria-valuemin", String(bounds.min));
+  handle.setAttribute("aria-valuemax", String(bounds.max));
+  handle.setAttribute("aria-valuenow", String(state.previewWidth));
+  handle.setAttribute("aria-valuetext", `${state.previewWidth} 像素`);
+  handle.setAttribute("aria-disabled", responsiveLayoutMode2() !== "desktop" || document.body.classList.contains("preview-collapsed") ? "true" : "false");
+}
+function beginPreviewResize2(event) {
+  const handle = els.previewResizeHandle;
+  if (!handle) return;
+  if (responsiveLayoutMode2() !== "desktop" || document.body.classList.contains("preview-collapsed")) return;
+  event.preventDefault();
+  state.previewResizeStartX = Number(event.clientX);
+  state.previewResizeStartWidth = state.previewWidth;
+  handle.setPointerCapture?.(event.pointerId);
+  document.body.classList.add("preview-resizing");
+}
+function updatePreviewResize2(event) {
+  if (state.previewResizeStartX === null || state.previewResizeStartWidth === null) return;
+  const delta = Number(event.clientX) - state.previewResizeStartX;
+  setPreviewWidth(state.previewResizeStartWidth - delta);
+}
+function finishPreviewResize2(event) {
+  const handle = els.previewResizeHandle;
+  if (!handle) return;
+  if (state.previewResizeStartX === null) return;
+  handle.releasePointerCapture?.(event.pointerId);
+  state.previewResizeStartX = null;
+  state.previewResizeStartWidth = null;
+  document.body.classList.remove("preview-resizing");
+  setPreviewWidth(state.previewWidth, { persist: true, announce: true });
+}
+function handlePreviewResizeKeydown2(event) {
+  if (responsiveLayoutMode2() !== "desktop" || document.body.classList.contains("preview-collapsed")) return;
+  let next = state.previewWidth;
+  const step = event.shiftKey ? 48 : 16;
+  if (event.key === "ArrowLeft") next += step;
+  else if (event.key === "ArrowRight") next -= step;
+  else if (event.key === "Home") next = previewWidthBounds2(Number(window.innerWidth) || 1200, state.sidebarCollapsed).min;
+  else if (event.key === "End") next = previewWidthBounds2(Number(window.innerWidth) || 1200, state.sidebarCollapsed).max;
+  else return;
+  event.preventDefault();
+  setPreviewWidth(next, { persist: true, announce: true });
+}
+function setResponsiveView(view) {
+  if (view !== "settings" && state.settingsOpen) {
+    hideSettingsWorkspace({ restoreFocus: false });
+  }
+  state.responsiveView = normalizedResponsiveView2(Number(window.innerWidth) || 1200, view);
+  syncResponsiveNavigation();
+}
+function syncResponsiveNavigation() {
+  const width = Number(window.innerWidth) || Number(document.documentElement?.clientWidth) || 1200;
+  const view = normalizedResponsiveView2(width, state.responsiveView);
+  state.responsiveView = view;
+  if (width < 1200) {
+    state.sidebarCollapsed = false;
+    document.body.classList.remove("sidebar-collapsed", "preview-collapsed");
+  }
+  document.body.dataset.dashboardView = view;
+  els.responsiveNavigation?.querySelectorAll("button[data-dashboard-view]").forEach((button) => {
+    const active = button.dataset.dashboardView === (state.settingsOpen ? "settings" : view);
+    button.classList.toggle("active", active);
+    if (active) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  });
+  if (state.modalContext) return;
+  const desktop = width >= 1200;
+  setResponsiveSurfaceInert2(els.sidebar, !desktop && view !== "sessions");
+  setResponsiveSurfaceInert2(els.workspace, !desktop && !["conversation", "settings"].includes(view));
+  setResponsiveSurfaceInert2(els.preview, !desktop && view !== "files");
+}
+function setResponsiveSurfaceInert2(element, inert) {
+  if (!element) return;
+  element.inert = Boolean(inert);
+}
+function handleResponsiveFileNavigation2(event) {
+  if (responsiveLayoutMode2() === "desktop") return;
+  if (eventTargetOf(event).closest(".file-item, .file-link, [data-file]")) {
+    setResponsiveView("files");
+  }
+}
+function syncVisualViewport2() {
+  const viewportHeight = Number(window.visualViewport?.height) || Number(window.innerHeight) || 0;
+  if (viewportHeight > 0) {
+    document.documentElement?.style?.setProperty("--dashboard-viewport-height", `${Math.round(viewportHeight)}px`);
+  }
+  const keyboardVisible = Boolean(window.visualViewport) && Number(window.innerHeight) - viewportHeight > 120;
+  document.body.classList.toggle("keyboard-visible", keyboardVisible);
+}
+function resizePromptInput() {
+  if (!els.promptInput) return;
+  els.promptInput.style.height = "auto";
+  const height = composerHeightFor2(els.promptInput.scrollHeight);
+  els.promptInput.style.height = `${height}px`;
+  els.promptInput.style.overflowY = Number(els.promptInput.scrollHeight) > height ? "auto" : "hidden";
+}
+function handlePermissionModeKeydown2(event) {
+  const keys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"];
+  if (!keys.includes(event.key)) return;
+  const buttons = Array.from(els.permissionMode.querySelectorAll("button[data-mode]"));
+  const current = Math.max(0, buttons.indexOf(eventTargetOf(event).closest("button[data-mode]")));
+  const next = permissionIndexForKey2(current, event.key, buttons.length);
+  const button = buttons[next];
+  if (!button) return;
+  event.preventDefault();
+  event.stopPropagation();
+  button.focus();
+  requestPermissionMode2(button.dataset.mode, button);
+}
+function requestPermissionMode2(mode, trigger = document.activeElement) {
+  if (state.goal.enabled && mode !== "fullAccess") {
+    showError("Goal 开启时不能降低权限。请先退出 Goal。");
+    return;
+  }
+  if (mode === "fullAccess" && state.permissionMode !== "fullAccess") {
+    showPermissionConfirm2(trigger);
+    return;
+  }
+  hidePermissionConfirm({ restoreFocus: false });
+  setPermissionMode2(mode);
+}
+function defaultGoalMaxAutoContinues2() {
+  const value = Number(state.settings?.agents?.goalMaxAutoContinues);
+  return Number.isInteger(value) && value >= 1 && value <= 100 ? value : 12;
+}
+function emptyGoalSnapshot2() {
+  return {
+    enabled: false,
+    status: "off",
+    text: "",
+    previousPermissionMode: "plan",
+    roundCount: 0,
+    continueCount: 0,
+    maxAutoContinues: defaultGoalMaxAutoContinues2(),
+    lastContinueReason: "",
+    lastBlockReason: "",
+    lastEvidence: null,
+    hasWrites: false,
+    recap: null
+  };
+}
+function applyGoalSnapshot(goal, options = {}) {
+  const snapshot = isPlainObject(goal) ? goal : {};
+  const enabled = snapshot.enabled === true;
+  state.goal = {
+    ...emptyGoalSnapshot2(),
+    enabled,
+    text: String(snapshot.text ?? ""),
+    status: enabled ? String(snapshot.status || "active") : "off",
+    previousPermissionMode: String(snapshot.previousPermissionMode ?? state.goal.previousPermissionMode ?? "plan"),
+    roundCount: Number(snapshot.roundCount) || 0,
+    continueCount: Number(snapshot.continueCount) || 0,
+    maxAutoContinues: Number(snapshot.maxAutoContinues) || defaultGoalMaxAutoContinues2(),
+    lastContinueReason: String(snapshot.lastContinueReason ?? ""),
+    lastBlockReason: String(snapshot.lastBlockReason ?? ""),
+    lastEvidence: snapshot.lastEvidence ?? null,
+    hasWrites: snapshot.hasWrites === true,
+    recap: isPlainObject(snapshot.recap) ? snapshot.recap : null
+  };
+  const permissionSource = options.permissionMode || (state.goal.enabled ? "fullAccess" : state.permissionMode);
+  if (state.goal.enabled) {
+    setPermissionMode2("fullAccess");
+  } else if (options.permissionMode) {
+    setPermissionMode2(options.permissionMode);
+  } else {
+    setPermissionMode2(permissionSource);
+  }
+  renderGoalControls2();
+  syncPromptPlaceholder();
+}
+var DEFAULT_PROMPT_PLACEHOLDER = "输入任务需求，例如：整理这批实验数据并生成一份简洁报告";
+function syncPromptPlaceholder() {
+  if (!els.promptInput) return;
+  els.promptInput.placeholder = DEFAULT_PROMPT_PLACEHOLDER;
+}
+function renderGoalControls2() {
+  const enabled = state.goal.enabled === true;
+  const readonlyLocked = state.sessionStatus?.readonlyLocked === true || state.trust?.readonlyLocked === true;
+  if (els.goalMode) {
+    els.goalMode.setAttribute("aria-pressed", String(enabled));
+    els.goalMode.classList.toggle("active", enabled);
+    els.goalMode.disabled = readonlyLocked && !enabled;
+    els.goalMode.title = readonlyLocked && !enabled ? "只读锁定会话不能启用 Goal" : "Goal 模式";
+  }
+  document.body.classList.toggle("goal-mode-active", enabled);
+  els.permissionMode?.querySelectorAll("button[data-mode]").forEach((button) => {
+    button.disabled = enabled && button.dataset.mode !== "fullAccess";
+  });
+  if (enabled) {
+    els.modeDescription.textContent = MODE_DESCRIPTIONS.goal;
+  }
+  renderGoalStatusBar2();
+}
+function renderGoalStatusBar2() {
+  const bar = els.goalStatusBar;
+  if (!bar) return;
+  if (!state.goal.enabled) {
+    bar.classList.add("hidden");
+    bar.replaceChildren();
+    return;
+  }
+  bar.classList.remove("hidden");
+  const statusLabel = {
+    active: "进行中",
+    running: "进行中",
+    paused: "已暂停",
+    verifying: "核验中",
+    complete: "已完成",
+    failed: "失败",
+    off: "关闭"
+  }[state.goal.status] ?? state.goal.status;
+  const recapLine = String(state.goal.recap?.line ?? "").trim();
+  const showRecap = recapLine.length > 0;
+  const canResume = state.goal.status === "paused" || state.goal.status === "failed";
+  const showPause = !canResume && state.goal.status !== "complete";
+  const objectiveClass = ["goal-objective", showRecap ? "goal-objective-ellipsis" : ""].filter(Boolean).join(" ");
+  const continueReason = String(state.goal.lastContinueReason ?? "").trim();
+  bar.innerHTML = `
+    <div class="goal-copy">
+      <div class="goal-title">Goal · ${escapeHtml(statusLabel)}</div>
+      <div class="${objectiveClass}" title="${escapeHtml(state.goal.text || "")}">${escapeHtml(state.goal.text || "")}</div>
+      ${showRecap ? `<div class="goal-recap">${escapeHtml(recapLine)}</div>` : `<div class="goal-continue-meta">${Number(state.goal.continueCount) || 0} / ${Number(state.goal.maxAutoContinues) || defaultGoalMaxAutoContinues2()} 次续跑${continueReason ? ` · ${escapeHtml(continueReason)}` : ""}</div>`}
+    </div>
+    <div class="goal-status-actions">
+      ${canResume ? `<button type="button" data-goal-action="resume">继续</button>` : ""}
+      ${showPause ? `<button type="button" data-goal-action="pause">暂停</button>` : ""}
+      <button type="button" data-goal-action="disable">退出 Goal</button>
+    </div>
+  `;
+  bar.querySelectorAll("[data-goal-action]").forEach((button) => {
+    button.addEventListener("click", () => submitGoalAction2(String(button.dataset.goalAction ?? "")));
+  });
+}
+function requestGoalMode2() {
+  if (state.goal.enabled) {
+    submitGoalAction2("disable");
+    return;
+  }
+  if (!state.trust?.trusted) {
+    showTrustPanel();
+    return;
+  }
+  showGoalConfirm2(els.goalMode);
+}
+function showGoalConfirm2(trigger) {
+  const panel = els.goalConfirmPanel;
+  if (!panel) return;
+  panel.classList.remove("hidden");
+  panel.innerHTML = `
+    <div>
+      <div class="context-title" id="goal-confirm-title">启用 Goal 模式？</div>
+      <div class="context-copy">Goal 模式会在本会话朝着你给出的目标自动连续执行，直到完成、暂停、失败或预算用尽。<br><br>开启后当前会话将使用「完全访问」：本机工具、工作区外文件和网络操作将自动获准，并且不会在每个工具调用时停下等你批准。<br><br>这是无人值守自动执行，不是普通聊天。请确认本机工作区可被连续修改。你随时可以暂停、中断或退出 Goal。</div>
+    </div>
+    <div class="context-confirm-actions">
+      <button type="button" data-action="cancel">取消</button>
+      <button type="button" data-action="confirm" class="danger">确认 Goal 并完全访问</button>
+    </div>
+  `;
+  panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-modal", "true");
+  panel.setAttribute("aria-labelledby", "goal-confirm-title");
+  panel.setAttribute("tabindex", "-1");
+  panel.querySelector("button[data-action='cancel']")?.addEventListener("click", () => hideGoalConfirm());
+  panel.querySelector("button[data-action='confirm']")?.addEventListener("click", () => {
+    hideGoalConfirm({ restoreFocus: false });
+    showGoalTextPanel2(trigger);
+  });
+  activateModal(panel, { initialFocus: "button[data-action='cancel']", returnFocus: trigger });
+}
+function hideGoalConfirm(options = {}) {
+  const panel = els.goalConfirmPanel;
+  if (!panel || panel.classList.contains("hidden")) return;
+  deactivateModal(panel, options);
+  panel.classList.add("hidden");
+  panel.replaceChildren();
+}
+function showGoalTextPanel2(trigger) {
+  const panel = els.goalTextPanel;
+  if (!panel) return;
+  panel.classList.remove("hidden");
+  panel.innerHTML = `
+    <div>
+      <div class="context-title" id="goal-text-title">输入 Goal 目标</div>
+      <div class="context-copy">用一句话写清要完成的目标。提交后才会进入无人值守执行。</div>
+      <label class="visually-hidden" for="goal-objective-input">目标</label>
+      <textarea id="goal-objective-input" rows="3" placeholder="例如：给会话列表加上运行态筛选并补测试"></textarea>
+      <div class="context-copy" id="goal-text-error" hidden>请输入目标</div>
+    </div>
+    <div class="context-confirm-actions">
+      <button type="button" data-action="cancel">取消</button>
+      <button type="button" data-action="confirm" class="danger">开始 Goal</button>
+    </div>
+  `;
+  panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-modal", "true");
+  panel.setAttribute("aria-labelledby", "goal-text-title");
+  const input = panel.querySelector("#goal-objective-input");
+  panel.querySelector("button[data-action='cancel']")?.addEventListener("click", () => hideGoalTextPanel());
+  panel.querySelector("button[data-action='confirm']")?.addEventListener("click", () => {
+    const text = String(input?.value ?? "").trim();
+    if (!text) {
+      const error = panel.querySelector("#goal-text-error");
+      if (error) error.hidden = false;
+      input?.focus();
+      return;
+    }
+    hideGoalTextPanel({ restoreFocus: false });
+    enableGoalWithObjective2(text);
+  });
+  activateModal(panel, { initialFocus: "#goal-objective-input", returnFocus: trigger });
+}
+function hideGoalTextPanel(options = {}) {
+  const panel = els.goalTextPanel;
+  if (!panel || panel.classList.contains("hidden")) return;
+  deactivateModal(panel, options);
+  panel.classList.add("hidden");
+  panel.replaceChildren();
+}
+async function enableGoalWithObjective2(text) {
+  const previous = state.permissionMode;
+  applyGoalSnapshot({
+    enabled: true,
+    status: "active",
+    text,
+    previousPermissionMode: previous
+  });
+  if (!state.currentSessionId) {
+    if (currentSessionNeedsModelSelection()) {
+      applyGoalSnapshot(null, { permissionMode: previous });
+      showError("请先重新选择模型来源和模型");
+      return;
+    }
+    state.turnSubmitting = true;
+    updateSendButton();
+    els.runStatus.textContent = "启动中";
+    let result;
+    try {
+      result = await postJson("/api/turns", {
+        requestId: dashboardRequestId(),
+        prompt: text,
+        permissionMode: "fullAccess",
+        goalMode: true,
+        goalText: text,
+        clientPreviousPermissionMode: previous,
+        clientId: dashboardClientId()
+      });
+    } catch (error) {
+      result = { ok: false, error: errorMessageOf(error) };
+    } finally {
+      state.turnSubmitting = false;
+      updateSendButton();
+    }
+    if (!result.ok) {
+      applyGoalSnapshot(null, { permissionMode: previous });
+      if (result.trust) {
+        state.trust = result.trust;
+        renderTrustPanel();
+      }
+      showError(result.error ?? "Goal 启动失败");
+      els.runStatus.textContent = result.status === 403 ? "待信任" : "失败";
+      updateSendButton();
+      return;
+    }
+    adoptGoalRunResult2(result);
+    await loadSessions();
+    return;
+  }
+  await submitGoalAction2("enable", { objective: text });
+}
+async function submitGoalAction2(action, extra = {}) {
+  if (state.goalSubmitting) return;
+  if (!state.currentSessionId) {
+    if (action === "disable" || action === "clear") {
+      applyGoalSnapshot(null, { permissionMode: state.goal.previousPermissionMode || "plan" });
+    }
+    return;
+  }
+  state.goalSubmitting = true;
+  const result = await postJson("/api/goal", {
+    sessionId: state.currentSessionId,
+    action,
+    objective: extra.objective,
+    clientPreviousPermissionMode: state.goal.enabled ? state.goal.previousPermissionMode : state.permissionMode,
+    permissionMode: state.permissionMode
+  }).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+  state.goalSubmitting = false;
+  if (!result.ok) {
+    showError(result.error ?? "Goal 操作失败");
+    return;
+  }
+  adoptGoalRunResult2(result);
+  if (result.running === true) {
+    await loadSessions();
+  }
+}
+function adoptGoalRunResult2(result) {
+  applyGoalSnapshot(result.goal ?? state.goal, { permissionMode: result.permission?.mode ?? state.permissionMode });
+  if (result.sessionStatus) {
+    updateSessionStatus(result.sessionStatus);
+  }
+  state.queue = result.queue ?? state.queue;
+  renderQueuePanel();
+  const previousSessionId = state.currentSessionId;
+  if (result.sessionId) {
+    state.currentSessionId = result.sessionId;
+    rememberCurrentSession(result.sessionId);
+    if (previousSessionId !== result.sessionId) {
+      resetEventReplayState();
+    }
+    rememberEventCursor(result.eventCursor);
+    ensureEventsConnected(result.sessionId);
+  }
+  if (result.running === true) {
+    state.running = true;
+    els.runStatus.textContent = "运行中";
+    setLiveTitle("正在推进 Goal");
+  }
+  updateSendButton();
+}
+function showPermissionConfirm2(trigger = document.activeElement) {
+  const panel = els.permissionConfirmPanel;
+  if (!panel) return;
+  panel.classList.remove("hidden");
+  panel.innerHTML = `
+    <div>
+      <div class="context-title" id="permission-confirm-title">启用完全访问？</div>
+      <div class="context-copy">当前会话的本机工具、工作区外文件和网络操作将自动获准，直到你切换权限或离开该会话。</div>
+    </div>
+    <div class="context-confirm-actions">
+      <button type="button" data-action="cancel">取消</button>
+      <button type="button" data-action="confirm" class="danger">确认完全访问</button>
+    </div>
+  `;
+  panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-modal", "true");
+  panel.setAttribute("aria-labelledby", "permission-confirm-title");
+  panel.setAttribute("tabindex", "-1");
+  panel.querySelector("button[data-action='cancel']")?.addEventListener("click", () => hidePermissionConfirm());
+  panel.querySelector("button[data-action='confirm']")?.addEventListener("click", () => {
+    hidePermissionConfirm({ restoreFocus: false });
+    setPermissionMode2("fullAccess");
+    els.permissionMode.querySelector("button[data-mode='fullAccess']")?.focus();
+  });
+  activateModal(panel, { initialFocus: "button[data-action='cancel']", returnFocus: trigger });
+}
+function hidePermissionConfirm(options = {}) {
+  const panel = els.permissionConfirmPanel;
+  if (!panel || panel.classList.contains("hidden")) return;
+  deactivateModal(panel, options);
+  panel.classList.add("hidden");
+  panel.replaceChildren();
+}
+function updateContextActions2() {
+  const noSession = !state.currentSessionId;
+  const busy = state.running || state.turnSubmitting;
+  const disabled = noSession || busy;
+  const hint = noSession ? "请先打开一个空闲会话" : busy ? "任务运行期间不能清空或压缩上下文" : "可管理当前会话上下文";
+  for (const button of [els.contextClear, els.contextCompact]) {
+    if (!button) continue;
+    button.disabled = disabled;
+    button.title = hint;
+  }
+  if (els.contextActionHint) els.contextActionHint.textContent = hint;
+}
+function announceStatus2(message) {
+  if (!els.dashboardLiveRegion || !message) return;
+  els.dashboardLiveRegion.textContent = "";
+  requestAnimationFrame(() => {
+    els.dashboardLiveRegion.textContent = String(message);
+  });
+}
+var FOCUSABLE_SELECTOR = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "[tabindex]:not([tabindex='-1'])"
+].join(",");
+function modalFocusableElements(modal) {
+  if (!modal) return [];
+  return Array.from(modal.querySelectorAll(FOCUSABLE_SELECTOR)).filter((node) => node.getAttribute("aria-hidden") !== "true" && !node.closest("[inert]"));
 }
 
 // src/dashboard/public/transcript.ts
@@ -2180,7 +2205,7 @@ function visibleTranscriptRole(role) {
 }
 
 // src/dashboard/public/app-ui3.ts
-async function cancelBackgroundSubagent(groupId, taskId) {
+async function cancelBackgroundSubagent2(groupId, taskId) {
   const key = backgroundCancelKey3(groupId, taskId);
   if (!state.currentSessionId || !key || state.backgroundCancelling.has(key)) {
     return;
@@ -2211,7 +2236,7 @@ async function cancelBackgroundSubagent(groupId, taskId) {
     }
   }
   updateLiveStatus3();
-  applyIdleRunStatus2("空闲");
+  applyIdleRunStatus("空闲");
 }
 function backgroundCancelKey3(groupId, taskId) {
   const group = String(groupId ?? "").trim();
@@ -2219,10 +2244,10 @@ function backgroundCancelKey3(groupId, taskId) {
   return group || task ? `${group || "-"}:${task || "-"}` : "";
 }
 function connectEvents3(sessionId) {
-  clearEventReconnectTimer();
-  closeEventSource();
+  clearEventReconnectTimer2();
+  closeEventSource2();
   state.eventSourceSessionId = sessionId;
-  setConnectionState(state.eventReconnectAttempt > 0 ? "reconnecting" : "connecting");
+  setConnectionState2(state.eventReconnectAttempt > 0 ? "reconnecting" : "connecting");
   const params = new URLSearchParams({ sessionId });
   if (state.lastEventSequence > 0) {
     params.set("after", String(state.lastEventSequence));
@@ -2240,7 +2265,7 @@ function connectEvents3(sessionId) {
     if (state.eventSource !== source) return;
     clearEventConnectTimer3();
     markEventConnectionAlive3(false);
-    setConnectionState("connected");
+    setConnectionState2("connected");
   });
   source.addEventListener("heartbeat", () => {
     if (state.eventSource === source) {
@@ -2253,7 +2278,7 @@ function connectEvents3(sessionId) {
     try {
       payload = JSON.parse(event.data);
     } catch {
-      setConnectionState("stale");
+      setConnectionState2("stale");
       return;
     }
     markEventConnectionAlive3(true);
@@ -2270,7 +2295,7 @@ function connectEvents3(sessionId) {
     state.eventSource = null;
     clearEventStaleTimer3();
     if (navigator.onLine === false) {
-      setConnectionState("offline");
+      setConnectionState2("offline");
       return;
     }
     scheduleEventReconnect3(sessionId);
@@ -2282,17 +2307,17 @@ function ensureEventsConnected(sessionId) {
   }
   connectEvents3(sessionId);
 }
-function disconnectEvents2() {
-  clearEventReconnectTimer();
+function disconnectEvents() {
+  clearEventReconnectTimer2();
   clearEventConnectTimer3();
   clearEventStaleTimer3();
-  closeEventSource();
+  closeEventSource2();
   state.eventSourceSessionId = null;
   state.eventReconnectAttempt = 0;
   state.lastEventAt = 0;
-  setConnectionState("idle");
+  setConnectionState2("idle");
 }
-function closeEventSource() {
+function closeEventSource2() {
   clearEventConnectTimer3();
   clearEventStaleTimer3();
   state.eventSource?.close();
@@ -2305,7 +2330,7 @@ function markEventConnectionAlive3(stable = true) {
   state.lastEventAt = Date.now();
   clearEventConnectTimer3();
   if (["connecting", "stale", "reconnecting"].includes(state.connectionState)) {
-    setConnectionState("connected");
+    setConnectionState2("connected");
   }
   clearEventStaleTimer3();
   const sessionId = state.eventSourceSessionId;
@@ -2320,10 +2345,10 @@ function armEventConnectTimer3(source, sessionId) {
     state.eventSource = null;
     clearEventStaleTimer3();
     if (navigator.onLine === false) {
-      setConnectionState("offline");
+      setConnectionState2("offline");
       return;
     }
-    setConnectionState("stale");
+    setConnectionState2("stale");
     scheduleEventReconnect3(sessionId);
   }, EVENT_CONNECT_TIMEOUT_MS);
 }
@@ -2335,20 +2360,20 @@ function armEventStaleTimer3(sessionId, delay) {
       armEventStaleTimer3(sessionId, remaining);
       return;
     }
-    setConnectionState("stale");
-    closeEventSource();
+    setConnectionState2("stale");
+    closeEventSource2();
     scheduleEventReconnect3(sessionId);
   }, Math.max(1, Number(delay) || 1));
 }
 function scheduleEventReconnect3(sessionId) {
   if (!sessionId || state.currentSessionId !== sessionId) return;
-  clearEventReconnectTimer();
+  clearEventReconnectTimer2();
   state.eventReconnectAttempt += 1;
   if (state.eventReconnectAttempt > EVENT_RECONNECT_MAX_ATTEMPTS) {
-    setConnectionState("offline");
+    setConnectionState2("offline");
     return;
   }
-  setConnectionState("reconnecting");
+  setConnectionState2("reconnecting");
   const delay = Math.min(15e3, 500 * 2 ** (state.eventReconnectAttempt - 1));
   state.eventReconnectTimer = setTimeout(() => {
     state.eventReconnectTimer = null;
@@ -2357,16 +2382,16 @@ function scheduleEventReconnect3(sessionId) {
     }
   }, delay);
 }
-function reconnectEventsManually() {
-  clearEventReconnectTimer();
+function reconnectEventsManually2() {
+  clearEventReconnectTimer2();
   state.eventReconnectAttempt = 0;
   if (!state.currentSessionId) {
-    bootstrapDashboard();
+    bootstrapDashboard2();
     return;
   }
   connectEvents3(state.currentSessionId);
 }
-function clearEventReconnectTimer() {
+function clearEventReconnectTimer2() {
   if (state.eventReconnectTimer) {
     clearTimeout(state.eventReconnectTimer);
     state.eventReconnectTimer = null;
@@ -2384,7 +2409,7 @@ function clearEventStaleTimer3() {
     state.eventStaleTimer = null;
   }
 }
-function setConnectionState(next) {
+function setConnectionState2(next) {
   const previous = state.connectionState;
   state.connectionState = next;
   if (!els.connectionStatus) return;
@@ -2407,9 +2432,9 @@ function setConnectionState(next) {
   const text = els.connectionStatus.querySelector(".connection-label");
   if (text) text.textContent = label;
   if (next !== previous && ["offline", "unavailable", "error", "reconnecting", "stale"].includes(next)) {
-    announceStatus(label);
+    announceStatus2(label);
   } else if (next === "connected" && ["offline", "unavailable", "error", "reconnecting", "stale"].includes(previous)) {
-    announceStatus("本地网关已重新连接");
+    announceStatus2("本地网关已重新连接");
   }
 }
 function resetEventReplayState() {
@@ -2426,25 +2451,25 @@ function handleDashboardEvent3(event) {
   if (event.type === "session_disposed" || event.type === "error" && /会话不存在/.test(String(event.message ?? ""))) {
     state.running = false;
     state.queue = [];
-    hideApproval2();
-    hideQuestion2();
-    clearPendingGuide2();
-    resetLiveStatus2();
-    disconnectEvents2();
+    hideApproval();
+    hideQuestion();
+    clearPendingGuide();
+    resetLiveStatus();
+    disconnectEvents();
     els.runStatus.textContent = "会话已结束";
     renderQueuePanel();
     updateSendButton();
-    scheduleSessionsRefresh2(0);
+    scheduleSessionsRefresh(0);
     return;
   }
   hideEmptyState3();
   updateSessionStatus(event.sessionStatus);
-  updateTurnChangeStats2(event.turnChangeStats ?? event.changeStats, {
+  updateTurnChangeStats(event.turnChangeStats ?? event.changeStats, {
     replace: event.type === "run_state" || event.type === "files_updated" || Boolean(event.turnChangeStats)
   });
   if (event.type === "user_message") {
     beginEventTurn3(event);
-    updateTurnChangeStats2(null, { reset: true });
+    updateTurnChangeStats(null, { reset: true });
     state.lastAssistantFinalSignature = "";
     appendMessage3(
       "user",
@@ -2453,10 +2478,10 @@ function handleDashboardEvent3(event) {
       event.attachments
     );
     state.running = true;
-    scheduleSessionsRefresh2();
+    scheduleSessionsRefresh();
     if (event.queuedKind === "guide") {
       els.runStatus.textContent = "引导中";
-      setPendingGuide2({
+      setPendingGuide({
         sessionId: state.currentSessionId,
         phase: "continuing",
         preview: event.text
@@ -2477,7 +2502,7 @@ function handleDashboardEvent3(event) {
     return;
   }
   if (event.type === "goal_question_skipped") {
-    appendActivity2({
+    appendActivity({
       title: "已跳过需求核对",
       detail: "Goal 无人值守，未打开核对面板",
       severity: "info",
@@ -2490,7 +2515,7 @@ function handleDashboardEvent3(event) {
       applyGoalSnapshot(event.goal, { permissionMode: event.permission?.mode });
     } else if (event.permission?.mode) {
       if (!(state.goal.enabled && event.permission.mode !== "fullAccess")) {
-        setPermissionMode(event.permission.mode);
+        setPermissionMode2(event.permission.mode);
       }
     }
     if (event.running === true) {
@@ -2500,9 +2525,9 @@ function handleDashboardEvent3(event) {
     }
     state.running = event.running === true;
     state.queue = event.queue ?? [];
-    scheduleSessionsRefresh2();
+    scheduleSessionsRefresh();
     if (state.running && event.current?.kind === "guide") {
-      setPendingGuide2({
+      setPendingGuide({
         sessionId: state.currentSessionId,
         phase: "continuing",
         preview: event.current.preview ?? state.pendingGuide?.preview ?? ""
@@ -2510,9 +2535,9 @@ function handleDashboardEvent3(event) {
       els.runStatus.textContent = "引导中";
       setLiveTitle("正在按引导继续");
     } else if (!state.running) {
-      clearPendingGuide2();
-      resetLiveStatus2({ keepBackgroundSubagents: true });
-      applyIdleRunStatus2("空闲");
+      clearPendingGuide();
+      resetLiveStatus({ keepBackgroundSubagents: true });
+      applyIdleRunStatus("空闲");
     } else {
       els.runStatus.textContent = "运行中";
       renderQueuePanel();
@@ -2522,8 +2547,8 @@ function handleDashboardEvent3(event) {
   }
   if (event.type === "guide_queued") {
     state.queue = event.queue ?? [];
-    scheduleSessionsRefresh2();
-    setPendingGuide2({
+    scheduleSessionsRefresh();
+    setPendingGuide({
       sessionId: state.currentSessionId,
       phase: "registered",
       preview: event.guidance ?? event.item?.preview ?? state.pendingGuide?.preview ?? ""
@@ -2533,7 +2558,7 @@ function handleDashboardEvent3(event) {
   }
   if (event.type === "prompt_queued" || event.type === "queue_updated") {
     state.queue = event.queue ?? [];
-    scheduleSessionsRefresh2();
+    scheduleSessionsRefresh();
     syncPendingGuideFromQueue3();
     els.runStatus.textContent = state.pendingGuide ? "引导中" : state.running ? "运行中" : "已排队";
     return;
@@ -2543,7 +2568,7 @@ function handleDashboardEvent3(event) {
     state.queueCancelling.delete(event.item?.id);
     updateSessionStatus(event.sessionStatus);
     if (event.item?.kind === "guide" && state.pendingGuide?.phase !== "continuing") {
-      clearPendingGuide2();
+      clearPendingGuide();
     } else {
       renderQueuePanel();
     }
@@ -2552,7 +2577,7 @@ function handleDashboardEvent3(event) {
   }
   if (event.type === "wakeup_queued") {
     state.queue = event.queue ?? state.queue;
-    scheduleSessionsRefresh2();
+    scheduleSessionsRefresh();
     clearBackgroundSubagentStatus3(event.groupId);
     renderQueuePanel();
     els.runStatus.textContent = event.running ? "主控续跑已排队" : "主控接续中";
@@ -2561,24 +2586,24 @@ function handleDashboardEvent3(event) {
     return;
   }
   if (event.type === "background_subagent_snapshot") {
-    reconcileBackgroundSubagentSnapshot2(event.groups, event.at);
+    reconcileBackgroundSubagentSnapshot(event.groups, event.at);
     return;
   }
   if (event.type === "background_subagent_cancelled") {
     clearBackgroundSubagentStatus3(event.groupId || event.taskId);
-    applyIdleRunStatus2("空闲");
+    applyIdleRunStatus("空闲");
     return;
   }
   if (event.type === "background_terminal_cancelled") {
     clearBackgroundSubagentStatus3(event.taskId);
-    applyIdleRunStatus2("空闲");
+    applyIdleRunStatus("空闲");
     return;
   }
   if (event.type === "turn_interrupt_requested") {
     if (event.reason === "guided") {
-      hideApproval2();
-      hideQuestion2();
-      setPendingGuide2({
+      hideApproval();
+      hideQuestion();
+      setPendingGuide({
         sessionId: state.currentSessionId,
         phase: "interrupting",
         preview: state.pendingGuide?.preview ?? state.queue.find((item) => item.kind === "guide")?.preview ?? ""
@@ -2593,7 +2618,7 @@ function handleDashboardEvent3(event) {
   }
   if (event.type === "guide_stopped") {
     state.queue = event.queue ?? [];
-    setPendingGuide2({
+    setPendingGuide({
       sessionId: state.currentSessionId,
       phase: "stopped",
       preview: event.guidance ?? ""
@@ -2603,8 +2628,8 @@ function handleDashboardEvent3(event) {
     return;
   }
   if (event.type === "context_cleared") {
-    hideContextConfirm2();
-    appendActivity2({
+    hideContextConfirm();
+    appendActivity({
       title: "上下文已清空",
       detail: contextSummaryLine3(event.after),
       severity: "success",
@@ -2644,7 +2669,7 @@ function handleDashboardEvent3(event) {
     appendAssistantDraft3(event);
     els.runStatus.textContent = state.pendingGuide ? "引导中" : "运行中";
     state.running = true;
-    scheduleSessionsRefresh2();
+    scheduleSessionsRefresh();
     updateSendButton();
     return;
   }
@@ -2662,7 +2687,7 @@ function handleDashboardEvent3(event) {
     return;
   }
   if (event.type === "question_resolved") {
-    hideQuestion2();
+    hideQuestion();
     if (event.interrupted && state.pendingGuide) {
       els.runStatus.textContent = "引导中";
       setLiveTitle("引导已接管，等待当前轮次收束");
@@ -2672,13 +2697,13 @@ function handleDashboardEvent3(event) {
     appendMessage3("user", "你", questionResolutionText3(event));
     els.runStatus.textContent = "运行中";
     state.running = true;
-    scheduleSessionsRefresh2();
+    scheduleSessionsRefresh();
     updateSendButton();
     setLiveTitle(event.cancelled ? "继续处理需求核对结果" : "继续处理你的确认");
     return;
   }
   if (event.type === "approval_resolved") {
-    hideApproval2({ approvalId: event.approvalId });
+    hideApproval({ approvalId: event.approvalId });
     if (state.pendingApproval) {
       els.runStatus.textContent = "等待确认";
       setLiveTitle("等待权限确认");
@@ -2694,7 +2719,7 @@ function handleDashboardEvent3(event) {
     }
     els.runStatus.textContent = event.allowed ? "运行中" : "已拒绝";
     if (!event.allowed) {
-      resetLiveStatus2({ keepBackgroundSubagents: true });
+      resetLiveStatus({ keepBackgroundSubagents: true });
     }
     return;
   }
@@ -2708,28 +2733,28 @@ function handleDashboardEvent3(event) {
     state.lastAssistantFinalSignature = finalSignature;
     collapseAssistantDrafts3(event.text);
     collapseCompletedActivities3();
-    resetLiveStatus2({ keepBackgroundSubagents: true });
-    clearPendingGuide2();
+    resetLiveStatus({ keepBackgroundSubagents: true });
+    clearPendingGuide();
     appendMessage3("assistant", "Ant Code", event.text);
     state.activeTurnId = "";
     els.runStatus.textContent = state.backgroundSubagents.size > 0 ? idleRunStatus3("收尾中") : "收尾中";
     updateSendButton();
-    scheduleSessionsRefresh2();
+    scheduleSessionsRefresh();
     return;
   }
   if (event.type === "files_updated") {
     state.files = event.files ?? [];
-    renderFiles2();
+    renderFiles();
     if (shouldKeepGuideFeedback3()) {
       els.runStatus.textContent = "引导中";
       updateLiveStatus3();
     } else {
-      resetLiveStatus2({ keepBackgroundSubagents: true });
-      applyIdleRunStatus2("完成");
-      clearPendingGuide2();
+      resetLiveStatus({ keepBackgroundSubagents: true });
+      applyIdleRunStatus("完成");
+      clearPendingGuide();
     }
     updateSendButton();
-    scheduleSessionsRefresh2();
+    scheduleSessionsRefresh();
     loadSessions();
     return;
   }
@@ -2740,12 +2765,12 @@ function handleDashboardEvent3(event) {
       updateSendButton();
       return;
     }
-    resetLiveStatus2({ keepBackgroundSubagents: true });
-    clearPendingGuide2();
+    resetLiveStatus({ keepBackgroundSubagents: true });
+    clearPendingGuide();
     showError(event.message ?? "任务失败");
-    applyIdleRunStatus2("失败");
+    applyIdleRunStatus("失败");
     updateSendButton();
-    scheduleSessionsRefresh2();
+    scheduleSessionsRefresh();
   }
 }
 function shouldSkipDashboardEvent3(event) {
@@ -2772,7 +2797,7 @@ function beginEventTurn3(event) {
   }
   state.activeTurnId = turnId;
 }
-function renderTranscriptMessages2(messages, options = {}) {
+function renderTranscriptMessages(messages, options = {}) {
   const nodes = [];
   const list = Array.isArray(messages) ? messages : [];
   for (const message of list) {
@@ -2801,7 +2826,7 @@ function renderTranscriptMessages2(messages, options = {}) {
   trimTranscriptWindow3({ direction: "append", preserveAnchor: !state.transcriptFollowing });
   return nodes;
 }
-function renderSessionFailure2(failure2) {
+function renderSessionFailure(failure2) {
   if (!isPlainObject(failure2) || failure2.kind !== "gateway") {
     return;
   }
@@ -2812,14 +2837,14 @@ function renderSessionFailure2(failure2) {
     Number.isInteger(failure2.attempts) && Number(failure2.attempts) > 1 ? `已尝试 ${failure2.attempts} 次` : null,
     failure2.code ? String(failure2.code) : null
   ].filter(Boolean);
-  appendActivity2({
+  appendActivity({
     title: "模型请求失败",
     detail: details.join(" · "),
     severity: "danger",
     collapsed: false
   });
 }
-function setTranscriptPaging2(page = null) {
+function setTranscriptPaging(page = null) {
   const record = isPlainObject(page) ? page : {};
   state.transcriptPaging = {
     cursor: record.cursor ?? record.nextCursor ?? null,
@@ -2862,7 +2887,7 @@ function transcriptFirstContentNode3() {
   if (node === els.emptyState) node = node.nextSibling;
   return node;
 }
-function handleTranscriptScroll() {
+function handleTranscriptScroll2() {
   syncTranscriptFollowState3();
   if (els.transcript.scrollTop > 180) {
     return;
@@ -2904,7 +2929,7 @@ async function loadOlderTranscript3() {
   state.transcriptPaging.hasMore = page?.hasMore === true;
   const pageTotal = Number(page?.total);
   state.transcriptPaging.total = Number.isFinite(pageTotal) ? pageTotal : state.transcriptPaging.total;
-  renderTranscriptMessages2(result.transcript ?? [], { prepend: true });
+  renderTranscriptMessages(result.transcript ?? [], { prepend: true });
   state.transcriptPaging.error = "";
   renderTranscriptHistoryStatus3();
   if (!restoreTranscriptNodeAnchor3(anchor, anchorTop)) {
@@ -2920,7 +2945,7 @@ function renderWorkflowPanel3(workflow, summary = null) {
   if (!record || !todos.length && !steps.length) {
     state.workflow = null;
     state.workflowExpanded = false;
-    renderWorkflowStrip();
+    renderWorkflowStrip2();
     return;
   }
   hideEmptyState3();
@@ -2954,10 +2979,10 @@ function renderWorkflowPanel3(workflow, summary = null) {
     ${todos.length ? workflowSection3("Todo", todos) : ""}
     ${steps.length ? workflowSection3("Plan", steps) : ""}
   `;
-  renderWorkflowStrip();
-  scrollTranscript2();
+  renderWorkflowStrip2();
+  scrollTranscript();
 }
-function renderWorkflowStrip() {
+function renderWorkflowStrip2() {
   if (!state.workflow || !state.workflow.todos?.length && !state.workflow.plan?.steps?.length) {
     els.workflowStrip.classList.add("hidden");
     els.workflowStrip.innerHTML = "";
@@ -3030,8 +3055,8 @@ function appendMessage3(kind, label, text, attachments = []) {
   const wasAtBottom = isTranscriptNearBottom3();
   const node = createMessageNode3(kind, label, text, attachments);
   appendTranscriptNode3(node);
-  scrollTranscript2({ onlyIfNearBottom: true, wasAtBottom });
-  if (kind === "assistant") announceStatus("收到新的助手回复");
+  scrollTranscript({ onlyIfNearBottom: true, wasAtBottom });
+  if (kind === "assistant") announceStatus2("收到新的助手回复");
 }
 function createMessageNode3(kind, label, text, attachments = []) {
   hideEmptyState3();
@@ -3043,9 +3068,9 @@ function createMessageNode3(kind, label, text, attachments = []) {
     <div class="message-body"></div>
   `;
   const body = node.querySelector(".message-body");
-  if (kind === "assistant") renderFinalAssistantBody(body, text);
+  if (kind === "assistant") renderFinalAssistantBody2(body, text);
   else {
-    renderMessageText(body, text ?? "", { markdown: false });
+    renderMessageText2(body, text ?? "", { markdown: false });
     appendMessageAttachmentChips(body, attachments);
   }
   return node;
@@ -3101,7 +3126,7 @@ function trimTranscriptWindow3(options = {}) {
   const willAddMarker = !state.transcriptWindow[markerKey];
   const limit = Math.max(1, TRANSCRIPT_DOM_LIMIT - (willAddMarker ? 1 : 0));
   const nodes = Array.from(els.transcript.children ?? []);
-  const toRemove = selectTranscriptNodesToRemove(nodes, limit, direction, isProtectedTranscriptNode3);
+  const toRemove = selectTranscriptNodesToRemove2(nodes, limit, direction, isProtectedTranscriptNode3);
   if (toRemove.length === 0) return 0;
   const anchor = options.preserveAnchor ? captureTranscriptViewportAnchor3(new Set(toRemove)) : null;
   for (const node of toRemove) node.remove();
@@ -3158,7 +3183,7 @@ function renderTranscriptWindowMarker3(side) {
     node.setAttribute("aria-live", "off");
     node.innerHTML = `<span></span><button type="button">恢复最近消息</button>`;
     node.querySelector("button").addEventListener("click", () => {
-      if (state.currentSessionId) openSession2(state.currentSessionId);
+      if (state.currentSessionId) openSession(state.currentSessionId);
     });
     state.transcriptWindow[nodeKey] = node;
   }
@@ -3241,22 +3266,22 @@ function appendAssistantDraft3(event) {
   }
   draft.text += String(event.text ?? "");
   scheduleDraftRender4(draft);
-  scrollTranscript2({ onlyIfNearBottom: true, wasAtBottom });
+  scrollTranscript({ onlyIfNearBottom: true, wasAtBottom });
   setLiveTitle("正在生成回复");
 }
 function scheduleDraftRender4(draft) {
-  scheduleAnimationFrameOnce(draft, "renderFrame", () => renderAssistantDraft4(draft));
+  scheduleAnimationFrameOnce2(draft, "renderFrame", () => renderAssistantDraft4(draft));
 }
 function renderAssistantDraft4(draft, options = {}) {
   const wasAtBottom = isTranscriptNearBottom3();
-  if (options.force) cancelScheduledAnimationFrame(draft, "renderFrame");
+  if (options.force) cancelScheduledAnimationFrame2(draft, "renderFrame");
   if (draft.renderedLength === String(draft.text ?? "").length) {
     return;
   }
-  draft.renderedLength = appendPlainDraftDelta(draft.body, draft.text, draft.renderedLength);
-  scrollTranscript2({ onlyIfNearBottom: true, wasAtBottom });
+  draft.renderedLength = appendPlainDraftDelta2(draft.body, draft.text, draft.renderedLength);
+  scrollTranscript({ onlyIfNearBottom: true, wasAtBottom });
 }
-function appendActivity2(activity) {
+function appendActivity(activity) {
   const wasAtBottom = isTranscriptNearBottom3();
   const node = document.createElement("div");
   node.className = `activity-card ${activity.severity ?? "info"}${activity.collapsed ? "" : " open"}`;
@@ -3274,8 +3299,8 @@ function appendActivity2(activity) {
     toggle.setAttribute("aria-expanded", String(node.classList.contains("open")));
   });
   appendTranscriptNode3(node);
-  scrollTranscript2({ onlyIfNearBottom: true, wasAtBottom });
-  if (activity.severity === "danger" || activity.severity === "warning") announceStatus(activity.title);
+  scrollTranscript({ onlyIfNearBottom: true, wasAtBottom });
+  if (activity.severity === "danger" || activity.severity === "warning") announceStatus2(activity.title);
 }
 function appendContextBoundary3(event = {}) {
   const wasAtBottom = isTranscriptNearBottom3();
@@ -3289,7 +3314,7 @@ function appendContextBoundary3(event = {}) {
     <span class="context-boundary-line" aria-hidden="true"></span>
   `;
   appendTranscriptNode3(node);
-  scrollTranscript2({ onlyIfNearBottom: true, wasAtBottom });
+  scrollTranscript({ onlyIfNearBottom: true, wasAtBottom });
 }
 function contextBoundaryText4(event = {}) {
   const detail = String(event.detail ?? "").trim();
@@ -3361,7 +3386,7 @@ function clearBackgroundSubagentStatus3(groupId) {
   }
   updateLiveStatus3();
 }
-function reconcileBackgroundSubagentSnapshot2(groups, snapshotAt) {
+function reconcileBackgroundSubagentSnapshot(groups, snapshotAt) {
   const visibleGroups = Array.isArray(groups) ? groups.filter(backgroundSubagentVisible4) : [];
   const nextKeys = /* @__PURE__ */ new Set();
   const snapshotTime = Date.parse(String(snapshotAt ?? "")) || Date.now();
@@ -3416,7 +3441,7 @@ function reconcileBackgroundSubagentSnapshot2(groups, snapshotAt) {
     state.liveStatusExpanded = false;
   }
   updateLiveStatus3();
-  applyIdleRunStatus2("完成");
+  applyIdleRunStatus("完成");
 }
 function backgroundSubagentDisplayStatus4(activity, previous = {}) {
   if (activity.rawType === "subagent_group_wakeup" || activity.wakePromptQueued === true) {
@@ -3449,7 +3474,7 @@ function setLiveTitle(title) {
   state.liveTitle = title;
   updateLiveStatus3();
 }
-function toggleLiveStatusDetails() {
+function toggleLiveStatusDetails2() {
   if (state.pendingApproval) {
     showApproval3(state.pendingApproval);
     return;
@@ -3636,7 +3661,7 @@ function backgroundSubagentMeta4(item) {
 function backgroundSubagentCancellable4(item) {
   return item.cancellable !== false && (item.status === "starting" || item.status === "running" || item.status === "stale" || item.status === "lost");
 }
-function resetLiveStatus2(options = {}) {
+function resetLiveStatus(options = {}) {
   state.running = false;
   state.liveTitle = "";
   state.liveActivities.clear();
@@ -3686,7 +3711,7 @@ function idleRunStatus3(fallback) {
   }
   return fallback;
 }
-function applyIdleRunStatus2(fallback = "空闲") {
+function applyIdleRunStatus(fallback = "空闲") {
   if (state.running) {
     return;
   }
@@ -3702,7 +3727,7 @@ function updateRunStatusForBackground4(fallback = "空闲") {
 }
 function updateSessionStatus(status) {
   if (!status || typeof status !== "object") {
-    renderComposerStatus();
+    renderComposerStatus2();
     return;
   }
   state.sessionStatus = {
@@ -3710,17 +3735,17 @@ function updateSessionStatus(status) {
     ...status,
     context: status.context ?? state.sessionStatus?.context ?? null
   };
-  state.models = markCurrentModel2(state.models, state.sessionStatus.model);
-  renderComposerStatus();
+  state.models = markCurrentModel(state.models, state.sessionStatus.model);
+  renderComposerStatus2();
   renderSettingsView4();
 }
-function updateTurnChangeStats2(stats, options = {}) {
+function updateTurnChangeStats(stats, options = {}) {
   if (options.reset) {
-    resetTurnChangeStats2();
+    resetTurnChangeStats();
     return;
   }
   if (!stats || typeof stats !== "object") {
-    renderComposerStatus();
+    renderComposerStatus2();
     return;
   }
   const normalized = normalizeChangeStats4(stats);
@@ -3736,11 +3761,11 @@ function updateTurnChangeStats2(stats, options = {}) {
       approximate: state.turnChangeStats.approximate || normalized.approximate
     };
   }
-  renderComposerStatus();
+  renderComposerStatus2();
 }
-function resetTurnChangeStats2() {
+function resetTurnChangeStats() {
   state.turnChangeStats = { additions: 0, deletions: 0, files: 0, redacted: false, truncated: false, approximate: false };
-  renderComposerStatus();
+  renderComposerStatus2();
 }
 function normalizeChangeStats4(stats) {
   return {
@@ -3752,8 +3777,8 @@ function normalizeChangeStats4(stats) {
     approximate: stats.approximate === true
   };
 }
-function renderComposerStatus() {
-  setConnectionState(state.connectionState);
+function renderComposerStatus2() {
+  setConnectionState2(state.connectionState);
   if (!els.modelStatus || !els.contextStatus || !els.changeStatus) {
     return;
   }
@@ -3808,7 +3833,7 @@ function modelStatusHtml4(modelInfo, fallbackModel) {
       <span>思考</span>
       <select id="reasoning-effort-select" aria-label="思考强度" ${reasoningDisabled ? "disabled" : ""}>
         <option value=""${selectedEffort ? "" : " selected"}>默认</option>
-        ${efforts.map((effort) => `<option value="${escapeAttribute2(effort.id)}"${selectedEffort === effort.id ? " selected" : ""}${effort.description ? ` title="${escapeAttribute2(effort.description)}"` : ""}>${escapeHtml(effort.label)}</option>`).join("")}
+        ${efforts.map((effort) => `<option value="${escapeAttribute(effort.id)}"${selectedEffort === effort.id ? " selected" : ""}${effort.description ? ` title="${escapeAttribute(effort.description)}"` : ""}>${escapeHtml(effort.label)}</option>`).join("")}
       </select>
     </label>
   `;
@@ -3827,7 +3852,7 @@ function unresolvedModelStatusHtml4() {
     </label>
   `;
 }
-function handleModelStatusActivate(event) {
+function handleModelStatusActivate2(event) {
   const toggle = eventTargetOf(event).closest("#model-status-toggle");
   if (!toggle || toggle.disabled || event.type === "click" && event.detail === 0) {
     return;
@@ -3836,7 +3861,7 @@ function handleModelStatusActivate(event) {
   event.stopPropagation();
   toggleModelPanel4();
 }
-function handleModelStatusKeydown(event) {
+function handleModelStatusKeydown2(event) {
   const toggle = eventTargetOf(event).closest("#model-status-toggle");
   if (!toggle || toggle.disabled) {
     return;
@@ -3855,14 +3880,14 @@ function toggleModelPanel4() {
   }
   state.modelPanelOpen = !state.modelPanelOpen;
   renderModelPanel4();
-  renderComposerStatus();
+  renderComposerStatus2();
 }
 function hideModelPanel() {
   state.modelPanelOpen = false;
   renderModelPanel4();
-  renderComposerStatus();
+  renderComposerStatus2();
 }
-function showSettingsWorkspace() {
+function showSettingsWorkspace2() {
   const opening = !state.settingsOpen;
   if (opening) {
     state.settingsReturnFocus = document.activeElement;
@@ -3896,12 +3921,12 @@ async function refreshSettingsConfiguration4() {
     state.gatewayProfiles = normalizeGatewayProfiles(result.gatewayProfiles);
     state.agentModelTiers = normalizeAgentModelTiers(result.agentModelTiers);
     state.visionAgent = normalizeVisionAgent(result.visionAgent);
-    state.settings = normalizeDashboardSettings(result.settings);
+    state.settings = normalizeDashboardSettings2(result.settings);
     state.applyAgentDefaultsOnSwitch = state.settings.agents.syncModelTiersOnSwitch;
     updateConfigRevisions(result);
     state.settingsFeedback = null;
     renderSettingsView4();
-    renderComposerStatus();
+    renderComposerStatus2();
   } catch (error) {
     if (!isAbortError(error) && isCurrentScopedRequest(request) && state.settingsOpen) {
       state.settingsFeedback = { tone: "error", message: error instanceof Error ? error.message : "读取设置失败" };
@@ -3928,8 +3953,8 @@ function hideSettingsWorkspace(options = {}) {
   requestAnimationFrame(() => returnFocus?.focus?.({ preventScroll: true }));
 }
 function showModelConfigPanel4(modelId = "", profileId = "", intent = "") {
-  cancelScopedRequest2("gateway-probe");
-  cancelScopedRequest2("model-capabilities-probe");
+  cancelScopedRequest("gateway-probe");
+  cancelScopedRequest("model-capabilities-probe");
   const returnFocus = document.activeElement;
   const requestedProfileId = String(profileId ?? "").trim();
   const requestedModelId = String(modelId ?? "").trim();
@@ -3964,12 +3989,12 @@ function showModelConfigPanel4(modelId = "", profileId = "", intent = "") {
     returnFocus
   });
 }
-function hideModelConfigPanel2() {
+function hideModelConfigPanel() {
   if (state.modelConfigSaving) {
     return;
   }
-  cancelScopedRequest2("gateway-probe");
-  cancelScopedRequest2("model-capabilities-probe");
+  cancelScopedRequest("gateway-probe");
+  cancelScopedRequest("model-capabilities-probe");
   state.modelConfigDialogGeneration += 1;
   state.gatewayProbeRunning = false;
   state.modelCapabilityProbeRunning = false;
@@ -4007,13 +4032,13 @@ function renderModelPanel4() {
       <label>
         <span>模型来源</span>
         <select data-action="switch-source" ${state.running || state.modelSwitching || profiles.length === 0 ? "disabled" : ""}>
-          ${profiles.length > 0 ? `${unresolved ? `<option value="" selected disabled>请选择模型来源</option>` : ""}${groups.map((group) => `<option value="${escapeAttribute2(group.profiles.find((profile) => profile.ready !== false)?.id || group.profiles[0].id)}"${!unresolved && group.id === activeGroup?.id ? " selected" : ""}${group.profiles.every((profile) => profile.ready === false) ? " disabled" : ""}>${escapeHtml(group.label)}</option>`).join("")}` : `<option value="">${unresolved ? "没有可用模型来源" : escapeHtml(modelSourceLabel4(selection.model))}</option>`}
+          ${profiles.length > 0 ? `${unresolved ? `<option value="" selected disabled>请选择模型来源</option>` : ""}${groups.map((group) => `<option value="${escapeAttribute(group.profiles.find((profile) => profile.ready !== false)?.id || group.profiles[0].id)}"${!unresolved && group.id === activeGroup?.id ? " selected" : ""}${group.profiles.every((profile) => profile.ready === false) ? " disabled" : ""}>${escapeHtml(group.label)}</option>`).join("")}` : `<option value="">${unresolved ? "没有可用模型来源" : escapeHtml(modelSourceLabel4(selection.model))}</option>`}
         </select>
       </label>
       <label>
         <span>模型名称</span>
         <select data-action="switch-model" ${state.running || state.modelSwitching || unresolved || models.length === 0 ? "disabled" : ""}>
-          ${unresolved ? `<option value="" selected>请先选择模型来源</option>` : models.map((model) => `<option value="${escapeAttribute2(model.id)}" data-profile-id="${escapeAttribute2(model.switchProfileId)}"${model.id === activeModelId && model.switchProfileId === activeProfileId ? " selected" : ""}${model.switchReady ? "" : " disabled"}>${escapeHtml(modelPickerLabel(model, models))}</option>`).join("") || `<option value="">未配置模型</option>`}
+          ${unresolved ? `<option value="" selected>请先选择模型来源</option>` : models.map((model) => `<option value="${escapeAttribute(model.id)}" data-profile-id="${escapeAttribute(model.switchProfileId)}"${model.id === activeModelId && model.switchProfileId === activeProfileId ? " selected" : ""}${model.switchReady ? "" : " disabled"}>${escapeHtml(modelPickerLabel(model, models))}</option>`).join("") || `<option value="">未配置模型</option>`}
         </select>
       </label>
     </div>
@@ -4032,10 +4057,10 @@ function modelCapabilityLabels5(model) {
   if (model?.thinking) labels.push("thinking");
   return labels.length > 0 ? labels : ["文本"];
 }
-function handleModelPanelClick(event) {
+function handleModelPanelClick2(event) {
   event.stopPropagation();
 }
-async function handleModelPanelChange(event) {
+async function handleModelPanelChange2(event) {
   event.stopPropagation();
   const select = eventElement(event)?.closest("select[data-action]");
   if (!(select instanceof HTMLSelectElement) || select.disabled) return;
@@ -4110,7 +4135,7 @@ function modelSettingsHtml5() {
         </div>
         <div class="settings-section-tools">
           <span class="settings-section-count">${models.length} 个</span>
-          <button class="settings-primary-action" id="settings-add-model" type="button" data-action="add-model" data-profile-id="${escapeAttribute2(inspectedProfile?.id || "")}"${!inspectedProfile || inspectedProfile.editable === false || state.settingsRefreshing || state.running ? " disabled" : ""}>添加模型</button>
+          <button class="settings-primary-action" id="settings-add-model" type="button" data-action="add-model" data-profile-id="${escapeAttribute(inspectedProfile?.id || "")}"${!inspectedProfile || inspectedProfile.editable === false || state.settingsRefreshing || state.running ? " disabled" : ""}>添加模型</button>
         </div>
       </div>
       <div class="settings-model-list">
@@ -4120,7 +4145,7 @@ function modelSettingsHtml5() {
   `;
 }
 function transcriptSettingsHtml5() {
-  const settings = state.settings ?? normalizeDashboardSettings(null);
+  const settings = state.settings ?? normalizeDashboardSettings2(null);
   const transcript = settings.transcript;
   const managed = settings.managed;
   return `
@@ -4170,10 +4195,10 @@ function transcriptRetentionOptionsHtml5(current) {
   if (current !== null && Number.isInteger(current) && !options.some(([value]) => value === currentValue)) {
     options.splice(options.length - 1, 0, [currentValue, `${current} 天（当前）`]);
   }
-  return options.map(([value, label]) => `<option value="${escapeAttribute2(value)}"${value === currentValue ? " selected" : ""}>${escapeHtml(label)}</option>`).join("");
+  return options.map(([value, label]) => `<option value="${escapeAttribute(value)}"${value === currentValue ? " selected" : ""}>${escapeHtml(label)}</option>`).join("");
 }
 function networkSettingsHtml5() {
-  const settings = state.settings ?? normalizeDashboardSettings(null);
+  const settings = state.settings ?? normalizeDashboardSettings2(null);
   const network = settings.network;
   return `
     <form class="settings-form" data-settings-form="network">
@@ -4201,10 +4226,10 @@ function networkSettingsHtml5() {
 }
 function networkModeOptionHtml5(value, label, network) {
   const allowed = Array.isArray(network.allowedModes) && network.allowedModes.includes(value);
-  return `<option value="${escapeAttribute2(value)}"${network.mode === value ? " selected" : ""}${allowed ? "" : " disabled"}>${escapeHtml(label)}</option>`;
+  return `<option value="${escapeAttribute(value)}"${network.mode === value ? " selected" : ""}${allowed ? "" : " disabled"}>${escapeHtml(label)}</option>`;
 }
 function agentSettingsHtml5() {
-  const settings = state.settings ?? normalizeDashboardSettings(null);
+  const settings = state.settings ?? normalizeDashboardSettings2(null);
   const agents = settings.agents;
   return `
     <form class="settings-form" data-settings-form="agents">
@@ -4213,7 +4238,7 @@ function agentSettingsHtml5() {
         <div class="settings-control-list">
           <label class="settings-field-row">
             <span><strong>只读任务并行数</strong></span>
-            <span class="settings-number-control"><input name="maxParallelReadonlyAgentRuns" type="number" min="1" max="8" step="1" required value="${escapeAttribute2(agents.maxParallelReadonlyAgentRuns)}"${settingsDisabled5(false)} /><span>个</span></span>
+            <span class="settings-number-control"><input name="maxParallelReadonlyAgentRuns" type="number" min="1" max="8" step="1" required value="${escapeAttribute(agents.maxParallelReadonlyAgentRuns)}"${settingsDisabled5(false)} /><span>个</span></span>
           </label>
           ${settingsToggleHtml5("backgroundWakeupEnabled", "允许后台子智能体", agents.backgroundWakeupEnabled)}
           ${settingsToggleHtml5("backgroundByDefault", "模型子任务默认后台运行", agents.backgroundByDefault)}
@@ -4226,7 +4251,7 @@ function agentSettingsHtml5() {
         <div class="settings-control-list">
           <label class="settings-field-row">
             <span><strong>自动续跑上限</strong></span>
-            <span class="settings-number-control"><input name="goalMaxAutoContinues" type="number" min="1" max="100" step="1" required value="${escapeAttribute2(agents.goalMaxAutoContinues)}"${settingsDisabled5(false)} /><span>次</span></span>
+            <span class="settings-number-control"><input name="goalMaxAutoContinues" type="number" min="1" max="100" step="1" required value="${escapeAttribute(agents.goalMaxAutoContinues)}"${settingsDisabled5(false)} /><span>次</span></span>
           </label>
         </div>
       </section>
@@ -4235,7 +4260,7 @@ function agentSettingsHtml5() {
   `;
 }
 function reliabilitySettingsHtml5() {
-  const settings = state.settings ?? normalizeDashboardSettings(null);
+  const settings = state.settings ?? normalizeDashboardSettings2(null);
   const reliability = settings.reliability;
   const managed = settings.managed;
   return `
@@ -4245,15 +4270,15 @@ function reliabilitySettingsHtml5() {
         <div class="settings-control-list">
           <label class="settings-field-row">
             <span><strong>失败重试</strong>${managedFieldHtml5(managed.gatewayMaxRetries)}</span>
-            <span class="settings-number-control"><input name="maxRetries" type="number" min="0" max="5" step="1" required value="${escapeAttribute2(reliability.maxRetries)}"${settingsDisabled5(managed.gatewayMaxRetries)} /><span>次</span></span>
+            <span class="settings-number-control"><input name="maxRetries" type="number" min="0" max="5" step="1" required value="${escapeAttribute(reliability.maxRetries)}"${settingsDisabled5(managed.gatewayMaxRetries)} /><span>次</span></span>
           </label>
           <label class="settings-field-row">
             <span><strong>总超时</strong>${managedFieldHtml5(managed.gatewayTimeoutMs)}</span>
-            <span class="settings-number-control"><input name="timeoutSeconds" type="number" min="1" max="900" step="1" required value="${escapeAttribute2(Math.round(reliability.timeoutMs / 1e3))}"${settingsDisabled5(managed.gatewayTimeoutMs)} /><span>秒</span></span>
+            <span class="settings-number-control"><input name="timeoutSeconds" type="number" min="1" max="900" step="1" required value="${escapeAttribute(Math.round(reliability.timeoutMs / 1e3))}"${settingsDisabled5(managed.gatewayTimeoutMs)} /><span>秒</span></span>
           </label>
           <label class="settings-field-row">
             <span><strong>流空闲超时</strong>${managedFieldHtml5(managed.gatewayIdleTimeoutMs)}</span>
-            <span class="settings-number-control"><input name="idleTimeoutSeconds" type="number" min="1" max="300" step="1" required value="${escapeAttribute2(Math.round(reliability.idleTimeoutMs / 1e3))}"${settingsDisabled5(managed.gatewayIdleTimeoutMs)} /><span>秒</span></span>
+            <span class="settings-number-control"><input name="idleTimeoutSeconds" type="number" min="1" max="300" step="1" required value="${escapeAttribute(Math.round(reliability.idleTimeoutMs / 1e3))}"${settingsDisabled5(managed.gatewayIdleTimeoutMs)} /><span>秒</span></span>
           </label>
         </div>
       </section>
@@ -4262,10 +4287,10 @@ function reliabilitySettingsHtml5() {
   `;
 }
 function settingsSectionHeading5(kicker, title, id) {
-  return `<div class="settings-section-head"><div><div class="settings-section-kicker">${escapeHtml(kicker)}</div><h2 id="${escapeAttribute2(id)}">${escapeHtml(title)}</h2></div></div>`;
+  return `<div class="settings-section-head"><div><div class="settings-section-kicker">${escapeHtml(kicker)}</div><h2 id="${escapeAttribute(id)}">${escapeHtml(title)}</h2></div></div>`;
 }
 function settingsToggleHtml5(name, label, checked, detail = "") {
-  return `<label class="settings-toggle-row"><span><strong>${escapeHtml(label)}</strong>${detail ? `<small>${escapeHtml(detail)}</small>` : ""}</span><input name="${escapeAttribute2(name)}" type="checkbox"${checked ? " checked" : ""}${settingsDisabled5(false)} /></label>`;
+  return `<label class="settings-toggle-row"><span><strong>${escapeHtml(label)}</strong>${detail ? `<small>${escapeHtml(detail)}</small>` : ""}</span><input name="${escapeAttribute(name)}" type="checkbox"${checked ? " checked" : ""}${settingsDisabled5(false)} /></label>`;
 }
 function managedFieldHtml5(managed) {
   return managed ? `<small>环境变量管理</small>` : "";
@@ -4283,7 +4308,7 @@ function settingsFormActions5() {
 }
 function settingsFeedbackHtml5() {
   if (!state.settingsFeedback?.message) return "";
-  return `<div class="settings-feedback ${escapeAttribute2(state.settingsFeedback.tone)}" role="status">${escapeHtml(state.settingsFeedback.message)}</div>`;
+  return `<div class="settings-feedback ${escapeAttribute(state.settingsFeedback.tone)}" role="status">${escapeHtml(state.settingsFeedback.message)}</div>`;
 }
 function settingsGatewayProfileHtml5(profile) {
   const confirmingDelete = state.deleteConfirmGatewayProfileId === profile.id;
@@ -4299,11 +4324,11 @@ function settingsGatewayProfileHtml5(profile) {
         <small>${escapeHtml(profile.ready === false ? `${protocolDisplayName5(profile.gatewayProtocol)} · 配置不完整` : `${protocolDisplayName5(profile.gatewayProtocol)} · ${profile.apiKeyConfigured ? "Key 已配置" : "无 Key"} · ${count} 模型`)}</small>
       </div>
       <div class="settings-row-actions">
-        <label title="使用此配置保存的凭据；保存范围由上方项目/全局选项决定"><input type="radio" name="credential-${escapeAttribute2(String(profile.connectionGroupId || profile.id))}" data-action="select-source-credential" data-profile-id="${escapeAttribute2(profile.id)}" ${profile.activeCredentialProfileId === profile.id ? "checked" : ""} ${state.running || state.settingsRefreshing ? "disabled" : ""}>生效凭据</label>
-        <button type="button" data-action="inspect-profile" data-profile-id="${escapeAttribute2(profile.id)}" aria-pressed="${inspected}" ${state.settingsRefreshing ? "disabled" : ""}>${inspected ? "正在查看" : "查看模型"}</button>
-        <button type="button" data-action="use-profile" data-profile-id="${escapeAttribute2(profile.id)}" ${profile.ready === false || state.settingsRefreshing || state.running || state.modelSwitching ? "disabled" : ""}>设为默认</button>
-        <button type="button" data-action="edit-gateway-profile" data-profile-id="${escapeAttribute2(profile.id)}"${profile.editable === false ? ` title="${escapeAttribute2(gatewayProfileReadonlyLabel5(profile))}"` : ""} ${profile.editable === false || state.settingsRefreshing || state.running || Boolean(state.deletingGatewayProfileId) ? "disabled" : ""}>${profile.editable === false ? "只读" : "编辑"}</button>
-        <button class="danger" type="button" data-action="delete-gateway-profile" data-profile-id="${escapeAttribute2(profile.id)}" ${profile.editable === false || state.settingsRefreshing || state.running || Boolean(state.deletingGatewayProfileId) ? "disabled" : ""}>${deleting ? "删除中" : confirmingDelete ? "确认删除" : "删除"}</button>
+        <label title="使用此配置保存的凭据；保存范围由上方项目/全局选项决定"><input type="radio" name="credential-${escapeAttribute(String(profile.connectionGroupId || profile.id))}" data-action="select-source-credential" data-profile-id="${escapeAttribute(profile.id)}" ${profile.activeCredentialProfileId === profile.id ? "checked" : ""} ${state.running || state.settingsRefreshing ? "disabled" : ""}>生效凭据</label>
+        <button type="button" data-action="inspect-profile" data-profile-id="${escapeAttribute(profile.id)}" aria-pressed="${inspected}" ${state.settingsRefreshing ? "disabled" : ""}>${inspected ? "正在查看" : "查看模型"}</button>
+        <button type="button" data-action="use-profile" data-profile-id="${escapeAttribute(profile.id)}" ${profile.ready === false || state.settingsRefreshing || state.running || state.modelSwitching ? "disabled" : ""}>设为默认</button>
+        <button type="button" data-action="edit-gateway-profile" data-profile-id="${escapeAttribute(profile.id)}"${profile.editable === false ? ` title="${escapeAttribute(gatewayProfileReadonlyLabel5(profile))}"` : ""} ${profile.editable === false || state.settingsRefreshing || state.running || Boolean(state.deletingGatewayProfileId) ? "disabled" : ""}>${profile.editable === false ? "只读" : "编辑"}</button>
+        <button class="danger" type="button" data-action="delete-gateway-profile" data-profile-id="${escapeAttribute(profile.id)}" ${profile.editable === false || state.settingsRefreshing || state.running || Boolean(state.deletingGatewayProfileId) ? "disabled" : ""}>${deleting ? "删除中" : confirmingDelete ? "确认删除" : "删除"}</button>
       </div>
       ${confirmingDelete ? `<div class="settings-delete-confirm">再次点击确认删除；删除当前来源后不会自动切换到其他来源。</div>` : ""}
     </div>
@@ -4354,15 +4379,15 @@ function settingsModelHtml5(model, profile, modelCount) {
         </div>
       </div>
       <div class="settings-row-actions">
-        <button type="button" data-action="use-model" data-model-id="${escapeAttribute2(model.id)}" data-profile-id="${escapeAttribute2(profile?.id || "")}" ${isScopedDefault || state.settingsRefreshing || state.running || state.modelSwitching ? "disabled" : ""}>${isScopedDefault ? "已设为默认" : "设为默认"}</button>
-        <button type="button" data-action="edit-model" data-model-id="${escapeAttribute2(model.id)}" data-profile-id="${escapeAttribute2(profile?.id || "")}" ${!modelEditable || state.settingsRefreshing || state.running || Boolean(state.deletingModelKey) ? "disabled" : ""}>${modelEditable ? "编辑" : "只读"}</button>
-        <button class="danger" type="button" data-action="delete-model" data-model-id="${escapeAttribute2(model.id)}" data-profile-id="${escapeAttribute2(profile?.id || "")}" data-save-target="${escapeAttribute2(source?.saveTarget || profile?.saveTarget || "")}" ${!modelEditable || state.settingsRefreshing || state.running || Boolean(state.deletingModelKey) ? "disabled" : ""}>${deleting ? "删除中" : confirmingDelete ? "确认删除" : "删除"}</button>
+        <button type="button" data-action="use-model" data-model-id="${escapeAttribute(model.id)}" data-profile-id="${escapeAttribute(profile?.id || "")}" ${isScopedDefault || state.settingsRefreshing || state.running || state.modelSwitching ? "disabled" : ""}>${isScopedDefault ? "已设为默认" : "设为默认"}</button>
+        <button type="button" data-action="edit-model" data-model-id="${escapeAttribute(model.id)}" data-profile-id="${escapeAttribute(profile?.id || "")}" ${!modelEditable || state.settingsRefreshing || state.running || Boolean(state.deletingModelKey) ? "disabled" : ""}>${modelEditable ? "编辑" : "只读"}</button>
+        <button class="danger" type="button" data-action="delete-model" data-model-id="${escapeAttribute(model.id)}" data-profile-id="${escapeAttribute(profile?.id || "")}" data-save-target="${escapeAttribute(source?.saveTarget || profile?.saveTarget || "")}" ${!modelEditable || state.settingsRefreshing || state.running || Boolean(state.deletingModelKey) ? "disabled" : ""}>${deleting ? "删除中" : confirmingDelete ? "确认删除" : "删除"}</button>
       </div>
       ${confirmingDelete ? `<div class="settings-delete-confirm">${escapeHtml(confirmCopy)}</div>` : ""}
     </div>
   `;
 }
-function handleSettingsRailClick(event) {
+function handleSettingsRailClick2(event) {
   const button = eventTargetOf(event).closest("button[data-settings-section]");
   if (!button || state.settingsSaving) return;
   state.settingsSection = button.dataset.settingsSection || "models";
@@ -4376,7 +4401,7 @@ function initializeSettingsFormTracking5(form) {
   }
   form.dataset.changedFields = "[]";
 }
-function handleSettingsFormChange(event) {
+function handleSettingsFormChange2(event) {
   const form = eventTargetOf(event).closest?.("form[data-settings-form]");
   if (!form || state.settingsSaving) return;
   form.dataset.changedFields = JSON.stringify(changedSettingsFields5(form));
@@ -4422,7 +4447,7 @@ function renderSettingsFeedbackInPlace5() {
   feedback.setAttribute("role", state.settingsFeedback.tone === "error" ? "alert" : "status");
   feedback.textContent = state.settingsFeedback.message;
 }
-async function saveSettingsConfig(event) {
+async function saveSettingsConfig2(event) {
   const form = eventTargetOf(event).closest("form[data-settings-form]");
   if (!(form instanceof HTMLFormElement)) return;
   event.preventDefault();
@@ -4468,7 +4493,7 @@ async function saveSettingsConfig(event) {
       changedFields
     });
     if (!result.ok) throw new Error(result.error ?? "设置保存失败");
-    state.settings = normalizeDashboardSettings(result.settings);
+    state.settings = normalizeDashboardSettings2(result.settings);
     state.applyAgentDefaultsOnSwitch = state.settings.agents.syncModelTiersOnSwitch;
     state.goal.maxAutoContinues = state.settings.agents.goalMaxAutoContinues;
     state.settingsFeedback = { tone: "success", message: "设置已保存" };
@@ -4476,16 +4501,16 @@ async function saveSettingsConfig(event) {
     if (els.settingsBack) els.settingsBack.disabled = false;
     if (result.sessionStatus) updateSessionStatus(result.sessionStatus);
     else renderSettingsView4();
-    announceStatus("设置已保存");
+    announceStatus2("设置已保存");
   } catch (error) {
     state.settingsFeedback = { tone: "error", message: error instanceof Error ? error.message : "设置保存失败" };
     state.settingsSaving = false;
     setSettingsFormSaving5(form, false);
     renderSettingsFeedbackInPlace5();
-    announceStatus(state.settingsFeedback.message);
+    announceStatus2(state.settingsFeedback.message);
   }
 }
-async function handleSettingsClick(event) {
+async function handleSettingsClick2(event) {
   const action = eventTargetOf(event).closest("[data-action]");
   if (!action) return;
   if (action.dataset.action === "select-default-scope") {
@@ -4550,14 +4575,14 @@ function agentModelPickerHtml5(name, label, value) {
   const inputId = `agent-model-${name}`;
   const selectId = `${inputId}-select`;
   return `
-    <div class="agent-model-picker" data-agent-model-picker data-saved-model-id="${escapeAttribute2(modelId)}">
-      <label for="${escapeAttribute2(selectId)}">${escapeHtml(label)}</label>
-      <select id="${escapeAttribute2(selectId)}" data-agent-model-select="${escapeAttribute2(name)}" aria-controls="${escapeAttribute2(inputId)}">
+    <div class="agent-model-picker" data-agent-model-picker data-saved-model-id="${escapeAttribute(modelId)}">
+      <label for="${escapeAttribute(selectId)}">${escapeHtml(label)}</label>
+      <select id="${escapeAttribute(selectId)}" data-agent-model-select="${escapeAttribute(name)}" aria-controls="${escapeAttribute(inputId)}">
         <option value=""${modelId ? "" : " selected"}>未指定</option>
-        ${modelId ? `<option value="${escapeAttribute2(modelId)}" selected>${escapeHtml(modelId)}（已保存 · 等待目录核对）</option>` : ""}
+        ${modelId ? `<option value="${escapeAttribute(modelId)}" selected>${escapeHtml(modelId)}（已保存 · 等待目录核对）</option>` : ""}
         <option value="${MANUAL_AGENT_MODEL_VALUE}">手工输入 ID...</option>
       </select>
-      <input class="agent-model-manual-input hidden" id="${escapeAttribute2(inputId)}" name="${escapeAttribute2(name)}" aria-label="${escapeAttribute2(`${label} 手工模型 ID`)}" spellcheck="false" value="${escapeAttribute2(modelId)}" placeholder="输入精确模型 ID" />
+      <input class="agent-model-manual-input hidden" id="${escapeAttribute(inputId)}" name="${escapeAttribute(name)}" aria-label="${escapeAttribute(`${label} 手工模型 ID`)}" spellcheck="false" value="${escapeAttribute(modelId)}" placeholder="输入精确模型 ID" />
       <small class="agent-model-picker-status">${modelId ? "已保存，等待目录核对" : "未指定"}</small>
     </div>
   `;
@@ -4666,7 +4691,7 @@ function renderModelConfigPanel4() {
       <div class="model-config-grid">
         <label>
           <span>网关 URL</span>
-          <input name="gatewayUrl" type="url" required spellcheck="false" value="${escapeAttribute2(gateway.gatewayUrl || "")}" placeholder="${escapeAttribute2(gatewayUrlPlaceholder5(gatewayProtocol))}" />
+          <input name="gatewayUrl" type="url" required spellcheck="false" value="${escapeAttribute(gateway.gatewayUrl || "")}" placeholder="${escapeAttribute(gatewayUrlPlaceholder5(gatewayProtocol))}" />
           <small class="gateway-url-hint">${escapeHtml(gatewayUrlHint5(gatewayProtocol))}</small>
         </label>
         <label>
@@ -4679,11 +4704,11 @@ function renderModelConfigPanel4() {
         </label>
         <label>
           <span>API Key</span>
-          <input name="gatewayApiKey" type="password" autocomplete="new-password" spellcheck="false" data-key-configured="${gateway.apiKeyConfigured ? "true" : "false"}" data-keep-placeholder="${escapeAttribute2(gateway.apiKeyConfigured ? `已配置，来自${keySource}，留空则保留` : "可选")}" placeholder="${escapeAttribute2(gateway.apiKeyConfigured ? `已配置，来自${keySource}，留空则保留` : "可选")}" />
+          <input name="gatewayApiKey" type="password" autocomplete="new-password" spellcheck="false" data-key-configured="${gateway.apiKeyConfigured ? "true" : "false"}" data-keep-placeholder="${escapeAttribute(gateway.apiKeyConfigured ? `已配置，来自${keySource}，留空则保留` : "可选")}" placeholder="${escapeAttribute(gateway.apiKeyConfigured ? `已配置，来自${keySource}，留空则保留` : "可选")}" />
         </label>
         <label>
           <span>健康检查 URL</span>
-          <input name="gatewayHealthUrl" type="url" spellcheck="false" value="${escapeAttribute2(gateway.gatewayHealthUrl || "")}" placeholder="可选" />
+          <input name="gatewayHealthUrl" type="url" spellcheck="false" value="${escapeAttribute(gateway.gatewayHealthUrl || "")}" placeholder="可选" />
         </label>
         <div class="gateway-probe-row">
           <button type="button" data-action="probe-gateway" ${state.gatewayProbeRunning ? "disabled" : ""}>${state.gatewayProbeRunning ? "连接中" : "测试连接 / 发现模型"}</button>
@@ -4691,15 +4716,15 @@ function renderModelConfigPanel4() {
         </div>
         <label>
           <span>模型 ID</span>
-          <input name="modelId" required spellcheck="false" value="${escapeAttribute2(current.id || "")}" placeholder="example-coding-model" />
+          <input name="modelId" required spellcheck="false" value="${escapeAttribute(current.id || "")}" placeholder="example-coding-model" />
         </label>
         <label>
           <span>模型备注</span>
-          <input name="label" maxlength="160" spellcheck="false" value="${escapeAttribute2(current.label === current.id ? "" : current.label || "")}" placeholder="例如：科研分析、代码开发" />
+          <input name="label" maxlength="160" spellcheck="false" value="${escapeAttribute(current.label === current.id ? "" : current.label || "")}" placeholder="例如：科研分析、代码开发" />
         </label>
         <label>
           <span>上下文窗口</span>
-          <input name="contextTokens" inputmode="numeric" pattern="[0-9]*" value="${escapeAttribute2(current.contextTokens || "")}" placeholder="例如 400000" />
+          <input name="contextTokens" inputmode="numeric" pattern="[0-9]*" value="${escapeAttribute(current.contextTokens || "")}" placeholder="例如 400000" />
         </label>
       </div>
       <fieldset class="agent-model-config">
@@ -4712,7 +4737,7 @@ function renderModelConfigPanel4() {
           ${agentModelPickerHtml5("visionAgentModel", "vision", visionAgentModel)}
         </div>
       </fieldset>
-      <fieldset class="model-reasoning-config" data-reasoning-mode="${state.modelConfigReasoningLocked ? "manual" : "auto"}" data-reasoning-source="${escapeAttribute2(state.modelConfigReasoningSource)}">
+      <fieldset class="model-reasoning-config" data-reasoning-mode="${state.modelConfigReasoningLocked ? "manual" : "auto"}" data-reasoning-source="${escapeAttribute(state.modelConfigReasoningSource)}">
         <legend>思考强度</legend>
         <div class="model-reasoning-discovery">
           <span class="model-reasoning-status" id="reasoning-capability-status" role="status" aria-live="polite"></span>
@@ -4724,7 +4749,7 @@ function renderModelConfigPanel4() {
         <div class="model-reasoning-options">
           ${effortChoices.map((effort) => `
             <label>
-              <input name="reasoningEfforts" type="checkbox" value="${escapeAttribute2(effort.id)}" data-effort-label="${escapeAttribute2(effort.label)}"${selectedEffortIds.has(effort.id) ? " checked" : ""} />
+              <input name="reasoningEfforts" type="checkbox" value="${escapeAttribute(effort.id)}" data-effort-label="${escapeAttribute(effort.label)}"${selectedEffortIds.has(effort.id) ? " checked" : ""} />
               <span>${escapeHtml(effort.label)}</span>
             </label>
           `).join("")}
@@ -4733,7 +4758,7 @@ function renderModelConfigPanel4() {
           <span>模型默认强度</span>
           <select name="defaultReasoningEffort" ${selectedEffortIds.size === 0 ? "disabled" : ""}>
             <option value="">未指定</option>
-            ${effortChoices.filter((effort) => selectedEffortIds.has(effort.id)).map((effort) => `<option value="${escapeAttribute2(effort.id)}"${defaultReasoningEffort === effort.id ? " selected" : ""}>${escapeHtml(effort.label)}</option>`).join("")}
+            ${effortChoices.filter((effort) => selectedEffortIds.has(effort.id)).map((effort) => `<option value="${escapeAttribute(effort.id)}"${defaultReasoningEffort === effort.id ? " selected" : ""}>${escapeHtml(effort.label)}</option>`).join("")}
           </select>
         </label>
       </fieldset>
@@ -4761,10 +4786,10 @@ function renderModelConfigPanel4() {
   renderGatewayProbeResult5();
   renderReasoningCapabilityStatus5();
 }
-async function handleModelConfigPanelClick(event) {
+async function handleModelConfigPanelClick2(event) {
   const action = eventTargetOf(event).closest("button[data-action]");
   if (action?.dataset.action === "close-model-config") {
-    hideModelConfigPanel2();
+    hideModelConfigPanel();
   } else if (action?.dataset.action === "probe-gateway") {
     await probeGateway5(action.closest("form"));
   } else if (action?.dataset.action === "select-probed-model") {
@@ -4777,7 +4802,7 @@ async function handleModelConfigPanelClick(event) {
     applyPendingReasoningCapabilities5(action.closest("form"));
   }
 }
-function handleModelConfigInput(event) {
+function handleModelConfigInput2(event) {
   const target = event.target;
   const form = target?.closest?.("form");
   if (!target || !form) return;
@@ -4802,7 +4827,7 @@ function handleModelConfigInput(event) {
     }
   }
 }
-function handleModelConfigChange(event) {
+function handleModelConfigChange2(event) {
   if (eventTargetOf(event).matches("select[data-agent-model-select]")) {
     handleAgentModelSelection5(event.target);
   } else if (eventTargetOf(event).matches(".agent-model-manual-input")) {
@@ -4835,8 +4860,8 @@ function handleModelConfigChange(event) {
 }
 function markModelConfigCredentialChanged5(form) {
   state.modelConfigCredentialRevision += 1;
-  cancelScopedRequest2("gateway-probe");
-  cancelScopedRequest2("model-capabilities-probe");
+  cancelScopedRequest("gateway-probe");
+  cancelScopedRequest("model-capabilities-probe");
   state.gatewayProbeRunning = false;
   state.modelCapabilityProbeRunning = false;
   state.modelCapabilityProbeError = "";
@@ -4854,8 +4879,8 @@ function markModelConfigEndpointChanged5(form, options = {}) {
   syncAgentModelPickersForEndpoint6(form, {
     retainedCatalogModelIds: options.retainedAgentModelIds
   });
-  cancelScopedRequest2("gateway-probe");
-  cancelScopedRequest2("model-capabilities-probe");
+  cancelScopedRequest("gateway-probe");
+  cancelScopedRequest("model-capabilities-probe");
   state.gatewayProbeRunning = false;
   state.modelCapabilityProbeRunning = false;
   state.modelCapabilityProbeError = "";
@@ -4876,7 +4901,7 @@ function markModelConfigEndpointChanged5(form, options = {}) {
   renderReasoningCapabilityStatus5();
 }
 function handleModelConfigModelIdChanged5(form) {
-  cancelScopedRequest2("model-capabilities-probe");
+  cancelScopedRequest("model-capabilities-probe");
   state.modelCapabilityProbeRunning = false;
   state.modelCapabilityProbeError = "";
   state.modelCapabilityDiscoveryToken = "";
@@ -4935,7 +4960,7 @@ function syncReasoningDefaultOptions5(form) {
     id: input.value,
     label: input.dataset.effortLabel || input.value
   }));
-  select.innerHTML = `<option value="">未指定</option>${efforts.map((effort) => `<option value="${escapeAttribute2(effort.id)}">${escapeHtml(effort.label)}</option>`).join("")}`;
+  select.innerHTML = `<option value="">未指定</option>${efforts.map((effort) => `<option value="${escapeAttribute(effort.id)}">${escapeHtml(effort.label)}</option>`).join("")}`;
   select.disabled = efforts.length === 0;
   select.value = efforts.some((effort) => effort.id === previous) ? previous : "";
 }
@@ -5283,10 +5308,10 @@ function renderGatewayProbeResult5(options = {}) {
   target.innerHTML = `
     <strong>${escapeHtml(result.message || "连接成功")}</strong>
     ${result.modelsUrl ? `<span>模型列表 ${escapeHtml(result.modelsUrl)}</span>` : ""}
-    ${suggestedGatewayUrl && suggestedGatewayUrl !== currentGatewayUrl ? `<button class="gateway-probe-suggestion" type="button" data-action="use-suggested-gateway-url" data-gateway-url="${escapeAttribute2(suggestedGatewayUrl)}">使用建议地址</button>` : ""}
+    ${suggestedGatewayUrl && suggestedGatewayUrl !== currentGatewayUrl ? `<button class="gateway-probe-suggestion" type="button" data-action="use-suggested-gateway-url" data-gateway-url="${escapeAttribute(suggestedGatewayUrl)}">使用建议地址</button>` : ""}
     ${(result.models ?? []).length > 0 ? `
       <div class="gateway-probe-models" aria-label="发现的模型">
-        ${(result.models ?? []).map((model) => `<button type="button" data-action="select-probed-model" data-model-id="${escapeAttribute2(model.id)}" data-model-label="${escapeAttribute2(model.label)}">${escapeHtml(model.label || model.id)}</button>`).join("")}
+        ${(result.models ?? []).map((model) => `<button type="button" data-action="select-probed-model" data-model-id="${escapeAttribute(model.id)}" data-model-label="${escapeAttribute(model.label)}">${escapeHtml(model.label || model.id)}</button>`).join("")}
       </div>
     ` : `<span>未返回模型列表</span>`}
   `;
@@ -5508,7 +5533,7 @@ function ensureReasoningEffortOptions6(form, efforts) {
       continue;
     }
     const label = document.createElement("label");
-    label.innerHTML = `<input name="reasoningEfforts" type="checkbox" value="${escapeAttribute2(effort.id)}"><span></span>`;
+    label.innerHTML = `<input name="reasoningEfforts" type="checkbox" value="${escapeAttribute(effort.id)}"><span></span>`;
     const created = label.querySelector("input");
     if (created) created.dataset.effortLabel = effort.label;
     const span = label.querySelector("span");
@@ -5727,7 +5752,7 @@ function manualAgentModelIds6(form) {
 }
 
 // src/dashboard/public/app-ui7.ts
-async function saveModelConfig(event) {
+async function saveModelConfig2(event) {
   event.preventDefault();
   if (state.modelConfigSaving) {
     return;
@@ -5797,10 +5822,10 @@ async function saveModelConfig(event) {
     updateSessionStatus(result.sessionStatus);
     if (!state.currentSessionId) rememberNewTaskModelState();
     state.modelConfigSaving = false;
-    hideModelConfigPanel2();
+    hideModelConfigPanel();
     hideModelPanel();
     renderSettingsView4();
-    renderComposerStatus();
+    renderComposerStatus2();
     if (payload.switchToModel) {
       const defaultModelId = String(result.modelId ?? payload.modelId ?? "").trim();
       showNotice7("模型配置已保存", `${modelSaveTargetLabel7(payload.saveTarget)}，默认模型已设为 ${modelDisplayName7(defaultModelId, String(payload.label || payload.modelId || ""))}`);
@@ -5813,8 +5838,8 @@ async function saveModelConfig(event) {
     setModelConfigFormSaving6(form, false);
     const message = error instanceof Error ? error.message : "保存模型配置失败";
     renderModelConfigFailure6(form, message);
-    announceStatus(message);
-    renderComposerStatus();
+    announceStatus2(message);
+    renderComposerStatus2();
   }
 }
 async function saveDefaultModelSelection5(modelId, providerId, scope) {
@@ -5843,11 +5868,11 @@ async function saveDefaultModelSelection5(modelId, providerId, scope) {
     if (result.gatewayConfig) mergeGatewayConfig7(result.gatewayConfig);
     if (Array.isArray(result.gatewayProfiles)) state.gatewayProfiles = normalizeGatewayProfiles(result.gatewayProfiles);
     state.settingsFeedback = { tone: "success", message: scope === "global" ? "全局默认模型已保存" : "当前项目默认模型已保存" };
-    announceStatus(state.settingsFeedback.message);
+    announceStatus2(state.settingsFeedback.message);
   } catch (error) {
     if (isPlainObject(error) && error.configConflict) await refreshConfigRevisionsAfterConflict7();
     state.settingsFeedback = { tone: "error", message: error instanceof Error ? error.message : "保存默认模型失败" };
-    announceStatus(state.settingsFeedback.message);
+    announceStatus2(state.settingsFeedback.message);
   } finally {
     state.modelSwitching = false;
     renderSettingsView4();
@@ -5860,7 +5885,7 @@ async function switchModel5(modelId, options = {}) {
   const requestSessionId = state.currentSessionId;
   const requestClientId = requestSessionId ? void 0 : dashboardClientId();
   state.modelSwitching = true;
-  renderComposerStatus();
+  renderComposerStatus2();
   renderModelPanel4();
   renderSettingsView4();
   try {
@@ -5893,20 +5918,20 @@ async function switchModel5(modelId, options = {}) {
     if (!state.currentSessionId) rememberNewTaskModelState();
     if (options.keepPanelOpen) renderModelPanel4();
     else hideModelPanel();
-    announceStatus(`模型已切换为 ${modelDisplayName7(modelId)}`);
+    announceStatus2(`模型已切换为 ${modelDisplayName7(modelId)}`);
   } catch (error) {
     if (state.currentSessionId === requestSessionId) {
       showError(errorMessageOf(error) || "切换模型失败");
     }
   } finally {
     state.modelSwitching = false;
-    renderComposerStatus();
+    renderComposerStatus2();
     renderModelPanel4();
     renderSettingsView4();
     updateSendButton();
   }
 }
-async function handleReasoningEffortChange(event) {
+async function handleReasoningEffortChange2(event) {
   const select = eventTargetOf(event).closest("#reasoning-effort-select");
   if (!select || select.disabled) return;
   await switchReasoningEffort7(select.value);
@@ -5923,7 +5948,7 @@ async function switchReasoningEffort7(reasoningEffort) {
   const requestSessionId = state.currentSessionId;
   const requestClientId = requestSessionId ? void 0 : dashboardClientId();
   state.reasoningEffortSwitching = true;
-  renderComposerStatus();
+  renderComposerStatus2();
   try {
     const normalized = normalizedReasoningEffort6(reasoningEffort);
     const result = await postJson("/api/reasoning-effort", {
@@ -5942,14 +5967,14 @@ async function switchReasoningEffort7(reasoningEffort) {
     if (Array.isArray(result.gatewayProfiles)) state.gatewayProfiles = normalizeGatewayProfiles(result.gatewayProfiles);
     updateSessionStatus(result.sessionStatus ?? { reasoningEffort: normalized || null });
     if (!state.currentSessionId) rememberNewTaskModelState();
-    announceStatus(`思考强度已设为 ${normalized ? reasoningEffortLabel7(normalized) : "默认"}`);
+    announceStatus2(`思考强度已设为 ${normalized ? reasoningEffortLabel7(normalized) : "默认"}`);
   } catch (error) {
     if (state.currentSessionId === requestSessionId) {
       showError(errorMessageOf(error) || "调整思考强度失败");
     }
   } finally {
     state.reasoningEffortSwitching = false;
-    renderComposerStatus();
+    renderComposerStatus2();
     renderSettingsView4();
   }
 }
@@ -5968,7 +5993,7 @@ async function deleteGatewayProfile5(profileId) {
   const profile = gatewayProfileById4(profileId);
   const scope = configScope5(profile?.saveTarget) || "project";
   try {
-    const result = await deleteJson2(`/api/gateway-profile/${encodeURIComponent(profileId)}`, {
+    const result = await deleteJson(`/api/gateway-profile/${encodeURIComponent(profileId)}`, {
       sessionId: requestSessionId,
       providerId: profileId,
       saveTarget: scope,
@@ -6001,7 +6026,7 @@ async function deleteGatewayProfile5(profileId) {
   } finally {
     state.deletingGatewayProfileId = "";
     renderSettingsView4();
-    renderComposerStatus();
+    renderComposerStatus2();
   }
 }
 async function deleteModel5(modelId, options = {}) {
@@ -6017,11 +6042,11 @@ async function deleteModel5(modelId, options = {}) {
   }
   state.deletingModelKey = modelKey;
   renderSettingsView4();
-  renderComposerStatus();
+  renderComposerStatus2();
   const requestSessionId = state.currentSessionId;
   const scope = configScope5(options.saveTarget || currentGatewayProfile5()?.saveTarget) || "project";
   try {
-    const result = await deleteJson2(`/api/model-config/${encodeURIComponent(modelId)}`, {
+    const result = await deleteJson(`/api/model-config/${encodeURIComponent(modelId)}`, {
       sessionId: requestSessionId,
       profileId: providerId,
       providerId,
@@ -6055,7 +6080,7 @@ async function deleteModel5(modelId, options = {}) {
   } finally {
     state.deletingModelKey = "";
     renderSettingsView4();
-    renderComposerStatus();
+    renderComposerStatus2();
   }
 }
 function updateConfigRevisions(payload) {
@@ -6155,7 +6180,7 @@ function normalizeGatewayConfig(value) {
     }
   };
 }
-function normalizeDashboardSettings(value) {
+function normalizeDashboardSettings2(value) {
   const record = isPlainObject(value) ? value : {};
   const transcript = isPlainObject(record.transcript) ? record.transcript : {};
   const network = isPlainObject(record.network) ? record.network : {};
@@ -6448,7 +6473,7 @@ function modelSourceLabel4(model) {
     return gatewayUrl || "未配置来源";
   }
 }
-function markCurrentModel2(models, currentModel) {
+function markCurrentModel(models, currentModel) {
   const current = String(currentModel ?? "");
   return normalizeModels(models).map((model) => ({
     ...model,
@@ -6635,11 +6660,11 @@ function collapseCompletedActivities3() {
   }
   appendTranscriptNode3(node);
   state.completedActivities = [];
-  scrollTranscript2({ onlyIfNearBottom: true });
+  scrollTranscript({ onlyIfNearBottom: true });
 }
 function clearAssistantDrafts3() {
   for (const draft of state.assistantDrafts.values()) {
-    cancelScheduledAnimationFrame(draft, "renderFrame");
+    cancelScheduledAnimationFrame2(draft, "renderFrame");
     draft.node?.remove();
   }
   state.assistantDrafts.clear();
@@ -6679,7 +6704,7 @@ function collapseAssistantDrafts3(finalText = "") {
     list?.append(item);
   }
   appendTranscriptNode3(node);
-  scrollTranscript2({ onlyIfNearBottom: true });
+  scrollTranscript({ onlyIfNearBottom: true });
 }
 function isMeaningfulCompletedActivity4(activity) {
   if (activity.toolName === "agent_run") {
@@ -6749,14 +6774,14 @@ function renderApprovalPanel(approval) {
     </div>
   `;
   els.approvalPanel.querySelectorAll("button[data-action]").forEach((button) => {
-    button.addEventListener("click", () => resolveApproval2(button.dataset.action));
+    button.addEventListener("click", () => resolveApproval(button.dataset.action));
   });
   activateModal(els.approvalPanel, { initialFocus: "button[data-action='allow-once']" });
   revealInteractionPanel8(els.approvalPanel, "button[data-action]");
   updateLiveStatus3();
-  announceStatus(`需要确认 ${approval.toolName ?? "工具"} 权限`);
+  announceStatus2(`需要确认 ${approval.toolName ?? "工具"} 权限`);
 }
-async function resolveApproval2(action) {
+async function resolveApproval(action) {
   const approval = state.pendingApproval;
   if (!approval || state.approvalSubmitting) return;
   state.approvalSubmitting = true;
@@ -6773,10 +6798,10 @@ async function resolveApproval2(action) {
     showError(result.error ?? "权限确认提交失败");
     return;
   }
-  hideApproval2({ approvalId: approval.id });
+  hideApproval({ approvalId: approval.id });
   els.runStatus.textContent = state.pendingApproval ? "等待确认" : state.running ? "运行中" : "处理中";
 }
-function hideApproval2(options = {}) {
+function hideApproval(options = {}) {
   const approvalId = options.approvalId == null || options.approvalId === "" ? "" : String(options.approvalId);
   if (approvalId) {
     if (state.pendingApproval?.id && state.pendingApproval.id !== approvalId) {
@@ -6849,7 +6874,7 @@ function showQuestion3(question) {
     initialFocus: ".question-input, button[data-choice], button[data-action='submit']"
   });
   revealInteractionPanel8(els.questionPanel, ".question-input, button[data-choice], button[data-action='submit']");
-  announceStatus("需要核对任务需求");
+  announceStatus2("需要核对任务需求");
 }
 function revealInteractionPanel8(panel, focusSelector) {
   if (!panel || panel.classList.contains("hidden")) {
@@ -6884,7 +6909,7 @@ function renderQuestionPanel8() {
         <button type="button" data-action="return-to-question">返回确认</button>
       </div>
     `;
-    panel.querySelector("button[data-action='return-to-question']")?.addEventListener("click", returnToQuestion2);
+    panel.querySelector("button[data-action='return-to-question']")?.addEventListener("click", returnToQuestion);
     return;
   }
   panel.removeAttribute("aria-label");
@@ -6915,7 +6940,7 @@ function renderQuestionPanel8() {
   });
   panel.querySelector("button[data-action='review-conversation']")?.addEventListener("click", reviewQuestionConversation8);
   panel.querySelector("button[data-action='submit']")?.addEventListener("click", submitQuestion8);
-  panel.querySelector("button[data-action='cancel']")?.addEventListener("click", cancelQuestion2);
+  panel.querySelector("button[data-action='cancel']")?.addEventListener("click", cancelQuestion);
   const input = (
     /** @type {HTMLTextAreaElement | null} */
     panel.querySelector(".question-input")
@@ -6938,9 +6963,9 @@ function reviewQuestionConversation8() {
   renderQuestionPanel8();
   activateQuestionReviewBackground8();
   els.transcript?.focus?.({ preventScroll: true });
-  announceStatus("需求确认已收起，可以查看对话；按 Esc 返回确认");
+  announceStatus2("需求确认已收起，可以查看对话；按 Esc 返回确认");
 }
-function returnToQuestion2() {
+function returnToQuestion() {
   if (!state.pendingQuestion || !state.questionReviewMode) return;
   deactivateQuestionReviewBackground8();
   state.questionReviewMode = false;
@@ -6949,7 +6974,7 @@ function returnToQuestion2() {
     initialFocus: ".question-input, button[data-choice], button[data-action='submit']"
   });
   revealInteractionPanel8(els.questionPanel, ".question-input, button[data-choice], button[data-action='submit']");
-  announceStatus("已返回需求确认");
+  announceStatus2("已返回需求确认");
 }
 function activateQuestionReviewBackground8() {
   deactivateQuestionReviewBackground8();
@@ -6957,7 +6982,7 @@ function activateQuestionReviewBackground8() {
   const panel = els.questionPanel;
   if (!transcript || !panel) return;
   const transcriptStage = transcript.closest?.(".transcript-stage") ?? transcript;
-  const entries = collectModalBackground2(panel).filter((entry) => entry.node !== transcriptStage && !entry.node.contains?.(transcriptStage));
+  const entries = collectModalBackground(panel).filter((entry) => entry.node !== transcriptStage && !entry.node.contains?.(transcriptStage));
   state.questionReviewInertEntries = entries;
   for (const entry of entries) entry.node.inert = true;
 }
@@ -7013,7 +7038,7 @@ async function submitQuestion8() {
   }).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) }));
   finishQuestionSubmission8(question, buttons, result);
 }
-async function cancelQuestion2() {
+async function cancelQuestion() {
   const question = state.pendingQuestion;
   if (!question || state.questionSubmitting) return;
   state.questionSubmitting = true;
@@ -7037,10 +7062,10 @@ function finishQuestionSubmission8(question, buttons, result) {
     showError(result.error ?? "需求确认提交失败");
     return;
   }
-  hideQuestion2();
+  hideQuestion();
   els.runStatus.textContent = state.running ? "运行中" : "处理中";
 }
-function hideQuestion2() {
+function hideQuestion() {
   deactivateModal(els.questionPanel);
   deactivateQuestionReviewBackground8();
   state.questionReviewMode = false;
@@ -7111,12 +7136,12 @@ function renderQueuePanel() {
     ${guideFeedback}
     ${queueItems ? `<div class="queue-list">${queueItems}${hiddenQueueCount ? `<div class="queue-more">还有 ${hiddenQueueCount} 条排队内容未展开</div>` : ""}</div>` : ""}
   `;
-  els.queuePanel.querySelector("#guide-button")?.addEventListener("click", () => guideTurn2());
+  els.queuePanel.querySelector("#guide-button")?.addEventListener("click", () => guideTurn());
   els.queuePanel.querySelectorAll("[data-guide-queue-id]").forEach((button) => {
     button.addEventListener("click", () => guideTurnFromQueue8(button.dataset.guideQueueId));
   });
   els.queuePanel.querySelectorAll("[data-cancel-queue-id]").forEach((button) => {
-    button.addEventListener("click", () => cancelQueuedTurn2(button.dataset.cancelQueueId));
+    button.addEventListener("click", () => cancelQueuedTurn(button.dataset.cancelQueueId));
   });
   syncGuideButton();
 }
@@ -7134,7 +7159,7 @@ function renderQueueItem8(item, index) {
     </div>
   `;
 }
-function setPendingGuide2(guide) {
+function setPendingGuide(guide) {
   state.pendingGuide = {
     ...state.pendingGuide ?? {},
     ...guide,
@@ -7143,7 +7168,7 @@ function setPendingGuide2(guide) {
   renderQueuePanel();
   updateLiveStatus3();
 }
-function clearPendingGuide2() {
+function clearPendingGuide() {
   state.pendingGuide = null;
   renderQueuePanel();
 }
@@ -7151,7 +7176,7 @@ function syncPendingGuideFromQueue3() {
   if (state.pendingGuide) {
     const stillQueued = state.queue.some((item) => item.kind === "guide");
     if (!stillQueued && !state.running && state.pendingGuide.phase === "registered") {
-      clearPendingGuide2();
+      clearPendingGuide();
       return;
     }
     renderQueuePanel();
@@ -7159,7 +7184,7 @@ function syncPendingGuideFromQueue3() {
   }
   const queuedGuide = state.queue.find((item) => item.kind === "guide");
   if (queuedGuide) {
-    setPendingGuide2({
+    setPendingGuide({
       sessionId: state.currentSessionId,
       phase: "registered",
       preview: queuedGuide.preview ?? ""
@@ -7212,7 +7237,7 @@ function guideCopy8(phase) {
     detail: "下一轮会优先按这条引导继续。"
   };
 }
-function guideSource2(queueItemId = "") {
+function guideSource(queueItemId = "") {
   const queuedItem = queueItemId ? state.queue.find((item) => item.id === queueItemId && item.kind === "prompt" && !state.queueCancelling.has(item.id)) : null;
   if (queueItemId && !queuedItem) {
     return null;
@@ -7234,7 +7259,7 @@ function guideTurnFromQueue8(queueItemId) {
   if (!queueItemId || state.guideSubmitting) {
     return;
   }
-  guideTurn2(queueItemId);
+  guideTurn(queueItemId);
 }
 function guideButtonText8() {
   if (state.guideSubmitting || state.pendingGuide?.phase === "registering") return "登记中";
@@ -7244,7 +7269,7 @@ function guideButtonText8() {
   return "引导对话";
 }
 function guideButtonDisabled8() {
-  return !state.running || state.guideSubmitting || !guideSource2();
+  return !state.running || state.guideSubmitting || !guideSource();
 }
 function guideButtonVisible8() {
   return state.running && (Boolean(els.promptInput.value.trim()) || state.guideSubmitting || state.pendingGuide?.phase === "registering");
@@ -7263,7 +7288,7 @@ function isInterruptError3(message) {
   return /aborted|abort|interrupted|中断|取消/i.test(String(message ?? ""));
 }
 function updateSendButton() {
-  updateContextActions();
+  updateContextActions2();
   els.sendButton.setAttribute("aria-busy", String(state.turnSubmitting));
   if (state.turnSubmitting) {
     els.sendButton.textContent = "提交中";
@@ -7291,7 +7316,7 @@ function updateSendButton() {
   }
   els.sendButton.disabled = false;
 }
-function showContextConfirm(action) {
+function showContextConfirm2(action) {
   const isClear = action === "clear";
   const panel = els.contextPanel;
   if (!panel) return;
@@ -7311,11 +7336,11 @@ function showContextConfirm(action) {
   panel.setAttribute("aria-modal", "true");
   panel.setAttribute("aria-labelledby", "context-confirm-title");
   panel.setAttribute("tabindex", "-1");
-  panel.querySelector("button[data-action='cancel']")?.addEventListener("click", () => hideContextConfirm2());
+  panel.querySelector("button[data-action='cancel']")?.addEventListener("click", () => hideContextConfirm());
   panel.querySelector(`button[data-action='${action}']`)?.addEventListener("click", () => runContextAction8(action));
   activateModal(panel, { initialFocus: "button[data-action='cancel']" });
 }
-function hideContextConfirm2() {
+function hideContextConfirm() {
   const panel = els.contextPanel;
   if (!panel) return;
   deactivateModal(panel);
@@ -7335,12 +7360,12 @@ async function runContextAction8(action) {
   }, contextActionRequestOptions8(action)).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) }));
   if (!result.ok) {
     showError(result.error ?? "上下文操作失败");
-    hideContextConfirm2();
+    hideContextConfirm();
     return;
   }
   state.currentSessionId = result.sessionId ?? state.currentSessionId;
-  hideContextConfirm2();
-  appendActivity2({
+  hideContextConfirm();
+  appendActivity({
     title: action === "clear" ? "上下文已清空" : "上下文已压缩",
     detail: action === "clear" ? contextSummaryLine3(result.after) : compactResultLine8(result.result),
     severity: "success",
@@ -7383,9 +7408,9 @@ function questionResolutionText3(event) {
   }
   return parts.length > 0 ? `需求核对：${parts.join("；")}` : "已确认需求核对";
 }
-async function showShutdownPanel() {
+async function showShutdownPanel2() {
   const version = ++state.shutdownStatusVersion;
-  cancelScopedRequest2("shutdown");
+  cancelScopedRequest("shutdown");
   const request = beginScopedRequest("shutdown");
   state.shutdownActivity = null;
   els.shutdownCopy.textContent = "正在检查主任务、队列和后台任务，请稍候。";
@@ -7393,7 +7418,7 @@ async function showShutdownPanel() {
   els.shutdownConfirm.textContent = "检查中";
   els.shutdownPanel.classList.remove("hidden");
   activateModal(els.shutdownPanel, { initialFocus: "#shutdown-cancel" });
-  announceStatus("需要确认是否关闭 Dashboard");
+  announceStatus2("需要确认是否关闭 Dashboard");
   const result = await getJson("/api/lifecycle/status", {
     signal: request.signal,
     timeoutMs: DASHBOARD_LIFECYCLE_TIMEOUT_MS
@@ -7413,7 +7438,7 @@ async function showShutdownPanel() {
     els.shutdownCopy.textContent = `无法确认当前活动状态：${detail}。可以取消任务并强制关闭，或返回继续处理。`;
     els.shutdownConfirm.disabled = false;
     els.shutdownConfirm.textContent = "强制关闭";
-    announceStatus("Dashboard 活动检查超时，可强制关闭");
+    announceStatus2("Dashboard 活动检查超时，可强制关闭");
     return;
   }
   state.shutdownActivity = normalizeLifecycleActivity8(result.activity);
@@ -7421,15 +7446,15 @@ async function showShutdownPanel() {
 }
 function hideShutdownPanel() {
   state.shutdownStatusVersion += 1;
-  cancelScopedRequest2("shutdown");
+  cancelScopedRequest("shutdown");
   deactivateModal(els.shutdownPanel);
   els.shutdownPanel.classList.add("hidden");
   els.shutdownConfirm.disabled = false;
   els.shutdownConfirm.textContent = "确认关闭";
 }
-async function shutdownDashboard() {
+async function shutdownDashboard2() {
   if (!state.shutdownActivity) return;
-  cancelScopedRequest2("shutdown");
+  cancelScopedRequest("shutdown");
   const request = beginScopedRequest("shutdown");
   els.shutdownConfirm.disabled = true;
   els.shutdownConfirm.textContent = "正在关闭";
@@ -7453,11 +7478,11 @@ async function shutdownDashboard() {
     els.shutdownConfirm.disabled = false;
     els.shutdownConfirm.textContent = state.shutdownActivity.uncertain ? "强制关闭" : state.shutdownActivity.total > 0 ? "重试取消并关闭" : "重试关闭";
     els.runStatus.textContent = "关闭失败";
-    announceStatus("Dashboard 关闭失败，页面仍可继续使用");
+    announceStatus2("Dashboard 关闭失败，页面仍可继续使用");
     els.shutdownConfirm.focus({ preventScroll: true });
     return;
   }
-  disconnectEvents2();
+  disconnectEvents();
   deactivateModal(els.shutdownPanel, { restoreFocus: false });
   els.shutdownPanel.classList.add("hidden");
   hideSettingsWorkspace({ restoreFocus: false });
@@ -7475,7 +7500,7 @@ async function shutdownDashboard() {
     </div>
   `;
   lockClosedDashboard8();
-  announceStatus("Dashboard 已关闭");
+  announceStatus2("Dashboard 已关闭");
 }
 
 // src/dashboard/public/markdown.ts
@@ -8160,7 +8185,7 @@ function renderShutdownActivity8() {
   els.shutdownConfirm.disabled = false;
   els.shutdownConfirm.textContent = activity.total > 0 ? "取消任务并关闭" : "确认关闭";
 }
-function renderFiles2() {
+function renderFiles() {
   els.fileList.innerHTML = "";
   if (state.files.length === 0) {
     const empty = document.createElement("div");
@@ -8251,7 +8276,7 @@ async function openFile9(filePath) {
     article.className = "markdown-document markdown-body";
     article.tabIndex = 0;
     article.setAttribute("aria-label", `${file.name} Markdown 内容`);
-    renderMessageText(article, file.content ?? "", { markdown: true, basePath: parentDirectory9(file.relativePath) });
+    renderMessageText2(article, file.content ?? "", { markdown: true, basePath: parentDirectory9(file.relativePath) });
     els.previewBody.replaceChildren(article);
   } else if (file.kind === "data") {
     els.previewBody.classList.add("document-preview-body");
@@ -8259,7 +8284,7 @@ async function openFile9(filePath) {
     article.className = "markdown-document markdown-body";
     article.tabIndex = 0;
     article.setAttribute("aria-label", `${file.name} 数据预览`);
-    renderMessageText(article, fencedDataForFile9(file), { markdown: true });
+    renderMessageText2(article, fencedDataForFile9(file), { markdown: true });
     els.previewBody.replaceChildren(article);
   } else {
     els.previewBody.classList.add("document-preview-body");
@@ -8267,7 +8292,7 @@ async function openFile9(filePath) {
   }
 }
 function localOpenButtonHtml(relativePath) {
-  return `<button type="button" class="open-file" data-open-local="${escapeAttribute2(relativePath ?? "")}" title="用系统应用打开">打开</button>`;
+  return `<button type="button" class="open-file" data-open-local="${escapeAttribute(relativePath ?? "")}" title="用系统应用打开">打开</button>`;
 }
 function handleLocalFileOpenClick(event) {
   const button = eventTargetOf(event).closest("[data-open-local]");
@@ -8507,7 +8532,7 @@ function renderSheetCellHtml9(line) {
   }
   return `<div class="office-cell"><dt>${escapeHtml(match[1])}</dt><dd>${escapeHtml(match[2])}</dd></div>`;
 }
-function resetPreview2(message = "任务产物会显示在这里") {
+function resetPreview(message = "任务产物会显示在这里") {
   els.previewBody.className = "preview-body";
   els.previewBody.innerHTML = `<div class="preview-placeholder">${escapeHtml(message)}</div>`;
 }
@@ -8606,7 +8631,7 @@ function hideLightbox() {
   state.lightboxIndex = 0;
   state.tableLightboxSheetIndex = 0;
 }
-function setPermissionMode(mode) {
+function setPermissionMode2(mode) {
   if (!mode) return;
   if (state.goal?.enabled && mode !== "fullAccess") {
     mode = "fullAccess";
@@ -8620,10 +8645,10 @@ function setPermissionMode(mode) {
   });
   document.body.classList.toggle("full-access-active", mode === "fullAccess");
   els.modeDescription.textContent = state.goal?.enabled ? MODE_DESCRIPTIONS.goal : MODE_DESCRIPTIONS[mode] ?? MODE_DESCRIPTIONS.plan;
-  updateContextActions();
-  renderGoalControls();
+  updateContextActions2();
+  renderGoalControls2();
 }
-function clearTranscript2() {
+function clearTranscript() {
   cancelTranscriptAnimationFrames8();
   resetTranscriptWindow4();
   els.transcript.innerHTML = "";
@@ -8633,7 +8658,7 @@ function clearTranscript2() {
   state.workflow = null;
   state.workflowNode = null;
   state.workflowExpanded = false;
-  renderWorkflowStrip();
+  renderWorkflowStrip2();
   state.assistantDrafts.clear();
   state.transcriptPaging = {
     cursor: null,
@@ -8651,12 +8676,12 @@ function clearTranscript2() {
 }
 function cancelTranscriptAnimationFrames8() {
   clearAssistantDraftTimers9();
-  cancelScheduledAnimationFrame(state, "transcriptScrollFrame");
+  cancelScheduledAnimationFrame2(state, "transcriptScrollFrame");
   state.transcriptScrollForce = false;
 }
 function clearAssistantDraftTimers9() {
   for (const draft of state.assistantDrafts.values()) {
-    cancelScheduledAnimationFrame(draft, "renderFrame");
+    cancelScheduledAnimationFrame2(draft, "renderFrame");
   }
 }
 function hideEmptyState3() {
@@ -8664,7 +8689,7 @@ function hideEmptyState3() {
 }
 function showError(message) {
   hideEmptyState3();
-  appendActivity2({
+  appendActivity({
     title: "发生错误",
     detail: message ?? "",
     severity: "danger",
@@ -8673,22 +8698,22 @@ function showError(message) {
 }
 function showNotice7(message, detail = "本地配置已更新") {
   hideEmptyState3();
-  appendActivity2({
+  appendActivity({
     title: message,
     detail: detail == null ? "本地配置已更新" : String(detail),
     severity: "info",
     collapsed: false
   });
 }
-function renderBootstrapLoading() {
+function renderBootstrapLoading2() {
   els.projectPath.textContent = "正在连接";
   els.runStatus.textContent = "连接中";
   els.sendButton.disabled = true;
-  setConnectionState("connecting");
+  setConnectionState2("connecting");
 }
-function renderBootstrapFailure(error) {
+function renderBootstrapFailure2(error) {
   const failure2 = bootstrapFailurePresentation9(error, navigator.onLine !== false);
-  setConnectionState(failure2.connectionState);
+  setConnectionState2(failure2.connectionState);
   els.projectPath.textContent = failure2.projectLabel;
   els.runStatus.textContent = "初始化失败";
   els.sendButton.disabled = true;
@@ -8706,11 +8731,11 @@ function renderBootstrapFailure(error) {
     if (typeof window.location?.reload === "function") {
       window.location.reload();
     } else {
-      bootstrapDashboard();
+      bootstrapDashboard2();
     }
   });
 }
-function dashboardPayloadError(payload, fallback) {
+function dashboardPayloadError2(payload, fallback) {
   const error = new Error(String(payload?.error ?? fallback));
   for (const key of ["code", "status", "requestId", "configPath"]) {
     if (payload?.[key] !== void 0) Object.defineProperty(error, key, { value: payload[key] });
@@ -8748,13 +8773,13 @@ function bootstrapFailurePresentation9(error, online = true) {
     message: diagnosticMessage
   };
 }
-function clearBootstrapStatus() {
+function clearBootstrapStatus2() {
   if (state.connectionState === "connecting" && !state.currentSessionId) {
-    setConnectionState("idle");
+    setConnectionState2("idle");
   }
 }
-function scrollTranscript2(options = {}) {
-  if (!shouldFollowTranscript({
+function scrollTranscript(options = {}) {
+  if (!shouldFollowTranscript2({
     force: options.force,
     following: state.transcriptFollowing,
     onlyIfNearBottom: options.onlyIfNearBottom,
@@ -8769,7 +8794,7 @@ function scrollTranscript2(options = {}) {
   state.newReplyAvailable = false;
   state.transcriptScrollForce = state.transcriptScrollForce || options.force === true;
   updateTranscriptJump9();
-  scheduleAnimationFrameOnce(state, "transcriptScrollFrame", () => {
+  scheduleAnimationFrameOnce2(state, "transcriptScrollFrame", () => {
     const force = state.transcriptScrollForce;
     state.transcriptScrollForce = false;
     if (!force && !state.transcriptFollowing) {
@@ -8790,10 +8815,10 @@ function syncTranscriptFollowState3() {
   if (nearBottom) state.newReplyAvailable = false;
   updateTranscriptJump9();
 }
-function followTranscript() {
+function followTranscript2() {
   state.transcriptFollowing = true;
   state.newReplyAvailable = false;
-  scrollTranscript2({ force: true });
+  scrollTranscript({ force: true });
 }
 function updateTranscriptJump9() {
   if (!els.transcriptJump) return;
@@ -8803,7 +8828,7 @@ function updateTranscriptJump9() {
   els.transcriptJump.setAttribute("aria-label", state.newReplyAvailable ? "有新回复，回到底部" : "回到底部");
 }
 function beginScopedRequest(scope, key = "") {
-  cancelScopedRequest2(scope);
+  cancelScopedRequest(scope);
   const controller = new AbortController();
   const request = { scope, key, controller, signal: controller.signal };
   state.requestScopes.set(scope, request);
@@ -8817,7 +8842,7 @@ function finishScopedRequest(request) {
     state.requestScopes.delete(request.scope);
   }
 }
-function cancelScopedRequest2(scope) {
+function cancelScopedRequest(scope) {
   const request = state.requestScopes.get(scope);
   if (!request) return;
   state.requestScopes.delete(scope);
@@ -8847,7 +8872,7 @@ async function postJson(url, body, options = {}) {
     signal: options.signal
   }, options);
 }
-async function deleteJson2(url, body = {}, options = {}) {
+async function deleteJson(url, body = {}, options = {}) {
   return dashboardFetch9(url, {
     method: "DELETE",
     credentials: "same-origin",
@@ -9041,7 +9066,7 @@ function imageAttachmentLine9(item) {
   ].filter(Boolean);
   return `[图片附件：${parts.join(" · ")}]`;
 }
-function renderMessageText(node, text, options = {}) {
+function renderMessageText2(node, text, options = {}) {
   if (!node) return;
   node.classList.toggle("markdown-body", options.markdown === true);
   const html = options.markdown ? renderMarkdown(text ?? "", { basePath: options.basePath, lightweight: options.lightweight === true }) : escapeHtml(text ?? "");
@@ -9709,10 +9734,10 @@ function formatBytes9(value) {
 function escapeHtml(value) {
   return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
-function escapeAttribute2(value) {
+function escapeAttribute(value) {
   return escapeHtml(value);
 }
-function formatTime2(value) {
+function formatTime(value) {
   if (!value) return "";
   const date = new Date(typeof value === "number" || value instanceof Date ? value : String(value));
   if (Number.isNaN(date.getTime())) return "";
@@ -9739,7 +9764,7 @@ function formatRelativeTime4(value) {
 }
 
 // src/dashboard/public/app.ts
-await init();
+await init2();
 export {
   CURRENT_SESSION_STORAGE_KEY,
   DASHBOARD_API_VERSION,
@@ -9771,30 +9796,30 @@ export {
   activateModal,
   activateQuestionReviewBackground8 as activateQuestionReviewBackground,
   addAttachmentFiles,
-  adoptGoalRunResult,
+  adoptGoalRunResult2 as adoptGoalRunResult,
   agentModelPickerHtml5 as agentModelPickerHtml,
   agentModelTiersSummary5 as agentModelTiersSummary,
   agentSettingsHtml5 as agentSettingsHtml,
-  announceStatus,
+  announceStatus2 as announceStatus,
   apiFileUrl10 as apiFileUrl,
-  appendActivity2 as appendActivity,
+  appendActivity,
   appendAgentModelOptions6 as appendAgentModelOptions,
   appendAssistantDraft3 as appendAssistantDraft,
   appendContextBoundary3 as appendContextBoundary,
   appendMessage3 as appendMessage,
   appendMessageAttachmentChips,
-  appendPlainDraftDelta,
+  appendPlainDraftDelta2 as appendPlainDraftDelta,
   appendTranscriptNode3 as appendTranscriptNode,
   applyGatewayDiscoveredModel6 as applyGatewayDiscoveredModel,
   applyGoalSnapshot,
-  applyIdleRunStatus2 as applyIdleRunStatus,
+  applyIdleRunStatus,
   applyPendingReasoningCapabilities5 as applyPendingReasoningCapabilities,
   applyProbedModel5 as applyProbedModel,
   applyReasoningCapabilityCandidate6 as applyReasoningCapabilityCandidate,
   applySuggestedGatewayUrl5 as applySuggestedGatewayUrl,
   armEventConnectTimer3 as armEventConnectTimer,
   armEventStaleTimer3 as armEventStaleTimer,
-  attachmentPayload2 as attachmentPayload,
+  attachmentPayload,
   backgroundCancelKey3 as backgroundCancelKey,
   backgroundSubagentCancellable4 as backgroundSubagentCancellable,
   backgroundSubagentCompactLabel4 as backgroundSubagentCompactLabel,
@@ -9804,45 +9829,45 @@ export {
   backgroundSubagentTitle4 as backgroundSubagentTitle,
   backgroundSubagentVisible4 as backgroundSubagentVisible,
   beginEventTurn3 as beginEventTurn,
-  beginPreviewResize,
+  beginPreviewResize2 as beginPreviewResize,
   beginScopedRequest,
-  bindEvents,
+  bindEvents2 as bindEvents,
   bindRichContent3 as bindRichContent,
   bindTableLightboxControls9 as bindTableLightboxControls,
-  bootstrapDashboard,
+  bootstrapDashboard2 as bootstrapDashboard,
   bootstrapFailurePresentation9 as bootstrapFailurePresentation,
-  cancelBackgroundSubagent,
-  cancelQuestion2 as cancelQuestion,
-  cancelQueuedTurn2 as cancelQueuedTurn,
-  cancelScheduledAnimationFrame,
-  cancelScopedRequest2 as cancelScopedRequest,
+  cancelBackgroundSubagent2 as cancelBackgroundSubagent,
+  cancelQuestion,
+  cancelQueuedTurn,
+  cancelScheduledAnimationFrame2 as cancelScheduledAnimationFrame,
+  cancelScopedRequest,
   cancelTranscriptAnimationFrames8 as cancelTranscriptAnimationFrames,
   canonicalSettingsField5 as canonicalSettingsField,
   captureTranscriptViewportAnchor3 as captureTranscriptViewportAnchor,
   changedSettingsFields5 as changedSettingsFields,
-  clampedPreviewWidth,
+  clampedPreviewWidth2 as clampedPreviewWidth,
   classifyComposerFile,
   clearAssistantDraftTimers9 as clearAssistantDraftTimers,
   clearAssistantDrafts3 as clearAssistantDrafts,
-  clearAttachments2 as clearAttachments,
+  clearAttachments,
   clearBackgroundSubagentStatus3 as clearBackgroundSubagentStatus,
-  clearBootstrapStatus,
+  clearBootstrapStatus2 as clearBootstrapStatus,
   clearEventConnectTimer3 as clearEventConnectTimer,
-  clearEventReconnectTimer,
+  clearEventReconnectTimer2 as clearEventReconnectTimer,
   clearEventStaleTimer3 as clearEventStaleTimer,
   clearModelConfigFailure6 as clearModelConfigFailure,
-  clearPendingGuide2 as clearPendingGuide,
+  clearPendingGuide,
   clearPermissionWaitActivity,
   clearReasoningCapabilityControls6 as clearReasoningCapabilityControls,
-  clearTranscript2 as clearTranscript,
-  closeActiveModal2 as closeActiveModal,
-  closeEventSource,
+  clearTranscript,
+  closeActiveModal,
+  closeEventSource2 as closeEventSource,
   collapseAssistantDrafts3 as collapseAssistantDrafts,
   collapseCompletedActivities3 as collapseCompletedActivities,
-  collectModalBackground2 as collectModalBackground,
+  collectModalBackground,
   columnLabel9 as columnLabel,
   compactResultLine8 as compactResultLine,
-  composerHeightFor,
+  composerHeightFor2 as composerHeightFor,
   configMutationMetadata6 as configMutationMetadata,
   configRevisionConflictMessage7 as configRevisionConflictMessage,
   configScope5 as configScope,
@@ -9853,7 +9878,7 @@ export {
   contextBoundaryText4 as contextBoundaryText,
   contextSummaryLine3 as contextSummaryLine,
   copyCodeBlock10 as copyCodeBlock,
-  copySessionId2 as copySessionId,
+  copySessionId,
   createMessageNode3 as createMessageNode,
   currentGatewayCatalogModels6 as currentGatewayCatalogModels,
   currentGatewayProbeResult6 as currentGatewayProbeResult,
@@ -9867,47 +9892,47 @@ export {
   dashboardCsrfToken9 as dashboardCsrfToken,
   dashboardFetch9 as dashboardFetch,
   dashboardJsonHeaders9 as dashboardJsonHeaders,
-  dashboardPayloadError,
+  dashboardPayloadError2 as dashboardPayloadError,
   dashboardRequestId,
   dataLanguageForExtension9 as dataLanguageForExtension,
   deactivateModal,
   deactivateQuestionReviewBackground8 as deactivateQuestionReviewBackground,
-  defaultGoalMaxAutoContinues,
+  defaultGoalMaxAutoContinues2 as defaultGoalMaxAutoContinues,
   deleteGatewayProfile5 as deleteGatewayProfile,
-  deleteJson2 as deleteJson,
+  deleteJson,
   deleteModel5 as deleteModel,
-  deleteSession2 as deleteSession,
-  disconnectEvents2 as disconnectEvents,
+  deleteSession,
+  disconnectEvents,
   documentAttachmentLine,
   documentChipLabel,
   els,
   emptyBackgroundSubagent,
-  emptyGoalSnapshot,
+  emptyGoalSnapshot2 as emptyGoalSnapshot,
   emptySessionStatus,
-  enableGoalWithObjective,
+  enableGoalWithObjective2 as enableGoalWithObjective,
   ensureEventsConnected,
   ensureReasoningEffortOptions6 as ensureReasoningEffortOptions,
   environmentGatewayDefaultNote5 as environmentGatewayDefaultNote,
   errorMessageOf,
-  escapeAttribute2 as escapeAttribute,
+  escapeAttribute,
   escapeHtml,
   eventElement,
   eventTargetOf,
   fencedDataForFile9 as fencedDataForFile,
   filePreviewUrl9 as filePreviewUrl,
-  finishPreviewResize,
+  finishPreviewResize2 as finishPreviewResize,
   finishQuestionSubmission8 as finishQuestionSubmission,
   finishScopedRequest,
   firstFiniteNumber8 as firstFiniteNumber,
   firstVisionModelId5 as firstVisionModelId,
-  focusModalInitialTarget2 as focusModalInitialTarget,
+  focusModalInitialTarget,
   focusTrapTarget,
-  followTranscript,
+  followTranscript2 as followTranscript,
   formatBytes9 as formatBytes,
   formatContextUsage4 as formatContextUsage,
   formatNumber9 as formatNumber,
   formatRelativeTime4 as formatRelativeTime,
-  formatTime2 as formatTime,
+  formatTime,
   formatTokenCount5 as formatTokenCount,
   gatewayCredentialAction6 as gatewayCredentialAction,
   gatewayProfileById4 as gatewayProfileById,
@@ -9922,8 +9947,8 @@ export {
   guideButtonText8 as guideButtonText,
   guideButtonVisible8 as guideButtonVisible,
   guideCopy8 as guideCopy,
-  guideSource2 as guideSource,
-  guideTurn2 as guideTurn,
+  guideSource,
+  guideTurn,
   guideTurnFromQueue8 as guideTurnFromQueue,
   handleActivity3 as handleActivity,
   handleAgentModelSelection5 as handleAgentModelSelection,
@@ -9931,41 +9956,42 @@ export {
   handleDashboardEvent3 as handleDashboardEvent,
   handleGlobalKeydown,
   handleLocalFileOpenClick,
-  handleModelConfigChange,
-  handleModelConfigInput,
+  handleModelConfigChange2 as handleModelConfigChange,
+  handleModelConfigInput2 as handleModelConfigInput,
   handleModelConfigModelIdChanged5 as handleModelConfigModelIdChanged,
-  handleModelConfigPanelClick,
-  handleModelPanelChange,
-  handleModelPanelClick,
-  handleModelStatusActivate,
-  handleModelStatusKeydown,
-  handlePermissionModeKeydown,
-  handlePreviewResizeKeydown,
-  handleReasoningEffortChange,
-  handleResponsiveFileNavigation,
-  handleSessionAction2 as handleSessionAction,
-  handleSettingsClick,
-  handleSettingsFormChange,
-  handleSettingsRailClick,
-  handleTranscriptScroll,
+  handleModelConfigPanelClick2 as handleModelConfigPanelClick,
+  handleModelPanelChange2 as handleModelPanelChange,
+  handleModelPanelClick2 as handleModelPanelClick,
+  handleModelStatusActivate2 as handleModelStatusActivate,
+  handleModelStatusKeydown2 as handleModelStatusKeydown,
+  handlePermissionModeKeydown2 as handlePermissionModeKeydown,
+  handlePreviewResizeKeydown2 as handlePreviewResizeKeydown,
+  handleReasoningEffortChange2 as handleReasoningEffortChange,
+  handleResponsiveFileNavigation2 as handleResponsiveFileNavigation,
+  handleSessionAction,
+  handleSettingsClick2 as handleSettingsClick,
+  handleSettingsFormChange2 as handleSettingsFormChange,
+  handleSettingsRailClick2 as handleSettingsRailClick,
+  handleTranscriptScroll2 as handleTranscriptScroll,
   hasAgentModelTiers7 as hasAgentModelTiers,
-  hideApproval2 as hideApproval,
-  hideContextConfirm2 as hideContextConfirm,
+  hideApproval,
+  hideContextConfirm,
   hideEmptyState3 as hideEmptyState,
   hideGoalConfirm,
   hideGoalTextPanel,
   hideLightbox,
-  hideModelConfigPanel2 as hideModelConfigPanel,
+  hideModelConfigPanel,
   hideModelPanel,
   hidePermissionConfirm,
-  hideQuestion2 as hideQuestion,
+  hideQuestion,
   hideSettingsWorkspace,
   hideShutdownPanel,
   idleRunStatus3 as idleRunStatus,
   imageAttachmentLine9 as imageAttachmentLine,
+  imageMimeFromName,
   imagePreviewUrl10 as imagePreviewUrl,
-  init,
-  initialSessionId2 as initialSessionId,
+  init2 as init,
+  initialSessionId,
   initializeAgentModelPickerSnapshot5 as initializeAgentModelPickerSnapshot,
   initializeSettingsFormTracking5 as initializeSettingsFormTracking,
   interruptTurn,
@@ -9984,7 +10010,7 @@ export {
   isSafeInlineBitmapUrl10 as isSafeInlineBitmapUrl,
   isTranscriptNearBottom3 as isTranscriptNearBottom,
   isWorkspaceRelativeToBase11 as isWorkspaceRelativeToBase,
-  latestBackgroundSessionId2 as latestBackgroundSessionId,
+  latestBackgroundSessionId,
   lifecycleActivitySummary8 as lifecycleActivitySummary,
   linkifyFileTextNodes9 as linkifyFileTextNodes,
   liveStatusTitle4 as liveStatusTitle,
@@ -9996,7 +10022,7 @@ export {
   lockClosedDashboard8 as lockClosedDashboard,
   managedFieldHtml5 as managedFieldHtml,
   manualAgentModelIds6 as manualAgentModelIds,
-  markCurrentModel2 as markCurrentModel,
+  markCurrentModel,
   markEventConnectionAlive3 as markEventConnectionAlive,
   markModelConfigCredentialChanged5 as markModelConfigCredentialChanged,
   markModelConfigEndpointChanged5 as markModelConfigEndpointChanged,
@@ -10026,7 +10052,7 @@ export {
   normalizeChangeStats4 as normalizeChangeStats,
   normalizeComparableText3 as normalizeComparableText,
   normalizeConfigSource7 as normalizeConfigSource,
-  normalizeDashboardSettings,
+  normalizeDashboardSettings2 as normalizeDashboardSettings,
   normalizeFileReferencePath10 as normalizeFileReferencePath,
   normalizeGatewayConfig,
   normalizeGatewayProbeModels6 as normalizeGatewayProbeModels,
@@ -10042,18 +10068,18 @@ export {
   normalizeVisionAgent,
   normalizeWorkflowStatus3 as normalizeWorkflowStatus,
   normalizedReasoningEffort6 as normalizedReasoningEffort,
-  normalizedResponsiveView,
-  observeRunStatus,
+  normalizedResponsiveView2 as normalizedResponsiveView,
+  observeRunStatus2 as observeRunStatus,
   officePreviewBodyHtml9 as officePreviewBodyHtml,
   officePreviewMeta9 as officePreviewMeta,
   openFile9 as openFile,
   openLocalFile,
-  openSession2 as openSession,
+  openSession,
   parentDirectory9 as parentDirectory,
-  permissionIndexForKey,
+  permissionIndexForKey2 as permissionIndexForKey,
   postJson,
   previewText8 as previewText,
-  previewWidthBounds,
+  previewWidthBounds2 as previewWidthBounds,
   primaryLiveActivity4 as primaryLiveActivity,
   probeGateway5 as probeGateway,
   probeModelCapabilities5 as probeModelCapabilities,
@@ -10063,7 +10089,7 @@ export {
   questionResolutionText3 as questionResolutionText,
   rawFileUrl9 as rawFileUrl,
   readDocumentAttachment,
-  readImageAttachment2 as readImageAttachment,
+  readImageAttachment,
   reasoningCapabilityCandidate6 as reasoningCapabilityCandidate,
   reasoningCapabilityIsActionable6 as reasoningCapabilityIsActionable,
   reasoningCapabilityStatusText6 as reasoningCapabilityStatusText,
@@ -10071,10 +10097,10 @@ export {
   reasoningEffortCatalog5 as reasoningEffortCatalog,
   reasoningEffortFallbackLabel7 as reasoningEffortFallbackLabel,
   reasoningEffortLabel7 as reasoningEffortLabel,
-  reconcileBackgroundSubagentSnapshot2 as reconcileBackgroundSubagentSnapshot,
-  reconnectEventsManually,
+  reconcileBackgroundSubagentSnapshot,
+  reconnectEventsManually2 as reconnectEventsManually,
   refreshConfigRevisionsAfterConflict7 as refreshConfigRevisionsAfterConflict,
-  refreshNewTaskModelState2 as refreshNewTaskModelState,
+  refreshNewTaskModelState,
   refreshSettingsConfiguration4 as refreshSettingsConfiguration,
   reliabilitySettingsHtml5 as reliabilitySettingsHtml,
   rememberCurrentSession,
@@ -10086,22 +10112,22 @@ export {
   renderAgentModelPickers5 as renderAgentModelPickers,
   renderApprovalPanel,
   renderAssistantDraft4 as renderAssistantDraft,
-  renderAttachmentStrip2 as renderAttachmentStrip,
+  renderAttachmentStrip,
   renderBackgroundSubagentStatus4 as renderBackgroundSubagentStatus,
-  renderBootstrapFailure,
-  renderBootstrapLoading,
+  renderBootstrapFailure2 as renderBootstrapFailure,
+  renderBootstrapLoading2 as renderBootstrapLoading,
   renderCompactTableHtml9 as renderCompactTableHtml,
-  renderComposerStatus,
+  renderComposerStatus2 as renderComposerStatus,
   renderExpandedTableHtml9 as renderExpandedTableHtml,
-  renderFiles2 as renderFiles,
-  renderFinalAssistantBody,
+  renderFiles,
+  renderFinalAssistantBody2 as renderFinalAssistantBody,
   renderGatewayProbeResult5 as renderGatewayProbeResult,
-  renderGoalControls,
-  renderGoalStatusBar,
+  renderGoalControls2 as renderGoalControls,
+  renderGoalStatusBar2 as renderGoalStatusBar,
   renderGuideFeedback8 as renderGuideFeedback,
   renderLightboxImage9 as renderLightboxImage,
   renderLinkedText9 as renderLinkedText,
-  renderMessageText,
+  renderMessageText2 as renderMessageText,
   renderModelConfigFailure6 as renderModelConfigFailure,
   renderModelConfigPanel4 as renderModelConfigPanel,
   renderModelPanel4 as renderModelPanel,
@@ -10110,8 +10136,8 @@ export {
   renderQueueItem8 as renderQueueItem,
   renderQueuePanel,
   renderReasoningCapabilityStatus5 as renderReasoningCapabilityStatus,
-  renderSessionFailure2 as renderSessionFailure,
-  renderSessions2 as renderSessions,
+  renderSessionFailure,
+  renderSessions,
   renderSettingsFeedbackInPlace5 as renderSettingsFeedbackInPlace,
   renderSettingsView4 as renderSettingsView,
   renderSheetCellHtml9 as renderSheetCellHtml,
@@ -10120,64 +10146,64 @@ export {
   renderTableHtml9 as renderTableHtml,
   renderTablePreview9 as renderTablePreview,
   renderTranscriptHistoryStatus3 as renderTranscriptHistoryStatus,
-  renderTranscriptMessages2 as renderTranscriptMessages,
+  renderTranscriptMessages,
   renderTranscriptWindowMarker3 as renderTranscriptWindowMarker,
   renderTrustPanel,
   renderWorkflowPanel3 as renderWorkflowPanel,
-  renderWorkflowStrip,
+  renderWorkflowStrip2 as renderWorkflowStrip,
   replaceFileReferences10 as replaceFileReferences,
-  requestGoalMode,
-  requestPermissionMode,
+  requestGoalMode2 as requestGoalMode,
+  requestPermissionMode2 as requestPermissionMode,
   resetEventReplayState,
-  resetLiveStatus2 as resetLiveStatus,
-  resetPreview2 as resetPreview,
+  resetLiveStatus,
+  resetPreview,
   resetTranscriptWindow4 as resetTranscriptWindow,
-  resetTurnChangeStats2 as resetTurnChangeStats,
+  resetTurnChangeStats,
   resizePromptInput,
-  resolveApproval2 as resolveApproval,
+  resolveApproval,
   resolveAtomicModelSelection7 as resolveAtomicModelSelection,
   resolveAttachedFilePath,
   resolveDisplayFilePath10 as resolveDisplayFilePath,
   responseJson9 as responseJson,
-  responsiveLayoutMode,
-  restoreBackgroundSnapshot2 as restoreBackgroundSnapshot,
+  responsiveLayoutMode2 as responsiveLayoutMode,
+  restoreBackgroundSnapshot,
   restoreInitialSession,
-  restoreModalAttribute2 as restoreModalAttribute,
-  restoreNewTaskModelState2 as restoreNewTaskModelState,
-  restorePreviewWidth,
+  restoreModalAttribute,
+  restoreNewTaskModelState,
+  restorePreviewWidth2 as restorePreviewWidth,
   restoreTranscriptNodeAnchor3 as restoreTranscriptNodeAnchor,
   restoreTranscriptViewportAnchor3 as restoreTranscriptViewportAnchor,
-  returnToQuestion2 as returnToQuestion,
+  returnToQuestion,
   revealInteractionPanel8 as revealInteractionPanel,
   reviewQuestionConversation8 as reviewQuestionConversation,
   runContextAction8 as runContextAction,
   saveDefaultModelSelection5 as saveDefaultModelSelection,
-  saveModelConfig,
-  saveSettingsConfig,
-  scheduleAnimationFrameOnce,
+  saveModelConfig2 as saveModelConfig,
+  saveSettingsConfig2 as saveSettingsConfig,
+  scheduleAnimationFrameOnce2 as scheduleAnimationFrameOnce,
   scheduleDraftRender4 as scheduleDraftRender,
   scheduleEventReconnect3 as scheduleEventReconnect,
-  scheduleSessionsRefresh2 as scheduleSessionsRefresh,
+  scheduleSessionsRefresh,
   scopedDefaultModelLabel5 as scopedDefaultModelLabel,
-  scrollTranscript2 as scrollTranscript,
-  selectTranscriptNodesToRemove,
+  scrollTranscript,
+  selectTranscriptNodesToRemove2 as selectTranscriptNodesToRemove,
   sendPrompt,
-  sessionMeta2 as sessionMeta,
-  sessionStatusView2 as sessionStatusView,
-  sessionsNeedRefresh2 as sessionsNeedRefresh,
-  setConnectionState,
+  sessionMeta,
+  sessionStatusView,
+  sessionsNeedRefresh,
+  setConnectionState2 as setConnectionState,
   setFormControlsSaving5 as setFormControlsSaving,
   setLiveTitle,
   setModelConfigFormSaving6 as setModelConfigFormSaving,
-  setPendingGuide2 as setPendingGuide,
-  setPermissionMode,
+  setPendingGuide,
+  setPermissionMode2 as setPermissionMode,
   setPreviewWidth,
-  setResponsiveSurfaceInert,
+  setResponsiveSurfaceInert2 as setResponsiveSurfaceInert,
   setResponsiveView,
-  setSessionsRefreshState2 as setSessionsRefreshState,
+  setSessionsRefreshState,
   setSettingsFormSaving5 as setSettingsFormSaving,
-  setSidebarCollapsed2 as setSidebarCollapsed,
-  setTranscriptPaging2 as setTranscriptPaging,
+  setSidebarCollapsed,
+  setTranscriptPaging,
   settingsControlValue5 as settingsControlValue,
   settingsDisabled5 as settingsDisabled,
   settingsFeedbackHtml5 as settingsFeedbackHtml,
@@ -10187,32 +10213,32 @@ export {
   settingsModelHtml5 as settingsModelHtml,
   settingsSectionHeading5 as settingsSectionHeading,
   settingsToggleHtml5 as settingsToggleHtml,
-  shouldFollowTranscript,
+  shouldFollowTranscript2 as shouldFollowTranscript,
   shouldKeepGuideFeedback3 as shouldKeepGuideFeedback,
   shouldSkipDashboardEvent3 as shouldSkipDashboardEvent,
   showApproval3 as showApproval,
-  showContextConfirm,
+  showContextConfirm2 as showContextConfirm,
   showError,
-  showGoalConfirm,
-  showGoalTextPanel,
+  showGoalConfirm2 as showGoalConfirm,
+  showGoalTextPanel2 as showGoalTextPanel,
   showImageLightbox9 as showImageLightbox,
   showModelConfigPanel4 as showModelConfigPanel,
   showNotice7 as showNotice,
-  showPermissionConfirm,
+  showPermissionConfirm2 as showPermissionConfirm,
   showQuestion3 as showQuestion,
-  showSettingsWorkspace,
-  showShutdownPanel,
+  showSettingsWorkspace2 as showSettingsWorkspace,
+  showShutdownPanel2 as showShutdownPanel,
   showTableLightbox9 as showTableLightbox,
   showTrustPanel,
-  shutdownDashboard,
+  shutdownDashboard2 as shutdownDashboard,
   shutdownRequestBody8 as shutdownRequestBody,
   shutdownResultIsClosed8 as shutdownResultIsClosed,
   sourceBadge7 as sourceBadge,
   sourceLabel5 as sourceLabel,
-  stableTurnRequest2 as stableTurnRequest,
+  stableTurnRequest,
   state,
   statusUrl,
-  submitGoalAction,
+  submitGoalAction2 as submitGoalAction,
   submitQuestion8 as submitQuestion,
   summarizeWorkflow3 as summarizeWorkflow,
   switchModel5 as switchModel,
@@ -10221,15 +10247,15 @@ export {
   syncGatewayUrlHint5 as syncGatewayUrlHint,
   syncGuideButton,
   syncPendingGuideFromQueue3 as syncPendingGuideFromQueue,
-  syncPreviewResizeHandle,
+  syncPreviewResizeHandle2 as syncPreviewResizeHandle,
   syncReasoningDefaultOptions5 as syncReasoningDefaultOptions,
   syncResponsiveNavigation,
   syncSettingsRail5 as syncSettingsRail,
   syncTranscriptFollowState3 as syncTranscriptFollowState,
-  syncVisualViewport,
+  syncVisualViewport2 as syncVisualViewport,
   tablePreviewMeta9 as tablePreviewMeta,
   tableTruncationNote9 as tableTruncationNote,
-  toggleLiveStatusDetails,
+  toggleLiveStatusDetails2 as toggleLiveStatusDetails,
   toggleModelPanel4 as toggleModelPanel,
   toggleQuestionChoice8 as toggleQuestionChoice,
   toggleSidebar,
@@ -10244,16 +10270,16 @@ export {
   unresolvedModelStatusHtml4 as unresolvedModelStatusHtml,
   updateAgentModelPickerManualStatus5 as updateAgentModelPickerManualStatus,
   updateConfigRevisions,
-  updateContextActions,
+  updateContextActions2 as updateContextActions,
   updateLiveActivity4 as updateLiveActivity,
   updateLiveStatus3 as updateLiveStatus,
-  updatePreviewResize,
+  updatePreviewResize2 as updatePreviewResize,
   updateRunStatusForBackground4 as updateRunStatusForBackground,
-  updateRunStatusTone,
+  updateRunStatusTone2 as updateRunStatusTone,
   updateSendButton,
   updateSessionStatus,
   updateTranscriptJump9 as updateTranscriptJump,
-  updateTurnChangeStats2 as updateTurnChangeStats,
+  updateTurnChangeStats,
   userMessageDisplayText9 as userMessageDisplayText,
   userTranscriptDisplayText,
   workflowItem3 as workflowItem,

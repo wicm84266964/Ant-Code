@@ -704,7 +704,7 @@ export function readImageAttachment(file: File) {
         id: `attachment-${Date.now()}-${Math.random().toString(16).slice(2)}`,
         type: "image",
         name: file.name || "image",
-        mimeType: match[1] || file.type || "image/png",
+        mimeType: /^(image\/(png|jpeg|gif|webp))$/i.test(match[1]) ? match[1].toLowerCase() : imageMimeFromName(file.name),
         size: file.size,
         data: match[2],
         previewUrl: dataUrl
@@ -771,6 +771,25 @@ export function renderAttachmentStrip() {
       renderAttachmentStrip();
       updateSendButton();
     });
+    if (isDocument && /\.pdf$/i.test(label)) {
+      const range = document.createElement("div");
+      range.className = "attachment-page-range";
+      for (const [key, labelText, placeholder] of [["pageStart", "起始页", "默认"], ["pageEnd", "结束页", "默认"]] as const) {
+        const input = document.createElement("input");
+        input.type = "number";
+        input.min = "1";
+        input.step = "1";
+        input.placeholder = placeholder;
+        input.title = key === "pageEnd"
+          ? "扫描件不填则只视觉识别前几页；全量视觉请填写结束页"
+          : "不填则从第 1 页开始";
+        input.setAttribute("aria-label", `${label} ${labelText}`);
+        input.value = attachment[key] === undefined ? "" : String(attachment[key]);
+        input.addEventListener("input", () => { attachment[key] = input.value ? Number(input.value) : undefined; });
+        range.append(input as unknown as Node);
+      }
+      item.append(range);
+    }
     els.attachmentStrip.append(item);
   }
 }
@@ -780,13 +799,20 @@ export function documentChipLabel(name: unknown) {
   return ext.slice(0, 4);
 }
 
-export function attachmentPayload(attachment: { type?: string; name?: string; mimeType?: string; size?: number; data?: string }) {
+export function imageMimeFromName(name: string) {
+  const extension = name.split(".").pop()?.toLowerCase();
+  return ({ png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" } as Record<string, string>)[extension ?? ""] || "application/octet-stream";
+}
+
+export function attachmentPayload(attachment: { type?: string; name?: string; mimeType?: string; size?: number; data?: string; pageStart?: number; pageEnd?: number }) {
   return {
     type: attachment.type === "document" ? "document" : "image",
     name: attachment.name,
     mimeType: attachment.mimeType,
     size: attachment.size,
-    data: attachment.data
+    data: attachment.data,
+    pageStart: attachment.pageStart,
+    pageEnd: attachment.pageEnd
   };
 }
 
@@ -879,12 +905,12 @@ export async function sendPrompt() {
   await loadSessions();
 }
 
-export function stableTurnRequest(prompt: string, attachments: Array<{ id?: string; name?: string; mimeType?: string; size?: number }>) {
+export function stableTurnRequest(prompt: string, attachments: Array<{ id?: string; name?: string; mimeType?: string; size?: number; pageStart?: number; pageEnd?: number }>) {
   const signature = JSON.stringify({
     prompt,
     sessionId: state.currentSessionId,
     permissionMode: state.permissionMode,
-    attachments: attachments.map((item) => [item.id, item.name, item.mimeType, item.size])
+    attachments: attachments.map((item) => [item.id, item.name, item.mimeType, item.size, item.pageStart, item.pageEnd])
   });
   if (state.turnRequest?.signature === signature) {
     return state.turnRequest;
@@ -1021,4 +1047,3 @@ export async function cancelQueuedTurn(queueItemId: unknown) {
   }
   syncGuideButton();
 }
-

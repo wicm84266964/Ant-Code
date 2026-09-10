@@ -3089,6 +3089,24 @@ body > .approval-panel:not(.hidden),
   padding: 4px;
 }
 
+.attachment-page-range {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.attachment-page-range input {
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  color: var(--text-soft);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
 .attachment-chip img,
 .attachment-chip-file {
   aspect-ratio: 1;

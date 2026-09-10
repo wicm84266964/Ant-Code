@@ -54,6 +54,13 @@ export function mapSessionEventToDashboard(event: Record<string, unknown>) {
   if (type === "turn_start") {
     return [activity("turn-start", "开始任务", "正在准备本轮请求", "running", "session", event, { coalesceKey: "turn" })];
   }
+  if (type === "pdf_vision_progress") {
+    const detail = `${String(event.name ?? "PDF")}${event.pageEnd ? ` · ${event.pageStart}-${event.pageEnd} / ${event.totalPages}` : ""}`;
+    return [activity("pdf-vision", event.stage === "completed" ? "PDF 页面识别完成" : event.stage === "rendering" ? "正在渲染 PDF" : "正在识别 PDF 页面", detail, "running", "gateway", event, { coalesceKey: "pdf-vision" })];
+  }
+  if (type === "pdf_vision_error") {
+    return [activity("pdf-vision", event.interrupted ? "PDF 识别已取消" : "PDF 识别失败", String(event.output ?? ""), event.interrupted ? "interrupted" : "failed", "gateway", event, { coalesceKey: "pdf-vision" })];
+  }
   if (type === "gateway_request_start") {
     return [activity("gateway-request", "正在请求模型", roundDetail(event), "running", "gateway", event, { coalesceKey: "gateway" })];
   }

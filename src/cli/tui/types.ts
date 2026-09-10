@@ -97,6 +97,8 @@ export type TuiRuntimeEvent = {
   truncated?: boolean;
   error?: TuiGatewayError;
   stage?: string;
+  pageEnd?: number;
+  totalPages?: number;
   attempt?: number;
   maxAttempts?: number;
   delayMs?: number;
