@@ -4,6 +4,9 @@
 
 ## 2.0.10 - 2026-09-10
 
+Published 2026-09-10 03:38:31 UTC (2026-09-10 11:38:31 UTC+08:00): [v2.0.10](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.10).
+Release commit: `e51b203038a44d72575c99d0bf87a9ab98a7c8eb`. PR #49 and main CI passed; local release verification passed 1,312 unit/integration tests and 37 browser tests, with no failures or skips. Additional process tests passed; cross-repository parity verified 23 exact paths and 6 reviewed differences.
+
 - Summarize older tool results in bounded model batches after the full request reaches its configured context budget; target a dynamic 10-20% reserve.
 - Retrieve pre-summary tool text through session-scoped `tool_result_read`, with existing transcript encryption, redaction, retention and deletion policies.
 - Distinguish tool summaries from conversation compaction in Dashboard and TUI; tool summaries no longer insert conversation boundaries.
