@@ -23,7 +23,8 @@ import { resolveMaxParallelReadonlyAgentRuns } from "../agents/orchestration-con
 import { appendDelegationReminderToExecution, createDelegationGuard } from "../agents/delegation-guard.ts";
 import { createReviewGate } from "../agents/review-policy.ts";
 import { buildCompactedContextMessage, compactSessionContextWithModel, createContextWindow, estimatePromptPayload, summarizeContextWindow } from "./context-window.ts";
-import { compactInFlightToolMessages, DEFAULT_IN_FLIGHT_COMPACT_RATIO, isReducedToolText } from "./inflight-compaction.ts";
+import { isReducedToolText } from "./inflight-compaction.ts";
+import { summarizeToolBatch, toolSummaryBudget, toolSummaryState } from "./tool-summary.ts";
 import { buildGoalSystemPromptAppendix, normalizeSessionGoal, serializeSessionGoal, stripGoalStatusFromContent, stripGoalStatusMarkers } from "./goal.ts";
 import { createAntEventNormalizer } from "./events.ts";
 import { accumulateProviderUsage, normalizeProviderUsageAggregate, sanitizeProviderUsage, type ProviderUsageAggregate } from "./provider-usage.ts";
@@ -449,13 +450,27 @@ export async function preparePromptBudgetForGateway(input: PromptBudgetInput) {
   );
 
   let estimate = estimateOf(messages);
+  const target = await toolSummaryBudget(input.session, estimate.bytes, input.env);
   if (!needsCompaction(estimate)) {
     return { messages, estimate, blocked: false };
   }
 
-  if (input.round !== 0) {
-    messages = await compactInflightForGateway(input, messages, true);
+  const before = estimate;
+  for (let batch = 0; batch < 3 && (estimate.tokens > target.targetTokens || estimate.bytes > target.targetBytes); batch += 1) {
+    const result = await summarizeToolBatch({ ...input, messages,
+      onStart: batch === 0 ? () => emitEvent(input.eventOptions, { type: "tool_results_summarizing", round: input.round + 1 }) : undefined,
+      neededBytes: Math.max(estimate.bytes - target.targetBytes, (estimate.tokens - target.targetTokens) * 4)
+    });
+    if (!result) break;
+    syncCompactedToolResults(input.toolResults, messages);
     estimate = estimateOf(messages);
+  }
+  if (estimate.bytes < before.bytes) {
+    await emitEvent(input.eventOptions, { type: "tool_results_summarized", reason: "automatic_prompt_budget", round: input.round + 1,
+      beforeTokens: before.tokens, afterTokens: estimate.tokens, beforeBytes: before.bytes, afterBytes: estimate.bytes,
+      targetTokens: target.targetTokens, reserveRatio: target.ratio });
+  } else {
+    await emitEvent(input.eventOptions, { type: "tool_summary_skipped", reason: "no_safe_reduction", round: input.round + 1 });
   }
 
   if (needsCompaction(estimate)) {
@@ -463,10 +478,12 @@ export async function preparePromptBudgetForGateway(input: PromptBudgetInput) {
     estimate = estimateOf(messages);
   }
 
-  if (needsCompaction(estimate)) {
-    messages = await compactInflightForGateway(input, messages, true);
-    estimate = estimateOf(messages);
-  }
+  const summaryState = await toolSummaryState(input.session, input.env);
+  summaryState.previousBytes = estimate.bytes;
+  summaryState.events.push({ type: "prompt_budget", at: new Date().toISOString(), turn: input.session.turnCount, round: input.round + 1,
+    beforeTokens: before.tokens, afterTokens: estimate.tokens, beforeBytes: before.bytes, afterBytes: estimate.bytes,
+    targetTokens: target.targetTokens, targetBytes: target.targetBytes, reserveRatio: target.ratio });
+  summaryState.events = summaryState.events.slice(-100);
 
   if (promptEstimateOverBudget(estimate, input.session.contextWindow)) {
     await emitEvent(input.eventOptions, {
@@ -488,6 +505,10 @@ async function compactHistoryForGateway(
   messages: SessionMessage[],
   beforeEstimate: ReturnType<typeof estimatePromptPayload>
 ) {
+  const state = await toolSummaryState(input.session, input.env);
+  const fingerprint = () => crypto.createHash("sha256").update(JSON.stringify(input.session.messages)).digest("hex");
+  if (state.historyFingerprint === fingerprint()) return messages;
+  state.historyFingerprint = fingerprint();
   const compaction = await compactSessionContextWithModel(input.session, {
     reason: "automatic_prompt_budget",
     force: true,
@@ -509,6 +530,7 @@ async function compactHistoryForGateway(
   if (!compaction.compacted) {
     return messages;
   }
+  state.historyFingerprint = fingerprint();
 
   const rebuilt = buildTurnMessages(input.session, buildUserTurnMessage(
     input.prompt,
@@ -540,40 +562,6 @@ async function compactHistoryForGateway(
   return nextMessages;
 }
 
-async function compactInflightForGateway(
-  input: PromptBudgetInput,
-  messages: SessionMessage[],
-  force: boolean
-) {
-  const inflight = compactInFlightToolMessages(messages as Array<Record<string, unknown>>, {
-    maxTokens: input.session.contextWindow?.maxTokens,
-    triggerRatio: boundedContextRatio(input.session.config.context?.inFlightCompactRatio, DEFAULT_IN_FLIGHT_COMPACT_RATIO),
-    keepRecentTools: input.session.config.context?.inFlightKeepRecentTools ?? undefined,
-    force,
-    needsCompaction: () => {
-      syncCompactedToolResults(input.toolResults, messages);
-      return promptEstimateNeedsCompaction(estimatePromptPayload({
-        model: input.session.model, messages, tools: input.session.context.tools,
-        toolResults: input.toolResults, gatewayProtocol: sessionGatewayProtocol(input.session)
-      }), input.session.contextWindow, input.session.config.context?.promptCompactRatio);
-    }
-  });
-  if (!inflight.compacted) {
-    return messages;
-  }
-  syncCompactedToolResults(input.toolResults, messages);
-  await emitEvent(input.eventOptions, {
-    type: "context_compacted",
-    beforeMessages: messages.length,
-    afterMessages: messages.length,
-    beforeTokens: inflight.beforeTokens,
-    afterTokens: inflight.afterTokens,
-    compactedTools: inflight.compactedTools,
-    strategy: "inflight-tools",
-    reason: input.round === 0 ? "automatic_prompt_budget" : "automatic_inflight_tools"
-  });
-  return messages;
-}
 
 function continuationAfterLastUser(messages: SessionMessage[]) {
   let lastUser = -1;

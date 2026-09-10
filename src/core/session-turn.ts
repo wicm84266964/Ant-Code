@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { readToolEvidence } from "./tool-summary.ts";
 import { buildInitialContext } from "../context/builder.ts";
 import { loadConfig, type LabAgentConfig } from "../config/load-config.ts";
 import {
@@ -184,6 +185,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
     mcpRuntime,
     workflowState: session.workflow,
     visualEvidence: session.visualEvidence,
+    readToolEvidence: (input) => readToolEvidence(session, input, options.env),
     approve: options.approvalCallback,
     askUser: options.userInputCallback,
     parentSessionId: session.id,

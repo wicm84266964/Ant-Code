@@ -9,6 +9,7 @@ export * from "./session-error.ts";
 export * from "./session-resume.ts";
 
 import crypto from "node:crypto";
+import { toolSummaryState } from "./tool-summary.ts";
 import { buildInitialContext } from "../context/builder.ts";
 import { loadConfig, type LabAgentConfig } from "../config/load-config.ts";
 import {
@@ -162,6 +163,7 @@ export async function createSession(options: CreateSessionOptions): Promise<Agen
     resumedFrom: resumed,
     visualEvidence: createVisualEvidenceStore()
   };
+  await toolSummaryState(session as unknown as AgentSession, options.env);
   await runHooks({
     config,
     cwd: options.cwd,

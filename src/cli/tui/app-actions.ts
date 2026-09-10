@@ -1130,6 +1130,8 @@ export function useTuiAppActions(s: ReturnType<typeof useTuiAppPanels>) {
       const body = "设置 LAB_MODEL_GATEWAY_URL 后才能启用模型轮次。";
       addEntry("gateway", "未配置", body);
       pushInspector(makeInspector("网关", "未配置", body, "gateway"), { focus: true });
+    } else if (event.type === "tool_results_summarized") {
+      addEntry("context", "工具结果已摘要", `${event.beforeTokens} -> ${event.afterTokens} tokens`);
     } else if (event.type === "context_compacted") {
       const strategy = event.strategy === "agent:compaction" ? "内部压缩 agent" : event.strategy === "model" ? "模型摘要" : event.strategy === "local" ? "本地摘要" : "未知方式";
       addEntry("context", "compacted", `${event.beforeMessages} -> ${event.afterMessages}; summary bytes=${event.summaryBytes}; ${strategy}${event.fallbackReason ? `; fallback=${event.fallbackReason}` : ""}`);

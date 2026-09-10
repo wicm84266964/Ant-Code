@@ -61,6 +61,8 @@ export type TuiRunPromptInput = string | {
 };
 
 export type TuiRuntimeEvent = {
+  beforeTokens?: number;
+  afterTokens?: number;
   type?: string;
   kind?: string;
   turnIndex?: number;

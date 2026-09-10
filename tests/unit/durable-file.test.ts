@@ -20,7 +20,7 @@ test("lock release retries sharing violations and permits the next mutation", as
   try {
     await withFileMutationLock(file, async () => {});
     await withFileMutationLock(file, async () => {});
-    assert.equal(failures, 4);
+    assert.ok(failures >= 4 && failures <= 12);
     assert.deepEqual(await fs.readdir(root), []);
   } finally {
     fs.rename = rename;

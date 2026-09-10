@@ -944,7 +944,7 @@ function safeSessionId(value: unknown) {
 }
 
 async function removeTranscriptDirectory(root: string, sessionId: string) {
-  for (const suffix of ["transcript", "model-context"]) {
+  for (const suffix of ["transcript", "model-context", "tool-evidence"]) {
     const dirPath = path.join(root, `${safeSessionId(sessionId)}.${suffix}`);
     await fs.rm(dirPath, { recursive: true, force: true });
   }

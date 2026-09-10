@@ -291,6 +291,14 @@ export function createAntEventNormalizer(options: { sessionId: string; now?: () 
       return events;
     }
 
+    if (["tool_results_summarizing", "tool_results_summarized", "tool_summary_skipped"].includes(type)) {
+      events.push(makeEvent(type, legacyEvent, {
+        beforeTokens: legacyEvent.beforeTokens ?? null,
+        afterTokens: legacyEvent.afterTokens ?? null,
+        reason: legacyEvent.reason ?? null
+      }, { source: "session" }));
+      return events;
+    }
     if (type === "context_compacted") {
       events.push(makeEvent("context_compacted", legacyEvent, {
         beforeMessages: legacyEvent.beforeMessages ?? null,

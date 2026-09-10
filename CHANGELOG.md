@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 2.0.10 - 2026-09-10
+
+- Summarize older tool results in bounded model batches after the full request reaches its configured context budget; target a dynamic 10-20% reserve.
+- Retrieve pre-summary tool text through session-scoped `tool_result_read`, with existing transcript encryption, redaction, retention and deletion policies.
+- Distinguish tool summaries from conversation compaction in Dashboard and TUI; tool summaries no longer insert conversation boundaries.
+- Preserve original text on summary failure, cancellation or insufficient savings; protect recent results and error diagnostics.
+
+Validation, upgrade steps and limitations: [Chinese release note](docs/releases/2.0.10-tool-summary-budget_zh.md).
+
 ## 2.0.9 - 2026-09-10
 
 Published 2026-09-09 17:37:09 UTC (2026-09-10 01:37:09 UTC+08:00): [v2.0.9](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.9).

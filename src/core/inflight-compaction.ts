@@ -112,7 +112,7 @@ function compactToolMessage(message: Record<string, unknown> | undefined, maxToo
 }
 
 export function isReducedToolText(text: string) {
-  return text.includes(COMPACTED_TOOL_MARKER) || text.includes(STALE_TOOL_MARKER);
+  return text.includes(COMPACTED_TOOL_MARKER) || text.includes(STALE_TOOL_MARKER) || text.includes("[tool results summary]");
 }
 
 function shouldCompactMore(messages: Array<Record<string, unknown>>, triggerTokens: number | null, force: boolean) {
