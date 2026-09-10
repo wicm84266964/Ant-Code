@@ -59,6 +59,15 @@ export function renderToolResultView(
 }
 
 function bodyForTool(name: string, execution: ToolResultValue, result: Record<string, unknown>, budget: number): ViewDraft {
+  if (name === "tool_result_read" && execution.ok === true) {
+    const content = String(result.content ?? "");
+    const excerpt = new TextDecoder("utf-8").decode(Buffer.from(content).subarray(0, Math.max(0, budget - 180)), { stream: true });
+    const nextOffset = excerpt.length < content.length ? Number(result.offset || 0) + excerpt.length : result.nextOffset;
+    return { text: [
+      `offset=${result.offset ?? 0}${nextOffset != null && excerpt ? ` nextOffset=${nextOffset}` : ""}`,
+      excerpt || (content ? "No content fits; increase maxToolResultBytes before retrying." : "End of tool evidence.")
+    ].join("\n"), truncated: nextOffset != null };
+  }
   if (name === "read_file") {
     return formatReadFile(result, budget);
   }

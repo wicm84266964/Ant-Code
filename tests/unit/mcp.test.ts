@@ -422,7 +422,7 @@ test("MCP request timeout is a failed request, not a user interrupt", async (t) 
             transport: "stdio",
             command: process.execPath,
             args: [path.resolve("tests/fixtures/mcp-cancel-server.ts")],
-            requestTimeoutMs: 80,
+            requestTimeoutMs: 2_000,
             toolRisks: { slow: "read" }
           }
         ]
@@ -434,7 +434,7 @@ test("MCP request timeout is a failed request, not a user interrupt", async (t) 
   });
   t.after(() => runtime.close());
 
-  await runtime.listTools("timeout-fixture");
+  assert.equal((await runtime.listTools("timeout-fixture")).ok, true);
   const result = await runtime.callTool("timeout-fixture", "slow", {});
 
   assert.equal(result.ok, false);

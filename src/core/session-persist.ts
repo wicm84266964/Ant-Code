@@ -491,6 +491,7 @@ export async function commitSessionSnapshot(store: ReturnType<typeof createSessi
         messages: persistableTranscriptMessages(transcriptMessagesForPersistence(session), session),
         contextMessages: persistableContextMessages(limitResumeContextMessages(session.messages, session.config.context)),
         contextWindow: persistableContextWindow(session.contextWindow),
+        toolSummaries: session.toolSummaries,
         archive: persistableTranscriptArchive(transcriptArchive),
         modelArchive: persistableTranscriptArchive(modelArchive)
       }

@@ -50,6 +50,40 @@ test("dashboard config atomic writes reject stale revisions without replacing th
   assert.deepEqual((await fs.readdir(root)).filter((name) => name.endsWith(".tmp")), []);
 });
 
+test("dashboard config rename retries sharing violations and preserves concurrent revisions", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-config-retry-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const file = path.join(root, "config.json");
+  await atomicWriteJsonConfig(file, { value: "first" });
+  const rename = fs.rename;
+  for (const scenario of ["transient", "conflict", "persistent"]) {
+    const snapshot = await readJsonConfigSnapshot(file);
+    let attempts = 0;
+    const injected = Object.assign(new Error("sharing violation"), { code: "EPERM" });
+    const mock = t.mock.method(fs, "rename", async (...args: Parameters<typeof fs.rename>) => {
+      attempts += 1;
+      if (scenario === "conflict") await fs.writeFile(file, '{"value":"external"}\n');
+      if (attempts === 1 || scenario !== "transient") throw injected;
+      return rename(...args);
+    });
+    try {
+      const write = atomicWriteJsonConfig(file, { value: "updated" }, { expectedRevision: snapshot.revision });
+      if (scenario === "transient") {
+        await write;
+        assert.equal(attempts, 2);
+        assert.deepEqual((await readJsonConfigSnapshot(file)).data, { value: "updated" });
+      } else {
+        await assert.rejects(write, scenario === "conflict" ? ConfigRevisionConflictError : injected);
+        assert.equal(attempts, scenario === "conflict" ? 1 : 6);
+        assert.deepEqual((await readJsonConfigSnapshot(file)).data, scenario === "conflict" ? { value: "external" } : snapshot.data);
+      }
+      assert.deepEqual((await fs.readdir(root)).filter((name) => name.endsWith(".tmp")), []);
+    } finally {
+      mock.mock.restore();
+    }
+  }
+});
+
 test("dashboard config updater failures preserve the original file and release its lock", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-config-store-"));
   const filePath = path.join(root, "config.json");

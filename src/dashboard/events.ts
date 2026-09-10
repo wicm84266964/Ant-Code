@@ -194,6 +194,15 @@ export function mapSessionEventToDashboard(event: Record<string, unknown>) {
   if (type === "context_compacting") {
     return [activity("context-compacting", "正在压缩上下文", contextCompactionStartDetail(event), "running", "session", event, { coalesceKey: "context-compaction" })];
   }
+  if (type === "tool_results_summarized") {
+    return [activity("tool-results-summarized", "工具结果已摘要", contextCompactionDetail(event), "completed", "session", event, { coalesceKey: "tool-summary" })];
+  }
+  if (type === "tool_results_summarizing") {
+    return [activity("tool-results-summarizing", "正在生成工具摘要", "", "running", "session", event, { coalesceKey: "tool-summary" })];
+  }
+  if (type === "tool_summary_skipped") {
+    return [activity("tool-summary-skipped", "工具原文已保留", "未获得可安全替换的摘要", "completed", "session", event, { coalesceKey: "tool-summary" })];
+  }
   if (type === "context_compacted") {
     return [
       activity("context-compacted", "上下文已压缩", contextCompactionDetail(event), "completed", "session", event, { coalesceKey: "context-compaction" }),

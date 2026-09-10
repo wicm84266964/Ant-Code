@@ -199,6 +199,7 @@ export type ToolRuntimeOptions = {
   onBackgroundAgentEvent?: (event: Record<string, unknown>) => void | Promise<void>;
   onBackgroundTerminalEvent?: (event: Record<string, unknown>) => void | Promise<void>;
   visualEvidence?: import("../core/visual-evidence.ts").VisualEvidenceStore | null;
+  readToolEvidence?: (input: Record<string, unknown>) => Promise<unknown>;
 };
 
 export function createToolRuntime(options: ToolRuntimeOptions) {
@@ -375,6 +376,11 @@ export function createToolRuntime(options: ToolRuntimeOptions) {
       }
 
       const handler = lookupHandler(name);
+      if (name === "tool_result_read") {
+        return finishTool(options, name, input, definition, options.readToolEvidence
+          ? await options.readToolEvidence(input)
+          : { ok: false, error: { code: "EVIDENCE_UNAVAILABLE", message: "Tool evidence is unavailable in this context." } });
+      }
       if (name === "todo_read") {
         return finishTool(options, name, input, definition, { ok: true, result: todoReadTool({ workflow: workflowState }) });
       }

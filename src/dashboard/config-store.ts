@@ -107,14 +107,24 @@ export async function atomicWriteJsonConfig(filePath: string, data: Record<strin
     await handle.close();
     handle = null;
 
-    if (options.expectedRevision !== undefined) {
-      const current = await readJsonConfigSnapshot(target);
-      if (current.revision !== options.expectedRevision) {
-        throw new ConfigRevisionConflictError();
+    for (let attempt = 0; ; attempt += 1) {
+      // Recheck after sharing violations so retries cannot overwrite a newer revision.
+      if (options.expectedRevision !== undefined) {
+        const current = await readJsonConfigSnapshot(target);
+        if (current.revision !== options.expectedRevision) {
+          throw new ConfigRevisionConflictError();
+        }
+      }
+      try {
+        await fs.rename(temporaryPath, target);
+        break;
+      } catch (error) {
+        if (attempt >= 5 || !["EPERM", "EACCES", "EBUSY"].includes(String(errorCode(error)))) {
+          throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20 * (attempt + 1)));
       }
     }
-
-    await fs.rename(temporaryPath, target);
     await fs.chmod(target, 0o600).catch(() => {});
     await syncDirectory(directory);
     return { revision: configRevision(serialized), path: target };

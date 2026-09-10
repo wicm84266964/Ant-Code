@@ -1,5 +1,15 @@
 export const BUILT_IN_TOOLS = Object.freeze([
   {
+    name: "tool_result_read",
+    description: "Retrieve original tool output referenced by a tool summary in this session. Use item and nextOffset to page; preserved text follows session redaction and retention policy.",
+    risk: "read",
+    supportsAbort: false,
+    inputSchema: { type: "object", required: ["evidenceId"], properties: {
+      evidenceId: { type: "string" }, item: { type: "integer", minimum: 0 },
+      offset: { type: "integer", minimum: 0 }, maxChars: { type: "integer", minimum: 1, maximum: 4000 }
+    } }
+  },
+  {
     name: "read_file",
     description: "Read a UTF-8 text file inside the active workspace, or an approved/full-access local path. Model output is a bounded continuous excerpt. Continue with returned nextStartLine/nextStartColumn as startLine/startColumn; maxLines defaults to 200 for range reads. Reuse retained results unless the file changed or another range is needed.",
     risk: "read",

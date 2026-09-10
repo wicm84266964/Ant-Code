@@ -472,7 +472,7 @@ test("session does not compact before the configured context window is reached b
   await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
     context: {
       maxMessages: 100,
-      maxTokens: 20000,
+      maxTokens: 24000,
       keepRecentMessages: 2,
       summaryBytes: 4096
     }
@@ -686,7 +686,7 @@ test("session retains eight source and analysis results in the actual gateway re
   }
 });
 
-test("session compactes oversized in-flight tool results before later gateway rounds", async () => {
+test("session preserves recent tool evidence instead of mechanically clipping it", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
   await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
     context: {
@@ -721,8 +721,8 @@ test("session compactes oversized in-flight tool results before later gateway ro
     const toolText = Array.isArray(toolMessage.content)
       ? toolMessage.content.map((item) => item.text ?? "").join("")
       : String(toolMessage.content ?? "");
-    assert.match(toolText, /\[stale tool result\]|\[compacted tool result\]/);
-    assert.ok(toolText.length < 8_000);
+    assert.doesNotMatch(toolText, /\[stale tool result\]|\[compacted tool result\]/);
+    assert.ok(toolText.length > 8_000);
   } finally {
     await close(server);
   }
