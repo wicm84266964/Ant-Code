@@ -4,7 +4,8 @@
 
 ## 2.0.11 - 2026-09-10
 
-Candidate small release for scanned PDF visual preview and background subagent wakeup merging. GitHub CI, tag and Release status will be recorded after publication.
+Published 2026-09-10 09:14:36 UTC (2026-09-10 17:14:36 UTC+08:00): [v2.0.11](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.11).
+Release commit: `474930e346a48f0ea919f0aaa1839498b067efc9`. PR #51 and main CI passed; local release verification passed 1,331 unit/integration tests and 38 browser tests, with no failures or skips. Additional process tests passed; cross-repository parity verified 27 exact paths and 13 reviewed differences.
 
 - Text-layer PDFs are answered from extracted text; scanned PDFs render the first few full pages for vision and cite those page numbers.
 - Full visual PDF reading is explicit: set start and end pages on the paperclip and resend. PNG pastes without MIME are classified by extension.
