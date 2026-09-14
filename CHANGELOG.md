@@ -4,6 +4,9 @@
 
 ## 2.0.13 - 2026-09-14
 
+Published 2026-09-14 13:40:52 UTC (2026-09-14 21:40:52 UTC+08:00): [v2.0.13](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.13).
+Release commit: `60b6154174523a6653579feff88a458e54dfef6e`. PR #56 and main CI passed; local release verification passed 1,356 unit/integration tests and 38 browser tests, with no failures or skips. Cross-repository parity verified 34 exact paths and 12 reviewed differences.
+
 This is a small Dashboard artifact, credential, and session-guard release on the 2.0 TypeScript runtime.
 Generated plots and reports can appear in the right pane without a manual open. Same-URL credentials are chosen automatically so chat is not blocked before send. Empty-body diagnostics stay in the UI, not the next model prompt. A one-line tool promise with no tool call is retried once with a new gateway session binding. Permission mode ids are unchanged.
 
