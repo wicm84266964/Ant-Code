@@ -4,6 +4,9 @@
 
 ## 2.0.14 - 2026-09-14
 
+Published 2026-09-14 14:52:10 UTC (2026-09-14 22:52:10 UTC+08:00): [v2.0.14](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.14).
+Release commit: `8ca6ff4545f964ebc64dd1723e2ce2fce6824751`. PR #58 and main CI passed; local release verification passed 1,358 unit/integration tests and 38 browser tests, with no failures or skips. Cross-repository parity verified 10 exact paths and 12 reviewed differences.
+
 This is a small Responses-search and Dashboard layout release on the 2.0 TypeScript runtime.
 Hosted `web_search_call` events from a Responses gateway no longer abort the turn. Todo and plan stay in the header strip instead of duplicating into the chat. The settings gear is rotationally symmetric. Permission mode ids are unchanged.
 
