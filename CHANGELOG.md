@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+## 2.0.13 - 2026-09-14
+
+This is a small Dashboard artifact, credential, and session-guard release on the 2.0 TypeScript runtime.
+Generated plots and reports can appear in the right pane without a manual open. Same-URL credentials are chosen automatically so chat is not blocked before send. Empty-body diagnostics stay in the UI, not the next model prompt. A one-line tool promise with no tool call is retried once with a new gateway session binding. Permission mode ids are unchanged.
+
+### Added
+
+- Dashboard lists script-generated previewable files and opens the latest exhibit automatically.
+- Optional `gatewaySessionAffinity` is persisted so a session can rebind the gateway conversation without changing the local session id.
+
+### Fixed
+
+- Multiple keys on one gateway URL no longer block chat until a settings click. HTTP 401/403 then asks the user to inspect or switch the active credential.
+- Empty-visible-text diagnostics are no longer written into model context.
+- A short “I will call this tool now” stop with no tool call is retried once after rotating gateway session affinity.
+- Unsolicited Responses `web_search_call` events fail as a protocol mismatch instead of a silent completion.
+- Dashboard event-stream disconnects show unknown task status instead of implying the turn finished.
+
+### Upgrade
+
+```sh
+git pull
+npm ci
+npm run verify:install
+npm link
+ant-code --version
+```
+
+`ant-code --version` should print `2.0.13`. Restart a running Dashboard
+and hard-refresh the browser. Gateway config and `.lab-agent` sessions
+do not need to be recreated.
+
 ## 2.0.12 - 2026-09-14
 
 Published 2026-09-14 02:04:48 UTC (2026-09-14 10:04:48 UTC+08:00): [v2.0.12](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.12).

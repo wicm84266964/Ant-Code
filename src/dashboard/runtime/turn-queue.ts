@@ -800,11 +800,40 @@ export function createTurnState(
     pendingApprovals: new Map(),
     pendingQuestions: new Map(),
     finalOutput: "",
+    lastArtifactFingerprint: "",
     backgroundSnapshotTimer: null,
     backgroundSnapshotDirty: false,
     backgroundSnapshotPromise: null,
     hooksTrusted: false
   };
+}
+
+function artifactFingerprint(files: Array<{ relativePath?: string }>): string {
+  return files.map((file) => String(file.relativePath ?? "").toLowerCase()).join("\n");
+}
+
+function rememberSessionArtifactFingerprint<T extends { relativePath?: string }>(state: DashboardActiveSessionState, files: T[]): T[] {
+  state.lastArtifactFingerprint = artifactFingerprint(files);
+  return files;
+}
+
+function publishSessionArtifacts(state: DashboardActiveSessionState) {
+  if (!state.currentTurnId || state.disposed) {
+    return;
+  }
+  const files = collectSessionFiles(state.session, state.finalOutput);
+  const fingerprint = artifactFingerprint(files);
+  if (fingerprint === state.lastArtifactFingerprint) {
+    return;
+  }
+  state.lastArtifactFingerprint = fingerprint;
+  appendDashboardEvent(state, {
+    type: "artifacts_updated",
+    id: eventId("artifacts"),
+    turnId: state.currentTurnId,
+    files,
+    at: new Date().toISOString()
+  });
 }
 
 
@@ -954,10 +983,13 @@ export function runTurnInBackground(state: DashboardActiveSessionState, item: Da
           if (currentTurn && event.type === "tool_finish" && (event.name === "todo_write" || event.name === "plan_update")) {
             appendWorkflowSnapshot(state, event.name);
           }
-          if (currentTurn && event.type === "tool_finish" && state.session.goal?.enabled) {
+          if (currentTurn && event.type === "tool_finish") {
             const name = String(event.name ?? "");
             if (["write_file", "edit_file", "powershell", "bash"].includes(name)) {
-              state.session.goal.hasWrites = true;
+              publishSessionArtifacts(state);
+              if (state.session.goal?.enabled) {
+                state.session.goal.hasWrites = true;
+              }
             }
           }
           if (currentTurn && event.type === "workflow_updated") {
@@ -987,7 +1019,7 @@ export function runTurnInBackground(state: DashboardActiveSessionState, item: Da
         type: "files_updated",
         id: eventId("files"),
         turnId: state.currentTurnId,
-        files: collectSessionFiles(state.session, state.finalOutput),
+        files: rememberSessionArtifactFingerprint(state, collectSessionFiles(state.session, state.finalOutput)),
         sessionStatus: sessionStatusSummary(state.session),
         changeStats: { ...state.turnChangeStats },
         at: new Date().toISOString()

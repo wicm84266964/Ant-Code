@@ -47,6 +47,7 @@ import {
   webFetchTool,
   webSearchTool
 } from "./web-tools.ts";
+import { collectShellArtifacts } from "./artifacts.ts";
 import { createWorkflowState, planUpdateTool, recordFileChange, recordValidation, todoReadTool, todoWriteTool } from "./workflow-tools.ts";
 
 const HANDLERS = Object.freeze({
@@ -329,7 +330,7 @@ export function createToolRuntime(options: ToolRuntimeOptions) {
         const execution = await executeWebFetchTool(options, input, definition);
         const fetchResult = asResultRecord(execution);
         if (fetchResult.ok === true) {
-          recordToolEffect(workflowState, name, input, isPlainObject(fetchResult.result) ? fetchResult.result : EMPTY_RECORD);
+          recordToolEffect(workflowState, name, input, isPlainObject(fetchResult.result) ? fetchResult.result : EMPTY_RECORD, options.cwd);
         }
         return finishTool(options, name, input, definition, options.signal?.aborted && fetchResult.interrupted !== true
           ? interruptedToolExecution(name, input, definition, fetchResult)
@@ -461,13 +462,13 @@ export function createToolRuntime(options: ToolRuntimeOptions) {
           });
         }
         if (options.signal?.aborted || resultFields.interrupted === true) {
-          recordToolEffect(workflowState, name, input, resultFields);
+          recordToolEffect(workflowState, name, input, resultFields, options.cwd);
           if (name === "write_file" || (name === "edit_file" && resultFields.edited !== false)) {
             await emitFileChangedHook(options, name, input, resultFields);
           }
           return finishTool(options, name, input, definition, interruptedToolExecution(name, input, definition, resultFields));
         }
-        recordToolEffect(workflowState, name, input, resultFields);
+        recordToolEffect(workflowState, name, input, resultFields, options.cwd);
         if (name === "write_file" || (name === "edit_file" && resultFields.edited !== false)) {
           await emitFileChangedHook(options, name, input, resultFields);
         }
@@ -1812,7 +1813,7 @@ function lookupHandler(name: string): BuiltinHandler | undefined {
  * @param {Record<string, any>} input
  * @param {Record<string, any>} result
  */
-function recordToolEffect(workflowState: ReturnType<typeof createWorkflowState>, name: string, input: Record<string, unknown>, result: Record<string, unknown>) {
+function recordToolEffect(workflowState: ReturnType<typeof createWorkflowState>, name: string, input: Record<string, unknown>, result: Record<string, unknown>, cwd: string = "") {
   if (name === "write_file") {
     recordFileChange(workflowState, {
       toolName: name,
@@ -1843,6 +1844,18 @@ function recordToolEffect(workflowState: ReturnType<typeof createWorkflowState>,
       stderrTruncated: result.stderrTruncated,
       error: result.error
     });
+    for (const artifact of collectShellArtifacts(cwd, {
+      command: input.command,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      durationMs: result.durationMs
+    })) {
+      recordFileChange(workflowState, {
+        toolName: name,
+        path: artifact.path,
+        created: artifact.created
+      });
+    }
   }
 }
 

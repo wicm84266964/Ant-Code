@@ -68,6 +68,68 @@ export function renderShutdownActivity() {
   els.shutdownConfirm.textContent = activity.total > 0 ? "取消任务并关闭" : "确认关闭";
 }
 
+const EXHIBIT_FILE_KINDS = new Set([
+  "image",
+  "pdf",
+  "office-preview",
+  "office",
+  "markdown",
+  "table-preview",
+  "data"
+]);
+const EXHIBIT_TEXT_EXTENSIONS = new Set(["txt", "log", "html", "htm"]);
+
+export function isExhibitFile(file: DashboardFile | null | undefined) {
+  if (!file?.relativePath) {
+    return false;
+  }
+  const kind = String(file.kind ?? "");
+  if (EXHIBIT_FILE_KINDS.has(kind)) {
+    return true;
+  }
+  if (kind !== "text") {
+    return false;
+  }
+  const name = String(file.relativePath ?? file.name ?? "");
+  const ext = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1).toLowerCase() : "";
+  return EXHIBIT_TEXT_EXTENSIONS.has(ext);
+}
+
+export function pickExhibitFile(
+  files: DashboardFile[] | null | undefined,
+  options: { previousPaths?: Array<string | null | undefined>; force?: boolean } = {}
+) {
+  const previous = new Set(
+    (options.previousPaths ?? []).map((value) => String(value ?? "").replace(/\\/g, "/").toLowerCase()).filter(Boolean)
+  );
+  const items = (Array.isArray(files) ? files : []).filter(isExhibitFile);
+  const fresh = items.filter((file) => !previous.has(String(file.relativePath ?? "").replace(/\\/g, "/").toLowerCase()));
+  const pool = fresh.length > 0 ? fresh : (options.force === true ? items : []);
+  return pool.at(-1) ?? null;
+}
+
+export function applySessionFiles(files: DashboardFile[] | null | undefined, options: { exhibit?: boolean; force?: boolean } = {}) {
+  const previousPaths = state.files.map((file) => file.relativePath);
+  state.files = Array.isArray(files) ? files : [];
+  renderFiles();
+  if (options.exhibit === false) {
+    return;
+  }
+  const next = pickExhibitFile(state.files, {
+    previousPaths,
+    force: options.force === true || !state.previewPath
+  });
+  if (next?.relativePath && next.relativePath !== state.previewPath) {
+    void openFile(next.relativePath);
+    return;
+  }
+  if (!state.previewPath) {
+    resetPreview();
+    return;
+  }
+  syncFileListSelection();
+}
+
 export function renderFiles() {
   els.fileList.innerHTML = "";
   if (state.files.length === 0) {
@@ -81,13 +143,24 @@ export function renderFiles() {
     const item = document.createElement("button");
     item.type = "button";
     item.className = "file-item";
+    item.dataset.file = file.relativePath ?? "";
     item.innerHTML = `
       <div class="file-name">${escapeHtml(file.name)}</div>
       <div class="file-meta">${escapeHtml(file.kind)} · ${escapeHtml(file.source ?? "file")}</div>
     `;
+    item.classList.toggle("active", Boolean(state.previewPath) && item.dataset.file === state.previewPath);
     item.addEventListener("click", () => openFile(file.relativePath));
     els.fileList.append(item);
   }
+}
+
+export function syncFileListSelection() {
+  els.fileList.querySelectorAll(".file-item").forEach((item) => {
+    if (!(item instanceof HTMLElement)) {
+      return;
+    }
+    item.classList.toggle("active", Boolean(state.previewPath) && item.dataset.file === state.previewPath);
+  });
 }
 
 export function currentImageFiles() {
@@ -102,6 +175,8 @@ export function currentImageFiles() {
 
 export async function openFile(filePath: string | null | undefined) {
   if (!filePath) return;
+  state.previewPath = filePath;
+  syncFileListSelection();
   const sessionId = state.currentSessionId;
   const request = beginScopedRequest("file", `${sessionId ?? "new"}:${filePath}`);
   els.previewBody.className = "preview-body";
@@ -442,8 +517,10 @@ export function renderSheetCellHtml(line: unknown) {
 }
 
 export function resetPreview(message: string = "任务产物会显示在这里") {
+  state.previewPath = "";
   els.previewBody.className = "preview-body";
   els.previewBody.innerHTML = `<div class="preview-placeholder">${escapeHtml(message)}</div>`;
+  syncFileListSelection();
 }
 
 export function fencedDataForFile(file: DashboardFile) {

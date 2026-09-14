@@ -1,4 +1,5 @@
 import { decideNetworkAccess } from "../permissions/network-policy.ts";
+import { sourceCredentialFailureMessage, sourceHasAlternateCredentials } from "../config/source-credentials.ts";
 import { isGatewayStreamInterruptedError, normalizeGatewayError, redactGatewayText } from "./errors.ts";
 import {
   createOpenAIChatCompletionRequest,
@@ -88,7 +89,7 @@ export function createLabModelGateway(config: import("../config/load-config.ts")
     /**
      * @param {{ messages: Array<Record<string, any>>; tools?: Array<Record<string, any>>; toolResults?: Array<Record<string, any>>; sessionId?: string; stream?: boolean; signal?: AbortSignal; onEvent?: (event: Record<string, any>) => void | Promise<void> }} request
      */
-    async sendChat(request: { messages: Array<Record<string, unknown>>; tools?: Array<Record<string, unknown>>; toolResults?: Array<Record<string, unknown>>; sessionId?: string; stream?: boolean; signal?: AbortSignal; onEvent?: (event: Record<string, unknown>) => void | Promise<void> }): Promise<GatewayChatResult> {
+    async sendChat(request: { messages: Array<Record<string, unknown>>; tools?: Array<Record<string, unknown>>; toolResults?: Array<Record<string, unknown>>; sessionId?: string; sessionAffinity?: string; stream?: boolean; signal?: AbortSignal; onEvent?: (event: Record<string, unknown>) => void | Promise<void> }): Promise<GatewayChatResult> {
       if (config.lab.sourceCredentialSelectionRequired) {
         throw new Error("请先在设置页为当前 URL 来源选择生效凭据；未发送模型请求。");
       }
@@ -152,7 +153,7 @@ export function createLabModelGateway(config: import("../config/load-config.ts")
         try {
           response = await fetch(config.lab.gatewayUrl, {
             method: "POST",
-            headers: createHeaders(config, request.sessionId, protocol),
+            headers: createHeaders(config, request.sessionAffinity?.trim() || request.sessionId, protocol),
             body: JSON.stringify(gatewayRequest),
             signal: attemptAbort.signal
           });
@@ -257,11 +258,16 @@ export function createLabModelGateway(config: import("../config/load-config.ts")
           } finally {
             attemptAbort.cleanup();
           }
+          const canSwitchSourceCredential = sourceHasAlternateCredentials(config);
+          const credentialFailure = response.status === 401 || response.status === 403;
           const error = normalizeGatewayError(null, {
             code: "GATEWAY_HTTP_ERROR",
-            message: `Gateway returned HTTP ${response.status}`,
+            message: credentialFailure
+              ? sourceCredentialFailureMessage(canSwitchSourceCredential, response.status)
+              : `Gateway returned HTTP ${response.status}`,
             status: response.status,
             protocol,
+            canSwitchSourceCredential,
             details: {
               body: errorBody.body,
               bodyTruncated: errorBody.truncated,
@@ -393,6 +399,17 @@ export function createLabModelGateway(config: import("../config/load-config.ts")
           continue;
         }
 
+        if (protocol === "openai-responses" && isRecord(data.raw) && data.raw.nativeWebSearch === true
+          && Array.isArray(gatewayRequest.tools)
+          && !gatewayRequest.tools.some((tool) => isRecord(tool) && ["web_search", "web_search_preview"].includes(String(tool.type)))
+          && gatewayRequest.tools.some((tool) => isRecord(tool) && tool.type === "function" && tool.name === "web_search")) {
+          return { ok: false, error: normalizeGatewayError(null, {
+            code: "GATEWAY_TOOL_PROTOCOL_MISMATCH",
+            message: "网关返回了未请求的原生搜索事件，而不是本地 web_search 工具调用；本轮未正常完成。请检查网关协议映射或重置此会话的网关绑定。",
+            details: { receivedToolType: "web_search_call", expectedToolType: "function_call" },
+            protocol
+          }) };
+        }
         return { ok: true, data };
       }
 

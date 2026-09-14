@@ -3,6 +3,7 @@ import { readdirSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { parseDocumentBufferAsync } from "../tools/document-tools.ts";
 import { COMPOSER_UPLOAD_DIR } from "../tools/composer-documents.ts";
+import { extractCandidatePaths } from "../tools/artifacts.ts";
 
 const DATA_EXTENSIONS = new Set([".json", ".csv", ".tsv", ".yaml", ".yml"]);
 const TEXT_EXTENSIONS = new Set([".txt", ".log", ".json", ".csv", ".tsv", ".md", ".markdown", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".css", ".html", ".xml", ".yaml", ".yml", ".py", ".ps1", ".cmd", ".sh", ".java", ".c", ".cpp", ".h", ".hpp", ".cs", ".go", ".rs", ".php", ".rb", ".sql", ".toml", ".ini"]);
@@ -317,7 +318,7 @@ export async function readRawFile(cwd: string, requestedPath: string) {
  * @param {Record<string, any>} session
  * @param {string} finalOutput
  */
-export function collectSessionFiles(session: { cwd?: unknown; workflow?: unknown } = {}, finalOutput: string = "") {
+export function collectSessionFiles(session: { cwd?: unknown; workflow?: unknown; artifacts?: unknown } = {}, finalOutput: string = "") {
   const cwd = typeof session?.cwd === "string" ? session.cwd : process.cwd();
   const items: SessionFileItem[] = [];
   const workflow = session?.workflow && typeof session.workflow === "object" ? session.workflow as { changes?: unknown } : {};
@@ -327,6 +328,13 @@ export function collectSessionFiles(session: { cwd?: unknown; workflow?: unknown
     addFile(items, cwd, record.path, {
       source: record.created ? "created" : record.edited ? "edited" : "changed",
       toolName: record.toolName ?? null
+    });
+  }
+  const persisted = Array.isArray(session?.artifacts) ? session.artifacts : [];
+  for (const artifact of persisted) {
+    const record = isRecord(artifact) ? artifact : {};
+    addFile(items, cwd, record.relativePath ?? record.path, {
+      source: typeof record.source === "string" ? record.source : "created"
     });
   }
   for (const candidate of extractPaths(finalOutput)) {
@@ -526,8 +534,7 @@ function fileKindForTextExtension(ext: string) {
 }
 
 function extractPaths(text: string) {
-  const matches = String(text ?? "").match(/(?:[A-Za-z]:[\\/][^\s"'<>|]+|(?:\.{1,2}[\\/])?[A-Za-z0-9_.-]+[\\/][A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,8}|[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,8})/g);
-  return matches ?? [];
+  return extractCandidatePaths(text);
 }
 
 function addFile(items: SessionFileItem[], cwd: string, target: unknown, meta: Partial<SessionFileItem> = {}) {

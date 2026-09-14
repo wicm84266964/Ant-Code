@@ -709,6 +709,7 @@ export async function resolveResumeMetadata(options: { cwd: string; config: LabA
     config: runtimeConfig,
     metadata: {
       id: result.metadata.id,
+      gatewaySessionAffinity: result.metadata.gatewaySessionAffinity,
       startedAt: result.metadata.startedAt,
       turnCount: Number.isFinite(result.metadata.turnIndex) ? result.metadata.turnIndex : 0,
       metadataPath: result.path,

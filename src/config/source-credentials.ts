@@ -14,16 +14,55 @@ export function sourceCredentialState(config: RecordValue) {
   for (const [url, members] of groups) {
     const explicit = lab.sourceCredentialSelections?.[url];
     const retained = lab.resolvedSourceCredentials?.[url];
-    const requested = explicit ?? retained;
-    if (requested !== undefined) {
-      result[url] = members.find((p) => p.id === requested)?.id ?? null;
-      continue;
-    }
-    const keys = new Set(members.map((p) => JSON.stringify([p.gatewayApiKeyDisabled === true, p.gatewayApiKey || ""])));
-    const active = members.find((p) => p.id === lab.activeGatewayProfile);
-    result[url] = keys.size === 1 ? members[0].id : active?.id ?? null;
+    result[url] = pickSourceCredential(members, lab, explicit ?? retained);
   }
   return result;
+}
+
+function pickSourceCredential(members: RecordValue[], lab: RecordValue, requested: unknown) {
+  const requestedId = typeof requested === "string" ? requested.trim() : "";
+  if (requestedId) {
+    const saved = members.find((profile) => profile.id === requestedId);
+    if (saved) {
+      return saved.id;
+    }
+  }
+  const keys = new Set(members.map((profile) => JSON.stringify([profile.gatewayApiKeyDisabled === true, profile.gatewayApiKey || ""])));
+  if (keys.size === 1) {
+    return members[0].id;
+  }
+  const active = members.find((profile) => profile.id === lab.activeGatewayProfile);
+  if (active) {
+    return active.id;
+  }
+  return members[0]?.id ?? null;
+}
+
+export function sourceHasAlternateCredentials(config: RecordValue) {
+  return distinctSourceCredentialCount(config) > 1;
+}
+
+export function sourceCredentialFailureMessage(canSwitch: boolean, status: number | null = null) {
+  const action = canSwitch
+    ? "请打开设置，为这个来源切换生效凭据后再试。"
+    : "请到设置页检查这份凭据。";
+  const http = Number.isInteger(status) && Number(status) > 0 ? `（HTTP ${status}）` : "";
+  return `当前生效凭据不能用。${action}${http}`;
+}
+
+function distinctSourceCredentialCount(config: RecordValue) {
+  const lab = config.lab ?? {};
+  const url = String(lab.gatewayUrl || "");
+  if (!url) {
+    return 0;
+  }
+  const profiles: RecordValue[] = Array.isArray(lab.gatewayProfiles) ? lab.gatewayProfiles : [];
+  const keys = new Set(
+    profiles
+      .filter((profile) => String(profile.gatewayUrl || "") === url)
+      .map((profile) => JSON.stringify([profile.gatewayApiKeyDisabled === true, profile.gatewayApiKey || ""]))
+  );
+  return keys.size;
 }
 
 export function applySourceCredentials<T extends RecordValue>(config: T): T {

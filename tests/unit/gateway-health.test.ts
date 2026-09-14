@@ -767,6 +767,25 @@ test("gateway client retries transient fetch failures before response", async ()
   }
 });
 
+test("Responses rejects unsolicited hosted search instead of silently completing", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const streaming of [false, true]) {
+      const raw = { status: "completed", output: [{ type: "web_search_call", id: "search-1", status: "completed" }] };
+      globalThis.fetch = async () => new Response(streaming
+        ? `data: ${JSON.stringify({ type: "response.output_item.added", item: raw.output[0] })}\n\ndata: ${JSON.stringify({ type: "response.completed", response: { status: "completed", output: [] } })}\n\n`
+        : JSON.stringify(raw), { headers: { "content-type": streaming ? "text/event-stream" : "application/json" } });
+      const gateway = createLabModelGateway({ modelAlias: "test", networkMode: "offline", allowedHosts: [], lab: {
+        gatewayUrl: "http://127.0.0.1/v1/responses", gatewayProtocol: "openai-responses", gatewayMaxRetries: 0
+      } });
+      const result = await gateway.sendChat({ messages: [{ role: "user", content: "search" }],
+        tools: [{ name: "web_search", description: "Search", inputSchema: { type: "object", properties: {} } }], stream: streaming });
+      assert.equal(result.ok, false);
+      assert.equal(result.error?.code, "GATEWAY_TOOL_PROTOCOL_MISMATCH");
+    }
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test("gateway client sends session affinity header", async () => {
   const originalFetch = globalThis.fetch;
   try {
@@ -802,6 +821,13 @@ test("gateway client sends session affinity header", async () => {
 
     assert.equal(result.ok, true);
     assert.equal(headers["x-session-affinity"], "session-affinity-1");
+    const rotated = await gateway.sendChat({
+      sessionId: "session-affinity-1",
+      sessionAffinity: "repaired-affinity",
+      messages: [{ role: "user", content: "hello again" }]
+    });
+    assert.equal(rotated.ok, true);
+    assert.equal(headers["x-session-affinity"], "repaired-affinity");
   } finally {
     globalThis.fetch = originalFetch;
   }

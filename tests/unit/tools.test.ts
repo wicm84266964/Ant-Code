@@ -2391,6 +2391,27 @@ test("powershell mutating commands are blocked without approval", { skip: proces
   await assert.rejects(fs.readFile(path.join(cwd, "notes.txt"), "utf8"), /ENOENT/);
 });
 
+test("powershell artifact writes are recorded as workflow file changes", { skip: process.platform !== "win32" ? "PowerShell executable is only assumed in Windows CI for now" : false }, async () => {
+  const cwd = await makeTempWorkspace();
+  const workflow = createWorkflowState();
+  const runtime = createToolRuntime({
+    cwd,
+    workflowState: workflow,
+    policy: {
+      networkMode: "offline",
+      approvals: { workspaceCommands: true }
+    }
+  });
+  const result = await runtime.execute("powershell", {
+    command: "Set-Content -LiteralPath chart.png -Value dummy",
+    timeoutMs: 10_000
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.result.exitCode, 0);
+  assert.equal(workflow.changes.some((change) => String(change.path).replace(/\\/g, "/").endsWith("chart.png")), true);
+});
+
 test("powershell mutating commands execute with approval", { skip: process.platform !== "win32" ? "PowerShell executable is only assumed in Windows CI for now" : false }, async () => {
   const cwd = await makeTempWorkspace();
   const runtime = createToolRuntime({

@@ -1099,6 +1099,62 @@ export function createReasoningOnlyOpenAIStreamingGateway() {
   });
 }
 
+export function createPromisedToolThenHealthyGateway(requests: Array<Record<string, unknown>>, affinities: string[] = []) {
+  return http.createServer(async (request, response) => {
+    if (request.method !== "POST" || request.url !== "/v1/chat") {
+      response.writeHead(404, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { code: "NOT_FOUND" } }));
+      return;
+    }
+
+    const body = await readRequestJson(request);
+    requests.push(body);
+    affinities.push(String(request.headers["x-session-affinity"] ?? ""));
+    response.writeHead(200, { "content-type": "application/json" });
+    if (requests.length === 1) {
+      response.end(JSON.stringify({
+        id: "mock-promised-tool",
+        model: body.model,
+        content: [{ type: "text", text: "马上调用 web_search 做最小实测，再写完整工具清单。" }],
+        thinking: "The user wants me to call web_search now, not just promise. Let me call web_search immediately.",
+        toolCalls: [],
+        stopReason: "stop"
+      }));
+      return;
+    }
+    response.end(JSON.stringify({
+      id: "mock-promised-tool-retry",
+      model: body.model,
+      content: [{ type: "text", text: "已完成最小搜索。\n\n第一段：web_search 可用。\n\n第二段：其余工具清单。\n\n第三段：缺口与残留。" }],
+      toolCalls: [],
+      stopReason: "stop"
+    }));
+  });
+}
+
+export function createReasoningOnlyThenHealthyOpenAIGateway(requests: Array<Record<string, unknown>>) {
+  return http.createServer(async (request, response) => {
+    if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
+      response.writeHead(404, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { code: "NOT_FOUND" } }));
+      return;
+    }
+
+    const body = await readRequestJson(request);
+    requests.push(body);
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    if (requests.length === 1) {
+      response.write('data: {"id":"chatcmpl-reasoning","model":"mock-openai","choices":[{"delta":{"reasoning_content":"private final text"}}]}\n\n');
+      response.write('data: {"choices":[{"delta":{"content":null},"finish_reason":"stop"}]}\n\n');
+      response.end("data: [DONE]\n\n");
+      return;
+    }
+    response.write('data: {"id":"chatcmpl-ok","model":"mock-openai","choices":[{"delta":{"content":"visible reply"}}]}\n\n');
+    response.write('data: {"choices":[{"finish_reason":"stop"}]}\n\n');
+    response.end("data: [DONE]\n\n");
+  });
+}
+
 /**
  * @param {Array<Record<string, any>>} requests
  */

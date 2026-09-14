@@ -162,7 +162,7 @@ export function mapSessionEventToDashboard(event: Record<string, unknown>) {
     })];
   }
   if (type === "gateway_error" || type === "gateway_not_configured") {
-    return [activity("gateway-error", "模型请求失败", asRecord(event.error).message ?? "网关未配置或请求失败", "failed", "gateway", event, { coalesceKey: "gateway" })];
+    return [activity("gateway-error", "模型请求失败", gatewayErrorDetail(event.error), "failed", "gateway", event, { coalesceKey: "gateway" })];
   }
   if (type === "turn_interrupted") {
     return [activity("turn-interrupted", "任务已中断", event.reason ?? "用户中断", "interrupted", "session", event)];
@@ -249,6 +249,18 @@ function backgroundProgressTitle(status: string) {
   if (status === "interrupted") return "子任务组已中断";
   if (status === "blocked") return "子任务组未全部完成";
   return "子任务组执行失败";
+}
+
+function gatewayErrorDetail(error: unknown) {
+  const record = asRecord(error);
+  const message = String(record.message ?? "").trim() || "网关未配置或请求失败";
+  const hint = Array.isArray(record.diagnostics)
+    ? record.diagnostics.map((item) => String(item ?? "").trim()).find((item) => item.includes("生效凭据"))
+    : "";
+  if (!hint || message.includes("生效凭据")) {
+    return message;
+  }
+  return `${message} ${hint}`;
 }
 
 /**

@@ -176,6 +176,7 @@ export async function parseOpenAIResponsesStream(body: ReadableStream<Uint8Array
       thinkingBytes: aggregate.thinkingBytes,
       thinkingTruncated: aggregate.thinkingTruncated,
       toolCallCount: normalizedToolCalls.length,
+      nativeWebSearch: aggregate.nativeWebSearch || (isPlainObject(final?.raw) && final.raw.nativeWebSearch === true),
       status: aggregate.stopReason
     }
   };
@@ -292,6 +293,7 @@ function createAggregate() {
     thinking: "",
     thinkingBytes: 0,
     thinkingTruncated: false,
+    nativeWebSearch: false,
     toolCalls: new Map<number, { id: string; name: string; arguments: string }>(),
     itemIndexes: new Map<string, number>(),
     responseItems: new Map<string, unknown>(),
@@ -314,6 +316,8 @@ async function applyResponsesRecord(aggregate: ResponsesAggregate, record: Recor
     if (isPlainObject(response.usage)) aggregate.usage = response.usage;
   }
   const type = String(record.type ?? "");
+  aggregate.nativeWebSearch ||= type.startsWith("response.web_search_call.")
+    || (isPlainObject(record.item) && record.item.type === "web_search_call");
   if (!aggregate.sawStart && (type === "response.created" || type === "response.in_progress" || aggregate.id)) {
     aggregate.sawStart = true;
     await emit(onEvent, { type: "message_start", id: aggregate.id, model: aggregate.model });
@@ -662,6 +666,7 @@ function summarizeResponse(raw: unknown, text: string, thinking: unknown, toolCa
     textBytes: Buffer.byteLength(text, "utf8"),
     thinkingBytes: Buffer.byteLength(String(thinking ?? ""), "utf8"),
     toolCallCount,
+    nativeWebSearch: Array.isArray(record.output) && record.output.some((item) => isPlainObject(item) && item.type === "web_search_call"),
     usage: isPlainObject(record.usage) ? record.usage : null
   };
 }
