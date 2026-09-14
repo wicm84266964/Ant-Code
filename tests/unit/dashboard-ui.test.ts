@@ -25,6 +25,12 @@ if (typeof globalThis.document === "undefined") {
   };
 }
 
+test("empty conversation copy changes on narrow viewports", async () => {
+  const module = await loadAppExports(["emptyStateCopy"]);
+  assert.equal(module.emptyStateCopy(1280), "过程折叠。结果展开。文件留在右侧。");
+  assert.equal(module.emptyStateCopy(390), "过程折叠。结果展开。文件在「文件」页。");
+});
+
 test("configured idle gateway shows connected without masking event failures", async () => {
   const app = await loadAppExports(["state", "els", "setConnectionState"]);
   const label = { textContent: "" };
@@ -48,7 +54,10 @@ test("configured idle gateway shows connected without masking event failures", a
 async function publicTsSource() {
   const dir = path.resolve("src/dashboard/public");
   const names = (await fs.readdir(dir)).filter((name) => name === "app-core.ts" || /^app-ui\d+\.ts$/.test(name));
-  const texts = await Promise.all(names.map((name) => fs.readFile(path.join(dir, name), "utf8")));
+  const texts = await Promise.all([
+    fs.readFile(path.resolve("src/tools/labels.ts"), "utf8"),
+    ...names.map((name) => fs.readFile(path.join(dir, name), "utf8"))
+  ]);
   return texts.join("\n");
 }
 
@@ -146,6 +155,13 @@ test("dashboard running send button exposes interrupt action", async () => {
 
   assert.match(source, /els\.sendButton\.textContent = "中断"/);
   assert.match(source, /els\.sendButton\.title = "点击中断当前任务"/);
+  assert.match(source, /els\.sendButton\.textContent = "加入队列"/);
+  assert.match(source, /composerHasOutboundContent\(\)/);
+  assert.match(source, /submittedSessionId/);
+  assert.match(source, /draftUnchanged/);
+  assert.match(source, /attachment-page-range-hint/);
+  assert.match(source, /起始页/);
+  assert.match(source, /扫描件只识别前几页/);
 });
 
 test("dashboard distinguishes configuration failures from service and network failures", async () => {
@@ -630,7 +646,7 @@ test("dashboard composer controls keep confirmations reviewable and critical sta
   assert.match(app, /postJson\("\/api\/default-model"/);
   assert.match(app, /expectedRevision: state\.configRevisions\[scope\] \|\| undefined/);
   assert.match(app, /payload\?\.configV2\?\.revisions/);
-  assert.match(app, /clientId: state\.currentSessionId \? undefined : dashboardClientId\(\)/);
+  assert.match(app, /clientId: submittedSessionId \? undefined : dashboardClientId\(\)/);
   assert.match(app, /const DASHBOARD_CLIENT_STORAGE_KEY = "ant-code-dashboard-client-id"/);
   assert.match(app, /value="global"/);
   assert.match(app, /当前项目默认/);

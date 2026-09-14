@@ -1,4 +1,5 @@
 import type { AgentSession } from "../../core/session.ts";
+import { getAntCodeVersionSync } from "../../version.ts";
 import { line, permissionModeLabel, splitLines, truncate } from "./format.ts";
 
 export const MAX_INSPECTOR_ITEMS = 30;
@@ -85,7 +86,7 @@ const EMPTY_INSPECTOR: InspectorItem = {};
 const EMPTY_TEXT_OPTIONS: InspectorTextOptions = {};
 
 export function initialInspector(session: AgentSession): InspectorItem {
-  return makeInspector("欢迎", "Ant Code TUI v1.0", [
+  return makeInspector("欢迎", `Ant Code TUI v${getAntCodeVersionSync()}`, [
     `模型：${session.model}`,
     `模式：${permissionModeLabel(session)}`,
     `网络：${session.networkMode}`,

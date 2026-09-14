@@ -175,7 +175,8 @@ import {
 export async function runtimeStatus(ctx: DashboardFactoryState, input: DashboardRequestInput = {}) {
   const configEnv = await ctx.resolveConfigEnv();
   const config = await loadConfig({ cwd: ctx.cwd, env: configEnv });
-  await ctx.maintainSessionRetention(config);
+  // Retention can scan every session file. Never block first paint or /api/status on it.
+  void ctx.maintainSessionRetention(config);
   const runtimeSelection = dashboardRuntimeSelection(
     ctx.clientModelSelections,
     input.clientId,

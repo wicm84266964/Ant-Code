@@ -1,6 +1,7 @@
 import { loadConfig } from "../config/load-config.ts";
 import { decideNetworkAccess } from "../permissions/network-policy.ts";
 import { gatewayTroubleshootingHints, normalizeGatewayError } from "./errors.ts";
+import { GATEWAY_MAX_ERROR_BODY_BYTES } from "./limits.ts";
 
 /**
  * @param {{ cwd?: string; env?: NodeJS.ProcessEnv; live?: boolean; timeoutMs?: number }} options
@@ -69,7 +70,7 @@ export async function runGatewayHealth(options: { cwd?: string; env?: NodeJS.Pro
     return result(config, checks, live);
   }
 
-  checks.push(await fetchHealth(healthUrl, options.timeoutMs ?? 5000));
+  checks.push(await fetchHealth(healthUrl, options.timeoutMs ?? 5000, 2));
   return result(config, checks, live);
 }
 
@@ -125,27 +126,63 @@ function result(config: import("../config/load-config.ts").LabAgentConfig, check
  * @param {URL} healthUrl
  * @param {number} timeoutMs
  */
-async function fetchHealth(healthUrl: URL, timeoutMs: number) {
+async function fetchHealth(healthUrl: URL, timeoutMs: number, attempts: number = 1) {
+  let last = await fetchHealthOnce(healthUrl, timeoutMs);
+  for (let attempt = 2; attempt <= attempts && last.status !== "ok"; attempt += 1) {
+    last = await fetchHealthOnce(healthUrl, timeoutMs);
+  }
+  return last;
+}
+
+async function discardBoundedBody(response: Response, maxBytes: number) {
+  if (!response.body) {
+    return;
+  }
+  const reader = response.body.getReader();
+  let received = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    received += value?.byteLength ?? 0;
+    if (received >= maxBytes) {
+      await reader.cancel();
+      break;
+    }
+  }
+}
+
+async function fetchHealthOnce(healthUrl: URL, timeoutMs: number) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const startedAt = Date.now();
   try {
     const response = await fetch(healthUrl, {
       method: "GET",
       headers: { accept: "application/json" },
       signal: controller.signal
     });
+    const latencyMs = Date.now() - startedAt;
+    if (!response.ok) {
+      await discardBoundedBody(response, GATEWAY_MAX_ERROR_BODY_BYTES);
+    } else {
+      await discardBoundedBody(response, 4096);
+    }
     return {
       name: "gateway live health",
       status: response.ok ? "ok" : "error",
-      message: `HTTP ${response.status}`
+      message: `HTTP ${response.status} · ${latencyMs}ms`,
+      latencyMs
     };
   } catch (error) {
     const normalized = normalizeGatewayError(error);
     return {
       name: "gateway live health",
       status: "error",
-      message: `${normalized.code}: ${normalized.message}`,
-      code: normalized.code
+      message: `${normalized.code}: ${normalized.message} · ${Date.now() - startedAt}ms`,
+      code: normalized.code,
+      latencyMs: Date.now() - startedAt
     };
   } finally {
     clearTimeout(timeout);

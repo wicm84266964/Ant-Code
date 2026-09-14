@@ -366,6 +366,7 @@ var EVENT_STALE_AFTER_MS = 35e3;
 var EVENT_CONNECT_TIMEOUT_MS = 1e4;
 var EVENT_RECONNECT_MAX_ATTEMPTS = 6;
 var DASHBOARD_REQUEST_TIMEOUT_MS = 15e3;
+var DASHBOARD_TURN_START_TIMEOUT_MS = 6e4;
 var DASHBOARD_API_VERSION = "dashboard.v2";
 var DASHBOARD_LIFECYCLE_TIMEOUT_MS = 5e3;
 var DASHBOARD_SHUTDOWN_TIMEOUT_MS = 15e3;
@@ -1090,7 +1091,15 @@ function renderAttachmentStrip() {
     if (isDocument && /\.pdf$/i.test(label)) {
       const range = document.createElement("div");
       range.className = "attachment-page-range";
-      for (const [key, labelText, placeholder] of [["pageStart", "起始页", "默认"], ["pageEnd", "结束页", "默认"]]) {
+      const hint = document.createElement("p");
+      hint.className = "attachment-page-range-hint";
+      hint.textContent = "不填则扫描件只识别前几页；全量视觉请填写结束页";
+      range.append(hint);
+      for (const [key, labelText, placeholder] of [["pageStart", "起始页", "1"], ["pageEnd", "结束页", "末页"]]) {
+        const field = document.createElement("label");
+        field.className = "attachment-page-field";
+        const caption = document.createElement("span");
+        caption.textContent = labelText;
         const input = document.createElement("input");
         input.type = "number";
         input.min = "1";
@@ -1102,7 +1111,9 @@ function renderAttachmentStrip() {
         input.addEventListener("input", () => {
           attachment[key] = input.value ? Number(input.value) : void 0;
         });
-        range.append(input);
+        field.append(caption);
+        field.append(input);
+        range.append(field);
       }
       item.append(range);
     }
@@ -1135,6 +1146,12 @@ function clearAttachments() {
   }
   renderAttachmentStrip();
 }
+function attachmentSignature(attachments = []) {
+  return JSON.stringify(attachments.map((item) => [item.id, item.name, item.mimeType, item.size, item.pageStart, item.pageEnd]));
+}
+function composerHasOutboundContent() {
+  return Boolean(els.promptInput?.value?.trim()) || state.attachments.length > 0;
+}
 async function sendPrompt() {
   if (state.turnSubmitting) {
     return;
@@ -1152,6 +1169,9 @@ async function sendPrompt() {
     showTrustPanel();
     return;
   }
+  const submittedSessionId = state.currentSessionId ?? null;
+  const submittedPrompt = prompt;
+  const submittedAttachments = attachmentSignature(attachments);
   state.turnSubmitting = true;
   updateSendButton();
   els.runStatus.textContent = state.running ? "已排队" : "启动中";
@@ -1162,18 +1182,23 @@ async function sendPrompt() {
       requestId: turnRequest.id,
       prompt,
       attachments: attachments.map(attachmentPayload),
-      sessionId: state.currentSessionId,
-      clientId: state.currentSessionId ? void 0 : dashboardClientId(),
+      sessionId: submittedSessionId,
+      clientId: submittedSessionId ? void 0 : dashboardClientId(),
       permissionMode: state.permissionMode,
       goalMode: state.goal.enabled === true,
       goalText: state.goal.enabled ? state.goal.text : void 0,
       clientPreviousPermissionMode: state.goal.enabled ? state.goal.previousPermissionMode : void 0
-    });
+    }, { timeoutMs: DASHBOARD_TURN_START_TIMEOUT_MS });
   } catch (error) {
     result = { ok: false, error: errorMessageOf(error) };
   } finally {
     state.turnSubmitting = false;
     updateSendButton();
+  }
+  const sessionChanged = (state.currentSessionId ?? null) !== submittedSessionId;
+  const draftUnchanged = els.promptInput.value.trim() === submittedPrompt && attachmentSignature(state.attachments) === submittedAttachments;
+  if (sessionChanged) {
+    return;
   }
   if (!result.ok) {
     if (Number.isFinite(Number(result.status))) {
@@ -1189,9 +1214,11 @@ async function sendPrompt() {
     return;
   }
   state.turnRequest = null;
-  els.promptInput.value = "";
-  resizePromptInput();
-  clearAttachments();
+  if (draftUnchanged) {
+    els.promptInput.value = "";
+    resizePromptInput();
+    clearAttachments();
+  }
   state.queue = result.queue ?? state.queue;
   state.running = result.running === true || state.running;
   applyGoalSnapshot(result.goal ?? state.goal, { permissionMode: result.permission?.mode ?? state.permissionMode });
@@ -1415,6 +1442,8 @@ function updateRunStatusTone2() {
   let tone = "idle";
   if (/失败|拒绝/.test(status)) {
     tone = "error";
+  } else if (/失联|无进展/.test(status)) {
+    tone = "error";
   } else if (/等待|待/.test(status)) {
     tone = "waiting";
   } else if (/运行|启动|引导|中断|停止|收尾|排队|压缩/.test(status)) {
@@ -1442,6 +1471,10 @@ function bindEvents2() {
       return;
     }
     if (state.running) {
+      if (composerHasOutboundContent()) {
+        sendPrompt();
+        return;
+      }
       interruptTurn();
       return;
     }
@@ -1456,6 +1489,7 @@ function bindEvents2() {
   els.promptInput.addEventListener("input", () => {
     syncGuideButton();
     resizePromptInput();
+    updateSendButton();
   });
   els.attachButton.addEventListener("click", () => els.attachmentInput.click());
   els.attachmentInput.addEventListener("change", async () => {
@@ -1763,10 +1797,20 @@ function setResponsiveView(view) {
   state.responsiveView = normalizedResponsiveView2(Number(window.innerWidth) || 1200, view);
   syncResponsiveNavigation();
 }
+function emptyStateCopy(width = Number(window.innerWidth) || 1200) {
+  return width >= 1200 ? "过程折叠。结果展开。文件留在右侧。" : "过程折叠。结果展开。文件在「文件」页。";
+}
+function syncEmptyStateCopy(width = Number(window.innerWidth) || 1200) {
+  const copy = document.querySelector("#empty-copy");
+  if (copy) {
+    copy.textContent = emptyStateCopy(width);
+  }
+}
 function syncResponsiveNavigation() {
   const width = Number(window.innerWidth) || Number(document.documentElement?.clientWidth) || 1200;
   const view = normalizedResponsiveView2(width, state.responsiveView);
   state.responsiveView = view;
+  syncEmptyStateCopy(width);
   if (width < 1200) {
     state.sidebarCollapsed = false;
     document.body.classList.remove("sidebar-collapsed", "preview-collapsed");
@@ -2058,7 +2102,7 @@ async function enableGoalWithObjective2(text) {
         goalText: text,
         clientPreviousPermissionMode: previous,
         clientId: dashboardClientId()
-      });
+      }, { timeoutMs: DASHBOARD_TURN_START_TIMEOUT_MS });
     } catch (error) {
       result = { ok: false, error: errorMessageOf(error) };
     } finally {
@@ -3638,10 +3682,16 @@ function backgroundSubagentTitle4(item) {
   if (item.status === "stale") return `${profile}子智能体长时间无进展`;
   return `${profile}子智能体运行中`;
 }
+function waitForDisplay(value) {
+  if (value === "all") return "等待全部完成";
+  if (value === "any") return "等待任一完成";
+  if (value === "none") return "完成后不接续";
+  return value ? String(value) : "";
+}
 function backgroundSubagentMeta4(item) {
   if (item.kind === "terminal") {
     return [
-      item.taskId ? `task=${item.taskId}` : null,
+      item.taskId ? `任务 ${item.taskId}` : null,
       item.status === "starting" ? "启动中" : null,
       item.status === "cancelling" ? "退出确认中" : null,
       item.runningCount === 1 ? "运行中" : null,
@@ -3649,9 +3699,9 @@ function backgroundSubagentMeta4(item) {
     ].filter(Boolean).join(" · ");
   }
   return [
-    item.groupId ? `group=${item.groupId}` : null,
-    item.taskId ? `task=${item.taskId}` : null,
-    item.waitFor ? `waitFor=${item.waitFor}` : null,
+    item.groupId ? `组 ${item.groupId}` : null,
+    item.taskId ? `任务 ${item.taskId}` : null,
+    waitForDisplay(item.waitFor) || null,
     Number.isFinite(item.runningCount) && Number.isFinite(item.taskCount) ? `${item.runningCount}/${item.taskCount} 运行中` : null,
     item.lastProgressAt ? `进展 ${formatRelativeTime4(item.lastProgressAt)}` : null,
     item.heartbeatAt ? `心跳 ${formatRelativeTime4(item.heartbeatAt)}` : null,
@@ -6573,6 +6623,62 @@ function sourceBadge7(source) {
   return "默认";
 }
 
+// src/tools/labels.ts
+var TOOL_LABELS = Object.freeze({
+  tool_result_read: "读取工具证据",
+  read_file: "读取文件",
+  list_files: "列出文件",
+  glob: "查找文件",
+  grep: "搜索文本",
+  rg_search: "搜索代码",
+  rg_files: "按名查找文件",
+  rg_files_with_matches: "查找含匹配的文件",
+  rg_count: "统计匹配",
+  ts_symbols: "查看 TypeScript 符号",
+  ts_diagnostics: "查看 TypeScript 诊断",
+  ts_find_definition: "查找 TypeScript 定义",
+  ts_find_references: "查找 TypeScript 引用",
+  git_status: "检查 Git 状态",
+  git_diff: "查看 Git 差异",
+  git_log: "查看 Git 记录",
+  git_show: "查看 Git 对象",
+  git_branch_list: "列出 Git 分支",
+  git_stash_list: "列出 Git 暂存",
+  git_tag_list: "列出 Git 标签",
+  git_add: "暂存 Git 改动",
+  git_commit: "提交 Git 改动",
+  git_branch: "管理 Git 分支",
+  git_stash: "管理 Git 暂存",
+  git_tag: "管理 Git 标签",
+  write_file: "写入文件",
+  edit_file: "编辑文件",
+  powershell: "运行 PowerShell",
+  bash: "运行 Shell",
+  background_shell: "启动后台终端",
+  background_terminal_list: "列出后台终端",
+  background_terminal_cancel: "停止后台终端",
+  mcp_list: "列出 MCP 能力",
+  mcp_call: "调用 MCP 工具",
+  web_fetch: "访问网页",
+  web_search: "搜索网页",
+  document_intake: "读取文档",
+  skill_list: "列出技能",
+  skill_read: "读取技能",
+  skill_run: "运行技能",
+  agent_run: "启动子智能体",
+  todo_read: "读取任务清单",
+  todo_write: "更新任务清单",
+  plan_update: "更新计划",
+  ask_user: "询问用户"
+});
+function toolLabel(name) {
+  const key = String(name ?? "").trim();
+  if (!key) {
+    return "工具";
+  }
+  return TOOL_LABELS[key] ?? key;
+}
+
 // src/dashboard/public/app-ui8.ts
 function sourceLabel5(source) {
   const type = typeof source === "string" ? source : String(source?.type ?? "");
@@ -6758,7 +6864,7 @@ function renderApprovalPanel(approval) {
   els.approvalPanel.setAttribute("aria-labelledby", "approval-title");
   const queued = state.approvalQueue.length;
   els.approvalPanel.innerHTML = `
-    <div class="approval-title" id="approval-title">需要权限确认 · ${escapeHtml(approval.toolName)}${queued > 0 ? ` · 还有 ${queued} 个排队` : ""}</div>
+    <div class="approval-title" id="approval-title">需要权限确认 · ${escapeHtml(toolLabel(approval.toolName))}${queued > 0 ? ` · 还有 ${queued} 个排队` : ""}</div>
     <div class="approval-preview">${escapeHtml([
     approval.reason,
     queued > 0 ? `还有 ${queued} 个权限请求排队。` : "",
@@ -6779,7 +6885,7 @@ function renderApprovalPanel(approval) {
   activateModal(els.approvalPanel, { initialFocus: "button[data-action='allow-once']" });
   revealInteractionPanel8(els.approvalPanel, "button[data-action]");
   updateLiveStatus3();
-  announceStatus2(`需要确认 ${approval.toolName ?? "工具"} 权限`);
+  announceStatus2(`需要确认 ${toolLabel(approval.toolName)} 权限`);
 }
 async function resolveApproval(action) {
   const approval = state.pendingApproval;
@@ -6830,7 +6936,7 @@ function refreshApprovalQueueLabel() {
     return;
   }
   const queued = state.approvalQueue.length;
-  title.textContent = `需要权限确认 · ${state.pendingApproval.toolName ?? "工具"}${queued > 0 ? ` · 还有 ${queued} 个排队` : ""}`;
+  title.textContent = `需要权限确认 · ${toolLabel(state.pendingApproval.toolName)}${queued > 0 ? ` · 还有 ${queued} 个排队` : ""}`;
 }
 function mountApprovalPanelOverlay() {
   if (!els.approvalPanel || !document.body) {
@@ -7308,8 +7414,13 @@ function updateSendButton() {
     return;
   }
   if (state.running) {
-    els.sendButton.textContent = "中断";
-    els.sendButton.title = "点击中断当前任务";
+    if (composerHasOutboundContent()) {
+      els.sendButton.textContent = "加入队列";
+      els.sendButton.title = "将当前输入加入队列，不中断正在运行的任务";
+    } else {
+      els.sendButton.textContent = "中断";
+      els.sendButton.title = "点击中断当前任务";
+    }
   } else {
     els.sendButton.textContent = "发送";
     els.sendButton.title = "发送";
@@ -9773,6 +9884,7 @@ export {
   DASHBOARD_LIFECYCLE_TIMEOUT_MS,
   DASHBOARD_REQUEST_TIMEOUT_MS,
   DASHBOARD_SHUTDOWN_TIMEOUT_MS,
+  DASHBOARD_TURN_START_TIMEOUT_MS,
   DOCUMENT_EXTENSIONS,
   EVENT_CONNECT_TIMEOUT_MS,
   EVENT_RECONNECT_MAX_ATTEMPTS,
@@ -9820,6 +9932,7 @@ export {
   armEventConnectTimer3 as armEventConnectTimer,
   armEventStaleTimer3 as armEventStaleTimer,
   attachmentPayload,
+  attachmentSignature,
   backgroundCancelKey3 as backgroundCancelKey,
   backgroundSubagentCancellable4 as backgroundSubagentCancellable,
   backgroundSubagentCompactLabel4 as backgroundSubagentCompactLabel,
@@ -9867,6 +9980,7 @@ export {
   collectModalBackground,
   columnLabel9 as columnLabel,
   compactResultLine8 as compactResultLine,
+  composerHasOutboundContent,
   composerHeightFor2 as composerHeightFor,
   configMutationMetadata6 as configMutationMetadata,
   configRevisionConflictMessage7 as configRevisionConflictMessage,
@@ -9909,6 +10023,7 @@ export {
   emptyBackgroundSubagent,
   emptyGoalSnapshot2 as emptyGoalSnapshot,
   emptySessionStatus,
+  emptyStateCopy,
   enableGoalWithObjective2 as enableGoalWithObjective,
   ensureEventsConnected,
   ensureReasoningEffortOptions6 as ensureReasoningEffortOptions,
@@ -10244,6 +10359,7 @@ export {
   switchModel5 as switchModel,
   switchReasoningEffort7 as switchReasoningEffort,
   syncAgentModelPickersForEndpoint6 as syncAgentModelPickersForEndpoint,
+  syncEmptyStateCopy,
   syncGatewayUrlHint5 as syncGatewayUrlHint,
   syncGuideButton,
   syncPendingGuideFromQueue3 as syncPendingGuideFromQueue,

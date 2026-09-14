@@ -626,7 +626,7 @@ test("dashboard runtime throttles retention maintenance and immediately applies 
 
   const status = await runtime.status();
   assert.equal(status.ok, true);
-  assert.equal((await store.readMetadataExact("old-session")).ok, false);
+  await waitForCondition(async () => (await store.readMetadataExact("old-session")).ok === false);
   await assert.rejects(fs.access(path.join(store.root, "old-session.transcript")), { code: "ENOENT" });
   assert.equal((await store.readMetadataExact("fresh-session")).ok, true);
 

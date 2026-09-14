@@ -14,6 +14,15 @@ import {
 
 const dashboardAuthCache = new WeakMap();
 
+test("dashboard listen does not probe runtime status before the first browser request", async () => {
+  const source = await fs.readFile(new URL("../../src/dashboard/server.ts", import.meta.url), "utf8");
+  const start = source.slice(
+    source.indexOf("export async function startDashboard"),
+    source.indexOf("export function normalizeDashboardHost")
+  );
+  assert.doesNotMatch(start, /runtime\.status\(/);
+});
+
 test("dashboard host is restricted to loopback", () => {
   assert.equal(normalizeDashboardHost("127.0.0.1"), "127.0.0.1");
   assert.equal(normalizeDashboardHost("localhost"), "localhost");

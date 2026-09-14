@@ -57,6 +57,23 @@ function errorCode(error: unknown): unknown {
   return error && typeof error === "object" && "code" in error ? error.code : undefined;
 }
 
+function createSessionExclusionCheck(
+  excludeSessionIds?: Iterable<string> | (() => Iterable<string>)
+): (sessionId: string) => boolean {
+  if (typeof excludeSessionIds === "function") {
+    return (sessionId) => {
+      for (const id of excludeSessionIds()) {
+        if (String(id) === sessionId) {
+          return true;
+        }
+      }
+      return false;
+    };
+  }
+  const excluded = new Set(Array.from(excludeSessionIds ?? [], (sessionId) => String(sessionId)));
+  return (sessionId) => excluded.has(sessionId);
+}
+
 /**
  * @param {{ cwd: string; transcript?: Record<string, any>; env?: NodeJS.ProcessEnv }} options
  */
@@ -118,9 +135,9 @@ export function createSessionStore(options: { cwd: string; transcript?: Record<s
 
     /**
      * @param {number | null} retentionDays Null keeps sessions indefinitely.
-     * @param {{ now?: Date; excludeSessionIds?: Iterable<string> }} cleanupOptions
+     * @param {{ now?: Date; excludeSessionIds?: Iterable<string> | (() => Iterable<string>) }} cleanupOptions
      */
-    async cleanupExpiredSessions(retentionDays: number | null, cleanupOptions: { now?: Date; excludeSessionIds?: Iterable<string> } = {}) {
+    async cleanupExpiredSessions(retentionDays: number | null, cleanupOptions: { now?: Date; excludeSessionIds?: Iterable<string> | (() => Iterable<string>) } = {}) {
       if (retentionDays === null) {
         return { deleted: [], skipped: "forever" };
       }
@@ -128,14 +145,12 @@ export function createSessionStore(options: { cwd: string; transcript?: Record<s
       const entries = await fs.readdir(root, { withFileTypes: true });
       const nowMs = (cleanupOptions.now ?? new Date()).getTime();
       const maxAgeMs = Math.max(0, retentionDays) * 24 * 60 * 60 * 1000;
-      const excludedSessionIds = new Set(
-        Array.from(cleanupOptions.excludeSessionIds ?? [], (sessionId: string) => String(sessionId))
-      );
+      const isExcluded = createSessionExclusionCheck(cleanupOptions.excludeSessionIds);
       const deleted: string[] = [];
 
       const grouped = groupSessionEntries(entries);
       for (const [sessionId, sessionEntries] of grouped) {
-        if (excludedSessionIds.has(sessionId)) {
+        if (isExcluded(sessionId)) {
           continue;
         }
         const records = await Promise.all(sessionEntries.map(async (entry) => {
@@ -149,6 +164,9 @@ export function createSessionStore(options: { cwd: string; transcript?: Record<s
         }
         const paths = sessionMetadataPaths(root, sessionId);
         await withFileMutationLock(paths.lock, async () => {
+          if (isExcluded(sessionId)) {
+            return;
+          }
           const currentEntries = (await fs.readdir(root, { withFileTypes: true }))
             .filter((entry) => entry.isFile() && isSessionFile(entry.name))
             .filter((entry) => sessionIdFromFileName(entry.name) === sessionId);

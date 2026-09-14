@@ -811,9 +811,9 @@ export function useTuiAppActions(s: ReturnType<typeof useTuiAppPanels>) {
       `详情：/agents task ${taskId}`
     ].join("\n");
     if (stateRef.current.entries?.some((entry) => entry.id === entryId)) {
-      updateEntryById(entryId, { kind: "agent", title: "子任务已启动", body, taskId, profile, taskStatus: "running" });
+      updateEntryById(entryId, { kind: "agent", title: "子任务后台运行中", body, taskId, profile, taskStatus: "running" });
     } else {
-      addEntry("agent", "子任务已启动", body, { id: entryId, taskId, profile, taskStatus: "running" });
+      addEntry("agent", "子任务后台运行中", body, { id: entryId, taskId, profile, taskStatus: "running" });
     }
     setSideView("tasks");
     setSideOffset(0);

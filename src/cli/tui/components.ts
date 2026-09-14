@@ -5,6 +5,7 @@ import type { LabModel } from "../../model-gateway/models.ts";
 import { listKeybindings } from "../../commands/registry.ts";
 import { buildTaskTree } from "../../agents/orchestrator.ts";
 import { summarizeContextWindow } from "../../core/context-window.ts";
+import { getAntCodeVersionSync } from "../../version.ts";
 import { formatTuiGoalFooter } from "./goal.ts";
 import { DEFAULT_TUI_THEME, themeColor } from "./theme.ts";
 import {
@@ -365,8 +366,8 @@ const EMPTY_ACTIVITY: TuiActivity = {
 
 export function StatusBar({ session, cwd = "", activity, pulse = 0, detailMode = "compact", width = 100, theme = DEFAULT_TUI_THEME }: TuiViewProps & { session: AgentSession }) {
   const gateway = session.config.lab.gatewayUrl
-    ? `${session.config.lab.gatewayProtocol ?? "openai-chat"} configured`
-    : "gateway missing";
+    ? `${session.config.lab.gatewayProtocol ?? "openai-chat"} 已配置`
+    : "网关未配置";
   const context = summarizeContextWindow(session);
   const inputBrief = Number.isFinite(context.promptTokens)
     ? ` input ${formatTokenCount(context.promptTokens)}`
@@ -381,7 +382,7 @@ export function StatusBar({ session, cwd = "", activity, pulse = 0, detailMode =
     : `${spinnerFrame(pulse)} `;
   const cwdWidth = Math.min(44, Math.max(18, Math.floor(width * 0.35)));
   const statusWidth = Math.max(24, (width ?? 100) - cwdWidth - 12);
-  const statusText = truncateMiddle(` v1.1 - ${activityPrefix}${activityStatus} - ${session.model} - ${contextBrief} - ${gateway} - ${permissionModeLabel(session)} - ${session.networkMode} - ${detailModeLabel(detailMode)} - events=${activity?.eventCount ?? 0}`, statusWidth);
+  const statusText = truncateMiddle(` v${getAntCodeVersionSync()} - ${activityPrefix}${activityStatus} - ${session.model} - ${contextBrief} - ${gateway} - ${permissionModeLabel(session)} - ${session.networkMode} - ${detailModeLabel(detailMode)} - 事件=${activity?.eventCount ?? 0}`, statusWidth);
   return h(Box, { paddingX: 1, justifyContent: "space-between" },
     h(Text, null,
       h(Text, { color: themeColor(theme, "identity", "cyan"), bold: true }, "Ant Code"),
@@ -427,8 +428,8 @@ export function LogPane({ entries, width, height, stream, pulse = 0, detailMode 
     ...Array.from({ length: scrollbackMode ? 0 : Math.max(0, viewportRows - viewport.lines.length) }, () => line(""))
   ];
   const counter = viewport.totalRows === 0
-    ? "0 rows"
-    : `${viewport.firstRow}-${viewport.lastRow}/${viewport.totalRows}${viewport.offset > 0 ? ` +${viewport.offset}` : scrollbackMode ? " scrollback" : " bottom"}`;
+    ? "0 行"
+    : `${viewport.firstRow}-${viewport.lastRow}/${viewport.totalRows}${viewport.offset > 0 ? ` +${viewport.offset}` : scrollbackMode ? " 回看" : " 底部"}`;
   const readingHistory = viewport.offset > 0;
   const selectionRange = transcriptSelection
     ? {
@@ -1238,7 +1239,7 @@ function statusMark(status: string) {
 export function startupEntry(session: AgentSession) {
   return {
     kind: "startup",
-    title: "Ant Code TUI v1.1",
+    title: `Ant Code TUI v${getAntCodeVersionSync()}`,
     body: startupBannerLines(session).join("\n"),
     at: new Date().toLocaleTimeString()
   };

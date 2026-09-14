@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 2.0.12 - 2026-09-14
+
+Candidate small release for Dashboard send stability and interaction correctness. GitHub CI, tag and Release status will be recorded after publication.
+
+- A successful `/api/turns` response no longer rewrites the session or draft after the user has already switched away.
+- While a turn is running, the main button queues when the composer has text or attachments, and interrupts only when it is empty.
+- Session retention cleanup no longer blocks first paint or a new Dashboard send. Long session resume reads from the tail of the archive; turn start waits up to 60 seconds instead of 15.
+- Approval Tab stays inside the panel in the TUI. Gateway 429 responses honor `Retry-After` up to 30 seconds.
+
+Validation, upgrade steps and limitations: [Chinese release note](docs/releases/2.0.12-dashboard-interaction-send-stability_zh.md).
+
 ## 2.0.11 - 2026-09-10
 
 Published 2026-09-10 09:14:36 UTC (2026-09-10 17:14:36 UTC+08:00): [v2.0.11](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.11).

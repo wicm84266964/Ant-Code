@@ -1,24 +1,4 @@
-const TOOL_LABELS: Readonly<Record<string, string>> = Object.freeze({
-  read_file: "读取文件",
-  list_files: "列出文件",
-  glob: "查找文件",
-  grep: "搜索文本",
-  git_status: "检查 Git 状态",
-  git_diff: "查看 Git 差异",
-  write_file: "写入文件",
-  edit_file: "编辑文件",
-  powershell: "运行 PowerShell",
-  bash: "运行 Shell",
-  background_shell: "启动后台终端",
-  web_fetch: "访问网页",
-  web_search: "搜索网页",
-  document_intake: "读取文档",
-  mcp_call: "调用 MCP 工具",
-  mcp_list: "列出 MCP 能力",
-  agent_run: "启动子智能体",
-  todo_write: "更新任务清单",
-  plan_update: "更新计划"
-});
+import { TOOL_LABELS, toolLabel } from "../tools/labels.ts";
 
 const SEVERITY_BY_STATUS: Readonly<Record<string, string>> = Object.freeze({
   running: "info",
@@ -326,7 +306,7 @@ function backgroundSubagentActivity(event: Record<string, unknown>, options: Bac
 
 function roundDetail(event: Record<string, unknown>) {
   const parts = [
-    Number.isFinite(event.round) ? `round ${event.round}` : null,
+    Number.isFinite(event.round) ? `第 ${event.round} 轮` : null,
     Number.isFinite(event.messageCount) ? `${event.messageCount} 条消息` : null,
     Number.isFinite(event.toolSchemaCount) ? `${event.toolSchemaCount} 个工具定义` : null
   ].filter(Boolean);
@@ -335,7 +315,7 @@ function roundDetail(event: Record<string, unknown>) {
 
 function gatewayRetryDetail(event: Record<string, unknown>) {
   const parts = [
-    Number.isFinite(event.round) ? `round ${event.round}` : null,
+    Number.isFinite(event.round) ? `第 ${event.round} 轮` : null,
     Number.isFinite(event.attempt) && Number.isFinite(event.maxAttempts) ? `第 ${event.attempt}/${event.maxAttempts} 次` : null,
     asRecord(event.error).code ? String(asRecord(event.error).code) : null,
     event.stage ? `阶段 ${event.stage}` : null,
@@ -344,11 +324,18 @@ function gatewayRetryDetail(event: Record<string, unknown>) {
   return parts.join(" · ") || "网关响应异常，正在自动重试";
 }
 
+function waitForLabel(value: unknown) {
+  if (value === "all") return "等待全部完成";
+  if (value === "any") return "等待任一完成";
+  if (value === "none") return "完成后不接续";
+  return value ? String(value) : "";
+}
+
 function backgroundSubagentStartedDetail(event: Record<string, unknown>) {
   const parts = [
-    event.profile ? `profile=${event.profile}` : null,
-    event.groupId ? `group=${event.groupId}` : null,
-    event.waitFor ? `waitFor=${event.waitFor}` : null,
+    event.profile ? String(event.profile) : null,
+    event.groupId ? `组 ${event.groupId}` : null,
+    waitForLabel(event.waitFor) || null,
     event.wakeParent === false ? "完成后仅记录结果" : "完成后自动唤醒主控"
   ].filter(Boolean);
   return parts.join(" · ");
@@ -406,9 +393,7 @@ function toolCallNames(toolCalls: unknown) {
   return toolCalls.map((call) => toolLabel(asRecord(call).name)).join("、");
 }
 
-export function toolLabel(name: unknown) {
-  return (typeof name === "string" ? TOOL_LABELS[name] : undefined) ?? String(name ?? "工具");
-}
+export { TOOL_LABELS, toolLabel };
 
 function toolDetail(event: Record<string, unknown>) {
   const keys = Array.isArray(event.inputKeys) && event.inputKeys.length > 0
