@@ -2993,45 +2993,22 @@ function renderWorkflowPanel3(workflow, summary = null) {
   const todos = Array.isArray(record?.todos) ? record.todos : [];
   const plan = isPlainObject(record?.plan) ? record.plan : null;
   const steps = Array.isArray(plan?.steps) ? plan.steps : [];
+  if (state.workflowNode) {
+    state.workflowNode.remove();
+    state.workflowNode = null;
+  }
   if (!record || !todos.length && !steps.length) {
     state.workflow = null;
     state.workflowExpanded = false;
     renderWorkflowStrip2();
     return;
   }
-  hideEmptyState3();
   state.workflow = {
     ...record,
     todos,
     plan: plan ? { ...plan, steps } : void 0
   };
-  if (!state.workflowNode) {
-    state.workflowNode = document.createElement("section");
-    state.workflowNode.className = "workflow-panel";
-    appendTranscriptNode3(state.workflowNode);
-  }
-  const totals = isPlainObject(summary) ? {
-    total: Number(summary.total ?? 0),
-    completed: Number(summary.completed ?? 0),
-    pending: Number(summary.pending ?? 0),
-    in_progress: Number(summary.in_progress ?? 0),
-    cancelled: Number(summary.cancelled ?? 0)
-  } : summarizeWorkflow3({ todos, plan: plan ? { steps } : void 0 });
-  const percent = Number(totals.total) > 0 ? Math.round(Number(totals.completed) / Number(totals.total) * 100) : 0;
-  state.workflowNode.innerHTML = `
-    <div class="workflow-head">
-      <div>
-        <div class="workflow-kicker">任务进度</div>
-        <div class="workflow-title">${totals.completed}/${totals.total} 已完成</div>
-      </div>
-      <div class="workflow-percent">${percent}%</div>
-    </div>
-    <div class="workflow-meter"><span style="width: ${percent}%"></span></div>
-    ${todos.length ? workflowSection3("Todo", todos) : ""}
-    ${steps.length ? workflowSection3("Plan", steps) : ""}
-  `;
   renderWorkflowStrip2();
-  scrollTranscript();
 }
 function renderWorkflowStrip2() {
   if (!state.workflow || !state.workflow.todos?.length && !state.workflow.plan?.steps?.length) {

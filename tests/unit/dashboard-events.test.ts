@@ -2,6 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { mapSessionEventToDashboard } from "../../src/dashboard/events.ts";
 
+test("dashboard keeps workflow updates out of the transcript", () => {
+  const events = mapSessionEventToDashboard({
+    type: "workflow_updated",
+    todosCompleted: 2,
+    planStepsCompleted: 1
+  });
+
+  assert.deepEqual(events, []);
+});
+
 test("dashboard maps thinking to folded activity without text", () => {
   const events = mapSessionEventToDashboard({
     type: "assistant_thinking_delta",

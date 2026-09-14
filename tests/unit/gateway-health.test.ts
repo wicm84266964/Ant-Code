@@ -767,7 +767,38 @@ test("gateway client retries transient fetch failures before response", async ()
   }
 });
 
-test("Responses rejects unsolicited hosted search instead of silently completing", async () => {
+test("Responses hosted search does not abort a turn that also has local tool calls or text", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      status: "completed",
+      output: [
+        { type: "web_search_call", id: "search-1", status: "completed" },
+        { type: "function_call", call_id: "call_local", name: "web_search", arguments: "{\"query\":\"ants\"}" },
+        { type: "message", content: [{ type: "output_text", text: "searching" }] }
+      ]
+    }), { headers: { "content-type": "application/json" } });
+    const gateway = createLabModelGateway({ modelAlias: "test", networkMode: "offline", allowedHosts: [], lab: {
+      gatewayUrl: "http://127.0.0.1/v1/responses", gatewayProtocol: "openai-responses", gatewayMaxRetries: 0
+    } });
+    const result = await gateway.sendChat({
+      messages: [{ role: "user", content: "search" }],
+      tools: [{ name: "web_search", description: "Search", inputSchema: { type: "object", properties: {} } }]
+    });
+    assert.equal(result.ok, true);
+    if (!result.ok) {
+      return;
+    }
+    assert.equal(result.data.raw?.nativeWebSearch, true);
+    assert.equal(result.data.text, "searching");
+    assert.equal(result.data.toolCalls[0]?.name, "web_search");
+    assert.equal(result.data.stopReason, "tool_calls");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Responses hosted-search-only completions stay successful instead of protocol-mismatch abort", async () => {
   const originalFetch = globalThis.fetch;
   try {
     for (const streaming of [false, true]) {
@@ -780,8 +811,12 @@ test("Responses rejects unsolicited hosted search instead of silently completing
       } });
       const result = await gateway.sendChat({ messages: [{ role: "user", content: "search" }],
         tools: [{ name: "web_search", description: "Search", inputSchema: { type: "object", properties: {} } }], stream: streaming });
-      assert.equal(result.ok, false);
-      assert.equal(result.error?.code, "GATEWAY_TOOL_PROTOCOL_MISMATCH");
+      assert.equal(result.ok, true);
+      if (!result.ok) {
+        return;
+      }
+      assert.equal(result.data.raw?.nativeWebSearch, true);
+      assert.equal(result.error, undefined);
     }
   } finally { globalThis.fetch = originalFetch; }
 });

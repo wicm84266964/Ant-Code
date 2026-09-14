@@ -686,8 +686,10 @@ button {
 
 .settings-icon {
   display: block;
-  height: 15px;
-  width: 15px;
+  flex: 0 0 auto;
+  height: 16px;
+  overflow: visible;
+  width: 16px;
 }
 
 .workspace {

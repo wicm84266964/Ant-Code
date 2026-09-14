@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+## 2.0.14 - 2026-09-14
+
+This is a small Responses-search and Dashboard layout release on the 2.0 TypeScript runtime.
+Hosted `web_search_call` events from a Responses gateway no longer abort the turn. Todo and plan stay in the header strip instead of duplicating into the chat. The settings gear is rotationally symmetric. Permission mode ids are unchanged.
+
+### Fixed
+
+- Responses hosted search no longer fails the turn as a protocol mismatch. Local function calls and visible text still run.
+- Dashboard todo/plan live only in the top progress strip. Chat no longer inserts a second workflow panel or “任务状态已同步” cards.
+- The settings gear icon is an eight-tooth symmetric mark.
+
+### Upgrade
+
+```sh
+git pull
+npm ci
+npm run verify:install
+npm link
+ant-code --version
+```
+
+`ant-code --version` should print `2.0.14`. Restart a running Dashboard
+and hard-refresh the browser. Gateway config and `.lab-agent` sessions
+do not need to be recreated.
+
 ## 2.0.13 - 2026-09-14
 
 Published 2026-09-14 13:40:52 UTC (2026-09-14 21:40:52 UTC+08:00): [v2.0.13](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.13).
