@@ -598,6 +598,7 @@ export type DashboardUiState = {
   deletingSessions: Set<unknown>;
   deleteConfirmSessionId: string;
   files: DashboardFile[];
+  previewPath: string;
   liveTitle: string;
   liveActivities: Map<string | undefined, DashboardActivity>;
   backgroundSubagents: Map<string | undefined, DashboardActivity>;
@@ -769,6 +770,7 @@ export const state: DashboardUiState = {
   deletingSessions: new Set(),
   deleteConfirmSessionId: "",
   files: [],
+  previewPath: "",
   liveTitle: "",
   liveActivities: new Map<string, DashboardActivity>(),
   backgroundSubagents: new Map(),

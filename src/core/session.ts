@@ -129,6 +129,9 @@ export async function createSession(options: CreateSessionOptions): Promise<Agen
   );
   const session = {
     id: String(resumed?.id ?? crypto.randomUUID()),
+    ...(typeof resumed?.gatewaySessionAffinity === "string" && resumed.gatewaySessionAffinity.trim()
+      ? { gatewaySessionAffinity: resumed.gatewaySessionAffinity.trim() }
+      : {}),
     cwd: options.cwd,
     startedAt: String(resumed?.startedAt ?? new Date().toISOString()),
     mode: options.mode,

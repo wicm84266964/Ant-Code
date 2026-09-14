@@ -87,6 +87,7 @@ var state = {
   deletingSessions: /* @__PURE__ */ new Set(),
   deleteConfirmSessionId: "",
   files: [],
+  previewPath: "",
   liveTitle: "",
   liveActivities: /* @__PURE__ */ new Map(),
   backgroundSubagents: /* @__PURE__ */ new Map(),
@@ -785,9 +786,8 @@ async function openSession(id) {
   });
   updateSendButton();
   resetTurnChangeStats();
-  state.files = Array.isArray(loadedSession.files) ? loadedSession.files : [];
-  renderFiles();
-  resetPreview();
+  state.previewPath = "";
+  applySessionFiles(Array.isArray(loadedSession.files) ? loadedSession.files : [], { force: true });
   els.runStatus.textContent = loadedSession.status || "历史";
   setTranscriptPaging(loadedSession.transcriptPage);
   renderTranscriptMessages(loadedSession.transcript ?? []);
@@ -891,6 +891,7 @@ function newTask() {
   hideContextConfirm();
   clearTranscript();
   state.files = [];
+  state.previewPath = "";
   state.queue = [];
   state.queueCancelling.clear();
   state.backgroundCancelling.clear();
@@ -2476,7 +2477,10 @@ function setConnectionState2(next) {
   const text = els.connectionStatus.querySelector(".connection-label");
   if (text) text.textContent = label;
   if (next !== previous && ["offline", "unavailable", "error", "reconnecting", "stale"].includes(next)) {
-    announceStatus2(label);
+    const uncertain = "Dashboard 连接中断，任务状态暂时未知；请勿重复发送。点击连接状态重连；若服务已退出，请重新启动 Dashboard 后刷新页面。";
+    els.connectionStatus.title = uncertain;
+    if (state.running) els.runStatus.textContent = "连接中断 · 任务状态未知";
+    announceStatus2(uncertain);
   } else if (next === "connected" && ["offline", "unavailable", "error", "reconnecting", "stale"].includes(previous)) {
     announceStatus2("本地网关已重新连接");
   }
@@ -2786,9 +2790,12 @@ function handleDashboardEvent3(event) {
     scheduleSessionsRefresh();
     return;
   }
+  if (event.type === "artifacts_updated") {
+    applySessionFiles(event.files ?? [], { exhibit: true });
+    return;
+  }
   if (event.type === "files_updated") {
-    state.files = event.files ?? [];
-    renderFiles();
+    applySessionFiles(event.files ?? [], { exhibit: true });
     if (shouldKeepGuideFeedback3()) {
       els.runStatus.textContent = "引导中";
       updateLiveStatus3();
@@ -8296,6 +8303,61 @@ function renderShutdownActivity8() {
   els.shutdownConfirm.disabled = false;
   els.shutdownConfirm.textContent = activity.total > 0 ? "取消任务并关闭" : "确认关闭";
 }
+var EXHIBIT_FILE_KINDS = /* @__PURE__ */ new Set([
+  "image",
+  "pdf",
+  "office-preview",
+  "office",
+  "markdown",
+  "table-preview",
+  "data"
+]);
+var EXHIBIT_TEXT_EXTENSIONS = /* @__PURE__ */ new Set(["txt", "log", "html", "htm"]);
+function isExhibitFile(file) {
+  if (!file?.relativePath) {
+    return false;
+  }
+  const kind = String(file.kind ?? "");
+  if (EXHIBIT_FILE_KINDS.has(kind)) {
+    return true;
+  }
+  if (kind !== "text") {
+    return false;
+  }
+  const name = String(file.relativePath ?? file.name ?? "");
+  const ext = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1).toLowerCase() : "";
+  return EXHIBIT_TEXT_EXTENSIONS.has(ext);
+}
+function pickExhibitFile(files, options = {}) {
+  const previous = new Set(
+    (options.previousPaths ?? []).map((value) => String(value ?? "").replace(/\\/g, "/").toLowerCase()).filter(Boolean)
+  );
+  const items = (Array.isArray(files) ? files : []).filter(isExhibitFile);
+  const fresh = items.filter((file) => !previous.has(String(file.relativePath ?? "").replace(/\\/g, "/").toLowerCase()));
+  const pool = fresh.length > 0 ? fresh : options.force === true ? items : [];
+  return pool.at(-1) ?? null;
+}
+function applySessionFiles(files, options = {}) {
+  const previousPaths = state.files.map((file) => file.relativePath);
+  state.files = Array.isArray(files) ? files : [];
+  renderFiles();
+  if (options.exhibit === false) {
+    return;
+  }
+  const next = pickExhibitFile(state.files, {
+    previousPaths,
+    force: options.force === true || !state.previewPath
+  });
+  if (next?.relativePath && next.relativePath !== state.previewPath) {
+    void openFile9(next.relativePath);
+    return;
+  }
+  if (!state.previewPath) {
+    resetPreview();
+    return;
+  }
+  syncFileListSelection();
+}
 function renderFiles() {
   els.fileList.innerHTML = "";
   if (state.files.length === 0) {
@@ -8309,13 +8371,23 @@ function renderFiles() {
     const item = document.createElement("button");
     item.type = "button";
     item.className = "file-item";
+    item.dataset.file = file.relativePath ?? "";
     item.innerHTML = `
       <div class="file-name">${escapeHtml(file.name)}</div>
       <div class="file-meta">${escapeHtml(file.kind)} · ${escapeHtml(file.source ?? "file")}</div>
     `;
+    item.classList.toggle("active", Boolean(state.previewPath) && item.dataset.file === state.previewPath);
     item.addEventListener("click", () => openFile9(file.relativePath));
     els.fileList.append(item);
   }
+}
+function syncFileListSelection() {
+  els.fileList.querySelectorAll(".file-item").forEach((item) => {
+    if (!(item instanceof HTMLElement)) {
+      return;
+    }
+    item.classList.toggle("active", Boolean(state.previewPath) && item.dataset.file === state.previewPath);
+  });
 }
 function currentImageFiles9() {
   return state.files.filter((file) => file.kind === "image").map((file) => ({
@@ -8326,6 +8398,8 @@ function currentImageFiles9() {
 }
 async function openFile9(filePath) {
   if (!filePath) return;
+  state.previewPath = filePath;
+  syncFileListSelection();
   const sessionId = state.currentSessionId;
   const request = beginScopedRequest("file", `${sessionId ?? "new"}:${filePath}`);
   els.previewBody.className = "preview-body";
@@ -8644,8 +8718,10 @@ function renderSheetCellHtml9(line) {
   return `<div class="office-cell"><dt>${escapeHtml(match[1])}</dt><dd>${escapeHtml(match[2])}</dd></div>`;
 }
 function resetPreview(message = "任务产物会显示在这里") {
+  state.previewPath = "";
   els.previewBody.className = "preview-body";
   els.previewBody.innerHTML = `<div class="preview-placeholder">${escapeHtml(message)}</div>`;
+  syncFileListSelection();
 }
 function fencedDataForFile9(file) {
   const language = dataLanguageForExtension9(file.extension);
@@ -9928,6 +10004,7 @@ export {
   applyPendingReasoningCapabilities5 as applyPendingReasoningCapabilities,
   applyProbedModel5 as applyProbedModel,
   applyReasoningCapabilityCandidate6 as applyReasoningCapabilityCandidate,
+  applySessionFiles,
   applySuggestedGatewayUrl5 as applySuggestedGatewayUrl,
   armEventConnectTimer3 as armEventConnectTimer,
   armEventStaleTimer3 as armEventStaleTimer,
@@ -10117,6 +10194,7 @@ export {
   isCurrentScopedRequest,
   isDisabledReasoningEffort6 as isDisabledReasoningEffort,
   isDuplicateDraftText8 as isDuplicateDraftText,
+  isExhibitFile,
   isInterruptError3 as isInterruptError,
   isLikelyLocalFileReference10 as isLikelyLocalFileReference,
   isMeaningfulCompletedActivity4 as isMeaningfulCompletedActivity,
@@ -10192,6 +10270,7 @@ export {
   openSession,
   parentDirectory9 as parentDirectory,
   permissionIndexForKey2 as permissionIndexForKey,
+  pickExhibitFile,
   postJson,
   previewText8 as previewText,
   previewWidthBounds2 as previewWidthBounds,
@@ -10360,6 +10439,7 @@ export {
   switchReasoningEffort7 as switchReasoningEffort,
   syncAgentModelPickersForEndpoint6 as syncAgentModelPickersForEndpoint,
   syncEmptyStateCopy,
+  syncFileListSelection,
   syncGatewayUrlHint5 as syncGatewayUrlHint,
   syncGuideButton,
   syncPendingGuideFromQueue3 as syncPendingGuideFromQueue,

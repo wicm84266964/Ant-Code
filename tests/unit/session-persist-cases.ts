@@ -51,6 +51,7 @@ test("createSession can resume legacy bounded metadata without transcript text",
   const store = createSessionStore({ cwd });
   await store.writeMetadata({
     id: "session-to-resume",
+    gatewaySessionAffinity: "repaired-route",
     startedAt: "2026-04-28T00:00:00.000Z",
     turnIndex: 4,
     prompt: "continue the TUI work",
@@ -66,6 +67,7 @@ test("createSession can resume legacy bounded metadata without transcript text",
   });
 
   assert.equal(session.id, "session-to-resume");
+  assert.equal(session.gatewaySessionAffinity, "repaired-route");
   assert.equal(session.startedAt, "2026-04-28T00:00:00.000Z");
   assert.equal(session.turnCount, 4);
   assert.deepEqual(session.messages, []);
@@ -73,6 +75,10 @@ test("createSession can resume legacy bounded metadata without transcript text",
   assert.equal(session.resumedFrom.prompt, "continue the TUI work");
   assert.equal(session.resumedFrom.status, "completed");
   assert.equal(session.resumedFrom.model, "mock-sonnet");
+  await persistSessionSnapshot(session, { env: {} });
+  const reloaded = await createSession({ cwd, mode: "interactive", env: {}, resume: session.id });
+  assert.equal(reloaded.id, session.id);
+  assert.equal(reloaded.gatewaySessionAffinity, "repaired-route");
 });
 
 test("createSession restores bounded persisted conversation messages", async () => {

@@ -35,6 +35,8 @@ import {
   createResponsesReasoningToolGateway,
   createLongReasoningToolGateway,
   createReasoningOnlyOpenAIStreamingGateway,
+  createReasoningOnlyThenHealthyOpenAIGateway,
+  createPromisedToolThenHealthyGateway,
   createSlowOpenAIStreamingGateway,
   createValidationGateway,
   readRequestJson,
@@ -790,6 +792,40 @@ test("session does not retry malformed final output while output health check is
     assert.equal(result.output, "Ver");
     assert.equal(requests.length, 1);
     assert.equal(events.some((event) => event.type === "output_health_retry"), false);
+  } finally {
+    await close(server);
+  }
+});
+
+test("session retries a one-line tool promise without sending it back to the model", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
+  const requests = [];
+  const affinities = [];
+  const events = [];
+  const server = await listen(createPromisedToolThenHealthyGateway(requests, affinities), "127.0.0.1");
+
+  try {
+    const env = mockGatewayEnv(serverUrl(server));
+    delete env.LAB_AGENT_TRANSCRIPT_ENABLED;
+    const session = await createSession({
+      cwd,
+      mode: "interactive",
+      env
+    });
+
+    const result = await runSessionTurn(session, {
+      prompt: "继续完成测试",
+      env,
+      onEvent: (event) => events.push(event)
+    });
+
+    assert.match(result.output, /已完成最小搜索/);
+    assert.equal(requests.length, 2);
+    assert.equal(JSON.stringify(requests[1]).includes("马上调用 web_search"), false);
+    assert.equal(events.some((event) => event.type === "output_health_retry" && event.reasons.includes("promised_tool_without_call")), true);
+    assert.equal(affinities.length, 2);
+    assert.notEqual(affinities[1], affinities[0]);
+    assert.match(String(session.gatewaySessionAffinity ?? ""), /^retry-/);
   } finally {
     await close(server);
   }
@@ -1819,6 +1855,47 @@ test("interactive session does not persist raw OpenAI reasoning-only streams as 
     assert.doesNotMatch(result.output, /private final text/);
     assert.ok(events.some((event) => event.type === "assistant_thinking_delta"));
     assert.ok(events.some((event) => event.type === "assistant_final"));
+    assert.equal(JSON.stringify(session.messages).includes("没有返回可展示正文"), false);
+    assert.match(JSON.stringify(session.transcriptMessages), /没有返回可展示正文/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("reasoning-only diagnostic is not sent back to the model on the next turn", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
+  const requests = [];
+  const server = await listen(createReasoningOnlyThenHealthyOpenAIGateway(requests), "127.0.0.1");
+
+  try {
+    const env = {
+      LAB_MODEL_GATEWAY_URL: `${serverUrl(server)}/v1/chat/completions`,
+      LAB_AGENT_MODEL: "mock-openai",
+      LAB_AGENT_NETWORK_MODE: "offline",
+      LAB_AGENT_TRANSCRIPT_ENABLED: "true",
+      LAB_MODEL_GATEWAY_PROTOCOL: "openai-chat"
+    };
+    const session = await createSession({
+      cwd,
+      mode: "interactive",
+      env
+    });
+
+    const first = await runSessionTurn(session, {
+      prompt: "reasoning only",
+      env
+    });
+    const second = await runSessionTurn(session, {
+      prompt: "continue after empty visible text",
+      env
+    });
+
+    assert.match(first.output, /没有返回可展示正文/);
+    assert.equal(second.output, "visible reply");
+    assert.equal(requests.length, 2);
+    assert.equal(JSON.stringify(requests[1]).includes("没有返回可展示正文"), false);
+    assert.equal(JSON.stringify(session.messages).includes("没有返回可展示正文"), false);
+    assert.match(JSON.stringify(session.transcriptMessages), /没有返回可展示正文/);
   } finally {
     await close(server);
   }

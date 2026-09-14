@@ -278,7 +278,8 @@ export async function runtimeReadSession(ctx: DashboardFactoryState, selector: u
       failure: persistedSessionFailure(metadata),
       files: collectSessionFiles({
         cwd: session?.cwd ?? metadata.cwd ?? ctx.cwd,
-        workflow: session?.workflow ?? metadata.workflow ?? null
+        workflow: session?.workflow ?? metadata.workflow ?? null,
+        artifacts: metadata.artifacts ?? session?.artifacts ?? null
       }, finalText),
       workflow: session?.workflow ?? metadata.workflow ?? null,
       backgroundSnapshot: backgroundSnapshot ? publicBackgroundSnapshot(backgroundSnapshot) : null,

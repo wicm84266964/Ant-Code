@@ -265,6 +265,36 @@ test("dashboard skips mentioned image files that do not exist", async () => {
   assert.equal(files.some((file) => file.relativePath === "missing.png"), false);
 });
 
+test("dashboard collects unicode mentioned reports from assistant text", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-files-unicode-"));
+  await fs.writeFile(path.join(cwd, "图1.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  await fs.mkdir(path.join(cwd, "reports"));
+  await fs.writeFile(path.join(cwd, "reports", "成绩.xlsx"), Buffer.from("PK"), "utf8");
+  const session = { cwd, workflow: { changes: [] } };
+
+  const files = collectSessionFiles(session, "见 `图1.png` 和 [报表](reports/成绩.xlsx)");
+  const relativePaths = files.map((file) => String(file.relativePath).replace(/\\/g, "/"));
+
+  assert.equal(relativePaths.includes("图1.png"), true);
+  assert.equal(relativePaths.includes("reports/成绩.xlsx"), true);
+});
+
+test("dashboard restores persisted exhibit artifacts when workflow changes are summarized", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-files-artifacts-"));
+  await fs.writeFile(path.join(cwd, "chart.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  const session = {
+    cwd,
+    workflow: {
+      changes: { total: 1, created: 1, edited: 0, diffTruncated: 0 }
+    },
+    artifacts: [{ relativePath: "chart.png", name: "chart.png", source: "created" }]
+  };
+
+  const files = collectSessionFiles(session, "");
+
+  assert.equal(files.some((file) => file.relativePath === "chart.png" && file.source === "created"), true);
+});
+
 test("dashboard collects mentioned files when persisted workflow changes are summarized", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-files-"));
   await fs.writeFile(path.join(cwd, "chart.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));

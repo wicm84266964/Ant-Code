@@ -127,10 +127,50 @@ export function formatAssistantOutput(data: import("../model-gateway/protocol.ts
   return "模型本轮没有返回可展示正文。";
 }
 
+const PROMISED_TOOL_STOP_REASONS = new Set(["", "stop", "end_turn", "completed"]);
+const PROMISED_TOOL_VISIBLE_LIMIT = 160;
 
-export function analyzeAssistantOutputHealth(data: import("../model-gateway/protocol.ts").NormalizedGatewayResponse, finalOutput: unknown, thinking: { text?: string; bytes?: number } | null | undefined) {
+export function looksLikePromisedToolWithoutCall(
+  data: import("../model-gateway/protocol.ts").NormalizedGatewayResponse,
+  visibleText: string,
+  thinkingText: string,
+  toolNames: string[] | undefined
+) {
+  if (data?.toolCalls?.length) {
+    return false;
+  }
+  const stopReason = String(data?.stopReason ?? "").toLowerCase();
+  if (!PROMISED_TOOL_STOP_REASONS.has(stopReason)) {
+    return false;
+  }
+  const text = String(visibleText ?? "").trim();
+  if (text.length > PROMISED_TOOL_VISIBLE_LIMIT) {
+    return false;
+  }
+  const names = (toolNames ?? []).map((name) => String(name ?? "").trim()).filter((name) => name.length >= 3);
+  if (names.length === 0) {
+    return false;
+  }
+  const haystack = `${thinkingText}\n${text}`;
+  const mentioned = names.filter((name) => haystack.includes(name));
+  if (mentioned.length === 0) {
+    return false;
+  }
+  if (/(马上|立刻|现在|补测|随后|然后|调用|let me|i will|i'll|going to)/i.test(haystack)) {
+    return true;
+  }
+  return Boolean(thinkingText) && text.length <= 80;
+}
+
+
+export function analyzeAssistantOutputHealth(
+  data: import("../model-gateway/protocol.ts").NormalizedGatewayResponse,
+  _finalOutput: unknown,
+  thinking: { text?: string; bytes?: number } | null | undefined,
+  options: { toolNames?: string[] } = {}
+) {
   const reasons = [];
-  const text = String(finalOutput ?? "").trim();
+  const text = assistantResponseText(data).trim();
   const stopReason = String(data?.stopReason ?? "").toLowerCase();
   const thinkingText = String(thinking?.text ?? "");
   const thinkingBytes = thinking && Number.isFinite(thinking.bytes) ? Number(thinking.bytes) : gatewayThinkingBytes(data);
@@ -141,7 +181,7 @@ export function analyzeAssistantOutputHealth(data: import("../model-gateway/prot
   if (["length", "max_tokens", "token_limit", "context_length_exceeded"].includes(stopReason)) {
     reasons.push(`stop_reason:${stopReason}`);
   }
-  if (text.length > 0 && data?.toolCalls?.length === 0 && thinkingBytes >= 1024 && dataTextBytes(data) === 0 && ["length", "max_tokens", "token_limit"].includes(stopReason)) {
+  if (data?.toolCalls?.length === 0 && thinkingBytes >= 1024 && dataTextBytes(data) === 0 && ["length", "max_tokens", "token_limit"].includes(stopReason)) {
     reasons.push("reasoning_only_length");
   }
   if (data?.toolCalls?.length === 0 && dataTextBytes(data) === 0 && thinkingBytes >= 4096 && looksLikeRepetitiveThinkingLoop(thinkingText)) {
@@ -158,6 +198,9 @@ export function analyzeAssistantOutputHealth(data: import("../model-gateway/prot
   }
   if (looksLikeTruncatedSentence(text)) {
     reasons.push("truncated_visible_text");
+  }
+  if (looksLikePromisedToolWithoutCall(data, text, thinkingText, options.toolNames)) {
+    reasons.push("promised_tool_without_call");
   }
 
   return {
@@ -261,6 +304,9 @@ export function buildOutputHealthRepairPrompt(health: { reasons?: string[] } | n
     `Reasons: ${reasons.join(", ") || "unknown"}.`,
     reasoningOnlyLength
       ? "The previous model call exhausted its completion budget in reasoning/thinking without producing visible user-facing text."
+      : "",
+    reasons.includes("promised_tool_without_call")
+      ? "The previous model call only promised a tool call in a short sentence and did not emit a tool call. Call the tool now; do not answer with another one-line promise."
       : "",
     repetitiveThinking
       ? "The previous model call repeated internal planning text in a thinking loop. Break the loop and answer directly."

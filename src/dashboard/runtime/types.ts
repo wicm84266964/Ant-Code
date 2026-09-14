@@ -218,6 +218,7 @@ export type DashboardActiveSessionState = {
   pendingApprovals: Map<unknown, DashboardPendingApproval>;
   pendingQuestions: Map<unknown, DashboardPendingQuestion>;
   finalOutput: string;
+  lastArtifactFingerprint: string;
   backgroundSnapshotTimer: ReturnType<typeof setInterval> | NodeJS.Timeout | null;
   backgroundSnapshotDirty: boolean;
   backgroundSnapshotPromise: Promise<unknown> | null;

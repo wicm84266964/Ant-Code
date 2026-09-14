@@ -43,8 +43,14 @@ test("configured idle gateway shows connected without masking event failures", a
   assert.equal(node.dataset.state, "connected");
   app.setConnectionState("error");
   assert.equal(label.textContent, "本地网关异常");
+  app.state.running = true;
+  app.els.runStatus = { textContent: "正在回答" };
   app.setConnectionState("offline");
   assert.equal(label.textContent, "本地网关离线");
+  assert.match(app.els.runStatus.textContent, /任务状态未知/);
+  assert.match(node.title, /请勿重复发送/);
+  assert.equal(app.state.running, true);
+  app.state.running = false;
   app.state.gatewayConfig = { apiKeyConfigured: false };
   app.state.gatewayProfiles = [];
   app.setConnectionState("idle");
@@ -670,6 +676,31 @@ test("dashboard composer controls keep confirmations reviewable and critical sta
   assert.match(css, /\.model-switch-fields\s*\{/);
   assert.match(css, /\.reasoning-effort-control\s*\{/);
   assert.match(css, /\.gateway-probe-result\.success strong\s*\{/);
+});
+
+test("dashboard auto-exhibits newly generated preview files", async () => {
+  const app = await publicTsSource();
+  const html = await fs.readFile(path.resolve("src/dashboard/public/index.html"), "utf8");
+  const module = await loadAppExports(["pickExhibitFile", "isExhibitFile"]);
+
+  assert.match(app, /event\.type === "artifacts_updated"/);
+  assert.match(app, /function applySessionFiles\(/);
+  assert.match(app, /function pickExhibitFile\(/);
+  assert.match(html, /生成的图、报表和导出文件会自动预览/);
+  assert.equal(module.isExhibitFile({ kind: "image", relativePath: "chart.png" }), true);
+  assert.equal(module.isExhibitFile({ kind: "binary", relativePath: "blob.bin" }), false);
+  assert.equal(module.isExhibitFile({ kind: "text", relativePath: "notes.txt" }), true);
+  assert.equal(module.isExhibitFile({ kind: "text", relativePath: "src/app.ts" }), false);
+  assert.equal(module.pickExhibitFile([
+    { kind: "markdown", relativePath: "notes.md", source: "created" },
+    { kind: "image", relativePath: "chart.png", source: "created" }
+  ], { previousPaths: ["notes.md"] })?.relativePath, "chart.png");
+  assert.equal(module.pickExhibitFile([
+    { kind: "image", relativePath: "chart.png", source: "created" }
+  ], { previousPaths: ["chart.png"] }), null);
+  assert.equal(module.pickExhibitFile([
+    { kind: "image", relativePath: "chart.png", source: "created" }
+  ], { previousPaths: ["chart.png"], force: true })?.relativePath, "chart.png");
 });
 
 test("dashboard renders lightweight office previews in the side panel", async () => {

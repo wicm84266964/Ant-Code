@@ -17,6 +17,7 @@ import { createSessionStore } from "../storage/session-store.ts";
 import { serializeToolResult } from "../tools/result.ts";
 import { countLineChanges } from "../tools/diff.ts";
 import { createToolRuntime } from "../tools/runtime.ts";
+import { serializeExhibitArtifacts } from "../tools/artifacts.ts";
 import { createWorkflowState, formatWorkflowContext, summarizeWorkflow, syncWorkflowCompletionOnFinal, type WorkflowState } from "../tools/workflow-tools.ts";
 import { getAgentProfile } from "../agents/profiles.ts";
 import { resolveMaxParallelReadonlyAgentRuns } from "../agents/orchestration-config.ts";
@@ -182,23 +183,32 @@ export async function appendSessionMessages(session: AgentSession, data: import(
   hooksTrusted?: boolean;
   eventOptions?: Record<string, unknown>;
 } = {}) {
-  const assistantContent = data.content.length > 0
-    ? data.content
-    : [{ type: "text", text: fallbackText }];
-  const assistantMessage: SessionMessage = {
-    role: "assistant",
-    content: assistantContent
-  };
   const thinking = normalizeAssistantThinking(options.thinking);
+  const modelContent = Array.isArray(data.content) ? data.content : [];
+  const contextAssistant: SessionMessage = {
+    role: "assistant",
+    content: modelContent
+  };
   if (thinking) {
-    assistantMessage.thinking = thinking;
+    contextAssistant.thinking = thinking;
+  }
+  if (Array.isArray(data.toolCalls) && data.toolCalls.length > 0) {
+    contextAssistant.toolCalls = data.toolCalls;
+  }
+
+  const transcriptAssistant: SessionMessage = {
+    role: "assistant",
+    content: modelContent.length > 0 ? modelContent : [{ type: "text", text: fallbackText }]
+  };
+  if (thinking) {
+    transcriptAssistant.thinking = thinking;
   }
 
   const turnMessages = Array.isArray(options.turnMessages) ? options.turnMessages : [];
   const transcriptMessages = Array.isArray(options.transcriptMessages) ? options.transcriptMessages : turnMessages;
-  session.messages.push(...turnMessages, assistantMessage);
-  appendTranscriptMessages(session, [...transcriptMessages, assistantMessage]);
-  appendModelContextArchiveMessages(session, [...turnMessages, assistantMessage]);
+  session.messages.push(...turnMessages, contextAssistant);
+  appendTranscriptMessages(session, [...transcriptMessages, transcriptAssistant]);
+  appendModelContextArchiveMessages(session, [...turnMessages, contextAssistant]);
 
   return compactSessionContextWithModel(session, {
     reason: "automatic",
@@ -243,6 +253,7 @@ export async function persistSessionMetadata(store: ReturnType<typeof createSess
   metadata.usage = usage;
   metadata.lastProviderUsage = usage.last ?? null;
   metadata.workflow = summarizeWorkflow(session.workflow);
+  metadata.artifacts = serializeExhibitArtifacts(session.cwd, session.workflow?.changes);
   metadata.context = summarizeContextWindow(session);
   metadata.goal = serializeSessionGoal(session.goal);
   metadata.permissionMode = session.permissionMode;
@@ -310,6 +321,7 @@ export async function persistSessionSnapshot(session: AgentSession, options: { e
   metadata.allowCommand = session.allowCommand;
   metadata.context = summarizeContextWindow(session);
   metadata.workflow = summarizeWorkflow(session.workflow);
+  metadata.artifacts = serializeExhibitArtifacts(session.cwd, session.workflow?.changes);
   metadata.goal = serializeSessionGoal(session.goal);
   const committed = await commitSessionSnapshot(store, metadata, session, {
     requireExisting: options.requireExisting !== false
@@ -526,7 +538,10 @@ export function refreshSessionModelSelection(session: AgentSession) {
 /** @param {AgentSession} session @returns {Record<string, any>} */
 export function sessionModelMetadata(session: AgentSession): Record<string, unknown> {
   const selection = refreshSessionModelSelection(session);
-  if (selection) return patchSessionModelSelectionMetadata({}, selection as Record<string, unknown>);
+  const routing = typeof session.gatewaySessionAffinity === "string" && session.gatewaySessionAffinity.trim()
+    ? { gatewaySessionAffinity: session.gatewaySessionAffinity.trim() }
+    : {};
+  if (selection) return patchSessionModelSelectionMetadata(routing, selection as Record<string, unknown>);
   if (session.config?.configV2?.enabled === true) {
     throw new SessionModelSelectionUnresolvedError({
       reason: "invalid-runtime-selection",
@@ -535,6 +550,7 @@ export function sessionModelMetadata(session: AgentSession): Record<string, unkn
     });
   }
   return {
+    ...routing,
     metadataVersion: 1,
     model: String(session.model ?? ""),
     reasoningEffort: typeof session.config?.reasoningEffort === "string"

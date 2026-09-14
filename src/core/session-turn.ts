@@ -382,6 +382,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
       tools: session.context.tools,
       toolResults,
       sessionId: session.id,
+      sessionAffinity: session.gatewaySessionAffinity,
       stream: session.mode === "interactive" || options.stream === true,
       signal: options.signal,
       onEvent: (event: Record<string, unknown>) => emitGatewayStreamEvent(eventOptions, event, round + 1)
@@ -516,7 +517,9 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
       metadata.rounds = round + 1;
       finalOutput = formatAssistantOutput(response.data);
       const thinking = thinkingForRound(thinkingCapture, round + 1, response.data);
-      const outputHealth = analyzeAssistantOutputHealth(response.data, finalOutput, thinking);
+      const outputHealth = analyzeAssistantOutputHealth(response.data, finalOutput, thinking, {
+        toolNames: (session.context.tools ?? []).map((tool) => String(tool?.name ?? "")).filter(Boolean)
+      });
       if (OUTPUT_HEALTH_CHECK_ENABLED || outputHealth.mustRetry) {
         recordOutputHealth(metadata, {
           round: round + 1,
@@ -525,6 +528,20 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
         });
         if (!outputHealth.ok && shouldRetryOutputHealth(outputHealth, outputHealthRetries)) {
           outputHealthRetries += 1;
+          if (outputHealth.reasons.includes("promised_tool_without_call")) {
+            rotateGatewaySessionAffinity(session);
+            await emitEvent(eventOptions, {
+              type: "output_health_retry",
+              round: round + 1,
+              reasons: outputHealth.reasons,
+              stopReason: response.data.stopReason ?? null,
+              textBytes: Buffer.byteLength(finalOutput, "utf8"),
+              thinkingBytes: thinking?.bytes ?? gatewayThinkingBytes(response.data),
+              retry: outputHealthRetries,
+              gatewaySessionAffinity: session.gatewaySessionAffinity
+            });
+            continue;
+          }
           const retryAssistantMessage: SessionMessage = {
             role: "assistant",
             content: response.data.content.length > 0
@@ -707,6 +724,10 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
   } finally {
     mcpRuntime.close();
   }
+}
+
+function rotateGatewaySessionAffinity(session: AgentSession) {
+  session.gatewaySessionAffinity = `retry-${Date.now().toString(36)}-${crypto.randomBytes(4).toString("hex")}`;
 }
 
 /**

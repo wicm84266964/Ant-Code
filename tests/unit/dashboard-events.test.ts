@@ -104,6 +104,20 @@ test("dashboard maps final gateway failure to the retry live activity key", () =
   assert.equal(events[0].title, "模型请求失败");
   assert.equal(events[0].status, "failed");
   assert.equal(events[0].coalesceKey, "gateway");
+  assert.equal(events[0].detail, "Gateway returned HTTP 502");
+});
+
+test("dashboard gateway auth failure surfaces the credential switch hint", () => {
+  const events = mapSessionEventToDashboard({
+    type: "gateway_error",
+    error: {
+      code: "GATEWAY_HTTP_ERROR",
+      message: "Gateway returned HTTP 401",
+      diagnostics: ["当前生效凭据不能用。请打开设置，为这个来源切换生效凭据后再试。"]
+    }
+  });
+
+  assert.match(events[0].detail, /切换生效凭据/);
 });
 
 test("dashboard maps context compaction to live status and transcript boundary", () => {
