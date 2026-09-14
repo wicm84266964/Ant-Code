@@ -101,7 +101,7 @@ export function mapSessionEventToDashboard(event: Record<string, unknown>) {
     })];
   }
   if (type === "workflow_updated") {
-    return [activity("workflow-updated", "任务状态已同步", `已完成 ${event.todosCompleted ?? 0} 个待办、${event.planStepsCompleted ?? 0} 个计划步骤`, "completed", "session", event, { coalesceKey: "workflow" })];
+    return [];
   }
   if (type === "subagent_group_started") {
     return [backgroundSubagentActivity(event, {

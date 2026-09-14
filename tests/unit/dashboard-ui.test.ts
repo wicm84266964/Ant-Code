@@ -947,6 +947,8 @@ test("dashboard exposes responsive navigation and accessible interaction semanti
   const html = await fs.readFile(path.resolve("src/dashboard/public/index.html"), "utf8");
   const css = await fs.readFile(path.resolve("src/dashboard/public/styles.css"), "utf8");
 
+  assert.doesNotMatch(app, /appendTranscriptNode\(state\.workflowNode\)/);
+  assert.match(app, /function renderWorkflowStrip\(/);
   const header = html.slice(html.indexOf("workspace-header"), html.indexOf("workflow-strip"));
   assert.match(header, /id="connection-status"/);
   assert.match(header, /正在读取配置/);

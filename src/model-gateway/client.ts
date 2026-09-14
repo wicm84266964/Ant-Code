@@ -399,17 +399,6 @@ export function createLabModelGateway(config: import("../config/load-config.ts")
           continue;
         }
 
-        if (protocol === "openai-responses" && isRecord(data.raw) && data.raw.nativeWebSearch === true
-          && Array.isArray(gatewayRequest.tools)
-          && !gatewayRequest.tools.some((tool) => isRecord(tool) && ["web_search", "web_search_preview"].includes(String(tool.type)))
-          && gatewayRequest.tools.some((tool) => isRecord(tool) && tool.type === "function" && tool.name === "web_search")) {
-          return { ok: false, error: normalizeGatewayError(null, {
-            code: "GATEWAY_TOOL_PROTOCOL_MISMATCH",
-            message: "网关返回了未请求的原生搜索事件，而不是本地 web_search 工具调用；本轮未正常完成。请检查网关协议映射或重置此会话的网关绑定。",
-            details: { receivedToolType: "web_search_call", expectedToolType: "function_call" },
-            protocol
-          }) };
-        }
         return { ok: true, data };
       }
 
