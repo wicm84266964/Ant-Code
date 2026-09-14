@@ -4,14 +4,33 @@
 
 ## 2.0.12 - 2026-09-14
 
-Candidate small release for Dashboard send stability and interaction correctness. GitHub CI, tag and Release status will be recorded after publication.
+Published 2026-09-14 02:04:48 UTC (2026-09-14 10:04:48 UTC+08:00): [v2.0.12](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.12).
+Release commit: `27cdb0d2922987985b6b5b4115193829e3cc7ae9`. PR #54 and main CI passed; local release verification passed 1,342 unit/integration tests and 38 browser tests, with no failures or skips. Additional process tests passed; cross-repository parity verified 36 exact paths and 16 reviewed differences.
 
-- A successful `/api/turns` response no longer rewrites the session or draft after the user has already switched away.
-- While a turn is running, the main button queues when the composer has text or attachments, and interrupts only when it is empty.
-- Session retention cleanup no longer blocks first paint or a new Dashboard send. Long session resume reads from the tail of the archive; turn start waits up to 60 seconds instead of 15.
-- Approval Tab stays inside the panel in the TUI. Gateway 429 responses honor `Retry-After` up to 30 seconds.
+This is a small Dashboard interaction and send-stability release on the 2.0 TypeScript runtime.
+A successful send no longer rewrites the current session or draft after the user has switched away. Session retention no longer blocks first paint or a new send. Long session resume reads the archive tail. Permission mode ids are unchanged.
 
-Validation, upgrade steps and limitations: [Chinese release note](docs/releases/2.0.12-dashboard-interaction-send-stability_zh.md).
+### Fixed
+
+- Late `/api/turns` responses no longer replace the last selected session or clear a draft written while waiting.
+- While a turn is running, the main button queues when the composer has text or attachments, and interrupts only when empty.
+- Session retention cleanup no longer blocks Dashboard first paint or a new-task send.
+- Long session resume no longer hits the 15-second request timeout before the gateway is called. Turn start waits up to 60 seconds.
+- TUI approval Tab/Shift+Tab stay inside the panel. Gateway 429 responses honor `Retry-After` up to 30 seconds.
+
+### Upgrade
+
+```sh
+git pull
+npm ci
+npm run verify:install
+npm link
+ant-code --version
+```
+
+`ant-code --version` should print `2.0.12`. Restart a running Dashboard
+and hard-refresh the browser. Gateway config and `.lab-agent` sessions
+do not need to be recreated.
 
 ## 2.0.11 - 2026-09-10
 
