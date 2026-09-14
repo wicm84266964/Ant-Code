@@ -755,9 +755,15 @@ export function useTuiAppKeys(s: ReturnType<typeof useTuiAppTurn>) {
       return;
     }
     if (isCtrlKey(inputValue, key, "l")) {
-      setEntries([]);
+      setEntries([withEntryIdentity({
+        kind: "session",
+        title: "已清屏",
+        body: "只隐藏当前可见记录，会话文件未删除。",
+        at: new Date().toLocaleTimeString()
+      })]);
       setTranscriptOffset(0);
       setStreamOffset(0);
+      setActivity((value) => ({ ...value, status: "已清屏" }));
       return;
     }
     const canScrollConversation = current.mode === "input"
@@ -833,19 +839,6 @@ export function useTuiAppKeys(s: ReturnType<typeof useTuiAppTurn>) {
       setHistoryIndex(null);
       return;
     }
-    if (key.shift && key.tab) {
-      cyclePermissionMode(current, "ink-shift-tab");
-      return;
-    }
-    if (key.tab) {
-      setSideView((value) => {
-        const next = nextSideView(value);
-        setActivity((currentActivity) => ({ ...currentActivity, status: `panel ${next}` }));
-        return next;
-      });
-      setSidePanelOffset(0);
-      return;
-    }
     if (current.mode === "approval") {
       handleApprovalInput(inputValue, key, current, sessionApprovals.current, addEntry, setActivity, setMode, setPendingApproval, setApprovalChoiceIndex);
       return;
@@ -859,6 +852,19 @@ export function useTuiAppKeys(s: ReturnType<typeof useTuiAppTurn>) {
         replaceQuestionDraft,
         updateQuestionDraft
       });
+      return;
+    }
+    if (key.shift && key.tab) {
+      cyclePermissionMode(current, "ink-shift-tab");
+      return;
+    }
+    if (key.tab) {
+      setSideView((value) => {
+        const next = nextSideView(value);
+        setActivity((currentActivity) => ({ ...currentActivity, status: `panel ${next}` }));
+        return next;
+      });
+      setSidePanelOffset(0);
       return;
     }
     if (current.modelPickerOpen) {

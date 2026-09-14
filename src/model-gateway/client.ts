@@ -33,7 +33,7 @@ const DEFAULT_GATEWAY_TIMEOUT_MS = 900000;
 const DEFAULT_GATEWAY_IDLE_TIMEOUT_MS = 300000;
 const BASE_RETRY_DELAY_MS = 200;
 const MAX_RETRY_DELAY_MS = 30000;
-const GATEWAY_TRANSIENT_ERROR_PATTERN = /KVTransferError|WaitingForInput|Decode transfer failed|premature close|stream.*interrupted/i;
+const MIMO_RETRY_ERROR_PATTERN = /KVTransferError|WaitingForInput|Decode transfer failed|premature close|stream.*interrupted/i;
 const RETRYABLE_STREAM_PROTOCOL_CODES = new Set(["UPSTREAM_STREAM_ABORTED", "INCOMPLETE_TOOL_CALL"]);
 const GATEWAY_RESPONSE_PROTOCOL_CODES = new Set([
   ...RETRYABLE_STREAM_PROTOCOL_CODES,
@@ -199,6 +199,7 @@ export function createLabModelGateway(config: import("../config/load-config.ts")
 
         const responseHeaderMs = Date.now() - startedAt;
         if (!response.ok) {
+          const retryAfter = response.headers.get("retry-after");
           let errorBody;
           try {
             errorBody = await boundedResponseText(response, {
@@ -242,7 +243,7 @@ export function createLabModelGateway(config: import("../config/load-config.ts")
               attempt,
               maxAttempts,
               retryHistory,
-              delayMs: retryDelayMs(attempt),
+              delayMs: retryDelayMs(attempt, retryAfter),
               error,
               stage: "http_body"
             });
@@ -288,7 +289,7 @@ export function createLabModelGateway(config: import("../config/load-config.ts")
             attempt,
             maxAttempts,
             retryHistory,
-            delayMs: retryDelayMs(attempt),
+            delayMs: retryDelayMs(attempt, retryAfter),
             error,
             stage: "http"
           });
@@ -626,7 +627,7 @@ function shouldRetryGatewayHttpError(error: Record<string, unknown>, options: { 
   if ([408, 409, 429].includes(Number(error.status)) || Number(error.status) >= 500) {
     return true;
   }
-  return isConfiguredGatewayRetryable(error, options.config);
+  return isMimoGatewayRetryable(error, options.config);
 }
 
 /**
@@ -642,7 +643,7 @@ function shouldRetryGatewayResponseError(error: Record<string, unknown>, options
     || error.code === "GATEWAY_STREAM_INTERRUPTED"
     || RETRYABLE_STREAM_PROTOCOL_CODES.has(String(error.code ?? ""))
     || isRetryableGatewayParseError(error)
-    || isConfiguredGatewayRetryable(error, options.config);
+    || isMimoGatewayRetryable(error, options.config);
 }
 
 function gatewayStreamProtocolCode(error: unknown) {
@@ -671,8 +672,8 @@ function isRetryableGatewayParseError(error: unknown) {
  * @param {Record<string, any>} error
  * @param {import("../config/load-config.ts").LabAgentConfig} config
  */
-function isConfiguredGatewayRetryable(error: Record<string, unknown>, config: import("../config/load-config.ts").LabAgentConfig) {
-  if (!usesGatewayRetryProfile(config)) {
+function isMimoGatewayRetryable(error: Record<string, unknown>, config: import("../config/load-config.ts").LabAgentConfig) {
+  if (!isMimoModel(config)) {
     return false;
   }
   const details = isRecord(error.details) ? error.details : {};
@@ -681,21 +682,43 @@ function isConfiguredGatewayRetryable(error: Record<string, unknown>, config: im
     details.body,
     details.responseReadStage
   ].filter(Boolean).join("\n");
-  return GATEWAY_TRANSIENT_ERROR_PATTERN.test(text);
+  return MIMO_RETRY_ERROR_PATTERN.test(text);
 }
 
 /**
  * @param {import("../config/load-config.ts").LabAgentConfig} config
  */
-function usesGatewayRetryProfile(config: import("../config/load-config.ts").LabAgentConfig) {
-  const lab = config?.lab as { gatewayRetryProfile?: unknown } | undefined;
-  return /retry/i.test(String(config?.modelAlias ?? lab?.gatewayRetryProfile ?? ""));
+function isMimoModel(config: import("../config/load-config.ts").LabAgentConfig) {
+  return /mimo/i.test(String(config?.modelAlias ?? ""));
 }
 
-/**
- * @param {number} attempt
- */
-function retryDelayMs(attempt: number) {
+export function parseRetryAfterMs(value: unknown, maxMs: number = MAX_RETRY_DELAY_MS) {
+  if (value == null) {
+    return null;
+  }
+  const text = String(value).trim();
+  if (!text) {
+    return null;
+  }
+  if (/^\d+$/.test(text)) {
+    const ms = Number(text) * 1000;
+    if (!Number.isFinite(ms) || ms < 0) {
+      return null;
+    }
+    return Math.min(maxMs, ms);
+  }
+  const at = Date.parse(text);
+  if (!Number.isFinite(at)) {
+    return null;
+  }
+  return Math.min(maxMs, Math.max(0, at - Date.now()));
+}
+
+export function retryDelayMs(attempt: number, retryAfterHeader?: string | null) {
+  const retryAfterMs = parseRetryAfterMs(retryAfterHeader);
+  if (retryAfterMs != null) {
+    return retryAfterMs;
+  }
   const rawDelay = BASE_RETRY_DELAY_MS * (2 ** Math.max(0, attempt - 1));
   const jitter = 0.9 + (Math.random() * 0.2);
   return Math.min(MAX_RETRY_DELAY_MS, Math.max(0, Math.round(rawDelay * jitter)));

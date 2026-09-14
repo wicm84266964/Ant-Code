@@ -539,10 +539,17 @@ export function backgroundSubagentTitle(item: DashboardActivity) {
   return `${profile}子智能体运行中`;
 }
 
+function waitForDisplay(value: unknown) {
+  if (value === "all") return "等待全部完成";
+  if (value === "any") return "等待任一完成";
+  if (value === "none") return "完成后不接续";
+  return value ? String(value) : "";
+}
+
 export function backgroundSubagentMeta(item: DashboardActivity) {
   if (item.kind === "terminal") {
     return [
-      item.taskId ? `task=${item.taskId}` : null,
+      item.taskId ? `任务 ${item.taskId}` : null,
       item.status === "starting" ? "启动中" : null,
       item.status === "cancelling" ? "退出确认中" : null,
       item.runningCount === 1 ? "运行中" : null,
@@ -550,9 +557,9 @@ export function backgroundSubagentMeta(item: DashboardActivity) {
     ].filter(Boolean).join(" · ");
   }
   return [
-    item.groupId ? `group=${item.groupId}` : null,
-    item.taskId ? `task=${item.taskId}` : null,
-    item.waitFor ? `waitFor=${item.waitFor}` : null,
+    item.groupId ? `组 ${item.groupId}` : null,
+    item.taskId ? `任务 ${item.taskId}` : null,
+    waitForDisplay(item.waitFor) || null,
     Number.isFinite(item.runningCount) && Number.isFinite(item.taskCount) ? `${item.runningCount}/${item.taskCount} 运行中` : null,
     item.lastProgressAt ? `进展 ${formatRelativeTime(item.lastProgressAt)}` : null,
     item.heartbeatAt ? `心跳 ${formatRelativeTime(item.heartbeatAt)}` : null,

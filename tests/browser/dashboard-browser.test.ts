@@ -2184,7 +2184,7 @@ test("permission approval dialog stays on screen and does not leave a stuck wait
       assert.equal(first.parent, "BODY");
       assert.equal(first.hidden, false);
       assert.equal(first.modal, true);
-      assert.match(first.title, /web_search/);
+      assert.match(first.title, /搜索网页/);
       assert.match(first.title, /还有 1 个排队/);
       assert.ok(first.left >= 0 && first.top >= 0, `approval dialog clipped at origin: ${JSON.stringify(first)}`);
       assert.ok(first.right <= 390 && first.bottom <= 844, `approval dialog outside mobile viewport: ${JSON.stringify(first)}`);
@@ -2199,8 +2199,8 @@ test("permission approval dialog stays on screen and does not leave a stuck wait
           allowed: true
         });
       });
-      await page.waitForFunction(() => document.querySelector("#approval-title")?.textContent?.includes("web_fetch"));
-      assert.match(await panel.locator("#approval-title").textContent(), /web_fetch/);
+      await page.waitForFunction(() => document.querySelector("#approval-title")?.textContent?.includes("访问网页"));
+      assert.match(await panel.locator("#approval-title").textContent(), /访问网页/);
       assert.equal(await page.locator("#live-title").textContent(), "等待权限确认");
 
       await page.evaluate(() => {

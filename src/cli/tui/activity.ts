@@ -97,14 +97,14 @@ export function updateActivity(current: TuiActivity, event: TuiRuntimeEvent): Tu
     return {
       ...current,
       status: event.interrupted ? "工具已中断" : event.ok ? "工具完成" : event.blocked ? "工具被阻止" : "工具失败",
-      lastTool: `${event.name} ${event.interrupted ? "interrupted" : event.ok ? "done" : event.blocked ? "blocked" : "failed"}`,
+      lastTool: `${event.name} ${event.interrupted ? "已中断" : event.ok ? "完成" : event.blocked ? "被阻止" : "失败"}`,
       toolCount: current.toolCount + 1,
       blockedTools: current.blockedTools + (event.blocked ? 1 : 0),
       failedTools: current.failedTools + (!event.ok && !event.blocked && !event.interrupted ? 1 : 0)
     };
   }
   if (event.type === "review_gate") {
-    return { ...current, status: "等待复核", lastTool: "review gate" };
+    return { ...current, status: "等待复核", lastTool: "复核门" };
   }
   if (event.type === "assistant_final") {
     return { ...current, status: "就绪", assistantBytes: event.outputBytes ?? current.assistantBytes };

@@ -197,7 +197,8 @@ export async function runtimeTrustWorkspace(ctx: DashboardFactoryState) {
 export async function runtimeListSessionRecords(ctx: DashboardFactoryState) {
   const configEnv = await ctx.resolveConfigEnv();
   const config = await loadConfig({ cwd: ctx.cwd, env: configEnv });
-  await ctx.maintainSessionRetention(config);
+  // Same cleanup as /api/status: run in the background so session list can render.
+  void ctx.maintainSessionRetention(config);
   const store = createSessionStore({ cwd: ctx.cwd, transcript: config.transcript, env: ctx.runtimeEnv });
   const records = await store.listSessionRecords();
   const persisted = records.map((record) => ({

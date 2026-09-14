@@ -304,13 +304,13 @@ export function createDashboardRuntime(options: CreateDashboardRuntimeOptions) {
       : Number.isFinite(config.transcript?.retentionDays) ? config.transcript.retentionDays : 30;
     const run = retentionMaintenanceTail.then(async () => {
       try {
-        return await withKeyedMutation(activeCapacityLocks, "active-capacity", async () => {
-          const store = createSessionStore({ cwd: options.cwd, transcript: config.transcript, env: runtimeEnv });
-          const result = await store.cleanupExpiredSessions(retentionDays, {
-            excludeSessionIds: [...active.keys()]
-          });
-          return { ok: true, deleted: result.deleted };
+        // Do not take active-capacity: new turns need that lock, and cleanup can
+        // exceed the 15s Dashboard request timeout.
+        const store = createSessionStore({ cwd: options.cwd, transcript: config.transcript, env: runtimeEnv });
+        const result = await store.cleanupExpiredSessions(retentionDays, {
+          excludeSessionIds: () => [...active.keys()]
         });
+        return { ok: true, deleted: result.deleted };
       } catch (error) {
         return {
           ok: false,

@@ -269,19 +269,43 @@ export async function restoreArchivedContextMessages(store: ReturnType<typeof cr
   }
   const contextRecord = context && typeof context === "object" ? context as Record<string, unknown> : {};
   const maxMessages = positiveInteger(contextRecord.resumeMaxMessages, DEFAULT_RESUME_CONTEXT_MESSAGES) ?? DEFAULT_RESUME_CONTEXT_MESSAGES;
-  const chunkCount = Math.max(1, Math.ceil(maxMessages / normalized.chunkSize));
-  const chunks = normalized.chunks.slice(-chunkCount);
+  const maxBytes = positiveInteger(contextRecord.resumeMaxBytes, DEFAULT_RESUME_CONTEXT_BYTES) ?? DEFAULT_RESUME_CONTEXT_BYTES;
+  const chunks = selectResumeArchiveChunks(normalized.chunks, { maxMessages, maxBytes });
+  const results = await Promise.all(chunks.map((chunk) => store.readTranscriptChunk(normalized, chunk.index)));
   const messages = [];
-  for (const chunk of chunks) {
-    const result = await store.readTranscriptChunk(normalized, chunk.index);
+  for (const result of results) {
     if (!result.ok) {
-      const error = new Error(result.error?.message ?? `Unable to read transcript chunk '${chunk.index}'`);
+      const error = new Error(result.error?.message ?? "Unable to read transcript chunk");
       Object.assign(error, { code: result.error?.code ?? "TRANSCRIPT_CHUNK_READ_ERROR" });
       throw error;
     }
     messages.push(...(Array.isArray(result.messages) ? result.messages : []));
   }
   return repairDanglingToolCallMessages(restorePersistedMessages(limitResumeContextMessages(messages, context)));
+}
+
+
+export function selectResumeArchiveChunks<T extends { index: number; messages?: number; bytes?: number }>(
+  chunks: T[],
+  limits: { maxMessages: number; maxBytes: number }
+): T[] {
+  if (!Array.isArray(chunks) || chunks.length === 0) {
+    return [];
+  }
+  const selected = [];
+  let messages = 0;
+  let bytes = 0;
+  for (let index = chunks.length - 1; index >= 0; index -= 1) {
+    const chunk = chunks[index];
+    selected.push(chunk);
+    messages += Math.max(0, Number(chunk?.messages) || 0);
+    bytes += Math.max(0, Number(chunk?.bytes) || 0);
+    if (messages >= limits.maxMessages || bytes >= limits.maxBytes) {
+      break;
+    }
+  }
+  selected.reverse();
+  return selected;
 }
 
 
@@ -293,15 +317,28 @@ export function limitResumeContextMessages(messages: unknown, context: unknown =
   const maxMessages = positiveInteger(record.resumeMaxMessages, DEFAULT_RESUME_CONTEXT_MESSAGES) ?? DEFAULT_RESUME_CONTEXT_MESSAGES;
   const maxTokens = positiveInteger(record.resumeMaxTokens, DEFAULT_RESUME_CONTEXT_TOKENS) ?? DEFAULT_RESUME_CONTEXT_TOKENS;
   const maxBytes = positiveInteger(record.resumeMaxBytes, DEFAULT_RESUME_CONTEXT_BYTES) ?? DEFAULT_RESUME_CONTEXT_BYTES;
-  let kept = messages.filter(Boolean).slice(-maxMessages);
-  while (kept.length > 1) {
-    const bytes = estimatePersistedMessagesBytes(kept);
-    if (bytes <= maxBytes && estimateTokensFromBytesLocal(bytes) <= maxTokens) {
-      break;
-    }
-    kept = kept.slice(1);
+  const kept = messages.filter(Boolean).slice(-maxMessages);
+  if (kept.length <= 1) {
+    return alignContextStartToUser(kept);
   }
-  return alignContextStartToUser(kept);
+  const fits = (slice: unknown[]) => {
+    const bytes = estimatePersistedMessagesBytes(slice);
+    return bytes <= maxBytes && estimateTokensFromBytesLocal(bytes) <= maxTokens;
+  };
+  if (fits(kept)) {
+    return alignContextStartToUser(kept);
+  }
+  let lo = 1;
+  let hi = kept.length - 1;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (fits(kept.slice(mid))) {
+      hi = mid;
+    } else {
+      lo = mid + 1;
+    }
+  }
+  return alignContextStartToUser(kept.slice(lo));
 }
 
 

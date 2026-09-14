@@ -5,10 +5,18 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createMockGatewayServer } from "../../scripts/mock-gateway.ts";
-import { createLabModelGateway } from "../../src/model-gateway/client.ts";
+import { createLabModelGateway, parseRetryAfterMs, retryDelayMs } from "../../src/model-gateway/client.ts";
 import { formatGatewayError, normalizeGatewayError, redactGatewayText } from "../../src/model-gateway/errors.ts";
 import { formatGatewayHealthReport, runGatewayHealth } from "../../src/model-gateway/health.ts";
 import { GATEWAY_MAX_STREAM_RECORD_BYTES } from "../../src/model-gateway/limits.ts";
+
+test("retry-after header prefers server wait time and caps at 30s", () => {
+  assert.equal(parseRetryAfterMs("0"), 0);
+  assert.equal(parseRetryAfterMs("2"), 2000);
+  assert.equal(parseRetryAfterMs("120"), 30000);
+  assert.equal(parseRetryAfterMs("not-a-date"), null);
+  assert.equal(retryDelayMs(1, "0"), 0);
+});
 
 test("normalizes gateway timeout errors", () => {
   const error = new Error("operation aborted");
@@ -158,10 +166,9 @@ test("gateway health live check accepts the mock gateway health endpoint", async
     });
 
     assert.equal(report.ok, true);
-    assert.deepEqual(
-      report.checks.find((check) => check.name === "gateway live health"),
-      { name: "gateway live health", status: "ok", message: "HTTP 200" }
-    );
+    const live = report.checks.find((check) => check.name === "gateway live health");
+    assert.equal(live?.status, "ok");
+    assert.match(String(live?.message), /^HTTP 200 · \d+ms$/);
   } finally {
     await close(server);
   }
@@ -327,7 +334,10 @@ test("gateway client retries HTTP 429 responses", async () => {
   let calls = 0;
   const server = await listen(http.createServer((_request, response) => {
     calls += 1;
-    response.writeHead(calls === 1 ? 429 : 200, { "content-type": "application/json" });
+    response.writeHead(calls === 1 ? 429 : 200, {
+      "content-type": "application/json",
+      ...(calls === 1 ? { "retry-after": "0" } : {})
+    });
     response.end(calls === 1
       ? JSON.stringify({ error: { message: "rate limited" } })
       : JSON.stringify({
@@ -797,7 +807,7 @@ test("gateway client sends session affinity header", async () => {
   }
 });
 
-test("gateway client retries configured transient HTTP 500 responses", async () => {
+test("gateway client retries Mimo KVTransfer HTTP 500 responses", async () => {
   const originalFetch = globalThis.fetch;
   const events = [];
   let calls = 0;
@@ -816,8 +826,8 @@ test("gateway client retries configured transient HTTP 500 responses", async () 
         });
       }
       return new Response(JSON.stringify({
-        id: "retry-ok",
-        model: "example-retry-model",
+        id: "mimo-retry-ok",
+        model: "mimo-v2.5",
         content: [{ type: "text", text: "recovered" }],
         toolCalls: [],
         stopReason: "stop"
@@ -828,7 +838,7 @@ test("gateway client retries configured transient HTTP 500 responses", async () 
     };
 
     const gateway = createLabModelGateway({
-      modelAlias: "example-retry-model",
+      modelAlias: "mimo-v2.5",
       networkMode: "offline",
       allowedHosts: [],
       lab: {
@@ -877,7 +887,7 @@ test("gateway client retries interrupted streams", async () => {
         });
       }
       return new Response([
-        'data: {"id":"retry-ok","model":"example-retry-model","choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}',
+        'data: {"id":"retry-ok","model":"mimo-v2.5","choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}',
         "",
         "data: [DONE]",
         ""
@@ -888,7 +898,7 @@ test("gateway client retries interrupted streams", async () => {
     };
 
     const gateway = createLabModelGateway({
-      modelAlias: "example-retry-model",
+      modelAlias: "mimo-v2.5",
       networkMode: "offline",
       allowedHosts: [],
       lab: {

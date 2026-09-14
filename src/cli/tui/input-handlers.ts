@@ -36,7 +36,7 @@ export function handleApprovalInput(
   if (!current.pendingApproval) {
     return;
   }
-  if (key.leftArrow || key.upArrow) {
+  if (key.leftArrow || key.upArrow || (key.tab && key.shift)) {
     setApprovalChoiceIndex((value) => (value + APPROVAL_CHOICES.length - 1) % APPROVAL_CHOICES.length);
     return;
   }
@@ -125,6 +125,12 @@ export function handleQuestionInput(inputValue: unknown, key: InkKey, current: T
   }
   if (hasChoices && key.downArrow) {
     const nextIndex = (prompt.focusedIndex + 1) % prompt.choices.length;
+    setPendingQuestion((pending: TuiUiState["pendingQuestion"]) => pending ? { ...pending, focusedIndex: nextIndex } : pending);
+    return;
+  }
+  if (hasChoices && key.tab) {
+    const delta = key.shift ? -1 : 1;
+    const nextIndex = (prompt.focusedIndex + delta + prompt.choices.length) % prompt.choices.length;
     setPendingQuestion((pending: TuiUiState["pendingQuestion"]) => pending ? { ...pending, focusedIndex: nextIndex } : pending);
     return;
   }

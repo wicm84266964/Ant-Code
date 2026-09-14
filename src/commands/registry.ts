@@ -55,13 +55,13 @@ export const KEYBINDINGS = Object.freeze([
   keybinding("slash", "发现", "/", "打开斜杠命令面板。"),
   keybinding("file-mention", "发现", "@", "打开工作区文件提及面板。"),
   keybinding("shell", "发现", "!", "通过 /run 进入本地 shell 模式。"),
-  keybinding("side-tab", "面板", "Tab", "在输入区和会话区之间切换焦点。", "斜杠/文件/模型面板打开时不切换。"),
-  keybinding("side-arrows", "面板", "Shift+←/→", "切换右侧栏：状态、任务、子智能体。单击侧栏标题也可切换。"),
-  keybinding("scrollback-nav", "会话区", "↑/↓", "选中上一条/下一条消息或工具卡。", "先按 Tab 进入会话区。"),
-  keybinding("scrollback-copy", "会话区", "y", "复制当前选中块的正文到系统剪贴板。"),
-  keybinding("scrollback-open", "会话区", "Enter", "打开当前块的摘录面板。"),
-  keybinding("scrollback-fold", "会话区", "←/→ 或 e", "折叠或展开当前块。"),
-  keybinding("message-actions", "面板", "鼠标点击消息块", "选中消息块；再按 y 复制，双击或 Enter 进入摘录。", "回退只影响对话上下文，不撤销文件改动。"),
+  keybinding("side-tab", "面板", "Tab", "切换右侧栏：状态、任务、子智能体。", "斜杠/文件/模型面板或审批框打开时不切换。"),
+  keybinding("side-arrows", "面板", "←/→", "输入为空时切换右侧栏分类；任务/子智能体栏内切换筛选。"),
+  keybinding("scrollback-nav", "会话区", "↑/↓", "输入为空时滚动聊天区。", "输入框有内容时在草稿内上下移动光标。"),
+  keybinding("scrollback-copy", "会话区", "拖选后复制", "拖选可见聊天文字复制到系统剪贴板。"),
+  keybinding("scrollback-open", "会话区", "双击消息", "打开当前块的摘录面板。"),
+  keybinding("message-actions", "面板", "鼠标单击消息块", "短时高亮该块；再双击进入摘录。", "回退只影响对话上下文，不撤销文件改动。"),
+  keybinding("clear-screen", "会话区", "Ctrl+L", "清屏：只隐藏当前可见记录，不删除会话文件。"),
   keybinding("transcript-detail", "面板", "Ctrl+O", "在紧凑/详细/完整 transcript 间切换。"),
   keybinding("thinking-toggle", "面板", "/thinking", "切换 thinking 预览显示；默认隐藏，超长内容仅保留最新片段。"),
   keybinding("wheel", "面板", "鼠标滚轮", "按鼠标位置滚动聊天区、右侧栏或当前弹层。"),
@@ -72,7 +72,7 @@ export const KEYBINDINGS = Object.freeze([
   keybinding("close", "生命周期", "Esc", "先关闭顶部弹层；忙碌时第一次确认、第二次中断当前轮次。"),
   keybinding("interrupt", "生命周期", "Ctrl+G", "先关闭顶部弹层；忙碌时直接中断当前轮次。"),
   keybinding("exit", "生命周期", "Ctrl+C", "第一次进入退出确认；第二次退出。"),
-  keybinding("approval", "权限", "Y/N/A", "权限弹窗中分别表示允许一次、拒绝、允许本会话同类请求。", "仅在权限确认框显示时有效。")
+  keybinding("approval", "权限", "Y/N/A、Tab", "权限弹窗中 Y 允许一次、A 本会话允许、N 拒绝；Tab / 方向键移动选项。Esc 取消并拒绝本次请求。", "仅在权限确认框显示时有效。Shift+Tab 在框内反向移动，不切换会话权限。")
 ]);
 
 const CATEGORY_ORDER = Object.freeze([

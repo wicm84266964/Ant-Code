@@ -52,6 +52,57 @@ test("session store permanent retention skips cleanup without deleting old metad
   assert.equal((await store.readMetadataExact("permanent-session")).ok, true);
 });
 
+test("session store cleanup live-excludes sessions that become active during the scan", async () => {
+  const cwd = await makeTempWorkspace();
+  const store = createSessionStore({ cwd });
+  const livePath = await store.writeMetadata({ id: "live-session" });
+  const expiredPath = await store.writeMetadata({ id: "expired-session" });
+  const oldTime = new Date("2026-01-01T00:00:00.000Z");
+  await Promise.all([
+    fs.utimes(livePath, oldTime, oldTime),
+    fs.utimes(expiredPath, oldTime, oldTime)
+  ]);
+
+  const activeIds = new Set();
+  const originalStat = fs.stat;
+  let releaseFirstStat;
+  let firstStatObservedResolve;
+  const firstStatObserved = new Promise((resolve) => {
+    firstStatObservedResolve = resolve;
+  });
+  const releaseFirst = new Promise((resolve) => {
+    releaseFirstStat = resolve;
+  });
+  let intercepted = false;
+  fs.stat = async (...args) => {
+    const result = await originalStat(...args);
+    if (!intercepted && path.resolve(String(args[0])) === path.resolve(livePath)) {
+      intercepted = true;
+      firstStatObservedResolve();
+      await releaseFirst;
+    }
+    return result;
+  };
+
+  try {
+    const cleanup = store.cleanupExpiredSessions(0, {
+      now: new Date("2026-04-28T00:00:00.000Z"),
+      excludeSessionIds: () => activeIds
+    });
+    await firstStatObserved;
+    activeIds.add("live-session");
+    releaseFirstStat();
+    const result = await cleanup;
+
+    assert.deepEqual(result.deleted, [expiredPath]);
+    assert.equal((await store.readMetadataExact("live-session")).ok, true);
+    assert.equal((await store.readMetadataExact("expired-session")).ok, false);
+  } finally {
+    fs.stat = originalStat;
+    releaseFirstStat?.();
+  }
+});
+
 test("session store cleanup preserves explicitly excluded sessions", async () => {
   const cwd = await makeTempWorkspace();
   const store = createSessionStore({ cwd });

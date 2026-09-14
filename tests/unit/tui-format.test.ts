@@ -394,7 +394,7 @@ test("exit confirmation and permission modal lines are bounded and decision-focu
 
   assert.ok(exitLines.some((line) => line.includes("再次按 Ctrl+C")));
   assert.match(permission, /需要权限/);
-  assert.match(permission, /\[write\] edit_file/);
+  assert.match(permission, /\[write\] 编辑文件/);
   assert.match(permission, /> 本会话允许/);
   assertTerminalBounds(permission, { columns: 100, rows: 12 });
 });
@@ -410,7 +410,7 @@ test("transcript and tool card lines expose block semantics", () => {
   });
 
   assert.equal(assistant[0].text, "Ant Code");
-  assert.match(tool[0].text, /\[blocked\] shell/);
+  assert.match(tool[0].text, /\[阻止\] 命令/);
   assert.match(agent[0].text, /\[✓\] 子智能体 - 子任务完成/);
   assert.ok(agent.some((item) => item.text.includes("/agents task task-1")));
 });
@@ -559,7 +559,7 @@ test("transcript detail modes collapse routine gateway and tool telemetry", () =
   assert.match(detailedText, /Ctrl\+O 再按一次/);
   assert.doesNotMatch(detailedText, /id=read-1/);
   assert.match(fullText, /gateway round 1/);
-  assert.match(fullText, /read_file done/);
+  assert.match(fullText, /读取文件 完成/);
 });
 
 test("failed and blocked tool telemetry remains visible in compact transcript mode", () => {
@@ -574,7 +574,7 @@ test("failed and blocked tool telemetry remains visible in compact transcript mo
   const text = compact.lines.map((item) => item.text).join("\n");
 
   assert.doesNotMatch(text, /running id=write-1/);
-  assert.match(text, /\[blocked\] edit - write_file blocked/);
+  assert.match(text, /\[阻止\] 写入 - 写入文件 被阻止/);
   assert.match(text, /需要权限/);
 });
 

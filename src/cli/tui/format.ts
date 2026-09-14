@@ -1,4 +1,5 @@
 import type { AgentSession } from "../../core/session.ts";
+import { toolLabel } from "../../tools/labels.ts";
 import { composerSegments, displayWidth } from "./input-editor.ts";
 import { parseMarkdownBlocks, renderTable } from "./markdown-table.ts";
 export { approvalKeyFor } from "../../permissions/approval-keys.ts";
@@ -629,7 +630,7 @@ export function promptLines(
   if (mode === "approval") {
     return [
       { text: "权限弹窗已打开" },
-      { text: "  用方向键/Tab 后按 Enter，或 Y 允许一次、A 本会话允许、N 拒绝、Esc 取消。", dim: true }
+      { text: "  用方向键/Tab 后按 Enter，或 Y 允许一次、A 本会话允许、N 拒绝。Esc 取消并拒绝本次请求。", dim: true }
     ];
   }
   if (mode === "question") {
@@ -802,7 +803,7 @@ export function permissionModalLines(
   const sensitive = request.decision?.sensitive === true;
   return [
     line("需要权限", false, "yellow"),
-    line(`${riskBadge(risk)} ${toolName}`, false, riskColor(risk)),
+    line(`${riskBadge(risk)} ${toolLabel(toolName)}`, false, riskColor(risk)),
     line(reason, true),
     ...(sensitive
       ? [
@@ -1046,11 +1047,11 @@ function compactUserPromptLines(body: string | undefined, detailMode: string): T
  * @param {{ title?: string; body?: string }} entry
  */
 export function toolCardLines(entry: { title?: string; body?: string } = {}, detailMode: string = "compact"): TuiLine[] {
-  const title = entry.title ?? "tool";
+  const title = entry.title ?? "工具";
   const state = inferToolState(title, entry.body);
-  const name = title.replace(/\s+(running|done|blocked|failed)$/i, "");
+  const name = title.replace(/\s+(running|done|blocked|failed|interrupted|运行中|完成|被阻止|失败|已中断)$/i, "");
   return [
-    line(`${toolStatusMarker(state)} ${toolClassLabel(name)} - ${title}`, false, toolStateColor(state)),
+    line(`${toolStatusMarker(state)} ${toolClassLabel(name)} - ${toolLabel(name)} ${toolRuntimeStateLabel(state)}`, false, toolStateColor(state)),
     ...foldBodyLines(splitFoldableLines(entry.body ?? ""), detailMode, { compact: 2, detailed: 8 }).map((item) => line(`  ${item.text}`, true))
   ];
 }
@@ -1116,54 +1117,62 @@ function foldBodyLines(lines: string[], detailMode: string, limits: FoldLimits):
 
 function inferToolState(title: string, body: string | undefined): string {
   const value = `${title} ${body ?? ""}`.toLowerCase();
-  if (value.includes("blocked")) {
+  if (value.includes("blocked") || value.includes("阻止")) {
     return "blocked";
   }
-  if (value.includes("failed") || value.includes("error=")) {
+  if (value.includes("failed") || value.includes("失败") || value.includes("error=")) {
     return "failed";
   }
-  if (value.includes("cancelled") || value.includes("interrupted")) {
+  if (value.includes("cancelled") || value.includes("interrupted") || value.includes("中断")) {
     return "interrupted";
   }
-  if (value.includes("done") || value.includes("approved")) {
+  if (value.includes("done") || value.includes("approved") || value.includes("完成")) {
     return "done";
   }
   return "running";
 }
 
 function toolClassLabel(name: string) {
-  if (["read_file", "list_files", "glob", "grep", "git_status", "git_diff"].includes(name)) {
-    return "read";
+  if (["read_file", "list_files", "glob", "grep", "rg_search", "rg_files", "rg_files_with_matches", "rg_count", "git_status", "git_diff", "git_log", "git_show"].includes(name)) {
+    return "读取";
   }
   if (["write_file", "edit_file", "todo_write", "plan_update"].includes(name)) {
-    return "edit";
+    return "写入";
   }
   if (["powershell", "bash"].includes(name)) {
-    return "shell";
+    return "命令";
   }
-  if (name === "mcp_call") {
-    return "mcp";
+  if (name === "mcp_call" || name === "mcp_list") {
+    return "MCP";
   }
   if (name === "ask_user") {
-    return "ask";
+    return "询问";
   }
-  return "tool";
+  return "工具";
+}
+
+function toolRuntimeStateLabel(state: string): string {
+  if (state === "done") return "完成";
+  if (state === "blocked") return "被阻止";
+  if (state === "failed") return "失败";
+  if (state === "interrupted") return "已中断";
+  return "运行中";
 }
 
 function toolStatusMarker(state: string): string {
   if (state === "done") {
-    return "[ok]";
+    return "[完成]";
   }
   if (state === "blocked") {
-    return "[blocked]";
+    return "[阻止]";
   }
   if (state === "failed") {
-    return "[failed]";
+    return "[失败]";
   }
   if (state === "interrupted") {
-    return "[stopped]";
+    return "[中断]";
   }
-  return "[run]";
+  return "[运行]";
 }
 
 function toolStateColor(state: string): string {
