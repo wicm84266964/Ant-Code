@@ -748,9 +748,9 @@ export function collectRawHttpResponse(url: string, socket: import("node:net").S
     let settled = false;
     const cleanup = () => {
       socket.removeListener("data", onData);
-      socket.removeListener("error", onError);
       socket.removeListener("end", onEnd);
-      socket.removeListener("close", onClose);
+      // TLS can emit an error after end (for example during a failed handshake).
+      // Keep handling errors until close, even when the response has settled.
     };
     const finishResolve = (value: Response) => {
       if (settled) return;
@@ -849,9 +849,12 @@ export function collectRawHttpResponse(url: string, socket: import("node:net").S
         finishReject(error);
       }
     };
-    const onClose = () => finishReject(new Error("Proxy HTTPS response socket closed before the response ended"));
+    const onClose = () => {
+      finishReject(new Error("Proxy HTTPS response socket closed before the response ended"));
+      socket.removeListener("error", onError);
+    };
     socket.on("data", onData);
-    socket.once("error", onError);
+    socket.on("error", onError);
     socket.once("end", onEnd);
     socket.once("close", onClose);
   });
