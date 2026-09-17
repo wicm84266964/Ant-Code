@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 2.0.15 - 2026-09-18
+
+Published 2026-09-18: [v2.0.15](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.15).
+
+修复内置 HTTPS 代理在 TLS 握手断开时可能导致 Dashboard 进程退出的问题。现将网络错误返回给当前请求，并在 socket 关闭前持续处理错误事件。
+
+升级后重启 Dashboard；现有配置和 session 可继续使用。
+
+
 ## 2.0.14 - 2026-09-14
 
 Published 2026-09-14 14:52:10 UTC (2026-09-14 22:52:10 UTC+08:00): [v2.0.14](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.14).
@@ -827,3 +836,4 @@ sessions do not need to be recreated.
 - `node --test --test-name-pattern "createSession keeps compacted context when restored full archive would exceed prompt budget" tests/unit/session.test.js`
 - `npm test -- tests/unit/tools.test.js`
 - `npm test -- tests/unit/agent-profiles-config.test.js tests/unit/context.test.js`
+
