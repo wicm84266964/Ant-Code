@@ -129,7 +129,7 @@ function migrateRawDocument(source: Record<string, unknown>, scope: "global" | "
   }
 
   const selection = legacySelection(source, profiles, mappedProfiles, context.inheritedProviders);
-  const routing = legacyAgentRouting(source, selection, providers, context.inheritedProviders);
+  const routing = legacyAgentRouting(source, selection, providers, context, scope);
   const remainder = stripLegacyModelFields(source);
   const namespaces: JsonObject = {};
   if (Object.keys(providers).length > 0) {
@@ -408,32 +408,57 @@ function legacySelection(source: Record<string, unknown>, profiles: LegacyProfil
  * @param {Record<string, any>} source
  * @param {Record<string, any> | null} selection
  * @param {Record<string, any>} providers
- * @param {Record<string, any>} inheritedProviders
+ * @param {{ inheritedProviders: Record<string, any>; diagnostics: any[] }} context
+ * @param {"global" | "project"} scope
  */
-function legacyAgentRouting(source: Record<string, unknown>, selection: Record<string, unknown> | null, providers: Record<string, unknown>, inheritedProviders: Record<string, unknown>) {
+function legacyAgentRouting(
+  source: Record<string, unknown>,
+  selection: Record<string, unknown> | null,
+  providers: Record<string, unknown>,
+  context: { inheritedProviders: Record<string, unknown>; diagnostics: Array<Record<string, unknown>> },
+  scope: "global" | "project"
+) {
   const agents = isPlainObject(source.agents) ? source.agents : {};
   const modelTiers: JsonObject = {};
-  const candidateProviders = { ...inheritedProviders, ...providers };
+  const candidateProviders = { ...context.inheritedProviders, ...providers };
+  const preferred = typeof selection?.provider === "string" ? selection.provider : "";
   for (const [tier, model] of Object.entries(isPlainObject(agents.modelTiers) ? agents.modelTiers : {})) {
     const modelId = stringValue(model);
     if (!modelId) continue;
-    const provider = providerForModel(candidateProviders, modelId, typeof selection?.provider === "string" ? selection.provider : undefined);
-    if (!provider) {
+    const resolved = resolveProviderForModel(candidateProviders, modelId, preferred);
+    if (resolved.status === "ambiguous") {
       throw migrationError(`Agent tier ${tier} references ambiguous or missing model ${modelId}`, "AMBIGUOUS_MODEL_REF");
     }
-    if (provider !== selection?.provider) continue;
-    modelTiers[tier] = { provider, model: modelId };
+    if (resolved.status === "missing") {
+      context.diagnostics.push({
+        code: "STALE_AGENT_MODEL_REF",
+        scope,
+        kind: "tier",
+        tier,
+        model: modelId
+      });
+      continue;
+    }
+    if (resolved.provider !== selection?.provider) continue;
+    modelTiers[tier] = { provider: resolved.provider, model: modelId };
   }
   const visionModel = stringValue(isPlainObject(agents.vision) ? agents.vision.model : undefined);
   let vision;
   if (visionModel) {
-    const provider = providerForModel(candidateProviders, visionModel, typeof selection?.provider === "string" ? selection.provider : undefined);
-    if (!provider) {
+    const resolved = resolveProviderForModel(candidateProviders, visionModel, preferred);
+    if (resolved.status === "ambiguous") {
       throw migrationError(`Vision route references ambiguous or missing model ${visionModel}`, "AMBIGUOUS_MODEL_REF");
     }
-    if (provider === selection?.provider) {
+    if (resolved.status === "missing") {
+      context.diagnostics.push({
+        code: "STALE_AGENT_MODEL_REF",
+        scope,
+        kind: "vision",
+        model: visionModel
+      });
+    } else if (resolved.provider === selection?.provider) {
       vision = {
-        model: { provider, model: visionModel },
+        model: { provider: resolved.provider, model: visionModel },
         enabled: isPlainObject(agents.vision) ? agents.vision.enabled !== false : true,
         autoUseWhenMainModelTextOnly: isPlainObject(agents.vision) ? agents.vision.autoUseWhenMainModelTextOnly !== false : true
       };
@@ -521,17 +546,19 @@ function sameProviderEndpoint(left: Record<string, unknown>, right: Record<strin
 }
 
 /** @param {Record<string, any>} providers @param {string} modelId @param {string} preferred */
-function providerForModel(providers: Record<string, unknown>, modelId: string, preferred: string = "") {
+function resolveProviderForModel(providers: Record<string, unknown>, modelId: string, preferred: string = "") {
   const preferredProvider = providers[preferred];
   if (preferred && isPlainObject(preferredProvider) && Array.isArray(preferredProvider.models)
     && preferredProvider.models.some((model) => isPlainObject(model) && model.id === modelId)) {
-    return preferred;
+    return { provider: preferred, status: "found" as const };
   }
   const matches = Object.entries(providers)
     .filter(([, provider]) => isPlainObject(provider) && Array.isArray(provider.models)
       && provider.models.some((model) => isPlainObject(model) && model.id === modelId))
     .map(([id]) => id);
-  return matches.length === 1 ? matches[0] : "";
+  if (matches.length === 1) return { provider: matches[0], status: "found" as const };
+  if (matches.length === 0) return { provider: "", status: "missing" as const };
+  return { provider: "", status: "ambiguous" as const };
 }
 
 /** @param {Record<string, any>} raw @param {Record<string, any>} owner @param {string} id */

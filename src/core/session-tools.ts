@@ -464,6 +464,9 @@ export function countUnifiedDiffChanges(diff: unknown): { path?: string | null; 
 
 export function createTurnMetadata(session: AgentSession, prompt: string): SessionTurnMetadata {
   session.title ??= makeSessionTitle(prompt);
+  if (session.title && !session.titleSource) {
+    session.titleSource = "prompt";
+  }
   const metadata: SessionTurnMetadata = {
     ...sessionModelMetadata(session),
     id: session.id,
@@ -715,6 +718,7 @@ export async function resolveResumeMetadata(options: { cwd: string; config: LabA
       metadataPath: result.path,
       status: result.metadata.status ?? "metadata",
       title: result.metadata.title ?? makeSessionTitle(result.metadata.prompt ?? ""),
+      titleSource: result.metadata.titleSource ?? (result.metadata.title ? "prompt" : null),
       prompt: result.metadata.prompt ?? "",
       model: result.metadata.model ?? "",
       modelSelection: appliedSelection.selection ?? null,

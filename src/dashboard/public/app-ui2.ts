@@ -224,6 +224,7 @@ export function renderSessions() {
   const threadList = els.threadList;
   if (!threadList) return;
   threadList.innerHTML = "";
+  const visibleSessions = state.sessions.filter((session) => sessionMatchesQuery(session, state.sessionSearchQuery));
   if (state.sessions.length === 0) {
     const empty = document.createElement("div");
     empty.className = "thread-meta";
@@ -231,7 +232,14 @@ export function renderSessions() {
     threadList.append(empty);
     return;
   }
-  for (const session of state.sessions) {
+  if (visibleSessions.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "thread-meta";
+    empty.textContent = "没有匹配的会话";
+    threadList.append(empty);
+    return;
+  }
+  for (const session of visibleSessions) {
     const status = sessionStatusView(session);
     const title = session.title || "未命名任务";
     const meta = sessionMeta(session, status);
@@ -273,6 +281,15 @@ export function renderSessions() {
     });
     threadList.append(item);
   }
+}
+
+export function sessionMatchesQuery(session: DashboardSessionSummary, query: unknown) {
+  const needle = String(query ?? "").trim().toLowerCase();
+  if (!needle) {
+    return true;
+  }
+  return [session.title, session.id, session.model, session.status]
+    .some((value) => String(value ?? "").toLowerCase().includes(needle));
 }
 
 export function sessionMeta(session: DashboardSessionSummary, status: { label: string; tone: string; detail?: string } = sessionStatusView(session)) {

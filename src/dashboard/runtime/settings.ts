@@ -40,6 +40,7 @@ import { clearSessionContext, compactSessionContextWithModel, createContextWindo
 import { createLabModelGateway } from "../../model-gateway/client.ts";
 import { redactGatewayText } from "../../model-gateway/errors.ts";
 import { listConfiguredModels, normalizeAgentModelTiers, normalizeReasoningEfforts, resolveModelSelection, type LabModel } from "../../model-gateway/models.ts";
+import { inferModelSupportsImages } from "../../model-gateway/vision-capabilities.ts";
 import {
   inferCatalogReasoning,
   normalizeCapabilityEfforts,
@@ -933,6 +934,9 @@ export function normalizeModelInputModalities(input: DashboardRequestInput) {
     }
   }
   if (input.vision === true || input.imageInput === true || input.multimodal === true) {
+    modalities.add("image");
+  }
+  if (inferModelSupportsImages(input.modelId ?? input.id)) {
     modalities.add("image");
   }
   return Array.from(modalities);

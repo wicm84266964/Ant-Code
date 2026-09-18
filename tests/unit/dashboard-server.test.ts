@@ -1535,7 +1535,8 @@ function createRuntimeStub() {
     sessionCwd: async () => ({ ok: false }),
     resolveApproval: () => ({ ok: false }),
     resolveQuestion: () => ({ ok: false }),
-    subscribe: () => null
+    subscribe: () => null,
+    probeVisionCapability: async () => ({ ok: true, supported: null, reason: "skipped" })
   };
 }
 

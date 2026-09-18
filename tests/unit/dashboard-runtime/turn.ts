@@ -1431,9 +1431,6 @@ test("dashboard turns a complete active reasoning probe into trusted restart-saf
   await fs.mkdir(path.dirname(settingsPath), { recursive: true });
   await fs.writeFile(settingsPath, JSON.stringify({ settingsVersion: 2, namespaces: {} }), "utf8");
   const modelId = "grok-4.6";
-  const acceptedEfforts = ["none", "off", "low", "medium", "high", "xhigh", "max", "ultra"];
-  const persistedEfforts = ["off", "low", "medium", "high", "xhigh", "max", "ultra"];
-  const supported = new Set(acceptedEfforts);
   const server = await listen(http.createServer(async (req, res) => {
     if (req.method === "GET") {
       res.writeHead(200, { "content-type": "application/json" });
@@ -1447,14 +1444,11 @@ test("dashboard turns a complete active reasoning probe into trusted restart-saf
       return;
     }
     const body = await readDashboardRequestJson(req);
-    const effort = String(body.reasoning?.effort ?? "");
-    if (!supported.has(effort)) {
-      res.writeHead(400, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: { message: "unsupported effort", param: "reasoning.effort" } }));
-      return;
-    }
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ id: `probe-${effort}`, output: [] }));
+    res.end(JSON.stringify({
+      id: `probe-${String(body.reasoning?.effort ?? "high")}`,
+      output: [{ type: "reasoning", summary: [{ type: "summary_text", text: "observed-thinking" }] }]
+    }));
   }), "127.0.0.1", 0);
   const gatewayUrl = `http://127.0.0.1:${server.address().port}/v1/responses`;
   const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: home } });
@@ -1488,8 +1482,9 @@ test("dashboard turns a complete active reasoning probe into trusted restart-saf
     });
     assert.equal(probed.ok, true);
     assert.equal(probed.outcome, "complete");
-    assert.deepEqual(probed.acceptedEfforts, acceptedEfforts);
-    assert.deepEqual(probed.reasoningEfforts.map((effort) => effort.id ?? effort), persistedEfforts);
+    assert.equal(probed.reasoningDiscovery.supportsReasoning, true);
+    assert.deepEqual(probed.acceptedEfforts, []);
+    assert.deepEqual(probed.reasoningEfforts.map((effort) => effort.id ?? effort), ["off", "xhigh"]);
     assert.equal(probed.defaultReasoningEffort, "xhigh");
     assert.match(probed.discoveryToken, /^[A-Za-z0-9_-]{32,}$/);
 
@@ -1515,8 +1510,9 @@ test("dashboard turns a complete active reasoning probe into trusted restart-saf
 
     const restarted = await createDashboardRuntime({ cwd, env: { USERPROFILE: home } }).status();
     const restartedModel = restarted.models.find((candidate) => candidate.id === modelId);
-    assert.deepEqual(restartedModel.reasoningEfforts.map((effort) => effort.id ?? effort), persistedEfforts);
+    assert.deepEqual(restartedModel.reasoningEfforts.map((effort) => effort.id ?? effort), ["off", "xhigh"]);
     assert.equal(restartedModel.defaultReasoningEffort, "xhigh");
+    assert.equal(restartedModel.thinking, true);
   } finally {
     await close(server);
   }
@@ -1881,7 +1877,7 @@ test("dashboard catalog inference combines declared metadata with exact Grok and
   }
 });
 
-test("dashboard capability probe stops after one accepted invalid effort and discards generated text", async () => {
+test("dashboard capability probe treats ignored extra fields without thinking as no reasoning support", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-capability-silent-ignore-"));
   const requests = [];
   const generatedText = "generated text that must never leave the probe";
@@ -1904,10 +1900,9 @@ test("dashboard capability probe stops after one accepted invalid effort and dis
     });
 
     assert.equal(result.ok, true);
-    assert.equal(result.outcome, "indeterminate");
-    assert.equal(result.diagnostic.requestCount, 1);
-    assert.equal(requests.length, 1);
-    assert.equal(requests[0].reasoning_effort, "antcode_invalid_effort_probe");
+    assert.equal(result.outcome, "complete");
+    assert.equal(result.reasoningDiscovery.supportsReasoning, false);
+    assert.equal(requests.length, 3);
     assert.deepEqual(result.reasoningEfforts, []);
     assert.doesNotMatch(JSON.stringify(result), new RegExp(generatedText, "i"));
     assert.equal(Object.prototype.hasOwnProperty.call(result, "raw"), false);
@@ -1916,21 +1911,22 @@ test("dashboard capability probe stops after one accepted invalid effort and dis
   }
 });
 
-test("dashboard chat capability probe requires a structured field then sends reasoning_effort candidates", async () => {
+test("dashboard chat capability probe confirms thinking from response content", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-capability-chat-"));
   const requests = [];
-  const accepted = new Set(["off", "high", "max"]);
   const server = await listen(http.createServer(async (req, res) => {
     const body = await readDashboardRequestJson(req);
     requests.push(body);
-    const effort = body.reasoning_effort;
-    if (effort === "antcode_invalid_effort_probe" || !accepted.has(effort)) {
-      res.writeHead(400, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: { type: "invalid_request_error", param: "reasoning_effort" } }));
-      return;
-    }
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "discard me" } }] }));
+    res.end(JSON.stringify({
+      choices: [{
+        message: {
+          role: "assistant",
+          content: "2",
+          reasoning_content: "add one and one"
+        }
+      }]
+    }));
   }), "127.0.0.1", 0);
   const origin = `http://127.0.0.1:${server.address().port}`;
   const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
@@ -1939,48 +1935,34 @@ test("dashboard chat capability probe requires a structured field then sends rea
     const result = await runtime.probeModelCapabilities({
       gatewayUrl: `${origin}/v1/chat/completions`,
       gatewayProtocol: "openai-chat",
-      modelId: "deepseek-v4-pro"
+      modelId: "deepseek-v4.1-flash"
     });
 
     assert.equal(result.ok, true);
     assert.equal(result.outcome, "complete");
-    assert.deepEqual(result.acceptedEfforts, ["off", "high", "max"]);
-    assert.equal(result.defaultReasoningEffort, "high");
+    assert.equal(result.reasoningDiscovery.supportsReasoning, true);
     assert.equal(result.reasoningDiscovery.path, "reasoning_effort");
-    assert.equal(result.diagnostic.requestCount, 9);
-    assert.deepEqual(requests.map((body) => body.reasoning_effort), [
-      "antcode_invalid_effort_probe",
-      "none",
-      "off",
-      "low",
-      "medium",
-      "high",
-      "xhigh",
-      "max",
-      "ultra"
-    ]);
-    assert.equal(requests.every((body) => !Object.prototype.hasOwnProperty.call(body, "reasoning")), true);
+    assert.deepEqual(result.reasoningEfforts, []);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].reasoning_effort, "high");
+    assert.doesNotMatch(JSON.stringify(result), /add one and one/);
   } finally {
     await close(server);
   }
 });
 
-test("dashboard Responses capability probe sends reasoning.effort with bearer auth", async () => {
+test("dashboard Responses capability probe confirms thinking from reasoning output", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-capability-responses-"));
   const requests = [];
   const apiKey = "capability-probe-secret";
-  const accepted = new Set(["low", "high", "xhigh"]);
   const server = await listen(http.createServer(async (req, res) => {
     const body = await readDashboardRequestJson(req);
     requests.push({ authorization: req.headers.authorization, body });
-    const effort = body.reasoning?.effort;
-    if (effort === "antcode_invalid_effort_probe" || !accepted.has(effort)) {
-      res.writeHead(422, { "content-type": "application/json" });
-      res.end(JSON.stringify({ detail: [{ loc: ["body", "reasoning", "effort"], type: "enum" }] }));
-      return;
-    }
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ output_text: "discard generated probe output" }));
+    res.end(JSON.stringify({
+      output: [{ type: "reasoning", summary: [{ type: "summary_text", text: "secret-thinking" }] }],
+      output_text: "2"
+    }));
   }), "127.0.0.1", 0);
   const origin = `http://127.0.0.1:${server.address().port}`;
   const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
@@ -1995,26 +1977,13 @@ test("dashboard Responses capability probe sends reasoning.effort with bearer au
     });
 
     assert.equal(result.ok, true);
-    assert.equal(result.outcome, "complete");
-    assert.deepEqual(result.acceptedEfforts, ["low", "high", "xhigh"]);
-    assert.equal(result.defaultReasoningEffort, "high");
+    assert.equal(result.reasoningDiscovery.supportsReasoning, true);
     assert.equal(result.reasoningDiscovery.path, "reasoning.effort");
     assert.equal(result.apiKeyUsed, true);
-    assert.equal(requests.length, 9);
-    assert.equal(requests.every((request) => request.authorization === `Bearer ${apiKey}`), true);
-    assert.deepEqual(requests.map((request) => request.body.reasoning.effort), [
-      "antcode_invalid_effort_probe",
-      "none",
-      "off",
-      "low",
-      "medium",
-      "high",
-      "xhigh",
-      "max",
-      "ultra"
-    ]);
-    assert.equal(requests.every((request) => !Object.prototype.hasOwnProperty.call(request.body, "reasoning_effort")), true);
-    assert.doesNotMatch(JSON.stringify(result), /capability-probe-secret|discard generated probe output/);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].authorization, `Bearer ${apiKey}`);
+    assert.equal(requests[0].body.reasoning.effort, "high");
+    assert.doesNotMatch(JSON.stringify(result), /capability-probe-secret|secret-thinking/);
   } finally {
     await close(server);
   }
@@ -2040,11 +2009,11 @@ test("dashboard capability probe stops after a generic validation error", async 
     });
 
     assert.equal(result.ok, true);
-    assert.equal(result.outcome, "indeterminate");
-    assert.equal(result.negativeControl.status, "indeterminate");
+    assert.equal(result.outcome, "complete");
+    assert.equal(result.reasoningDiscovery.supportsReasoning, false);
     assert.equal(result.reasoningDiscovery.path, null);
-    assert.equal(result.diagnostic.requestCount, 1);
-    assert.equal(requestCount, 1);
+    assert.equal(result.diagnostic.requestCount, 3);
+    assert.equal(requestCount, 3);
   } finally {
     await close(server);
   }
@@ -2174,7 +2143,7 @@ test("dashboard capability probe stops the upstream request when its caller abor
     const result = await probe;
 
     assert.equal(result.ok, false);
-    assert.equal(result.error, "思考档位检测已取消");
+    assert.equal(result.error, "思考能力检测已取消");
     assert.equal(result.diagnostic.stage, "cancelled");
     assert.equal(result.diagnostic.requestCount, 1);
     assert.equal(requestCount, 1);

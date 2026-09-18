@@ -261,6 +261,10 @@ export async function persistSessionMetadata(store: ReturnType<typeof createSess
   metadata.readonly = session.readonly;
   metadata.allowWrite = session.allowWrite;
   metadata.allowCommand = session.allowCommand;
+  metadata.title = session.title ?? metadata.title ?? null;
+  if (session.titleSource) {
+    metadata.titleSource = session.titleSource;
+  }
   const committed = await commitSessionSnapshot(store, metadata, session);
   Object.assign(metadata, committed.metadata);
   const metadataPath = committed.metadataPath;
@@ -312,6 +316,9 @@ export async function persistSessionSnapshot(session: AgentSession, options: { e
   metadata.mode = session.mode;
   metadata.clientSurface = session.clientSurface;
   metadata.title = session.title ?? null;
+  if (session.titleSource) {
+    metadata.titleSource = session.titleSource;
+  }
   metadata.turnIndex = session.turnCount ?? 0;
   metadata.status = session.goal?.enabled ? session.goal.status : metadata.status;
   metadata.permissionMode = session.permissionMode;

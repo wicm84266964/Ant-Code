@@ -1,3 +1,4 @@
+import { inferModelSupportsImages } from "../../model-gateway/vision-capabilities.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { hydrateRichContent } from "./rich-renderers.ts";
 import { visibleTranscriptRole } from "./transcript.ts";
@@ -44,7 +45,7 @@ export async function saveModelConfig(event: Event) {
     visionAgentModel: data.get("visionAgentModel"),
     gatewayDiscoveryToken: discoveryToken,
     manualAgentModelIds: manualAgentModelIds(form),
-    modalities: data.get("vision") ? ["text", "image"] : ["text"],
+    modalities: data.get("vision") || inferModelSupportsImages(data.get("modelId")) ? ["text", "image"] : ["text"],
     thinking: data.get("thinking") === "on",
     reasoningEfforts: data.getAll("reasoningEfforts").map(String),
     defaultReasoningEffort: data.get("defaultReasoningEffort") || null,

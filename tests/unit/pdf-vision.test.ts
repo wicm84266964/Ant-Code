@@ -115,8 +115,8 @@ for (const mainVision of [true, false]) {
     const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "ant-pdf-session-"));
     t.after(() => fs.rm(cwd, { recursive: true, force: true }));
     await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
-      modelAlias: mainVision ? "vision-model" : "text-model",
-      models: [{ id: "vision-model", modalities: ["text", "image"] }, { id: "text-model", modalities: ["text"] }],
+      modelAlias: mainVision ? "vision-model" : "embed-text-model",
+      models: [{ id: "vision-model", modalities: ["text", "image"] }, { id: "embed-text-model", modalities: ["text"] }],
       agents: { vision: { enabled: true, model: "vision-model" } }
     }));
     const requests = [];
@@ -147,8 +147,8 @@ for (const mainVision of [true, false]) {
     const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "ant-pdf-full-"));
     t.after(() => fs.rm(cwd, { recursive: true, force: true }));
     await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
-      modelAlias: mainVision ? "vision-model" : "text-model",
-      models: [{ id: "vision-model", modalities: ["text", "image"] }, { id: "text-model", modalities: ["text"] }],
+      modelAlias: mainVision ? "vision-model" : "embed-text-model",
+      models: [{ id: "vision-model", modalities: ["text", "image"] }, { id: "embed-text-model", modalities: ["text"] }],
       agents: { vision: { enabled: true, model: "vision-model" } }
     }));
     const requests = [];
@@ -189,7 +189,14 @@ for (const failure of ["empty", "gateway", "cancel", "unavailable"]) {
     }), "127.0.0.1");
     t.after(() => close(server));
     const env = mockGatewayEnvWithoutModel(serverUrl(server));
-    await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({ modelAlias: "vision-model", models: [{ id: "vision-model", modalities: failure === "unavailable" ? ["text"] : ["text", "image"] }], agents: { vision: { enabled: false } } }));
+    await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
+      modelAlias: failure === "unavailable" ? "embed-text-model" : "vision-model",
+      models: [{
+        id: failure === "unavailable" ? "embed-text-model" : "vision-model",
+        modalities: failure === "unavailable" ? ["text"] : ["text", "image"]
+      }],
+      agents: { vision: { enabled: false } }
+    }));
     const session = await createSession({ cwd, mode: "interactive", env });
     const controller = new AbortController();
     if (failure === "cancel") controller.abort();

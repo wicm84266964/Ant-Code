@@ -161,6 +161,7 @@ export async function createSession(options: CreateSessionOptions): Promise<Agen
     usage,
     lastProviderUsage: usage.last ?? null,
     title: resumed?.title ?? null,
+    titleSource: resumed?.titleSource ?? (resumed?.title ? "prompt" : null),
     turnCount: resumed?.turnCount ?? 0,
     goal: normalizeSessionGoal(resumed?.goal),
     resumedFrom: resumed,

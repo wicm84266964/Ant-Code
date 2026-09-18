@@ -151,6 +151,64 @@ test("Config V2 migration rejects ambiguous unqualified agent model routes", () 
   }), (error) => error.code === "CONFIG_V2_AMBIGUOUS_MODEL_REF");
 });
 
+test("Config V2 migration drops leftover project agent routes whose models no longer exist", () => {
+  const result = migrateV1Documents({
+    globalDocument: {
+      settingsVersion: 2,
+      namespaces: {
+        "model-providers": {
+          providers: {
+            deepseek: {
+              displayName: "DeepSeek",
+              transport: {
+                protocol: "openai-chat",
+                baseURL: "http://127.0.0.1:8787/v1/chat/completions"
+              },
+              auth: { mode: "ambient" },
+              models: [
+                { id: "deepseek-v4-flash", displayName: "deepseek-v4-flash" },
+                { id: "deepseek-v4.1-flash", displayName: "deepseek-v4.1-flash" }
+              ]
+            }
+          }
+        },
+        "default-model": {
+          selection: { provider: "deepseek", model: "deepseek-v4.1-flash" }
+        }
+      }
+    },
+    projectDocument: {
+      agents: {
+        modelTiers: {
+          cheap: "deepseek-v4-flash",
+          default: "deepseek-v4-pro",
+          strong: "deepseek-v4-pro",
+          vision: "gpt-5.5"
+        },
+        vision: { enabled: true, model: "gpt-5.5" }
+      }
+    }
+  });
+
+  assert.equal(result.projectDocument.namespaces["agent-routing"], undefined);
+  assert.equal(result.projectDocument.namespaces["default-model"], undefined);
+  assert.deepEqual(
+    result.diagnostics.filter((entry) => entry.code === "STALE_AGENT_MODEL_REF").map((entry) => ({
+      scope: entry.scope,
+      kind: entry.kind,
+      ...(entry.tier ? { tier: entry.tier } : {}),
+      model: entry.model
+    })),
+    [
+      { scope: "project", kind: "tier", tier: "default", model: "deepseek-v4-pro" },
+      { scope: "project", kind: "tier", tier: "strong", model: "deepseek-v4-pro" },
+      { scope: "project", kind: "tier", tier: "vision", model: "gpt-5.5" },
+      { scope: "project", kind: "vision", model: "gpt-5.5" }
+    ]
+  );
+  assert.doesNotThrow(() => validateSettingsDocument(result.projectDocument));
+});
+
 test("Config V2 migration drops agent routes owned by a non-active provider", () => {
   const result = migrateV1Documents({
     globalDocument: {

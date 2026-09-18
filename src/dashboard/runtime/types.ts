@@ -223,6 +223,7 @@ export type DashboardActiveSessionState = {
   backgroundSnapshotDirty: boolean;
   backgroundSnapshotPromise: Promise<unknown> | null;
   hooksTrusted: boolean;
+  sessionTitleGeneration?: AbortController;
 };
 
 export class ActiveSessionMap extends Map<string, DashboardActiveSessionState> {
@@ -545,6 +546,7 @@ export type ReasoningProbeInput = {
   warnings?: unknown;
   negativeControl?: unknown;
   efforts?: unknown;
+  supportsReasoning?: boolean | null;
   failure?: { message?: string; kind?: string };
 };
 

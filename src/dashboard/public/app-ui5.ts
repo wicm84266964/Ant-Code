@@ -1,3 +1,4 @@
+import { inferModelSupportsImages } from "../../model-gateway/vision-capabilities.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { modelConnectionGroups } from "./model-groups.ts";
 import { hydrateRichContent } from "./rich-renderers.ts";
@@ -12,7 +13,7 @@ export function modelCapabilityLabels(model: DashboardModelOption | string | nul
   const modalities = new Set(Array.isArray(model?.modalities) ? model.modalities : ["text"]);
   const labels = [];
   if (modalities.has("text")) labels.push("文本");
-  if (modalities.has("image")) labels.push("视觉");
+  if (modalities.has("image") || inferModelSupportsImages(model.id)) labels.push("视觉");
   if (model?.thinking) labels.push("thinking");
   return labels.length > 0 ? labels : ["文本"];
 }
@@ -782,6 +783,7 @@ export function renderModelConfigPanel() {
           <span>模型备注</span>
           <input name="label" maxlength="160" spellcheck="false" value="${escapeAttribute(current.label === current.id ? "" : current.label || "")}" placeholder="例如：科研分析、代码开发" />
         </label>
+        <div class="model-capability-status" id="model-id-capability-status" aria-live="polite"></div>
         <label>
           <span>上下文窗口</span>
           <input name="contextTokens" inputmode="numeric" pattern="[0-9]*" value="${escapeAttribute(current.contextTokens || "")}" placeholder="例如 400000" />
@@ -824,7 +826,7 @@ export function renderModelConfigPanel() {
       </fieldset>
       <div class="model-config-toggles">
         <label><input name="text" type="checkbox" checked disabled /> 文本</label>
-        <label><input name="vision" type="checkbox"${Array.isArray(current.modalities) && current.modalities.includes("image") ? " checked" : ""} /> 视觉</label>
+        <label class="model-vision-toggle"><input name="vision" type="checkbox"${Array.isArray(current.modalities) && current.modalities.includes("image") || inferModelSupportsImages(current.id) ? " checked" : ""} /> 视觉<span class="model-capability-status" aria-live="polite"></span></label>
         <label><input name="thinking" type="checkbox"${current.thinking ? " checked" : ""} /> thinking</label>
         <label><input name="clearGatewayApiKey" type="checkbox"${gateway.apiKeyConfigured ? "" : " disabled"} /> 清除已保存 Key</label>
         <label><input name="switchToModel" type="checkbox"${editing && !current.default ? "" : " checked"} /> 保存为该范围默认模型</label>

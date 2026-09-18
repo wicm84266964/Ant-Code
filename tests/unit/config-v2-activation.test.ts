@@ -156,6 +156,53 @@ test("Config V2 rollback restores exact legacy documents and removes only create
   assert.deepEqual(credentialDocument.credentials, {});
 });
 
+test("Config V2 activation ignores leftover project agent tiers for models that left the catalog", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "config-v2-stale-project-routes-"));
+  const home = path.join(root, "home");
+  const cwd = path.join(root, "project");
+  await fs.mkdir(path.join(home, ".ant-code"), { recursive: true });
+  await fs.mkdir(path.join(cwd, ".lab-agent"), { recursive: true });
+  await writeJson(path.join(home, ".ant-code", "settings.json"), {
+    settingsVersion: 2,
+    namespaces: {
+      "model-providers": {
+        providers: {
+          deepseek: {
+            displayName: "DeepSeek",
+            transport: {
+              protocol: "openai-chat",
+              baseURL: "http://127.0.0.1:8787/v1/chat/completions"
+            },
+            auth: { mode: "ambient" },
+            models: [{ id: "deepseek-v4.1-flash", displayName: "deepseek-v4.1-flash" }]
+          }
+        }
+      },
+      "default-model": {
+        selection: { provider: "deepseek", model: "deepseek-v4.1-flash" }
+      }
+    }
+  });
+  await writeJson(path.join(cwd, ".lab-agent", "config.json"), {
+    agents: {
+      modelTiers: {
+        cheap: "deepseek-v4-flash",
+        default: "deepseek-v4-pro",
+        strong: "deepseek-v4-pro",
+        vision: "gpt-5.5"
+      }
+    }
+  });
+
+  const migrated = await ensureConfigV2({ cwd, env: { USERPROFILE: home } });
+  assert.equal(migrated.changed, true);
+  const projectSettings = await readJson(migrated.paths.projectSettings);
+  assert.deepEqual(Object.keys(projectSettings), ["settingsVersion", "namespaces"]);
+  assert.equal(projectSettings.namespaces["agent-routing"], undefined);
+  const projectLegacy = await readJson(migrated.paths.projectLegacy);
+  assert.equal(projectLegacy.agents, undefined);
+});
+
 test("Config V2 activation refuses an invalid existing settings file without overwriting it", async () => {
   const fixture = await createFixture();
   const settingsPath = path.join(fixture.home, ".ant-code", "settings.json");

@@ -3,6 +3,7 @@ import type { DashboardRequestInput, DashboardEventListener, GatewayDiscoveryCat
 import { loadConfig, type LabAgentConfig, GATEWAY_PROTOCOLS, localProjectConfigPath, globalConfigPath } from "../../config/load-config.ts";
 import { persistSessionSnapshot, runSessionTurn, SessionModelSelectionUnresolvedError } from "../../core/session.ts";
 import { listConfiguredModels, normalizeReasoningEfforts, resolveModelSelection } from "../../model-gateway/models.ts";
+import { probeVisionCapability } from "../../model-gateway/vision-probe.ts";
 import { createSessionStore } from "../../storage/session-store.ts";
 import { collectSessionFiles } from "../files.ts";
 import { applyPermissionMode, normalizePermissionMode, permissionModeSummary } from "../permissions.ts";
@@ -42,6 +43,7 @@ import {
   consumeGatewayDiscovery,
   mergeReasoningProbeIntoCatalog,
   probeGatewayConnection,
+  probeGatewayCredential,
   probeModelReasoningCapabilities,
   rememberGatewayDiscovery,
   resolveGatewayDiscovery,
@@ -1023,5 +1025,47 @@ export async function runtimeSaveDefaultModelSelection(ctx: DashboardFactoryStat
     gatewayProfiles: publicGatewayProfiles(modelConfig),
     configV2,
     configRevisions: configV2.revisions
+  };
+}
+
+export async function runtimeProbeVisionCapability(
+  ctx: DashboardFactoryState,
+  input: DashboardRequestInput = {},
+  request: { signal?: AbortSignal } = {}
+) {
+  const configEnv = await ctx.resolveConfigEnv();
+  const config = await loadConfig({ cwd: ctx.cwd, env: configEnv });
+  const modelId = String(input.modelId ?? input.model ?? "").trim();
+  if (!modelId) {
+    return { ok: false, status: 400, error: "请输入模型 ID" };
+  }
+  const lab = config.lab ?? {};
+  const protocol = String(input.gatewayProtocol ?? lab.gatewayProtocol ?? "openai-chat").trim();
+  const gatewayUrl = String(input.gatewayUrl ?? lab.gatewayUrl ?? "").trim();
+  const catalogModel = Array.isArray(input.catalogModels)
+    ? input.catalogModels.find((model) => isPlainObject(model) && String(model.id ?? "") === modelId)
+    : null;
+  const probe = await probeVisionCapability({
+    config: {
+      ...config,
+      modelAlias: modelId,
+      lab: {
+        ...lab,
+        gatewayUrl,
+        gatewayProtocol: protocol,
+        gatewayApiKey: probeGatewayCredential(input, config, protocol, gatewayUrl),
+        gatewayMaxRetries: 0
+      }
+    },
+    modelId,
+    catalogModalities: isPlainObject(catalogModel) ? catalogModel.modalities ?? catalogModel.inputModalities : undefined,
+    signal: request.signal
+  });
+  return {
+    ok: true,
+    modelId,
+    supported: probe.supported,
+    reason: probe.reason,
+    error: probe.error
   };
 }

@@ -2503,6 +2503,14 @@ function createBrowserRuntime(remoteImageUrl) {
         }
       };
     },
+    async probeVisionCapability(body) {
+      return {
+        ok: true,
+        modelId: body?.modelId,
+        supported: null,
+        reason: "skipped"
+      };
+    },
     async saveModelConfig(body) {
       this.modelConfigCalls.push(body);
       const queued = this.modelConfigResponses.shift();

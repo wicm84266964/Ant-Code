@@ -310,8 +310,9 @@ export function mergeReasoningProbeIntoCatalog(models: Array<Record<string, unkn
   const probedDefault = String(result.defaultReasoningEffort ?? "").trim().toLowerCase();
   const previousDisabled = normalizeCapabilityEfforts(previous?.reasoningEfforts)
     .find((effort: { id?: string; default?: boolean }) => isDisabledDiscoveryEffort(effort.id))?.id ?? "";
+  const probedEfforts = normalizeCapabilityEfforts(result.reasoningEfforts);
   const reasoningEfforts = collapseDisabledDiscoveryEfforts(
-    normalizeCapabilityEfforts(result.reasoningEfforts),
+    probedEfforts.length > 0 ? probedEfforts : normalizeCapabilityEfforts(previous?.reasoningEfforts),
     isDisabledDiscoveryEffort(probedDefault) ? probedDefault : previousDisabled
   );
   const effortIds = new Set(reasoningEfforts.map((effort: { id?: string; default?: boolean }) => effort.id));
@@ -319,11 +320,14 @@ export function mergeReasoningProbeIntoCatalog(models: Array<Record<string, unkn
   const defaultReasoningEffort = effortIds.has(previousDefault)
     ? previousDefault
     : effortIds.has(probedDefault) ? probedDefault : null;
+  const supportsReasoning = isPlainObject(result.reasoningDiscovery)
+    ? result.reasoningDiscovery.supportsReasoning === true
+    : false;
   const probed = {
     ...(isPlainObject(previous) ? previous : {}),
     id: canonicalId,
     label: String(previous?.label ?? previous?.displayName ?? canonicalId).trim() || canonicalId,
-    thinking: previous?.thinking === true || reasoningEfforts.length > 0,
+    thinking: previous?.thinking === true || reasoningEfforts.length > 0 || supportsReasoning,
     reasoningEfforts,
     defaultReasoningEffort,
     reasoningDiscovery: {
@@ -587,8 +591,8 @@ export async function probeGatewayConnection(input: DashboardRequestInput, confi
 export async function probeModelReasoningCapabilities(input: DashboardRequestInput, config: LabAgentConfig | Record<string, unknown>, signal: AbortSignal | undefined): Promise<ReasoningProbeResult> {
   const lab = isPlainObject(config.lab) ? config.lab : null;
   const protocol = String(input.gatewayProtocol ?? lab?.gatewayProtocol ?? "openai-chat").trim();
-  if (!["openai-chat", "openai-responses"].includes(protocol)) {
-    return { ok: false, status: 400, error: `该协议不支持思考档位检测：${protocol}` };
+  if (!["openai-chat", "openai-responses", "lab-agent-gateway"].includes(protocol)) {
+    return { ok: false, status: 400, error: `该协议不支持思考能力检测：${protocol}` };
   }
   const modelId = String(input.modelId ?? input.model ?? "").trim();
   if (!modelId || modelId.length > 160 || /[\r\n\t\0]/.test(modelId)) {
@@ -618,68 +622,42 @@ export async function probeModelReasoningCapabilities(input: DashboardRequestInp
     maxResponseBytes: boundedCapabilityProbeResponseBytes(input.probeMaxResponseBytes)
   };
 
-  const negative = await sendReasoningCapabilityProbe(requestOptions, INVALID_REASONING_EFFORT_PROBE);
-  const negativeControl = publicReasoningProbeAttempt(INVALID_REASONING_EFFORT_PROBE, negative);
-  if (negative.failure) {
-    return failedReasoningCapabilityProbe({
-      protocol,
-      modelId,
-      inferenceUrl: publicInferenceUrl,
-      apiKeyUsed: Boolean(gatewayApiKey),
-      negativeControl,
-      failure: negative.failure
+  const encodings = reasoningThinkingProbeRequests(protocol, modelId);
+  const attempts = [];
+  const warnings = [];
+  let thinkingField = null;
+  let supportsReasoning = false;
+
+  for (const encoding of encodings) {
+    const attempt = await sendReasoningCapabilityProbe(requestOptions, encoding.body);
+    attempts.push({
+      encoding: encoding.id,
+      status: attempt.failure ? "failed" : attempt.ok ? (attempt.thinkingPresent ? "thinking" : "empty") : "rejected",
+      httpStatus: attempt.httpStatus ?? null,
+      thinkingPresent: attempt.thinkingPresent === true,
+      failure: isPlainObject(attempt.failure) ? attempt.failure.kind : null
     });
-  }
-  if (negative.ok) {
-    return completedReasoningCapabilityProbe({
-      protocol,
-      modelId,
-      inferenceUrl: publicInferenceUrl,
-      apiKeyUsed: Boolean(gatewayApiKey),
-      outcome: "indeterminate",
-      negativeControl,
-      efforts: [],
-      acceptedEfforts: [],
-      reasoningField: null,
-      warnings: ["上游接受了非法档位，无法确认它是否读取思考强度字段。"]
-    });
-  }
-  if (!negative.reasoningField) {
-    return completedReasoningCapabilityProbe({
-      protocol,
-      modelId,
-      inferenceUrl: publicInferenceUrl,
-      apiKeyUsed: Boolean(gatewayApiKey),
-      outcome: "indeterminate",
-      negativeControl,
-      efforts: [],
-      acceptedEfforts: [],
-      reasoningField: null,
-      warnings: ["负控错误没有以结构化字段标明思考强度参数，已停止检测。"]
-    });
+    if (attempt.failure) {
+      return failedReasoningCapabilityProbe({
+        protocol,
+        modelId,
+        inferenceUrl: publicInferenceUrl,
+        apiKeyUsed: Boolean(gatewayApiKey),
+        efforts: attempts,
+        failure: attempt.failure
+      });
+    }
+    if (attempt.ok && attempt.thinkingPresent) {
+      thinkingField = encoding.id;
+      supportsReasoning = true;
+      break;
+    }
   }
 
-  const attempts = [];
-  const acceptedEfforts = [];
-  let outcome = "complete";
-  const warnings = [];
-  for (const effort of reasoningProbeEffortIds()) {
-    const attempt = await sendReasoningCapabilityProbe(requestOptions, effort);
-    attempts.push(publicReasoningProbeAttempt(effort, attempt));
-    if (attempt.failure) {
-      outcome = "partial";
-      warnings.push("检测请求未完成，未重试其余档位。", attempt.failure.message);
-      break;
-    }
-    if (attempt.ok) {
-      acceptedEfforts.push(effort);
-      continue;
-    }
-    if (!attempt.reasoningField) {
-      outcome = "partial";
-      warnings.push("某个档位返回了无关错误，未重试其余档位。已确认的结果仍被保留。");
-      break;
-    }
+  if (supportsReasoning) {
+    warnings.push("已确认返回中包含思考内容。上游未提供可观测的档位列表时，请手动勾选强度。");
+  } else if (attempts.length > 0) {
+    warnings.push("请求已成功或被忽略未知字段，但返回中没有思考内容，不能当作已测出档位。");
   }
 
   return completedReasoningCapabilityProbe({
@@ -687,24 +665,124 @@ export async function probeModelReasoningCapabilities(input: DashboardRequestInp
     modelId,
     inferenceUrl: publicInferenceUrl,
     apiKeyUsed: Boolean(gatewayApiKey),
-    outcome,
-    negativeControl,
+    outcome: "complete",
     efforts: attempts,
-    acceptedEfforts,
-    reasoningField: negative.reasoningField,
+    acceptedEfforts: [],
+    reasoningField: thinkingField,
+    supportsReasoning,
     warnings
   });
 }
 
 
-export async function sendReasoningCapabilityProbe(options: ReasoningProbeRequestOptions, effort: string) {
+export function reasoningThinkingProbeRequests(protocol: string, modelId: string) {
+  if (protocol === "openai-responses") {
+    return [{
+      id: "reasoning.effort",
+      body: {
+        model: modelId,
+        input: "请进行逐步思考，然后只回答 17*19 的结果。",
+        stream: false,
+        max_output_tokens: 256,
+        reasoning: { effort: "high" }
+      }
+    }];
+  }
+  const chat = {
+    model: modelId,
+    messages: [{ role: "user", content: "请进行逐步思考，然后只回答 17*19 的结果。" }],
+    stream: false,
+    max_tokens: 256
+  };
+  return [
+    { id: "reasoning_effort", body: { ...chat, reasoning_effort: "high" } },
+    { id: "thinking", body: { ...chat, thinking: { type: "enabled" } } },
+    { id: "enable_thinking", body: { ...chat, enable_thinking: true } }
+  ];
+}
+
+export function probeResponseIndicatesThinking(value: unknown) {
+  if (extractThinkingFromProbeResponse(value).trim()) {
+    return true;
+  }
+  return usageReasoningTokens(value) > 0;
+}
+
+function usageReasoningTokens(value: unknown, depth: number = 0): number {
+  if (depth > 8 || value == null || typeof value !== "object") {
+    return 0;
+  }
+  if (Array.isArray(value)) {
+    return value.reduce((sum, entry) => sum + usageReasoningTokens(entry, depth + 1), 0);
+  }
+  const record = value as Record<string, unknown>;
+  if (record.usage && typeof record.usage === "object") {
+    const usage = record.usage as Record<string, unknown>;
+    const details = isPlainObject(usage.completion_tokens_details) ? usage.completion_tokens_details : {};
+    const counted = Number(usage.reasoning_tokens ?? usage.completion_thinking_tokens ?? details.reasoning_tokens ?? 0);
+    if (Number.isFinite(counted) && counted > 0) {
+      return counted;
+    }
+  }
+  return Math.max(
+    usageReasoningTokens(record.choices, depth + 1),
+    usageReasoningTokens(record.message, depth + 1)
+  );
+}
+
+export function extractThinkingFromProbeResponse(value: unknown, depth: number = 0): string {
+  if (depth > 10 || value == null) {
+    return "";
+  }
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return "";
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => extractThinkingFromProbeResponse(entry, depth + 1)).join("");
+  }
+  if (!isPlainObject(value)) {
+    return "";
+  }
+  const parts = [];
+  const type = String(value.type ?? "");
+  if (type === "reasoning" || type === "thinking" || type === "summary_text") {
+    if (typeof value.text === "string") parts.push(value.text);
+    if (typeof value.content === "string") parts.push(value.content);
+  }
+  if (Array.isArray(value.summary)) {
+    parts.push(extractThinkingFromProbeResponse(value.summary, depth + 1));
+  }
+  for (const key of ["reasoning_content", "thinking", "thought", "reasoning_text"]) {
+    const entry = value[key];
+    if (typeof entry === "string") {
+      parts.push(entry);
+    } else if (isPlainObject(entry) && typeof entry.text === "string") {
+      parts.push(entry.text);
+    }
+  }
+  if (Array.isArray(value.choices)) parts.push(extractThinkingFromProbeResponse(value.choices, depth + 1));
+  if (isPlainObject(value.message)) parts.push(extractThinkingFromProbeResponse(value.message, depth + 1));
+  if (isPlainObject(value.delta)) parts.push(extractThinkingFromProbeResponse(value.delta, depth + 1));
+  if (Array.isArray(value.output)) parts.push(extractThinkingFromProbeResponse(value.output, depth + 1));
+  if (Array.isArray(value.content)) {
+    for (const part of value.content) {
+      if (isPlainObject(part) && (part.type === "reasoning" || part.type === "thinking")) {
+        parts.push(extractThinkingFromProbeResponse(part, depth + 1));
+      }
+    }
+  }
+  return parts.join("");
+}
+
+export async function sendReasoningCapabilityProbe(options: ReasoningProbeRequestOptions, body: Record<string, unknown>) {
   const remainingMs = options.deadlineAt - Date.now();
   if (remainingMs <= 0) {
     return {
       ok: false,
       httpStatus: null,
       reasoningField: null,
-      failure: { kind: "timeout", message: "思考档位检测超过总时限" }
+      thinkingPresent: false,
+      failure: { kind: "timeout", message: "思考能力检测超过总时限" }
     };
   }
   const timeoutMs = Math.max(1, Math.min(remainingMs, MODEL_CAPABILITY_PROBE_REQUEST_TIMEOUT_MS));
@@ -714,7 +792,7 @@ export async function sendReasoningCapabilityProbe(options: ReasoningProbeReques
     response = await fetch(options.inferenceUrl, {
       method: "POST",
       headers: options.headers,
-      body: JSON.stringify(reasoningCapabilityProbeBody(options.protocol, options.modelId, effort)),
+      body: JSON.stringify(body),
       redirect: "manual",
       signal: abort.signal
     });
@@ -727,17 +805,49 @@ export async function sendReasoningCapabilityProbe(options: ReasoningProbeReques
       ok: false,
       httpStatus: null,
       reasoningField: null,
+      thinkingPresent: false,
       failure: {
         kind: cancelled ? "cancelled" : timedOut ? "timeout" : "connect",
-        message: cancelled ? "思考档位检测已取消" : timedOut ? "思考档位检测超时" : "无法连接模型来源"
+        message: cancelled ? "思考能力检测已取消" : timedOut ? "思考能力检测超时" : "无法连接模型来源"
       }
     };
   }
 
   try {
     if (response.ok) {
-      await cancelProbeResponseBody(response);
-      return { ok: true, httpStatus: response.status, reasoningField: null, failure: null };
+      let raw = "";
+      try {
+        raw = await readProbeResponse(response, {
+          maxBytes: options.maxResponseBytes,
+          tooLargeMessage: "思考能力响应超过大小限制"
+        });
+      } catch (error) {
+        abort.abort(error);
+        await cancelProbeResponseBody(response);
+        const tooLarge = capabilityProbeResponseTooLarge(error);
+        return {
+          ok: false,
+          httpStatus: response.status,
+          reasoningField: null,
+          thinkingPresent: false,
+          failure: tooLarge
+            ? { kind: "response-too-large", message: "思考能力响应超过大小限制" }
+            : { kind: "response", message: "读取模型来源响应失败" }
+        };
+      }
+      let json = null;
+      try {
+        json = JSON.parse(raw);
+      } catch {
+        json = null;
+      }
+      return {
+        ok: true,
+        httpStatus: response.status,
+        reasoningField: null,
+        thinkingPresent: probeResponseIndicatesThinking(json),
+        failure: null
+      };
     }
 
     const httpFailure = reasoningProbeHttpFailure(response.status);
@@ -747,6 +857,7 @@ export async function sendReasoningCapabilityProbe(options: ReasoningProbeReques
         ok: false,
         httpStatus: response.status,
         reasoningField: null,
+        thinkingPresent: false,
         failure: httpFailure
       };
     }
@@ -768,12 +879,13 @@ export async function sendReasoningCapabilityProbe(options: ReasoningProbeReques
         ok: false,
         httpStatus: response.status,
         reasoningField: null,
+        thinkingPresent: false,
         failure: cancelled
-          ? { kind: "cancelled", message: "思考档位检测已取消" }
+          ? { kind: "cancelled", message: "思考能力检测已取消" }
           : timedOut
-          ? { kind: "timeout", message: "思考档位检测超时" }
+          ? { kind: "timeout", message: "思考能力检测超时" }
           : tooLarge
-            ? { kind: "response-too-large", message: "思考档位错误响应超过大小限制" }
+            ? { kind: "response-too-large", message: "思考能力响应超过大小限制" }
             : { kind: "response", message: "读取模型来源响应失败" }
       };
     }
@@ -781,12 +893,13 @@ export async function sendReasoningCapabilityProbe(options: ReasoningProbeReques
     try {
       json = JSON.parse(body);
     } catch {
-      // A plain-text error is deliberately insufficient evidence to probe further.
+      json = null;
     }
     return {
       ok: false,
       httpStatus: response.status,
       reasoningField: structuredReasoningErrorField(json),
+      thinkingPresent: false,
       failure: null
     };
   } finally {
@@ -894,11 +1007,11 @@ export function publicReasoningProbeAttempt(effort: string, attempt: { ok?: unkn
 
 export function completedReasoningCapabilityProbe(input: ReasoningProbeInput): ReasoningProbeResult {
   const accepted = normalizeCapabilityEfforts(input.acceptedEfforts);
-  const preset = inferCatalogReasoning({ id: input.modelId }, { protocol: input.protocol });
-  const presetDefault = preset.reasoningDiscovery.source === "known-preset"
-    && accepted.some((effort: { id?: string; default?: boolean }) => effort.id === preset.defaultReasoningEffort)
-    ? preset.defaultReasoningEffort
-    : null;
+  const supportsReasoning = input.supportsReasoning === true
+    ? true
+    : input.supportsReasoning === false
+      ? false
+      : accepted.length > 0 ? true : false;
   return {
     ok: true,
     protocol: input.protocol != null ? String(input.protocol) : undefined,
@@ -908,21 +1021,21 @@ export function completedReasoningCapabilityProbe(input: ReasoningProbeInput): R
     outcome: input.outcome != null ? String(input.outcome) : undefined,
     acceptedEfforts: accepted.map((effort: { id?: string; default?: boolean }) => effort.id),
     reasoningEfforts: accepted,
-    defaultReasoningEffort: presetDefault,
+    defaultReasoningEffort: null,
     reasoningDiscovery: {
       source: "active-probe",
-      confidence: input.outcome === "complete" ? "probed" : input.outcome,
-      path: input.reasoningField,
+      confidence: "probed",
+      path: input.reasoningField ?? null,
       presetId: null,
-      supportsReasoning: accepted.length > 0 ? true : null,
+      supportsReasoning,
       probeAvailable: true,
       warnings: [...new Set(Array.isArray(input.warnings) ? input.warnings : [])]
     },
     negativeControl: input.negativeControl,
     efforts: input.efforts,
     diagnostic: {
-      stage: input.outcome === "complete" ? "complete" : input.outcome,
-      requestCount: 1 + (Array.isArray(input.efforts) ? input.efforts.length : 0)
+      stage: "complete",
+      requestCount: Array.isArray(input.efforts) ? input.efforts.length : 0
     }
   };
 }
@@ -946,7 +1059,10 @@ export function failedReasoningCapabilityProbe(input: ReasoningProbeInput): Reas
     defaultReasoningEffort: null,
     negativeControl: input.negativeControl,
     efforts: [],
-    diagnostic: { stage: input.failure?.kind, requestCount: 1 }
+    diagnostic: {
+      stage: input.failure?.kind,
+      requestCount: Array.isArray(input.efforts) ? input.efforts.length : 1
+    }
   };
 }
 
@@ -1121,7 +1237,10 @@ export function publicCatalogModel(value: unknown, protocol: string) {
     contextTokens: positiveIntegerOrNull(item.contextTokens ?? item.context_window ?? item.context_length ?? item.max_context_tokens),
     thinking: reasoning.reasoningDiscovery.supportsReasoning === true || /thinking|reason/i.test(id),
     ...reasoning,
-    modalities: normalizeModelInputModalities({ modalities: item.modalities ?? item.input_modalities })
+    modalities: normalizeModelInputModalities({
+      modelId: id,
+      modalities: item.modalities ?? item.input_modalities
+    })
   };
 }
 

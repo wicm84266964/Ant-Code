@@ -129,6 +129,12 @@ async function loadAppExports(exportNames) {
     const navigator = { clipboard: { writeText() {} } };
     const requestAnimationFrame = () => {};
     class EventSource {}
+    function inferModelSupportsImages(id) {
+      return /vision|vl/i.test(String(id ?? ""));
+    }
+    function needsVisionCapabilityProbe() {
+      return false;
+    }
   `;
   return import(`data:text/javascript,${encodeURIComponent(`${harness}\n${code}\nexport { ${exportNames.join(", ")} };`)}`);
 }
@@ -276,6 +282,17 @@ test("dashboard app exposes session actions and reconnects active sessions", asy
   assert.match(source, /data-action="delete"/);
   assert.match(source, /data-action="copy-id"/);
   assert.match(html, /id="collapse-sidebar"/);
+  assert.match(html, /id="session-search"/);
+  assert.match(source, /function sessionMatchesQuery\(/);
+  assert.match(source, /function syncVisionCheckboxForModel\(/);
+  assert.match(source, /function scheduleUncertainVisionProbe\(/);
+  assert.match(source, /已确认支持视觉/);
+  assert.match(source, /model-capability-status/);
+  assert.match(source, /model-id-capability-status/);
+  assert.match(source, /\/api\/model-vision\/probe/);
+  assert.match(source, /inferModelSupportsImages\(discoveredModel\.id\)/);
+  assert.match(source, /session_title_updated/);
+  assert.match(css, /\.thread-search input\s*\{/);
   assert.match(source, /sidebarCollapsed: false/);
   assert.match(source, /function toggleSidebar\(/);
   assert.match(source, /document\.body\.classList\.toggle\("sidebar-collapsed"/);

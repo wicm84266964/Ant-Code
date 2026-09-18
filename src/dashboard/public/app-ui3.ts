@@ -285,6 +285,18 @@ export function handleDashboardEvent(event: DashboardStreamEvent) {
     scheduleSessionsRefresh(0);
     return;
   }
+  if (event.type === "session_title_updated") {
+    const title = String(event.title ?? "").trim();
+    const sessionId = String(event.sessionId ?? state.currentSessionId ?? "");
+    if (title && sessionId) {
+      const listed = state.sessions.find((session) => session.id === sessionId);
+      if (listed) {
+        listed.title = title;
+        renderSessions();
+      }
+    }
+    return;
+  }
   hideEmptyState();
   updateSessionStatus(event.sessionStatus);
   updateTurnChangeStats(event.turnChangeStats ?? event.changeStats, {

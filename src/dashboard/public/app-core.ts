@@ -510,6 +510,8 @@ export type DashboardStreamEvent = {
   status?: string;
   item?: { id?: string; kind?: string; preview?: string; [key: string]: unknown };
   id?: string;
+  sessionId?: string;
+  title?: string;
   allowed?: boolean;
   interrupted?: boolean;
   current?: { preview?: string; [key: string]: unknown };
@@ -595,6 +597,7 @@ export type DashboardUiState = {
   sessionsRefreshTimer: ReturnType<typeof setTimeout> | null;
   sessionsRefreshDueAt: number;
   sidebarCollapsed: boolean;
+  sessionSearchQuery: string;
   deletingSessions: Set<unknown>;
   deleteConfirmSessionId: string;
   files: DashboardFile[];
@@ -767,6 +770,7 @@ export const state: DashboardUiState = {
   sessionsRefreshTimer: null,
   sessionsRefreshDueAt: 0,
   sidebarCollapsed: false,
+  sessionSearchQuery: "",
   deletingSessions: new Set(),
   deleteConfirmSessionId: "",
   files: [],
@@ -872,6 +876,7 @@ export const state: DashboardUiState = {
 export const els = {
   projectPath: document.querySelector("#project-path"),
   threadList: document.querySelector("#thread-list"),
+  sessionSearch: document.querySelector("#session-search"),
   refreshSessions: document.querySelector("#refresh-sessions"),
   collapseSidebar: document.querySelector("#collapse-sidebar"),
   sessionsStatus: document.querySelector("#sessions-status"),
