@@ -1,6 +1,6 @@
 {
   "name": "@ant-code/cli",
-  "version": "2.0.15",
+  "version": "2.0.16",
   "description": "Ant Code local coding agent development package.",
   "type": "module",
   "private": true,

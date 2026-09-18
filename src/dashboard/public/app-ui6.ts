@@ -1,3 +1,4 @@
+import { inferModelSupportsImages, needsVisionCapabilityProbe } from "../../model-gateway/vision-capabilities.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { hydrateRichContent } from "./rich-renderers.ts";
 import { visibleTranscriptRole } from "./transcript.ts";
@@ -36,8 +37,14 @@ export function markModelConfigEndpointChanged(form: HTMLElement | null, options
 }
 
 /** @param {HTMLFormElement | null} form */
+let visionProbeTimer = 0;
+let thinkingProbeTimer = 0;
+
 export function handleModelConfigModelIdChanged(form: HTMLElement | null) {
   cancelScopedRequest("model-capabilities-probe");
+  cancelScopedRequest("model-vision-probe");
+  window.clearTimeout(visionProbeTimer);
+  window.clearTimeout(thinkingProbeTimer);
   state.modelCapabilityProbeRunning = false;
   state.modelCapabilityProbeError = "";
   state.modelCapabilityDiscoveryToken = "";
@@ -51,6 +58,9 @@ export function handleModelConfigModelIdChanged(form: HTMLElement | null) {
   const modelId = String(modelInput?.value ?? "").trim();
   const discoveredModel = state.gatewayProbeResult?.models?.find((model) => model.id === modelId) ?? null;
   if (discoveredModel && applyGatewayDiscoveredModel(form, discoveredModel)) return;
+  syncVisionCheckboxForModel(form, modelId);
+  scheduleUncertainVisionProbe(form, modelId);
+  scheduleThinkingCapabilityProbe(form);
   renderReasoningCapabilityStatus();
 }
 
@@ -508,6 +518,114 @@ export function applyProbedModel(button: HTMLElement) {
 }
 
 /** @param {HTMLFormElement | null} form @param {any} discoveredModel */
+export function setVisionCapabilityState(form: HTMLElement | null | undefined, options: { checked?: boolean; status?: string }) {
+  const visionInput = form?.querySelector("input[name='vision']");
+  if (visionInput instanceof HTMLInputElement && options.checked != null) {
+    visionInput.checked = options.checked;
+  }
+  const text = String(options.status ?? "");
+  for (const status of form?.querySelectorAll(".model-capability-status") ?? []) {
+    status.textContent = text;
+  }
+}
+
+export function syncVisionCheckboxForModel(form: HTMLElement | null | undefined, modelId: unknown) {
+  const visionInput = form?.querySelector("input[name='vision']");
+  if (!(visionInput instanceof HTMLInputElement)) {
+    return;
+  }
+  const id = String(modelId ?? "").trim();
+  const discovered = currentGatewayCatalogModels(form ?? null).find((model) => model.id === id);
+  const checked = discovered?.modalities?.includes("image") === true || inferModelSupportsImages(id);
+  setVisionCapabilityState(form, {
+    checked,
+    status: checked ? (discovered?.modalities?.includes("image") ? "目录已标明视觉" : "") : ""
+  });
+}
+
+export function scheduleThinkingCapabilityProbe(form: HTMLElement | null | undefined) {
+  window.clearTimeout(thinkingProbeTimer);
+  if (!(form instanceof HTMLFormElement)) {
+    return;
+  }
+  thinkingProbeTimer = window.setTimeout(() => {
+    void probeModelCapabilities(form);
+  }, 800);
+}
+
+export function scheduleUncertainVisionProbe(form: HTMLElement | null | undefined, modelId: unknown) {
+  window.clearTimeout(visionProbeTimer);
+  const id = String(modelId ?? "").trim();
+  const discovered = currentGatewayCatalogModels(form ?? null).find((model) => model.id === id);
+  if (!id || !form) {
+    return;
+  }
+  if (!needsVisionCapabilityProbe(id, discovered?.modalities)) {
+    const checked = discovered?.modalities?.includes("image") === true || inferModelSupportsImages(id);
+    setVisionCapabilityState(form, {
+      checked,
+      status: checked ? "目录已标明视觉" : "无需检测视觉"
+    });
+    return;
+  }
+  const visionInput = form.querySelector("input[name='vision']");
+  if (visionInput instanceof HTMLInputElement && visionInput.checked && discovered?.modalities?.includes("image") === true) {
+    setVisionCapabilityState(form, { checked: true, status: "目录已标明视觉" });
+    return;
+  }
+  setVisionCapabilityState(form, { status: "正在检测视觉…" });
+  visionProbeTimer = window.setTimeout(() => {
+    void probeUncertainVisionCapability(form, id);
+  }, 200);
+}
+
+export async function probeUncertainVisionCapability(form: HTMLElement | null | undefined, modelId: string) {
+  if (!(form instanceof HTMLFormElement) || !modelId) {
+    return;
+  }
+  const data = new FormData(form);
+  const profile = gatewayProfileById(state.editingGatewayProfileId) ?? currentGatewayProfile();
+  const dialogGeneration = state.modelConfigDialogGeneration;
+  const endpointRevision = state.modelConfigEndpointRevision;
+  const credentialRevision = state.modelConfigCredentialRevision;
+  const request = beginScopedRequest("model-vision-probe", `${dialogGeneration}:${endpointRevision}:${credentialRevision}:${modelId}`);
+  try {
+    const result = await postJson("/api/model-vision/probe", {
+      modelId,
+      gatewayUrl: data.get("gatewayUrl"),
+      gatewayProtocol: data.get("gatewayProtocol"),
+      gatewayApiKey: data.get("gatewayApiKey"),
+      credentialAction: gatewayCredentialAction(data, profile ?? state.gatewayConfig),
+      clientId: dashboardClientId(),
+      profileId: profile?.id || state.gatewayConfig?.activeProfileId || "",
+      previousGatewayUrl: profile?.gatewayUrl || state.gatewayConfig?.gatewayUrl || "",
+      previousGatewayProtocol: profile?.gatewayProtocol || state.gatewayConfig?.gatewayProtocol || "openai-chat"
+    }, { signal: request.signal, timeoutMs: 12_000 });
+    if (!isCurrentModelConfigRequest(request, form, dialogGeneration, endpointRevision, credentialRevision)) {
+      return;
+    }
+    const currentModelInput = form.querySelector("input[name='modelId']");
+    if (String(currentModelInput instanceof HTMLInputElement ? currentModelInput.value : "").trim() !== modelId) {
+      return;
+    }
+    if (result.ok && result.supported === true) {
+      setVisionCapabilityState(form, { checked: true, status: "已确认支持视觉" });
+    } else if (result.ok && result.supported === false) {
+      setVisionCapabilityState(form, { status: "未确认视觉能力" });
+    } else {
+      const detail = String(result.error ?? "").trim();
+      setVisionCapabilityState(form, { status: detail ? `视觉检测无结论：${detail}` : "视觉检测无结论" });
+    }
+  } catch (error) {
+    if (isAbortError(error)) {
+      return;
+    }
+    setVisionCapabilityState(form, { status: "视觉检测失败" });
+  } finally {
+    finishScopedRequest(request);
+  }
+}
+
 export function applyGatewayDiscoveredModel(form: HTMLElement | null, discoveredModel: DashboardGatewayProbeModel | null | undefined) {
   if (!form || !discoveredModel) return false;
   const modelInput = /** @type {HTMLInputElement | null} */ (form.querySelector("input[name='modelId']"));
@@ -520,10 +638,16 @@ export function applyGatewayDiscoveredModel(form: HTMLElement | null, discovered
   if (!state.editingModelId && contextInput && !contextInput.value.trim() && discoveredModel.contextTokens) {
     contextInput.value = String(discoveredModel.contextTokens);
   }
-  if (!state.editingModelId && visionInput && discoveredModel.modalities?.includes("image")) {
-    visionInput.checked = true;
+  if (visionInput) {
+    const checked = discoveredModel.modalities?.includes("image") === true
+      || inferModelSupportsImages(discoveredModel.id);
+    setVisionCapabilityState(form, {
+      checked,
+      status: checked && discoveredModel.modalities?.includes("image") === true ? "目录已标明视觉" : "正在检测视觉…"
+    });
   }
   applyReasoningCapabilityCandidate(form, reasoningCapabilityCandidate(discoveredModel));
+  scheduleUncertainVisionProbe(form, discoveredModel.id);
   return true;
 }
 
@@ -726,6 +850,7 @@ export function applyPendingReasoningCapabilities(form: HTMLElement | null) {
 export function reasoningCapabilityIsActionable(candidate: DashboardReasoningCapabilityCandidate | null | undefined) {
   if (!candidate) return false;
   return normalizeReasoningEfforts(candidate.reasoningEfforts).length > 0
+    || candidate.reasoningDiscovery?.supportsReasoning === true
     || candidate.reasoningDiscovery?.supportsReasoning === false;
 }
 
@@ -779,10 +904,11 @@ export function reasoningDiscoveryStatusText(candidate: { reasoningEfforts?: unk
   const efforts = normalizeReasoningEfforts(candidate?.reasoningEfforts);
   const discovery = candidate?.reasoningDiscovery;
   const prefix = pending ? "发现" : "";
-  if (discovery?.supportsReasoning === false) return `${prefix}上游不支持档位`;
+  if (discovery?.supportsReasoning === false) return `${prefix}未返回思考内容`;
+  if (discovery?.supportsReasoning === true && efforts.length === 0) return `${prefix}已确认会思考，未发现档位列表`;
   if (discovery?.source === "known-preset") return `${pending ? "发现" : "已应用"}模型预设 ${efforts.length} 档`;
   if (discovery?.source === "active-probe" || discovery?.source === "explicit-probe" || discovery?.source === "probe" || discovery?.source === "capability-probe") {
-    return efforts.length > 0 ? `${pending ? "发现" : "已检测"} ${efforts.length} 档` : "检测未确认档位";
+    return efforts.length > 0 ? `${pending ? "发现" : "已检测"} ${efforts.length} 档` : `${prefix}已确认会思考，未发现档位列表`;
   }
   if (discovery?.source === "upstream-metadata") {
     return efforts.length > 0 ? `${pending ? "发现" : "上游已提供"} ${efforts.length} 档` : "上游未列出档位";

@@ -11,6 +11,7 @@ import {
 import { formatGatewayError, normalizeGatewayError } from "../model-gateway/errors.ts";
 import { createLabModelGateway } from "../model-gateway/client.ts";
 import { listConfiguredModels, listRoutingModels } from "../model-gateway/models.ts";
+import { inferModelSupportsImages, resolveModelSupportsImages } from "../model-gateway/vision-capabilities.ts";
 import { runHooks } from "../hooks/runner.ts";
 import { createMcpRuntime } from "../mcp/runtime.ts";
 import { appendThinkingPreview, limitThinkingPreview } from "../model-gateway/thinking-budget.ts";
@@ -277,16 +278,19 @@ export function modelSupportsImages(config: LabAgentConfig, modelId: unknown) {
   if (!id) {
     return false;
   }
-  const model = listConfiguredModels(config).find((item) => item.id === id);
-  return modelSupportsImagesEntry(model);
+  const model = listConfiguredModels(config).find((item) => item.id === id)
+    ?? listRoutingModels(config).find((item) => item.id === id);
+  if (modelSupportsImagesEntry(model)) {
+    return true;
+  }
+  return inferModelSupportsImages(id);
 }
 
-/** @param {Record<string, any> | null | undefined} model */
-
-
-/** @param {Record<string, any> | null | undefined} model */
-export function modelSupportsImagesEntry(model: { modalities?: unknown } | null | undefined) {
-  return Array.isArray(model?.modalities) && model.modalities.includes("image");
+export function modelSupportsImagesEntry(model: { id?: unknown; modalities?: unknown } | null | undefined) {
+  return resolveModelSupportsImages({
+    id: model?.id,
+    modalities: model?.modalities
+  });
 }
 
 

@@ -268,6 +268,7 @@ button {
 .sidebar-collapsed .section-label,
 .sidebar-collapsed .section-status,
 .sidebar-collapsed #refresh-sessions,
+.sidebar-collapsed .thread-search,
 .sidebar-collapsed .thread-main,
 .sidebar-collapsed .thread-actions,
 .sidebar-collapsed .thread-delete-confirm {
@@ -452,6 +453,33 @@ button {
 .icon-button[data-state="error"] {
   border-color: rgba(255, 105, 105, 0.45);
   color: var(--danger);
+}
+
+.thread-search {
+  display: block;
+  margin-top: 10px;
+  min-width: 0;
+}
+
+.thread-search input {
+  background: var(--panel);
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-body);
+  min-width: 0;
+  padding: 8px 10px;
+  width: 100%;
+}
+
+.thread-search input::placeholder {
+  color: var(--text-muted);
+}
+
+.thread-search input:focus {
+  border-color: rgba(232, 197, 71, 0.45);
+  outline: none;
 }
 
 .thread-list {
@@ -4029,6 +4057,23 @@ body > .approval-panel:not(.hidden),
 .model-config-grid select option {
   background: #1f1f1e;
   color: var(--text);
+}
+
+.model-capability-status {
+  color: var(--text);
+  display: block;
+  font-size: var(--fs-ui);
+  grid-column: 1 / -1;
+  line-height: 1.4;
+  min-height: 1.4em;
+}
+
+.model-vision-toggle .model-capability-status {
+  display: inline;
+  grid-column: auto;
+  margin-left: 6px;
+  margin-top: 0;
+  min-height: 0;
 }
 
 .model-config-toggles {

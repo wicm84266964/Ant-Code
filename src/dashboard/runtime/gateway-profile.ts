@@ -39,6 +39,7 @@ import { clearSessionContext, compactSessionContextWithModel, createContextWindo
 import { createLabModelGateway } from "../../model-gateway/client.ts";
 import { redactGatewayText } from "../../model-gateway/errors.ts";
 import { listConfiguredModels, normalizeAgentModelTiers, normalizeReasoningEfforts, resolveModelSelection, type LabModel } from "../../model-gateway/models.ts";
+import { inferModelSupportsImages } from "../../model-gateway/vision-capabilities.ts";
 import {
   inferCatalogReasoning,
   normalizeCapabilityEfforts,
@@ -399,7 +400,7 @@ export function profileModelEntry(model: unknown): LabModel {
       label: model,
       description: "Configured model alias.",
       thinking: /thinking|reason/i.test(model),
-      modalities: /vision|visual|image|omni|multimodal/i.test(model) ? ["text", "image"] : ["text"]
+      modalities: inferModelSupportsImages(model) ? ["text", "image"] : ["text"]
     }
     : isPlainObject(model) ? modelConfigEntry(model) : modelConfigEntry({ id: "" });
   return {

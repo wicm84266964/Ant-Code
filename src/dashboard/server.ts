@@ -573,6 +573,27 @@ async function routeRequest(req: http.IncomingMessage, res: http.ServerResponse,
     const result = await options.runtime.probeGateway(body);
     return sendJson(res, responseStatus(result, 200, 400), result);
   }
+  if (req.method === "POST" && url.pathname === "/api/model-vision/probe") {
+    const body = isJsonObject(requestBody) ? requestBody : EMPTY_JSON;
+    const controller = new AbortController();
+    const abort = () => {
+      if (!controller.signal.aborted) {
+        controller.abort(new Error("Dashboard vision probe client disconnected"));
+      }
+    };
+    req.once("aborted", abort);
+    res.once("close", abort);
+    try {
+      const result = await options.runtime.probeVisionCapability(body, { signal: controller.signal });
+      if (!res.destroyed && !res.writableEnded) {
+        return sendJson(res, responseStatus(result, 200, 400), result);
+      }
+      return undefined;
+    } finally {
+      req.off("aborted", abort);
+      res.off("close", abort);
+    }
+  }
   if (req.method === "POST" && url.pathname === "/api/model-capabilities/probe") {
     const body = isJsonObject(requestBody) ? requestBody : EMPTY_JSON;
     const controller = new AbortController();

@@ -114,6 +114,7 @@ import {
   mimeTypeForDocumentExt,
   storeComposerAttachments
 } from "../../tools/composer-documents.ts";
+import { scheduleDashboardSessionTitle } from "./session-title.ts";
 import {
   dropGoalContinueItems,
   emitGoalState,
@@ -918,6 +919,7 @@ export function beginPrompt(state: DashboardActiveSessionState, item: DashboardQ
     at: new Date().toISOString()
   });
   runTurnInBackground(state, item, env);
+  scheduleDashboardSessionTitle(state, item);
   return true;
 }
 

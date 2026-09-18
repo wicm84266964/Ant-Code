@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Ant Code Dashboard</title>
     <link rel="stylesheet" href="/assets/vendor/katex.min.css" />
-    <link rel="stylesheet" href="/assets/styles.css?v=2.0.12" />
+    <link rel="stylesheet" href="/assets/styles.css?v=2.0.16" />
   </head>
   <body data-dashboard-view="conversation">
     <div class="atmosphere" aria-hidden="true"></div>
@@ -34,6 +34,10 @@
               <button class="icon-button" id="refresh-sessions" type="button" title="刷新" aria-label="刷新会话">↻</button>
             </div>
           </div>
+          <label class="thread-search">
+            <span class="visually-hidden">搜索会话</span>
+            <input id="session-search" type="search" placeholder="搜索会话" autocomplete="off" />
+          </label>
           <div class="thread-list" id="thread-list"></div>
         </div>
         <div class="sidebar-footer">
@@ -225,6 +229,6 @@
         </div>
       </div>
     </div>
-    <script src="/assets/app.js?v=2.0.12" type="module"></script>
+    <script src="/assets/app.js?v=2.0.16" type="module"></script>
   </body>
 </html>

@@ -86,6 +86,10 @@ export function updateRunStatusTone() {
 
 export function bindEvents() {
   els.refreshSessions.addEventListener("click", () => loadSessions({ feedback: true }));
+  els.sessionSearch?.addEventListener("input", () => {
+    state.sessionSearchQuery = String(els.sessionSearch.value ?? "");
+    renderSessions();
+  });
   els.collapseSidebar.addEventListener("click", () => {
     if (responsiveLayoutMode() === "desktop") {
       toggleSidebar();

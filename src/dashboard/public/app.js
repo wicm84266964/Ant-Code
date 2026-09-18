@@ -84,6 +84,7 @@ var state = {
   sessionsRefreshTimer: null,
   sessionsRefreshDueAt: 0,
   sidebarCollapsed: false,
+  sessionSearchQuery: "",
   deletingSessions: /* @__PURE__ */ new Set(),
   deleteConfirmSessionId: "",
   files: [],
@@ -233,6 +234,7 @@ var state = {
 var els = {
   projectPath: document.querySelector("#project-path"),
   threadList: document.querySelector("#thread-list"),
+  sessionSearch: document.querySelector("#session-search"),
   refreshSessions: document.querySelector("#refresh-sessions"),
   collapseSidebar: document.querySelector("#collapse-sidebar"),
   sessionsStatus: document.querySelector("#sessions-status"),
@@ -587,6 +589,7 @@ function renderSessions() {
   const threadList = els.threadList;
   if (!threadList) return;
   threadList.innerHTML = "";
+  const visibleSessions = state.sessions.filter((session) => sessionMatchesQuery(session, state.sessionSearchQuery));
   if (state.sessions.length === 0) {
     const empty = document.createElement("div");
     empty.className = "thread-meta";
@@ -594,7 +597,14 @@ function renderSessions() {
     threadList.append(empty);
     return;
   }
-  for (const session of state.sessions) {
+  if (visibleSessions.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "thread-meta";
+    empty.textContent = "没有匹配的会话";
+    threadList.append(empty);
+    return;
+  }
+  for (const session of visibleSessions) {
     const status = sessionStatusView(session);
     const title = session.title || "未命名任务";
     const meta = sessionMeta(session, status);
@@ -634,6 +644,13 @@ function renderSessions() {
     });
     threadList.append(item);
   }
+}
+function sessionMatchesQuery(session, query) {
+  const needle = String(query ?? "").trim().toLowerCase();
+  if (!needle) {
+    return true;
+  }
+  return [session.title, session.id, session.model, session.status].some((value) => String(value ?? "").toLowerCase().includes(needle));
 }
 function sessionMeta(session, status = sessionStatusView(session)) {
   const parts = [
@@ -1456,6 +1473,10 @@ function updateRunStatusTone2() {
 }
 function bindEvents2() {
   els.refreshSessions.addEventListener("click", () => loadSessions({ feedback: true }));
+  els.sessionSearch?.addEventListener("input", () => {
+    state.sessionSearchQuery = String(els.sessionSearch.value ?? "");
+    renderSessions();
+  });
   els.collapseSidebar.addEventListener("click", () => {
     if (responsiveLayoutMode2() === "desktop") {
       toggleSidebar();
@@ -2508,6 +2529,18 @@ function handleDashboardEvent3(event) {
     renderQueuePanel();
     updateSendButton();
     scheduleSessionsRefresh(0);
+    return;
+  }
+  if (event.type === "session_title_updated") {
+    const title = String(event.title ?? "").trim();
+    const sessionId = String(event.sessionId ?? state.currentSessionId ?? "");
+    if (title && sessionId) {
+      const listed = state.sessions.find((session) => session.id === sessionId);
+      if (listed) {
+        listed.title = title;
+        renderSessions();
+      }
+    }
     return;
   }
   hideEmptyState3();
@@ -4079,6 +4112,43 @@ function renderModelPanel4() {
   `;
 }
 
+// src/model-gateway/vision-capabilities.ts
+var VISION_HINT = /vision|visual|image|omni|multimodal|(?:^|[^a-z0-9])vl(?:$|[^a-z0-9])|-vl|qwen-vl/i;
+var TEXT_ONLY = /(?:^|[^a-z0-9])(?:luna|embed(?:ding)?|whisper|tts|asr)(?:$|[^a-z0-9])/i;
+function inferModelSupportsImages(modelId, catalogModalities) {
+  const evidence = classifyModelVisionEvidence(modelId, catalogModalities);
+  return evidence === "catalog" || evidence === "hint";
+}
+function classifyModelVisionEvidence(modelId, catalogModalities) {
+  if (catalogListsImageModality(catalogModalities)) {
+    return "catalog";
+  }
+  const id = String(modelId ?? "").trim().toLowerCase();
+  if (!id) {
+    return "uncertain";
+  }
+  if (TEXT_ONLY.test(id)) {
+    return "text-only";
+  }
+  if (VISION_HINT.test(id)) {
+    return "hint";
+  }
+  return "uncertain";
+}
+function needsVisionCapabilityProbe(modelId, catalogModalities) {
+  const evidence = classifyModelVisionEvidence(modelId, catalogModalities);
+  return evidence === "uncertain" || evidence === "hint";
+}
+function catalogListsImageModality(modalities) {
+  if (!Array.isArray(modalities)) {
+    return false;
+  }
+  return modalities.some((entry) => {
+    const text = String(entry ?? "").trim().toLowerCase();
+    return ["image", "images", "vision", "visual", "multimodal", "图片", "视觉"].includes(text);
+  });
+}
+
 // src/dashboard/public/app-ui5.ts
 function modelCapabilityLabels5(model) {
   if (!model || typeof model !== "object") {
@@ -4087,7 +4157,7 @@ function modelCapabilityLabels5(model) {
   const modalities = new Set(Array.isArray(model?.modalities) ? model.modalities : ["text"]);
   const labels = [];
   if (modalities.has("text")) labels.push("文本");
-  if (modalities.has("image")) labels.push("视觉");
+  if (modalities.has("image") || inferModelSupportsImages(model.id)) labels.push("视觉");
   if (model?.thinking) labels.push("thinking");
   return labels.length > 0 ? labels : ["文本"];
 }
@@ -4756,6 +4826,7 @@ function renderModelConfigPanel4() {
           <span>模型备注</span>
           <input name="label" maxlength="160" spellcheck="false" value="${escapeAttribute(current.label === current.id ? "" : current.label || "")}" placeholder="例如：科研分析、代码开发" />
         </label>
+        <div class="model-capability-status" id="model-id-capability-status" aria-live="polite"></div>
         <label>
           <span>上下文窗口</span>
           <input name="contextTokens" inputmode="numeric" pattern="[0-9]*" value="${escapeAttribute(current.contextTokens || "")}" placeholder="例如 400000" />
@@ -4798,7 +4869,7 @@ function renderModelConfigPanel4() {
       </fieldset>
       <div class="model-config-toggles">
         <label><input name="text" type="checkbox" checked disabled /> 文本</label>
-        <label><input name="vision" type="checkbox"${Array.isArray(current.modalities) && current.modalities.includes("image") ? " checked" : ""} /> 视觉</label>
+        <label class="model-vision-toggle"><input name="vision" type="checkbox"${Array.isArray(current.modalities) && current.modalities.includes("image") || inferModelSupportsImages(current.id) ? " checked" : ""} /> 视觉<span class="model-capability-status" aria-live="polite"></span></label>
         <label><input name="thinking" type="checkbox"${current.thinking ? " checked" : ""} /> thinking</label>
         <label><input name="clearGatewayApiKey" type="checkbox"${gateway.apiKeyConfigured ? "" : " disabled"} /> 清除已保存 Key</label>
         <label><input name="switchToModel" type="checkbox"${editing && !current.default ? "" : " checked"} /> 保存为该范围默认模型</label>
@@ -4934,8 +5005,13 @@ function markModelConfigEndpointChanged5(form, options = {}) {
   renderGatewayProbeResult5();
   renderReasoningCapabilityStatus5();
 }
+var visionProbeTimer = 0;
+var thinkingProbeTimer = 0;
 function handleModelConfigModelIdChanged5(form) {
   cancelScopedRequest("model-capabilities-probe");
+  cancelScopedRequest("model-vision-probe");
+  window.clearTimeout(visionProbeTimer);
+  window.clearTimeout(thinkingProbeTimer);
   state.modelCapabilityProbeRunning = false;
   state.modelCapabilityProbeError = "";
   state.modelCapabilityDiscoveryToken = "";
@@ -4952,6 +5028,9 @@ function handleModelConfigModelIdChanged5(form) {
   const modelId = String(modelInput?.value ?? "").trim();
   const discoveredModel = state.gatewayProbeResult?.models?.find((model) => model.id === modelId) ?? null;
   if (discoveredModel && applyGatewayDiscoveredModel6(form, discoveredModel)) return;
+  syncVisionCheckboxForModel(form, modelId);
+  scheduleUncertainVisionProbe(form, modelId);
+  scheduleThinkingCapabilityProbe(form);
   renderReasoningCapabilityStatus5();
 }
 function markReasoningCapabilityManual5() {
@@ -5365,6 +5444,109 @@ function applyProbedModel5(button) {
   }
   modelInput?.focus?.({ preventScroll: true });
 }
+function setVisionCapabilityState(form, options) {
+  const visionInput = form?.querySelector("input[name='vision']");
+  if (visionInput instanceof HTMLInputElement && options.checked != null) {
+    visionInput.checked = options.checked;
+  }
+  const text = String(options.status ?? "");
+  for (const status of form?.querySelectorAll(".model-capability-status") ?? []) {
+    status.textContent = text;
+  }
+}
+function syncVisionCheckboxForModel(form, modelId) {
+  const visionInput = form?.querySelector("input[name='vision']");
+  if (!(visionInput instanceof HTMLInputElement)) {
+    return;
+  }
+  const id = String(modelId ?? "").trim();
+  const discovered = currentGatewayCatalogModels6(form ?? null).find((model) => model.id === id);
+  const checked = discovered?.modalities?.includes("image") === true || inferModelSupportsImages(id);
+  setVisionCapabilityState(form, {
+    checked,
+    status: checked ? discovered?.modalities?.includes("image") ? "目录已标明视觉" : "" : ""
+  });
+}
+function scheduleThinkingCapabilityProbe(form) {
+  window.clearTimeout(thinkingProbeTimer);
+  if (!(form instanceof HTMLFormElement)) {
+    return;
+  }
+  thinkingProbeTimer = window.setTimeout(() => {
+    void probeModelCapabilities5(form);
+  }, 800);
+}
+function scheduleUncertainVisionProbe(form, modelId) {
+  window.clearTimeout(visionProbeTimer);
+  const id = String(modelId ?? "").trim();
+  const discovered = currentGatewayCatalogModels6(form ?? null).find((model) => model.id === id);
+  if (!id || !form) {
+    return;
+  }
+  if (!needsVisionCapabilityProbe(id, discovered?.modalities)) {
+    const checked = discovered?.modalities?.includes("image") === true || inferModelSupportsImages(id);
+    setVisionCapabilityState(form, {
+      checked,
+      status: checked ? "目录已标明视觉" : "无需检测视觉"
+    });
+    return;
+  }
+  const visionInput = form.querySelector("input[name='vision']");
+  if (visionInput instanceof HTMLInputElement && visionInput.checked && discovered?.modalities?.includes("image") === true) {
+    setVisionCapabilityState(form, { checked: true, status: "目录已标明视觉" });
+    return;
+  }
+  setVisionCapabilityState(form, { status: "正在检测视觉…" });
+  visionProbeTimer = window.setTimeout(() => {
+    void probeUncertainVisionCapability(form, id);
+  }, 200);
+}
+async function probeUncertainVisionCapability(form, modelId) {
+  if (!(form instanceof HTMLFormElement) || !modelId) {
+    return;
+  }
+  const data = new FormData(form);
+  const profile = gatewayProfileById4(state.editingGatewayProfileId) ?? currentGatewayProfile5();
+  const dialogGeneration = state.modelConfigDialogGeneration;
+  const endpointRevision = state.modelConfigEndpointRevision;
+  const credentialRevision = state.modelConfigCredentialRevision;
+  const request = beginScopedRequest("model-vision-probe", `${dialogGeneration}:${endpointRevision}:${credentialRevision}:${modelId}`);
+  try {
+    const result = await postJson("/api/model-vision/probe", {
+      modelId,
+      gatewayUrl: data.get("gatewayUrl"),
+      gatewayProtocol: data.get("gatewayProtocol"),
+      gatewayApiKey: data.get("gatewayApiKey"),
+      credentialAction: gatewayCredentialAction6(data, profile ?? state.gatewayConfig),
+      clientId: dashboardClientId(),
+      profileId: profile?.id || state.gatewayConfig?.activeProfileId || "",
+      previousGatewayUrl: profile?.gatewayUrl || state.gatewayConfig?.gatewayUrl || "",
+      previousGatewayProtocol: profile?.gatewayProtocol || state.gatewayConfig?.gatewayProtocol || "openai-chat"
+    }, { signal: request.signal, timeoutMs: 12e3 });
+    if (!isCurrentModelConfigRequest6(request, form, dialogGeneration, endpointRevision, credentialRevision)) {
+      return;
+    }
+    const currentModelInput = form.querySelector("input[name='modelId']");
+    if (String(currentModelInput instanceof HTMLInputElement ? currentModelInput.value : "").trim() !== modelId) {
+      return;
+    }
+    if (result.ok && result.supported === true) {
+      setVisionCapabilityState(form, { checked: true, status: "已确认支持视觉" });
+    } else if (result.ok && result.supported === false) {
+      setVisionCapabilityState(form, { status: "未确认视觉能力" });
+    } else {
+      const detail = String(result.error ?? "").trim();
+      setVisionCapabilityState(form, { status: detail ? `视觉检测无结论：${detail}` : "视觉检测无结论" });
+    }
+  } catch (error) {
+    if (isAbortError(error)) {
+      return;
+    }
+    setVisionCapabilityState(form, { status: "视觉检测失败" });
+  } finally {
+    finishScopedRequest(request);
+  }
+}
 function applyGatewayDiscoveredModel6(form, discoveredModel) {
   if (!form || !discoveredModel) return false;
   const modelInput = (
@@ -5389,10 +5571,15 @@ function applyGatewayDiscoveredModel6(form, discoveredModel) {
   if (!state.editingModelId && contextInput && !contextInput.value.trim() && discoveredModel.contextTokens) {
     contextInput.value = String(discoveredModel.contextTokens);
   }
-  if (!state.editingModelId && visionInput && discoveredModel.modalities?.includes("image")) {
-    visionInput.checked = true;
+  if (visionInput) {
+    const checked = discoveredModel.modalities?.includes("image") === true || inferModelSupportsImages(discoveredModel.id);
+    setVisionCapabilityState(form, {
+      checked,
+      status: checked && discoveredModel.modalities?.includes("image") === true ? "目录已标明视觉" : "正在检测视觉…"
+    });
   }
   applyReasoningCapabilityCandidate6(form, reasoningCapabilityCandidate6(discoveredModel));
+  scheduleUncertainVisionProbe(form, discoveredModel.id);
   return true;
 }
 function applySuggestedGatewayUrl5(button) {
@@ -5582,7 +5769,7 @@ function applyPendingReasoningCapabilities5(form) {
 }
 function reasoningCapabilityIsActionable6(candidate) {
   if (!candidate) return false;
-  return normalizeReasoningEfforts4(candidate.reasoningEfforts).length > 0 || candidate.reasoningDiscovery?.supportsReasoning === false;
+  return normalizeReasoningEfforts4(candidate.reasoningEfforts).length > 0 || candidate.reasoningDiscovery?.supportsReasoning === true || candidate.reasoningDiscovery?.supportsReasoning === false;
 }
 function renderReasoningCapabilityStatus5() {
   const form = (
@@ -5645,10 +5832,11 @@ function reasoningDiscoveryStatusText6(candidate, pending = false) {
   const efforts = normalizeReasoningEfforts4(candidate?.reasoningEfforts);
   const discovery = candidate?.reasoningDiscovery;
   const prefix = pending ? "发现" : "";
-  if (discovery?.supportsReasoning === false) return `${prefix}上游不支持档位`;
+  if (discovery?.supportsReasoning === false) return `${prefix}未返回思考内容`;
+  if (discovery?.supportsReasoning === true && efforts.length === 0) return `${prefix}已确认会思考，未发现档位列表`;
   if (discovery?.source === "known-preset") return `${pending ? "发现" : "已应用"}模型预设 ${efforts.length} 档`;
   if (discovery?.source === "active-probe" || discovery?.source === "explicit-probe" || discovery?.source === "probe" || discovery?.source === "capability-probe") {
-    return efforts.length > 0 ? `${pending ? "发现" : "已检测"} ${efforts.length} 档` : "检测未确认档位";
+    return efforts.length > 0 ? `${pending ? "发现" : "已检测"} ${efforts.length} 档` : `${prefix}已确认会思考，未发现档位列表`;
   }
   if (discovery?.source === "upstream-metadata") {
     return efforts.length > 0 ? `${pending ? "发现" : "上游已提供"} ${efforts.length} 档` : "上游未列出档位";
@@ -5824,7 +6012,7 @@ async function saveModelConfig2(event) {
     visionAgentModel: data.get("visionAgentModel"),
     gatewayDiscoveryToken: discoveryToken,
     manualAgentModelIds: manualAgentModelIds6(form),
-    modalities: data.get("vision") ? ["text", "image"] : ["text"],
+    modalities: data.get("vision") || inferModelSupportsImages(data.get("modelId")) ? ["text", "image"] : ["text"],
     thinking: data.get("thinking") === "on",
     reasoningEfforts: data.getAll("reasoningEfforts").map(String),
     defaultReasoningEffort: data.get("defaultReasoningEffort") || null,
@@ -10254,6 +10442,7 @@ export {
   primaryLiveActivity4 as primaryLiveActivity,
   probeGateway5 as probeGateway,
   probeModelCapabilities5 as probeModelCapabilities,
+  probeUncertainVisionCapability,
   protocolDisplayName5 as protocolDisplayName,
   providerModelKey5 as providerModelKey,
   questionChoiceButton8 as questionChoiceButton,
@@ -10355,10 +10544,13 @@ export {
   scheduleDraftRender4 as scheduleDraftRender,
   scheduleEventReconnect3 as scheduleEventReconnect,
   scheduleSessionsRefresh,
+  scheduleThinkingCapabilityProbe,
+  scheduleUncertainVisionProbe,
   scopedDefaultModelLabel5 as scopedDefaultModelLabel,
   scrollTranscript,
   selectTranscriptNodesToRemove2 as selectTranscriptNodesToRemove,
   sendPrompt,
+  sessionMatchesQuery,
   sessionMeta,
   sessionStatusView,
   sessionsNeedRefresh,
@@ -10375,6 +10567,7 @@ export {
   setSettingsFormSaving5 as setSettingsFormSaving,
   setSidebarCollapsed,
   setTranscriptPaging,
+  setVisionCapabilityState,
   settingsControlValue5 as settingsControlValue,
   settingsDisabled5 as settingsDisabled,
   settingsFeedbackHtml5 as settingsFeedbackHtml,
@@ -10425,6 +10618,7 @@ export {
   syncResponsiveNavigation,
   syncSettingsRail5 as syncSettingsRail,
   syncTranscriptFollowState3 as syncTranscriptFollowState,
+  syncVisionCheckboxForModel,
   syncVisualViewport2 as syncVisualViewport,
   tablePreviewMeta9 as tablePreviewMeta,
   tableTruncationNote9 as tableTruncationNote,

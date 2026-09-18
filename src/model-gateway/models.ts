@@ -1,3 +1,5 @@
+import { inferModelSupportsImages } from "./vision-capabilities.ts";
+
 export type LabReasoningEffort = {
   id: string;
   label: string;
@@ -355,7 +357,7 @@ function normalizeModality(value: unknown) {
 }
 
 function inferModalities(modelId: unknown) {
-  return /vision|visual|image|omni|multimodal/i.test(String(modelId ?? "")) ? ["text", "image"] : ["text"];
+  return inferModelSupportsImages(modelId) ? ["text", "image"] : ["text"];
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
