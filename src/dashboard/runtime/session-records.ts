@@ -314,6 +314,43 @@ export function transcriptPageReadError(result: unknown) {
 }
 
 
+export function includeInterruptedDraftsFromEvents(messages: unknown, state: DashboardActiveSessionState | null | undefined) {
+  const list = Array.isArray(messages) ? messages.slice() : [];
+  if (!state || state.running === true) {
+    return list;
+  }
+  if (list.some((message) => isInterruptedDraftTranscriptMessage(message) || isThinkingProcessTranscriptMessage(message))) {
+    return list;
+  }
+  const text = (state.events ?? [])
+    .filter((event) => event.type === "assistant_draft")
+    .map((event) => String(event.text ?? ""))
+    .join("");
+  if (!text.trim()) {
+    return list;
+  }
+  list.push({
+    role: "assistant",
+    interruptedDraft: true,
+    content: [{ type: "text", text: `[中断草稿，非最终回复]\n${text}` }]
+  });
+  return list;
+}
+
+export function isThinkingProcessTranscriptMessage(message: unknown) {
+  return isPlainObject(message) && message.thinkingProcess === true && String(message.role ?? "") === "assistant";
+}
+
+export function isInterruptedDraftTranscriptMessage(message: unknown) {
+  if (!isPlainObject(message) || String(message.role ?? "") !== "assistant") {
+    return false;
+  }
+  if (message.interruptedDraft === true) {
+    return true;
+  }
+  return /^\[中断草稿，非最终回复\]/.test(messageContentText(message.content));
+}
+
 export function mergeActiveTranscriptPage(storedPage: TranscriptPageView, state: DashboardActiveSessionState, options: Record<string, unknown> = {}) {
   const storedMessages = Array.isArray(storedPage.messages) ? storedPage.messages : [];
   const storedPositions = Array.isArray(storedPage.positions) ? storedPage.positions : [];
@@ -547,28 +584,41 @@ export function messageContentText(content: unknown) {
 /** @param {Record<string, any>} metadata */
 export function persistedSessionFailure(metadata: Record<string, unknown>) {
   const status = String(metadata?.status ?? "").trim().toLowerCase();
-  if (!["failed", "error", "gateway_error"].includes(status)) {
+  if (!["blocked", "context_overflow", "error", "failed", "gateway_error", "gateway_not_configured", "tool_limit", "unexpected_loop_end", "vision_error", "vision_unavailable"].includes(status)) {
     return null;
   }
   const rounds = Array.isArray(metadata?.gatewayRounds) ? metadata.gatewayRounds : [];
   const round = [...rounds].reverse().find((item) => isPlainObject(item) && isPlainObject(item.error));
   const error = isPlainObject(round) && isPlainObject(round.error) ? round.error : null;
-  if (!error) {
-    return null;
-  }
-  const details = isPlainObject(error.details) ? error.details : null;
-  const httpStatus = Number.isInteger(error.status) && Number(error.status) > 0 ? Number(error.status) : null;
-  const attempts = Number.isInteger(details?.attempts) && Number(details?.attempts) > 0
-    ? Number(details?.attempts)
-    : null;
+  const details = isPlainObject(error?.details) ? error.details : null;
+  const statusCode = Number(error?.status);
+  const httpStatus = Number.isInteger(statusCode) && statusCode > 0 ? statusCode : null;
+  const attemptCount = Number(details?.attempts);
+  const attempts = Number.isInteger(attemptCount) && attemptCount > 0 ? attemptCount : null;
   return {
     kind: "gateway",
-    code: publicFailureText(error.code, 120) || "GATEWAY_ERROR",
-    message: publicFailureText(error.message, 500) || "模型网关请求失败",
+    code: publicFailureText(error?.code, 120) || publicFailureText(status, 120).toUpperCase() || "GATEWAY_ERROR",
+    message: publicFailureText(error?.message, 500) || failedTurnFallbackMessage(status),
     httpStatus,
     upstreamMessage: gatewayFailureBodyMessage(details?.body),
     attempts
   };
+}
+
+function failedTurnFallbackMessage(status: string) {
+  if (status === "gateway_not_configured") {
+    return "模型网关未配置";
+  }
+  if (status === "vision_unavailable" || status === "vision_error") {
+    return "视觉识别失败";
+  }
+  if (status === "context_overflow") {
+    return "上下文超出窗口";
+  }
+  if (status === "tool_limit") {
+    return "工具轮次已达上限";
+  }
+  return "模型网关请求失败";
 }
 
 /** @param {unknown} body */

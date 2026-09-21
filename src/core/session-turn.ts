@@ -606,6 +606,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
         hooksTrusted: options.hooksTrusted,
         eventOptions,
         thinking,
+        thinkingProcess: interruptedDraft.text,
         turnMessages,
         transcriptMessages: transcriptTurnMessages
       });

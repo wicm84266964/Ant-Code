@@ -187,10 +187,11 @@ export async function restoreInitialSession() {
     return;
   }
   const sessionId = initialSessionId() || latestBackgroundSessionId();
-  if (!sessionId || !state.sessions.some((session) => session.id === sessionId)) {
+  if (!sessionId) {
     return;
   }
-  await openSession(sessionId);
+  const listed = state.sessions.some((session) => session.id === sessionId);
+  await openSession(sessionId, { restore: !listed });
 }
 
 export function latestBackgroundSessionId() {
@@ -400,7 +401,7 @@ export function handleSessionAction(action: unknown, sessionId: string) {
   }
 }
 
-export async function openSession(id: string) {
+export async function openSession(id: string, options: { restore?: boolean } = {}) {
   state.turnRequest = null;
   const request = beginScopedRequest("session", id);
   cancelScopedRequest("transcript");
@@ -410,7 +411,7 @@ export async function openSession(id: string) {
   try {
     result = await getJson(`/api/sessions/${encodeURIComponent(id)}`, { signal: request.signal });
   } catch (error) {
-    if (!isAbortError(error) && isCurrentScopedRequest(request)) {
+    if (!isAbortError(error) && isCurrentScopedRequest(request) && options.restore !== true) {
       showError(errorMessageOf(error) || "无法读取会话");
     }
     finishScopedRequest(request);
@@ -419,12 +420,16 @@ export async function openSession(id: string) {
   if (!isCurrentScopedRequest(request)) return;
   finishScopedRequest(request);
   if (!result.ok) {
-    showError(typeof result.error === "string" ? result.error : result.error ?? "无法读取会话");
+    if (options.restore !== true) {
+      showError(typeof result.error === "string" ? result.error : result.error ?? "无法读取会话");
+    }
     return;
   }
   const loadedSession = result.session;
   if (!loadedSession) {
-    showError("无法读取会话");
+    if (options.restore !== true) {
+      showError("无法读取会话");
+    }
     return;
   }
   state.currentSessionId = id;

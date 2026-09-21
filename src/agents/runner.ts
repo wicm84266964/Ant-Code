@@ -16,7 +16,7 @@ import { suggestValidationCommands } from "../core/validation-suggestions.ts";
 import { accumulateProviderUsage } from "../core/provider-usage.ts";
 import { createBudgetTracker, checkBudget, recordBudgetToolResult, resolveAgentBudget, resolveAgentModel } from "./budget.ts";
 import { buildContextPack, formatContextPack, hasWriteScope } from "./context-pack.ts";
-import { createPartialSubagentResult } from "./continuation.ts";
+import { createInterruptedSubagentResult, createPartialSubagentResult } from "./continuation.ts";
 import { formatOutputContract, summarizeContractResult } from "./contracts.ts";
 import { createPlanPackageStore, extractPlanPackage } from "./plan-package-store.ts";
 import { getAgentProfile, listAgentProfileLabels, type AgentProfile } from "./profiles.ts";
@@ -335,7 +335,7 @@ export async function runSubagent(options: {
     finishedAt: new Date().toISOString(),
     latestProgress: persistedPlanPackage?.ok
       ? `子智能体已完成；计划包已保存到 ${persistedPlanPackage.path}`
-      : result.partial ? "子智能体阶段性暂停，可继续" : result.ok ? "子智能体已完成" : (isPlainObject(result.error) ? String(result.error.message ?? "子智能体失败") : "子智能体失败"),
+      : result.partial ? "子智能体阶段性暂停，可继续" : result.ok ? "子智能体已完成" : result.interrupted ? "子智能体已中断，已保留工具记录和草稿" : (isPlainObject(result.error) ? String(result.error.message ?? "子智能体失败") : "子智能体失败"),
     toolCalls: result.tools ?? [],
     outputSummary: summarizeAgentOutput(result),
     output: persistedOutput?.preview ?? result.output ?? "",
@@ -513,6 +513,11 @@ async function runModelSubagent(options: {
   let finalReportRequested = false;
   let lastPromptProgress: Record<string, unknown> = {};
   let providerUsageProgress: Record<string, unknown> = {};
+  const draftCapture = {
+    text: "",
+    thinking: "",
+    thinkingBytes: 0
+  };
 
   try {
   for (let round = 0; ; round += 1) {
@@ -541,12 +546,10 @@ async function runModelSubagent(options: {
       });
     }
     if (options.signal?.aborted) {
-      return {
-        ok: false,
-        profile: options.profile.name,
-        interrupted: true,
-        error: { code: "AGENT_INTERRUPTED", message: "Subagent was interrupted." }
-      };
+      return haltedSubagentResult(options, toolExecutions, draftCapture, {
+        code: "AGENT_INTERRUPTED",
+        message: "Subagent was interrupted."
+      }, true);
     }
 
     const promptEstimate = estimatePromptPayload({
@@ -567,20 +570,30 @@ async function runModelSubagent(options: {
       })
     });
 
+    draftCapture.text = "";
+    draftCapture.thinking = "";
+    draftCapture.thinkingBytes = 0;
     const response = await options.gateway.sendChat({
       messages,
       tools: finalReportRequested ? [] : toolDefinitions,
       toolResults,
       sessionId,
-      stream: false,
-      signal: options.signal
+      stream: true,
+      signal: options.signal,
+      onEvent: (event) => captureSubagentDraftEvent(draftCapture, event)
     });
 
     if (!response.ok) {
+      const interrupted = options.signal?.aborted === true || isSubagentStreamHalt(response.error);
       await options.taskStore?.updateTask(options.taskId, {
-        latestProgress: response.error?.message ?? "模型请求失败",
+        latestProgress: interrupted
+          ? "子智能体已中断，已保留工具记录和草稿"
+          : (response.error?.message ?? "模型请求失败"),
         error: response.error ?? null
       });
+      if (interrupted || toolExecutions.length > 0 || draftCapture.text.trim() || draftCapture.thinkingBytes > 0) {
+        return haltedSubagentResult(options, toolExecutions, draftCapture, response.error, interrupted);
+      }
       return {
         ok: false,
         profile: options.profile.name,
@@ -792,14 +805,10 @@ async function runModelSubagent(options: {
       });
     }
     if (options.signal?.aborted) {
-      return {
-        ok: false,
-        profile: options.profile.name,
-        mode: options.profile.mode,
-        interrupted: true,
-        error: { code: "AGENT_INTERRUPTED", message: "Subagent was interrupted." },
-        tools: toolExecutions
-      };
+      return haltedSubagentResult(options, toolExecutions, draftCapture, {
+        code: "AGENT_INTERRUPTED",
+        message: "Subagent was interrupted."
+      }, true);
     }
     if (finalReportReason && !finalReportRequested && shouldRequestFinalReportAfterBudgetHit(options.profile, finalReportReason)) {
       finalReportRequested = true;
@@ -970,7 +979,7 @@ function summarizeAgentOutput(result: Record<string, unknown> | SubagentResult) 
   if (!result) {
     return "";
   }
-  if (result.ok && result.output) {
+  if (result.output) {
     return truncateText(String(result.output)).split(/\r?\n/).slice(0, 8).join("\n");
   }
   if (result.summary) {
@@ -978,6 +987,53 @@ function summarizeAgentOutput(result: Record<string, unknown> | SubagentResult) 
   }
   const error = isPlainObject(result.error) ? result.error : undefined;
   return asString(error?.message) ?? "";
+}
+
+function haltedSubagentResult(
+  options: {
+    profile: AgentProfile;
+    query: string;
+    config: LabAgentConfig;
+  },
+  tools: Array<Record<string, unknown>>,
+  draft: { text: string; thinkingBytes: number },
+  error: unknown,
+  interrupted: boolean
+) {
+  const record = isPlainObject(error) ? error : EMPTY_RECORD;
+  return createInterruptedSubagentResult({
+    profile: options.profile,
+    query: options.query,
+    reason: {
+      code: String(record.code ?? (interrupted ? "AGENT_INTERRUPTED" : "AGENT_HALTED")),
+      message: String(record.message ?? (interrupted ? "Subagent was interrupted." : "Subagent stopped before a final report."))
+    },
+    tools,
+    draftText: draft.text,
+    draftThinkingBytes: draft.thinkingBytes,
+    model: options.config.modelAlias,
+    mode: asString(options.profile.mode),
+    interrupted
+  });
+}
+
+function captureSubagentDraftEvent(capture: { text: string; thinking: string; thinkingBytes: number }, event: Record<string, unknown>) {
+  if (event.type === "text_delta" && typeof event.text === "string" && event.text) {
+    capture.text += event.text;
+    return;
+  }
+  if (event.type === "thinking_delta" && typeof event.text === "string" && event.text) {
+    capture.thinking += event.text;
+    capture.thinkingBytes += Number(event.bytes ?? Buffer.byteLength(event.text, "utf8"));
+  }
+}
+
+function isSubagentStreamHalt(error: unknown) {
+  const code = String(isPlainObject(error) ? error.code ?? "" : "");
+  return code === "AGENT_INTERRUPTED"
+    || code === "GATEWAY_STREAM_INTERRUPTED"
+    || code === "UPSTREAM_STREAM_ABORTED"
+    || code === "GATEWAY_RESPONSE_PARSE_ERROR";
 }
 
 async function emitSubagentHook(
@@ -1421,13 +1477,18 @@ function formatSubagentOutput(value: unknown) {
 }
 
 async function persistResultOutput(taskStore: ReturnType<typeof createAgentTaskStore> | undefined, taskId: string, result: SubagentResult) {
-  if (!result || typeof result.outputFull !== "string" || result.outputFull.length === 0) {
+  const full = typeof result.outputFull === "string" && result.outputFull
+    ? result.outputFull
+    : (result.interrupted === true || result.partial === true) && typeof result.output === "string"
+      ? result.output
+      : "";
+  if (!full) {
     return null;
   }
   if (typeof taskStore?.writeTaskOutput !== "function") {
     return null;
   }
-  return taskStore.writeTaskOutput(taskId, result.outputFull);
+  return taskStore.writeTaskOutput(taskId, full);
 }
 
 async function persistPlannerPlanPackage(options: {

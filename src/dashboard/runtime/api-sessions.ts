@@ -129,6 +129,7 @@ import {
   deleteDashboardSession,
   hasTranscriptCursor,
   mergeActiveTranscriptPage,
+  includeInterruptedDraftsFromEvents,
   persistedSessionFailure,
   publicBackgroundSnapshot,
   readStoredTranscriptPage,
@@ -248,7 +249,7 @@ export async function runtimeReadSession(ctx: DashboardFactoryState, selector: u
   const transcriptPage = activeState
     ? mergeActiveTranscriptPage(storedPage, activeState)
     : storedPage;
-  const transcript = transcriptPage.messages;
+  const transcript = includeInterruptedDraftsFromEvents(transcriptPage.messages, activeState);
   const finalText = activeState?.finalOutput || assistantTranscriptText(transcript);
   const snapshotState = activeState ?? createSnapshotReadState(metadata, ctx.cwd);
   const backgroundSnapshot = snapshotState ? await buildBackgroundSubagentSnapshot(snapshotState) : null;

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { runSubagent } from "../../src/agents/runner.ts";
+import { createAgentTaskStore } from "../../src/agents/task-store.ts";
 
 test("readonly researcher returns workspace summary and grep matches without gateway", async () => {
   const cwd = await makeTempWorkspace();
@@ -1239,6 +1240,117 @@ test("verifier execute subagent can run validation commands without write tools"
     assert.equal(offeredToolNames.includes("powershell"), true);
     assert.equal(offeredToolNames.includes("write_file"), false);
     assert.equal(offeredToolNames.includes("edit_file"), false);
+  } finally {
+    await close(server);
+  }
+});
+
+test("interrupted subagent keeps visible draft in the task record for later lookup", async () => {
+  const cwd = await makeTempWorkspace();
+  const controller = new AbortController();
+  const server = await listen(http.createServer(async (request, response) => {
+    if (request.method !== "POST" || request.url !== "/v1/chat") {
+      response.writeHead(404, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { code: "NOT_FOUND" } }));
+      return;
+    }
+    for await (const _ of request) {
+      // Drain request body.
+    }
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.write(`data: ${JSON.stringify({ type: "message_start", id: "hanging-subagent", model: "mock-agent" })}\n\n`);
+    response.write(`data: ${JSON.stringify({ type: "text_delta", text: "half-written explorer draft" })}\n\n`);
+  }), "127.0.0.1");
+
+  try {
+    const pending = runSubagent({
+      cwd,
+      profileName: "explorer",
+      query: "inspect workspace",
+      env: mockGatewayEnv(serverUrl(server)),
+      signal: controller.signal,
+      taskId: "task-interrupt-draft"
+    });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    controller.abort();
+    const result = await pending;
+    assert.equal(result.interrupted, true);
+    assert.match(String(result.output ?? ""), /half-written explorer draft/);
+    const saved = await createAgentTaskStore({ cwd }).readTask("task-interrupt-draft");
+    assert.equal(saved.ok, true);
+    assert.equal(saved.task.status, "interrupted");
+    assert.match(String(saved.task.output ?? ""), /half-written explorer draft/);
+    assert.match(String(saved.task.outputSummary ?? ""), /已中断|half-written/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("interrupted subagent keeps completed tool calls in the task record", async () => {
+  const cwd = await makeTempWorkspace();
+  await fs.writeFile(path.join(cwd, "notes.txt"), "hello from notes\n", "utf8");
+  const controller = new AbortController();
+  let hits = 0;
+  const server = await listen(http.createServer(async (request, response) => {
+    if (request.method !== "POST" || request.url !== "/v1/chat") {
+      response.writeHead(404, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { code: "NOT_FOUND" } }));
+      return;
+    }
+    hits += 1;
+    if (hits === 1) {
+      const body = await readRequestJson(request);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        id: "mock-agent-tool",
+        model: body.model,
+        content: [],
+        toolCalls: [{ id: "read-notes", name: "read_file", input: { path: "notes.txt", maxBytes: 1024 } }],
+        stopReason: "tool_calls"
+      }));
+      return;
+    }
+    for await (const _ of request) {
+      // Drain request body.
+    }
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.write(`data: ${JSON.stringify({ type: "message_start", id: "hanging-second", model: "mock-agent" })}\n\n`);
+    response.write(`data: ${JSON.stringify({ type: "text_delta", text: "draft after reading notes" })}\n\n`);
+  }), "127.0.0.1");
+
+  try {
+    const pending = runSubagent({
+      cwd,
+      profileName: "explorer",
+      query: "read notes then continue",
+      env: mockGatewayEnv(serverUrl(server)),
+      signal: controller.signal,
+      taskId: "task-interrupt-tools"
+    });
+    await new Promise((resolve) => {
+      const timer = setInterval(() => {
+        if (hits >= 2) {
+          clearInterval(timer);
+          resolve(undefined);
+        }
+      }, 20);
+      setTimeout(() => {
+        clearInterval(timer);
+        resolve(undefined);
+      }, 2000);
+    });
+    controller.abort();
+    const result = await pending;
+    assert.equal(result.interrupted, true);
+    assert.equal(result.tools[0].name, "read_file");
+    assert.equal(result.tools[0].ok, true);
+    assert.match(String(result.output ?? ""), /read_file|已完成工具/);
+    const saved = await createAgentTaskStore({ cwd }).readTask("task-interrupt-tools");
+    assert.equal(saved.ok, true);
+    assert.equal(saved.task.status, "interrupted");
+    assert.equal(saved.task.toolCalls[0].name, "read_file");
+    assert.equal(saved.task.toolCalls[0].ok, true);
+    assert.match(String(saved.task.output ?? ""), /已完成工具|read_file/);
   } finally {
     await close(server);
   }

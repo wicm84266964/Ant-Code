@@ -154,6 +154,7 @@ import {
   isPlainObject,
   nonNegativeInteger
 } from "./util.ts";
+import { appendInterruptedDraftMessages } from "../../core/session-resume.ts";
 
 
 export async function withIdempotentTurnRequest(
@@ -1050,6 +1051,7 @@ export function runTurnInBackground(state: DashboardActiveSessionState, item: Da
       if (wasQuarantined) {
         state.status = "interrupted";
       }
+      await persistVisibleInterruptedDraft(state, turnId, env);
       state.currentPrompt = "";
       state.currentAttachmentBytes = 0;
       const pendingMutation = state.session.pendingModelSelectionMutation;
@@ -1108,6 +1110,37 @@ export function runTurnInBackground(state: DashboardActiveSessionState, item: Da
   });
 }
 
+
+async function persistVisibleInterruptedDraft(state: DashboardActiveSessionState, turnId: string, env: NodeJS.ProcessEnv | undefined) {
+  if (state.events.some((event) => event.turnId === turnId && event.type === "assistant_final")) {
+    return;
+  }
+  const messages = activeTranscriptMessages(state);
+  if (messages.some((message) => Boolean(message) && typeof message === "object" && (message as { interruptedDraft?: unknown }).interruptedDraft === true)) {
+    return;
+  }
+  const fromTurn = state.events
+    .filter((event) => event.turnId === turnId && event.type === "assistant_draft")
+    .map((event) => String(event.text ?? ""))
+    .join("");
+  const text = fromTurn.trim()
+    ? fromTurn
+    : state.events
+      .filter((event) => event.type === "assistant_draft")
+      .map((event) => String(event.text ?? ""))
+      .join("");
+  if (!text.trim()) {
+    return;
+  }
+  const prompt = String(state.currentPrompt ?? "");
+  appendInterruptedDraftMessages(state.session, prompt, prompt, { text }, `turn:${state.status || "failed"}`);
+  try {
+    await persistSessionSnapshot(state.session, { env, requireExisting: false });
+    state.persisted = true;
+  } catch {
+    state.persisted = false;
+  }
+}
 
 export function isCurrentTurn(state: DashboardActiveSessionState, controller: unknown, turnId: unknown) {
   return ownsTurn(state, controller, turnId) && state.quarantinedTurnId !== turnId && !state.disposed;

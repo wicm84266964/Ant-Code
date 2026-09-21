@@ -923,6 +923,31 @@ test("dashboard runtime exposes a redacted gateway failure summary for archived 
   assert.equal("body" in reopened.session.failure, false);
 });
 
+test("dashboard runtime exposes a failure summary when gateway rounds are missing", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const runtime = createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } });
+  const store = createSessionStore({ cwd });
+  await store.writeMetadata({
+    id: "archived-gateway-failure-no-rounds",
+    prompt: "failed first turn",
+    title: "failed first turn",
+    status: "gateway_error",
+    transcript: { messages: [] }
+  });
+
+  const reopened = await runtime.readSession("archived-gateway-failure-no-rounds");
+
+  assert.equal(reopened.ok, true);
+  assert.deepEqual(reopened.session.failure, {
+    kind: "gateway",
+    code: "GATEWAY_ERROR",
+    message: "模型网关请求失败",
+    httpStatus: null,
+    upstreamMessage: null,
+    attempts: null
+  });
+});
+
 test("dashboard resume sends archived full context while display stays paged", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
   const requests = [];

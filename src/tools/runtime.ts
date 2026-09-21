@@ -1592,10 +1592,18 @@ async function persistBackgroundAgentResultIfNeeded(
     heartbeatAt: now,
     progressAt: now,
     latestProgress: interrupted
-      ? "后台子智能体已中断"
+      ? (typeof result.output === "string" && result.output.trim() ? "子智能体已中断，已保留工具记录和草稿" : "后台子智能体已中断")
       : ok
         ? (partial ? "子智能体阶段性暂停，可继续" : "子智能体已完成")
         : String(error?.message ?? "后台子智能体异常结束"),
+    ...(typeof result.output === "string" && result.output.trim()
+      ? {
+        outputSummary: result.output.split(/\r?\n/).slice(0, 8).join("\n"),
+        output: result.output
+      }
+      : {}),
+    ...(Array.isArray(result.tools) ? { toolCalls: result.tools } : {}),
+    ...(typeof result.continuationPrompt === "string" ? { continuationPrompt: result.continuationPrompt } : {}),
     error: ok ? null : error
   });
 }

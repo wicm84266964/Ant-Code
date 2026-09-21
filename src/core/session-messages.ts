@@ -453,6 +453,9 @@ export function messagesForModelContext(messages: unknown = []): SessionMessage[
     if (!message || typeof message !== "object") {
       return [];
     }
+    if ("thinkingProcess" in message && message.thinkingProcess === true) {
+      return [];
+    }
     const { interruptedDraft: _interruptedDraft, attachments: _attachments, ...rest } = message;
     return [rest];
   });

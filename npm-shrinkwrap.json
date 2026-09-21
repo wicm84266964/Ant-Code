@@ -1,12 +1,12 @@
 {
   "name": "@ant-code/cli",
-  "version": "2.0.16",
+  "version": "2.0.17",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "@ant-code/cli",
-      "version": "2.0.16",
+      "version": "2.0.17",
       "dependencies": {
         "@napi-rs/canvas": "1.0.9",
         "@vscode/ripgrep": "1.18.0",
