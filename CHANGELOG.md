@@ -4,6 +4,8 @@
 
 ## 2.0.17 - 2026-09-21
 
+Published 2026-09-21: [v2.0.17](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.17).
+
 Dashboard keeps failed and interrupted drafts in the conversation, including after refresh. Completed turns keep the thinking-process fold. Interrupted subagents store completed tool calls and visible drafts in the task record for later lookup, without auto-waking the parent.
 
 ## 2.0.16 - 2026-09-18
