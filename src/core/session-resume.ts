@@ -558,7 +558,7 @@ export function captureInterruptedDraftEvent(capture: { text: string; thinking: 
   if (!capture || !event || typeof event !== "object") {
     return;
   }
-  if (event.type === "assistant_delta") {
+  if (event.type === "assistant_delta" || event.type === "assistant_text_delta") {
     capture.text += String(event.text ?? "");
     return;
   }
@@ -577,7 +577,7 @@ export function normalizeInterruptedDraft(draft: { text?: unknown; thinking?: un
   const thinkingBytes = Number.isFinite(Number(draft?.thinkingBytes))
     ? Number(draft?.thinkingBytes)
     : thinkingPreview.bytes;
-  if (!text.trim()) {
+  if (!text.trim() && !thinkingPreview.text.trim() && thinkingBytes <= 0) {
     return null;
   }
   return {
@@ -617,35 +617,42 @@ export function appendFailedGatewayDraft(options: {
 
 
 export function appendInterruptedDraftMessages(session: AgentSession, prompt: string, displayPrompt: unknown, draft: { text?: unknown; thinking?: unknown; thinkingBytes?: unknown }, reason: string) {
-  const note = [
+  const visibleText = String(draft.text ?? "").trim();
+  const transcriptNote = [
     "[中断草稿，非最终回复]",
     `原因：${reason}`,
-    "",
-    String(draft.text ?? "")
-  ].join("\n");
-  const assistantMessage: SessionMessage = {
-    role: "assistant",
-    content: [{ type: "text", text: note }],
-    interruptedDraft: true
-  };
+    visibleText ? "" : "本轮在给出可见正文前被上游断开。",
+    visibleText
+  ].filter((line) => line !== "").join("\n");
   const thinking = normalizeAssistantThinking({
     text: draft.thinking,
     bytes: draft.thinkingBytes,
     source: "gateway-interrupted"
   });
+  const transcriptAssistant: SessionMessage = {
+    role: "assistant",
+    content: [{ type: "text", text: transcriptNote }],
+    interruptedDraft: true
+  };
+  const contextAssistant: SessionMessage = {
+    role: "assistant",
+    content: visibleText ? [{ type: "text", text: transcriptNote }] : [],
+    interruptedDraft: true
+  };
   if (thinking) {
-    assistantMessage.thinking = thinking;
+    transcriptAssistant.thinking = thinking;
+    contextAssistant.thinking = thinking;
   }
   if (typeof prompt === "string" && prompt.trim()) {
     const userMessage = persistableUserTurnMessage(prompt);
     session.messages.push(userMessage);
     appendModelContextArchiveMessages(session, [userMessage]);
   }
-  session.messages.push(assistantMessage);
-  appendModelContextArchiveMessages(session, [assistantMessage]);
+  session.messages.push(contextAssistant);
+  appendModelContextArchiveMessages(session, [contextAssistant]);
   appendTranscriptMessages(session, [
     ...(typeof displayPrompt === "string" && displayPrompt.trim() ? [{ role: "user", content: displayPrompt }] : []),
-    assistantMessage
+    transcriptAssistant
   ]);
 }
 

@@ -2233,6 +2233,62 @@ test("dashboard runtime omits the active turn transcript during refresh recovery
   }
 });
 
+test("dashboard runtime keeps interrupted visible drafts in transcript after the turn fails", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createHangingStreamGateway(), "127.0.0.1", 0);
+  try {
+    const runtime = createDashboardRuntime({
+      cwd,
+      env: mockGatewayEnv(server)
+    });
+    await runtime.trustWorkspace();
+    const started = await runtime.startTurn({
+      prompt: "keep the streamed draft",
+      permissionMode: "workspace"
+    });
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "assistant_draft" && /partial draft/.test(String(event.text ?? "")));
+    runtime.interruptTurn(started.sessionId, cleanupAbortError());
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+
+    const reopened = await runtime.readSession(started.sessionId);
+    const transcript = JSON.stringify(reopened.session.transcript ?? []);
+    assert.equal(reopened.session.running, false);
+    assert.match(transcript, /partial draft/);
+    assert.equal(
+      (reopened.session.transcript ?? []).some((message) => message?.interruptedDraft === true || /中断草稿/.test(JSON.stringify(message))),
+      true
+    );
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime keeps thinking-process drafts in transcript after a completed turn", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createGateway("stable answer", { textChunks: ["visible draft"] }), "127.0.0.1", 0);
+  try {
+    const runtime = createDashboardRuntime({
+      cwd,
+      env: mockGatewayEnv(server)
+    });
+    await runtime.trustWorkspace();
+    const started = await runtime.startTurn({
+      prompt: "keep thinking process",
+      permissionMode: "workspace"
+    });
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+    const reopened = await runtime.readSession(started.sessionId);
+    const transcript = reopened.session.transcript ?? [];
+    assert.equal(
+      transcript.some((message) => message?.thinkingProcess === true && /visible draft/.test(JSON.stringify(message))),
+      true
+    );
+    assert.equal(transcript.some((message) => message?.interruptedDraft === true), false);
+  } finally {
+    await close(server);
+  }
+});
+
 test("dashboard runtime emits workflow snapshots for visible progress", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
   const server = await listen(createTodoGateway(), "127.0.0.1", 0);

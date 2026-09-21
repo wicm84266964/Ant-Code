@@ -75,6 +75,7 @@ export type SessionMessage = {
   toolCalls?: Array<{ id?: string; name?: string; input?: unknown }>;
   toolCallId?: string;
   interruptedDraft?: boolean;
+  thinkingProcess?: boolean;
   attachments?: SessionAttachmentChip[];
 };
 

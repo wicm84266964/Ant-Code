@@ -928,6 +928,9 @@ test("session reports gateway_error after normalized missing terminal retries ar
     assert.equal(metadata.status, "gateway_error");
     assert.equal(metadata.gatewayErrors.includes("UPSTREAM_STREAM_ABORTED"), true);
     assert.equal(metadataText.includes("模型本轮没有返回可展示正文"), false);
+    const visibleTranscript = JSON.stringify(metadata.transcript?.messages ?? []);
+    assert.match(visibleTranscript, /do not accept an incomplete response/);
+    assert.match(visibleTranscript, /UPSTREAM_STREAM_ABORTED/);
   } finally {
     if (transcriptEnabled === undefined) {
       delete env.LAB_AGENT_TRANSCRIPT_ENABLED;
@@ -1704,7 +1707,8 @@ test("streamed thinking persists into resume context and follows later turns", a
     assert.equal(session.messages[1].thinking.text, "checking ");
     const metadataPath = path.join(cwd, ".lab-agent", "sessions", `${session.id}.json`);
     const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
-    assert.equal(metadata.transcript.messages[1].thinking.text, "checking ");
+    const persistedAssistant = (metadata.transcript.messages ?? []).find((message) => message.role === "assistant" && message.thinkingProcess !== true && message.interruptedDraft !== true);
+    assert.equal(persistedAssistant.thinking.text, "checking ");
 
     const resumed = await createSession({
       cwd,
@@ -2154,6 +2158,104 @@ test("gateway failures persist streamed assistant draft for resume", async () =>
     const resumeAssistant = requests[1].messages.find((message) => message.role === "assistant" && String(message.content ?? "").includes("Phase 3 readonly review"));
     assert.ok(resumeAssistant);
     assert.equal(resumeAssistant.reasoning_content, "Need to keep the latest phase.");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("thinking-only gateway disconnect keeps thinking in context and a transcript marker", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  const events = [];
+  const encoder = new TextEncoder();
+  let fetchCalls = 0;
+
+  try {
+    globalThis.fetch = async (_url, options) => {
+      fetchCalls += 1;
+      requests.push(JSON.parse(String(options.body ?? "{}")));
+      if (fetchCalls > 1) {
+        return new Response(JSON.stringify({
+          id: "chatcmpl-resume-ok",
+          model: "mock-openai",
+          choices: [
+            {
+              finish_reason: "stop",
+              message: {
+                role: "assistant",
+                content: "continued after thinking-only disconnect"
+              }
+            }
+          ]
+        }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      let streamStep = 0;
+      const body = new ReadableStream({
+        pull(controller) {
+          streamStep += 1;
+          if (streamStep === 1) {
+            controller.enqueue(encoder.encode('data: {"id":"chatcmpl-thinking-only","model":"mock-openai","choices":[{"delta":{"reasoning_content":"Need to inspect the long-running phase before answering."}}]}\n\n'));
+            return;
+          }
+          controller.error(new Error("premature close"));
+        }
+      });
+      return new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" }
+      });
+    };
+
+    const env = {
+      LAB_MODEL_GATEWAY_URL: "http://127.0.0.1/v1/chat/completions",
+      LAB_AGENT_MODEL: "mock-openai",
+      LAB_AGENT_NETWORK_MODE: "offline",
+      LAB_MODEL_GATEWAY_PROTOCOL: "openai-chat",
+      LAB_MODEL_GATEWAY_MAX_RETRIES: "0"
+    };
+    const session = await createSession({
+      cwd,
+      mode: "interactive",
+      env
+    });
+
+    const result = await runSessionTurn(session, {
+      prompt: "continue the long thinking task",
+      env,
+      onEvent: (event) => events.push(event)
+    });
+
+    assert.match(result.output, /Gateway error: GATEWAY_(RESPONSE_PARSE_ERROR|STREAM_INTERRUPTED)/);
+    assert.equal(session.messages[1].interruptedDraft, true);
+    assert.equal(Array.isArray(session.messages[1].content) && session.messages[1].content.length === 0, true);
+    assert.match(String(session.messages[1].thinking?.text ?? ""), /inspect the long-running phase/);
+    assert.equal(JSON.stringify(session.messages).includes("中断草稿，非最终回复"), false);
+    assert.equal(events.some((event) => event.type === "assistant_interrupted_draft"), true);
+
+    const metadataPath = path.join(cwd, ".lab-agent", "sessions", `${session.id}.json`);
+    const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
+    assert.match(JSON.stringify(metadata.transcript.messages), /中断草稿，非最终回复/);
+    assert.match(JSON.stringify(metadata.transcript.messages), /可见正文前被上游断开/);
+    assert.equal(metadata.interruptedDraft.thinkingBytes > 0, true);
+
+    const resumed = await createSession({
+      cwd,
+      mode: "interactive",
+      env,
+      resume: session.id
+    });
+    await runSessionTurn(resumed, {
+      prompt: "continue after the disconnect",
+      env
+    });
+    const resumeAssistant = requests[1].messages.find((message) => message.role === "assistant");
+    assert.ok(resumeAssistant);
+    assert.equal(resumeAssistant.reasoning_content, "Need to inspect the long-running phase before answering.");
+    assert.equal(JSON.stringify(requests[1]).includes("中断草稿，非最终回复"), false);
   } finally {
     globalThis.fetch = originalFetch;
   }

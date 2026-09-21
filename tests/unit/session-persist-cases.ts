@@ -340,7 +340,8 @@ test("concurrent session snapshots rebase pending messages onto the latest commi
   const env = {};
   const seed = await createSession({ cwd, mode: "interactive", env });
   await runSessionTurn(seed, { prompt: "seed concurrent archive", env });
-  const baseTotal = seed.transcriptArchive.totalMessages;
+  const baseTranscriptTotal = seed.transcriptArchive.totalMessages;
+  const baseModelTotal = seed.modelContextArchive.totalMessages;
   const left = await createSession({ cwd, mode: "interactive", env, resume: seed.id });
   const right = await createSession({ cwd, mode: "interactive", env, resume: seed.id });
 
@@ -368,8 +369,8 @@ test("concurrent session snapshots rebase pending messages onto the latest commi
     visibleRoles: ["user", "assistant", "tool"]
   });
   assert.equal(saved.ok, true);
-  assert.equal(saved.metadata.transcript.archive.totalMessages, baseTotal + 2);
-  assert.equal(saved.metadata.transcript.modelArchive.totalMessages, baseTotal + 2);
+  assert.equal(saved.metadata.transcript.archive.totalMessages, baseTranscriptTotal + 2);
+  assert.equal(saved.metadata.transcript.modelArchive.totalMessages, baseModelTotal + 2);
   assert.equal(transcript.messages.some((message) => message.content === "concurrent left message"), true);
   assert.equal(transcript.messages.some((message) => message.content === "concurrent right message"), true);
   assert.equal(modelContext.messages.some((message) => message.content === "concurrent left message"), true);

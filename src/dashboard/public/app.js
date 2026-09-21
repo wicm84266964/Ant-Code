@@ -558,10 +558,11 @@ async function restoreInitialSession() {
     return;
   }
   const sessionId = initialSessionId() || latestBackgroundSessionId();
-  if (!sessionId || !state.sessions.some((session) => session.id === sessionId)) {
+  if (!sessionId) {
     return;
   }
-  await openSession(sessionId);
+  const listed = state.sessions.some((session) => session.id === sessionId);
+  await openSession(sessionId, { restore: !listed });
 }
 function latestBackgroundSessionId() {
   return state.sessions.find((session) => session.backgroundVisible === true)?.id ?? "";
@@ -750,7 +751,7 @@ function handleSessionAction(action, sessionId) {
     copySessionId(sessionId);
   }
 }
-async function openSession(id) {
+async function openSession(id, options = {}) {
   state.turnRequest = null;
   const request = beginScopedRequest("session", id);
   cancelScopedRequest("transcript");
@@ -760,7 +761,7 @@ async function openSession(id) {
   try {
     result = await getJson(`/api/sessions/${encodeURIComponent(id)}`, { signal: request.signal });
   } catch (error) {
-    if (!isAbortError(error) && isCurrentScopedRequest(request)) {
+    if (!isAbortError(error) && isCurrentScopedRequest(request) && options.restore !== true) {
       showError(errorMessageOf(error) || "无法读取会话");
     }
     finishScopedRequest(request);
@@ -769,12 +770,16 @@ async function openSession(id) {
   if (!isCurrentScopedRequest(request)) return;
   finishScopedRequest(request);
   if (!result.ok) {
-    showError(typeof result.error === "string" ? result.error : result.error ?? "无法读取会话");
+    if (options.restore !== true) {
+      showError(typeof result.error === "string" ? result.error : result.error ?? "无法读取会话");
+    }
     return;
   }
   const loadedSession = result.session;
   if (!loadedSession) {
-    showError("无法读取会话");
+    if (options.restore !== true) {
+      showError("无法读取会话");
+    }
     return;
   }
   state.currentSessionId = id;
@@ -2616,6 +2621,8 @@ function handleDashboardEvent3(event) {
       els.runStatus.textContent = "引导中";
       setLiveTitle("正在按引导继续");
     } else if (!state.running) {
+      collapseAssistantDrafts3();
+      collapseCompletedActivities3();
       clearPendingGuide();
       resetLiveStatus({ keepBackgroundSubagents: true });
       applyIdleRunStatus("空闲");
@@ -2728,7 +2735,7 @@ function handleDashboardEvent3(event) {
   }
   if (event.type === "activity") {
     if (event.rawType === "turn_interrupted") {
-      collapseAssistantDrafts3();
+      keepInterruptedAssistantDrafts();
     }
     if (isBackgroundSubagentActivity3(event)) {
       handleBackgroundSubagentActivity3(event);
@@ -2804,6 +2811,10 @@ function handleDashboardEvent3(event) {
     }
     return;
   }
+  if (event.type === "assistant_interrupted_draft") {
+    keepInterruptedAssistantDrafts();
+    return;
+  }
   if (event.type === "assistant_final") {
     beginEventTurn3(event);
     const finalSignature = normalizeComparableText3(event.text);
@@ -2851,6 +2862,8 @@ function handleDashboardEvent3(event) {
     }
     resetLiveStatus({ keepBackgroundSubagents: true });
     clearPendingGuide();
+    keepInterruptedAssistantDrafts();
+    collapseCompletedActivities3();
     showError(event.message ?? "任务失败");
     applyIdleRunStatus("失败");
     updateSendButton();
@@ -2885,6 +2898,18 @@ function renderTranscriptMessages(messages, options = {}) {
   const nodes = [];
   const list = Array.isArray(messages) ? messages : [];
   for (const message of list) {
+    if (isThinkingProcessMessage(message)) {
+      const node2 = createThinkingProcessNode(message);
+      node2.setAttribute("aria-live", "off");
+      nodes.push(node2);
+      continue;
+    }
+    if (isInterruptedDraftMessage(message)) {
+      const node2 = createInterruptedDraftNode(message);
+      node2.setAttribute("aria-live", "off");
+      nodes.push(node2);
+      continue;
+    }
     const role = visibleTranscriptRole(isPlainObject(message) ? message.role : message);
     if (!role) {
       continue;
@@ -3389,9 +3414,21 @@ function handleActivity3(activity) {
     updateLiveActivity4(activity);
     return;
   }
-  const shouldKeep = activity.status === "failed" || activity.status === "blocked" || isMeaningfulCompletedActivity4(activity);
   removeLiveActivity4(activity);
-  if (shouldKeep) {
+  if (activity.status === "failed") {
+    keepInterruptedAssistantDrafts();
+  }
+  if (activity.status === "failed" || activity.status === "blocked") {
+    appendActivity({
+      ...activity,
+      title: String(activity.title ?? (activity.status === "failed" ? "发生错误" : "任务未完成")),
+      detail: String(activity.detail ?? ""),
+      severity: activity.status === "failed" ? "danger" : "warning",
+      collapsed: false
+    });
+    return;
+  }
+  if (isMeaningfulCompletedActivity4(activity)) {
     state.completedActivities.push(activity);
   }
 }
@@ -6984,6 +7021,90 @@ function collapseAssistantDrafts3(finalText = "") {
   appendTranscriptNode3(node);
   scrollTranscript({ onlyIfNearBottom: true });
 }
+function keepInterruptedAssistantDrafts() {
+  for (const draft of state.assistantDrafts.values()) {
+    cancelScheduledAnimationFrame2(draft, "renderFrame");
+    renderAssistantDraft4(draft, { force: true });
+    const node = draft.node;
+    if (node instanceof HTMLElement) {
+      markInterruptedDraftNode(node, Number.isFinite(draft.round) ? Number(draft.round) : null);
+    }
+  }
+  state.assistantDrafts.clear();
+}
+function markInterruptedDraftNode(node, round = null) {
+  node.classList.add("interrupted");
+  const label = node.querySelector(".message-label");
+  if (label) {
+    const prefix = Number.isInteger(round) ? `思考 · 第 ${round} 轮` : "思考";
+    label.textContent = `${prefix} · 已中断 · 非最终回复`;
+  }
+}
+function isThinkingProcessMessage(message) {
+  return isPlainObject(message) && message.thinkingProcess === true && visibleTranscriptRole(String(message.role ?? "")) === "assistant";
+}
+function createThinkingProcessNode(message) {
+  const record = isPlainObject(message) ? message : {};
+  const body = String(messageDisplayText3(record.content) ?? "").trim();
+  const node = document.createElement("details");
+  node.className = "draft-summary";
+  node.setAttribute("aria-live", "off");
+  node.innerHTML = `
+    <summary>
+      <span class="status-dot"></span>
+      <span>思考过程</span>
+      <span class="draft-summary-meta">${body ? "已收起" : "已收起 · 已汇入最终回复"}</span>
+    </summary>
+    <div class="draft-summary-list"></div>
+  `;
+  const list = node.querySelector(".draft-summary-list");
+  if (body && list) {
+    const item = document.createElement("section");
+    item.className = "draft-summary-item";
+    const title = document.createElement("div");
+    title.className = "draft-summary-title";
+    title.textContent = "草稿";
+    const bodyNode = document.createElement("div");
+    bodyNode.className = "message-body draft-plain-text";
+    bodyNode.textContent = body;
+    item.append(title, bodyNode);
+    list.append(item);
+  } else if (list) {
+    const note = document.createElement("div");
+    note.className = "draft-summary-note";
+    note.textContent = "本轮流式草稿已合并到最终回复，没有额外过程内容。";
+    list.append(note);
+  }
+  return node;
+}
+function isInterruptedDraftMessage(message) {
+  if (!isPlainObject(message) || visibleTranscriptRole(String(message.role ?? "")) !== "assistant") {
+    return false;
+  }
+  if (message.interruptedDraft === true) {
+    return true;
+  }
+  return /^\[中断草稿，非最终回复\]/.test(messageDisplayText3(message.content));
+}
+function interruptedDraftDisplayText(content) {
+  return String(messageDisplayText3(content) ?? "").replace(/^\[中断草稿，非最终回复\]\s*/u, "").replace(/^原因：[^\n]*\s*/u, "").replace(/^本轮在给出可见正文前被上游断开。\s*/u, "").trim();
+}
+function createInterruptedDraftNode(message) {
+  const record = isPlainObject(message) ? message : {};
+  const body = interruptedDraftDisplayText(record.content);
+  const node = document.createElement("article");
+  node.className = "message assistant draft-message interrupted";
+  node.setAttribute("aria-live", "off");
+  node.innerHTML = `
+    <div class="message-label">思考 · 已中断 · 非最终回复</div>
+    <div class="message-body draft-plain-text"></div>
+  `;
+  const bodyNode = node.querySelector(".message-body");
+  if (bodyNode) {
+    bodyNode.textContent = body || "本轮在给出可见正文前被上游断开。模型内部思考没有作为最终回复展示。";
+  }
+  return node;
+}
 function isMeaningfulCompletedActivity4(activity) {
   if (activity.toolName === "agent_run") {
     return true;
@@ -10235,7 +10356,9 @@ export {
   contextSummaryLine3 as contextSummaryLine,
   copyCodeBlock10 as copyCodeBlock,
   copySessionId,
+  createInterruptedDraftNode,
   createMessageNode3 as createMessageNode,
+  createThinkingProcessNode,
   currentGatewayCatalogModels6 as currentGatewayCatalogModels,
   currentGatewayProbeResult6 as currentGatewayProbeResult,
   currentGatewayProfile5 as currentGatewayProfile,
@@ -10352,6 +10475,7 @@ export {
   initializeAgentModelPickerSnapshot5 as initializeAgentModelPickerSnapshot,
   initializeSettingsFormTracking5 as initializeSettingsFormTracking,
   interruptTurn,
+  interruptedDraftDisplayText,
   isAbortError,
   isBackgroundSubagentActivity3 as isBackgroundSubagentActivity,
   isConfigRevisionConflict7 as isConfigRevisionConflict,
@@ -10361,13 +10485,16 @@ export {
   isDuplicateDraftText8 as isDuplicateDraftText,
   isExhibitFile,
   isInterruptError3 as isInterruptError,
+  isInterruptedDraftMessage,
   isLikelyLocalFileReference10 as isLikelyLocalFileReference,
   isMeaningfulCompletedActivity4 as isMeaningfulCompletedActivity,
   isPlainObject,
   isProtectedTranscriptNode3 as isProtectedTranscriptNode,
   isSafeInlineBitmapUrl10 as isSafeInlineBitmapUrl,
+  isThinkingProcessMessage,
   isTranscriptNearBottom3 as isTranscriptNearBottom,
   isWorkspaceRelativeToBase11 as isWorkspaceRelativeToBase,
+  keepInterruptedAssistantDrafts,
   latestBackgroundSessionId,
   lifecycleActivitySummary8 as lifecycleActivitySummary,
   linkifyFileTextNodes9 as linkifyFileTextNodes,
@@ -10382,6 +10509,7 @@ export {
   manualAgentModelIds6 as manualAgentModelIds,
   markCurrentModel,
   markEventConnectionAlive3 as markEventConnectionAlive,
+  markInterruptedDraftNode,
   markModelConfigCredentialChanged5 as markModelConfigCredentialChanged,
   markModelConfigEndpointChanged5 as markModelConfigEndpointChanged,
   markReasoningCapabilityManual5 as markReasoningCapabilityManual,

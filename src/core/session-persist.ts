@@ -175,6 +175,7 @@ export function normalizeClientSurfaceValue(value: unknown) {
  */
 export async function appendSessionMessages(session: AgentSession, data: import("../model-gateway/protocol.ts").NormalizedGatewayResponse, fallbackText: string, options: {
   thinking?: unknown;
+  thinkingProcess?: unknown;
   turnMessages?: SessionMessage[];
   transcriptMessages?: SessionMessage[];
   gateway?: ReturnType<typeof createLabModelGateway>;
@@ -206,8 +207,16 @@ export async function appendSessionMessages(session: AgentSession, data: import(
 
   const turnMessages = Array.isArray(options.turnMessages) ? options.turnMessages : [];
   const transcriptMessages = Array.isArray(options.transcriptMessages) ? options.transcriptMessages : turnMessages;
+  const thinkingProcessText = String(options.thinkingProcess ?? "").trim();
+  const thinkingProcessMessage: SessionMessage[] = thinkingProcessText
+    ? [{
+        role: "assistant",
+        thinkingProcess: true,
+        content: [{ type: "text", text: thinkingProcessText }]
+      }]
+    : [];
   session.messages.push(...turnMessages, contextAssistant);
-  appendTranscriptMessages(session, [...transcriptMessages, transcriptAssistant]);
+  appendTranscriptMessages(session, [...transcriptMessages, ...thinkingProcessMessage, transcriptAssistant]);
   appendModelContextArchiveMessages(session, [...turnMessages, contextAssistant]);
 
   return compactSessionContextWithModel(session, {
@@ -238,6 +247,63 @@ export async function appendSessionMessages(session: AgentSession, data: import(
  */
 
 
+const VISIBLE_FAILED_TURN_STATUSES = new Set([
+  "blocked",
+  "context_overflow",
+  "error",
+  "failed",
+  "gateway_error",
+  "gateway_not_configured",
+  "tool_limit",
+  "unexpected_loop_end",
+  "vision_error",
+  "vision_unavailable"
+]);
+
+export function ensureVisibleFailedTurnTranscript(session: AgentSession, options: { prompt?: unknown; output?: unknown } = {}) {
+  const userText = String(options.prompt ?? "").trim();
+  const errorText = String(options.output ?? "").trim();
+  if (!userText && !errorText) {
+    return;
+  }
+  const messages = Array.isArray(session.transcriptMessages) ? session.transcriptMessages : [];
+  const lastUser = [...messages].reverse().find((message) => message?.role === "user");
+  const lastText = transcriptMessageText(messages.at(-1));
+  const toAdd: SessionMessage[] = [];
+  if (userText && transcriptMessageText(lastUser) !== userText) {
+    toAdd.push({ role: "user", content: userText });
+  }
+  const trailingText = toAdd.length > 0 ? transcriptMessageText(toAdd.at(-1)) : lastText;
+  if (errorText && trailingText !== errorText) {
+    toAdd.push({ role: "assistant", content: errorText });
+  }
+  if (toAdd.length > 0) {
+    appendTranscriptMessages(session, toAdd);
+  }
+}
+
+function transcriptMessageText(message: SessionMessage | undefined) {
+  if (!message) {
+    return "";
+  }
+  const content = message.content;
+  if (typeof content === "string") {
+    return content.trim();
+  }
+  if (!Array.isArray(content)) {
+    return "";
+  }
+  return content.map((item) => {
+    if (typeof item === "string") {
+      return item;
+    }
+    if (item && typeof item === "object" && "text" in item) {
+      return String(item.text ?? "");
+    }
+    return "";
+  }).filter(Boolean).join("\n").trim();
+}
+
 /**
  * @param {ReturnType<typeof createSessionStore>} store
  * @param {Record<string, any>} metadata
@@ -247,6 +313,12 @@ export async function appendSessionMessages(session: AgentSession, data: import(
  */
 export async function persistSessionMetadata(store: ReturnType<typeof createSessionStore>, metadata: Record<string, unknown>, output: string, status: string, session: AgentSession, options: Record<string, unknown> = {}) {
   metadata.status = status;
+  if (VISIBLE_FAILED_TURN_STATUSES.has(String(status ?? "").trim().toLowerCase())) {
+    ensureVisibleFailedTurnTranscript(session, {
+      prompt: metadata.prompt,
+      output
+    });
+  }
   metadata.finishedAt = new Date().toISOString();
   metadata.outputBytes = Buffer.byteLength(output, "utf8");
   const usage = normalizeProviderUsageAggregate(session.usage);
@@ -706,6 +778,9 @@ export function persistableMessage(message: unknown, options: Record<string, unk
   };
   if (message.interruptedDraft === true) {
     persisted.interruptedDraft = true;
+  }
+  if (message.thinkingProcess === true) {
+    persisted.thinkingProcess = true;
   }
   const thinking = options.includeThinking === false ? null : role === "assistant" ? persistableThinking(message.thinking) : null;
   if (thinking) {

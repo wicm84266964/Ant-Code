@@ -150,6 +150,101 @@ export function collapseAssistantDrafts(finalText: unknown = "") {
   scrollTranscript({ onlyIfNearBottom: true });
 }
 
+export function keepInterruptedAssistantDrafts() {
+  for (const draft of state.assistantDrafts.values()) {
+    cancelScheduledAnimationFrame(draft, "renderFrame");
+    renderAssistantDraft(draft, { force: true });
+    const node = draft.node;
+    if (node instanceof HTMLElement) {
+      markInterruptedDraftNode(node, Number.isFinite(draft.round) ? Number(draft.round) : null);
+    }
+  }
+  state.assistantDrafts.clear();
+}
+
+export function markInterruptedDraftNode(node: HTMLElement, round: number | null = null) {
+  node.classList.add("interrupted");
+  const label = node.querySelector(".message-label");
+  if (label) {
+    const prefix = Number.isInteger(round) ? `思考 · 第 ${round} 轮` : "思考";
+    label.textContent = `${prefix} · 已中断 · 非最终回复`;
+  }
+}
+
+export function isThinkingProcessMessage(message: unknown) {
+  return isPlainObject(message) && message.thinkingProcess === true && visibleTranscriptRole(String(message.role ?? "")) === "assistant";
+}
+
+export function createThinkingProcessNode(message: unknown) {
+  const record = isPlainObject(message) ? message : {};
+  const body = String(messageDisplayText(record.content) ?? "").trim();
+  const node = document.createElement("details");
+  node.className = "draft-summary";
+  node.setAttribute("aria-live", "off");
+  node.innerHTML = `
+    <summary>
+      <span class="status-dot"></span>
+      <span>思考过程</span>
+      <span class="draft-summary-meta">${body ? "已收起" : "已收起 · 已汇入最终回复"}</span>
+    </summary>
+    <div class="draft-summary-list"></div>
+  `;
+  const list = node.querySelector(".draft-summary-list");
+  if (body && list) {
+    const item = document.createElement("section");
+    item.className = "draft-summary-item";
+    const title = document.createElement("div");
+    title.className = "draft-summary-title";
+    title.textContent = "草稿";
+    const bodyNode = document.createElement("div");
+    bodyNode.className = "message-body draft-plain-text";
+    bodyNode.textContent = body;
+    item.append(title, bodyNode);
+    list.append(item);
+  } else if (list) {
+    const note = document.createElement("div");
+    note.className = "draft-summary-note";
+    note.textContent = "本轮流式草稿已合并到最终回复，没有额外过程内容。";
+    list.append(note);
+  }
+  return node;
+}
+
+export function isInterruptedDraftMessage(message: unknown) {
+  if (!isPlainObject(message) || visibleTranscriptRole(String(message.role ?? "")) !== "assistant") {
+    return false;
+  }
+  if (message.interruptedDraft === true) {
+    return true;
+  }
+  return /^\[中断草稿，非最终回复\]/.test(messageDisplayText(message.content));
+}
+
+export function interruptedDraftDisplayText(content: unknown) {
+  return String(messageDisplayText(content) ?? "")
+    .replace(/^\[中断草稿，非最终回复\]\s*/u, "")
+    .replace(/^原因：[^\n]*\s*/u, "")
+    .replace(/^本轮在给出可见正文前被上游断开。\s*/u, "")
+    .trim();
+}
+
+export function createInterruptedDraftNode(message: unknown) {
+  const record = isPlainObject(message) ? message : {};
+  const body = interruptedDraftDisplayText(record.content);
+  const node = document.createElement("article");
+  node.className = "message assistant draft-message interrupted";
+  node.setAttribute("aria-live", "off");
+  node.innerHTML = `
+    <div class="message-label">思考 · 已中断 · 非最终回复</div>
+    <div class="message-body draft-plain-text"></div>
+  `;
+  const bodyNode = node.querySelector(".message-body");
+  if (bodyNode) {
+    bodyNode.textContent = body || "本轮在给出可见正文前被上游断开。模型内部思考没有作为最终回复展示。";
+  }
+  return node;
+}
+
 export function isMeaningfulCompletedActivity(activity: DashboardActivity) {
   if (activity.toolName === "agent_run") {
     return true;

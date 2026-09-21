@@ -2,9 +2,15 @@
 
 ## Unreleased
 
+## 2.0.17 - 2026-09-21
+
+Dashboard keeps failed and interrupted drafts in the conversation, including after refresh. Completed turns keep the thinking-process fold. Interrupted subagents store completed tool calls and visible drafts in the task record for later lookup, without auto-waking the parent.
+
 ## 2.0.16 - 2026-09-18
 
-Dashboard session search, cheap-model titles, and observational vision/thinking probes. Leftover project agent routes no longer block startup. Settings uses the saved API key for probes and a 64×64 image instead of a 1×1 PNG. Candidate release; GitHub tag pending.
+Published 2026-09-18: [v2.0.16](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.16).
+
+Dashboard session search, cheap-model titles, and observational vision/thinking probes. Leftover project agent routes no longer block startup. Settings uses the saved API key for probes and a 64×64 image instead of a 1×1 PNG.
 
 ## 2.0.15 - 2026-09-18
 
