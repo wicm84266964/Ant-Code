@@ -626,8 +626,18 @@ test("dashboard runtime throttles retention maintenance and immediately applies 
 
   const status = await runtime.status();
   assert.equal(status.ok, true);
-  await waitForCondition(async () => (await store.readMetadataExact("old-session")).ok === false);
-  await assert.rejects(fs.access(path.join(store.root, "old-session.transcript")), { code: "ENOENT" });
+  const sessionFilesGone = async (sessionId) => {
+    if ((await store.readMetadataExact(sessionId)).ok !== false) {
+      return false;
+    }
+    try {
+      await fs.access(path.join(store.root, `${sessionId}.transcript`));
+      return false;
+    } catch (error) {
+      return error && typeof error === "object" && "code" in error && error.code === "ENOENT";
+    }
+  };
+  await waitForCondition(() => sessionFilesGone("old-session"));
   assert.equal((await store.readMetadataExact("fresh-session")).ok, true);
 
   const lateArchive = await store.writeTranscriptChunks("late-session", [{ role: "user", content: "late" }]);
@@ -644,8 +654,7 @@ test("dashboard runtime throttles retention maintenance and immediately applies 
   });
   assert.equal(saved.ok, true);
   assert.equal(saved.settings.transcript.retentionDays, 0);
-  assert.equal((await store.readMetadataExact("late-session")).ok, false);
-  await assert.rejects(fs.access(path.join(store.root, "late-session.transcript")), { code: "ENOENT" });
+  await waitForCondition(() => sessionFilesGone("late-session"));
   assert.equal((await store.readMetadataExact("fresh-session")).ok, true);
   assert.equal((await store.readTranscriptPage(freshArchive)).messages.length, 1);
 

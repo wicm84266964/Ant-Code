@@ -17,6 +17,10 @@ function asRecord(value: unknown): Record<string, unknown> {
   return isRecord(value) ? value : {};
 }
 
+function isSteerInterruptReason(reason: unknown) {
+  return String(reason ?? "").trim() === "guided";
+}
+
 const BLOCKED_TURN_STATUSES = new Set(["gateway_not_configured", "tool_limit", "vision_unavailable", "context_overflow"]);
 const INTERRUPTED_TURN_STATUSES = new Set(["interrupted", "cancelled"]);
 const FAILED_BACKGROUND_STATUSES = new Set(["failed", "error", "lost"]);
@@ -165,6 +169,9 @@ export function mapSessionEventToDashboard(event: Record<string, unknown>) {
     return [activity("gateway-error", "模型请求失败", gatewayErrorDetail(event.error), "failed", "gateway", event, { coalesceKey: "gateway" })];
   }
   if (type === "turn_interrupted") {
+    if (isSteerInterruptReason(event.reason)) {
+      return [activity("turn-guided", "引导已接管", "上一轮已收束，按你的引导继续", "running", "session", event, { coalesceKey: "turn" })];
+    }
     return [activity("turn-interrupted", "任务已中断", event.reason ?? "用户中断", "interrupted", "session", event)];
   }
   if (type === "context_overflow") {
@@ -216,6 +223,9 @@ function turnCompletionView(value: unknown) {
   const terminalStatus = String(value ?? "completed").trim().toLowerCase() || "completed";
   if (terminalStatus === "completed") {
     return { title: "任务已完成", detail: "状态：completed", status: "completed", terminalStatus };
+  }
+  if (terminalStatus === "guided" || isSteerInterruptReason(terminalStatus)) {
+    return { title: "引导已接管", detail: "上一轮已收束，按你的引导继续", status: "running", terminalStatus };
   }
   if (INTERRUPTED_TURN_STATUSES.has(terminalStatus)) {
     return { title: "任务已中断", detail: `状态：${terminalStatus}`, status: "interrupted", terminalStatus };

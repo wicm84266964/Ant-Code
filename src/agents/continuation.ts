@@ -28,6 +28,9 @@ export function createPartialSubagentResult(options: {
     options.reason?.kind === "maxOutputBytes"
       ? "继续时先用 grep/glob 缩小范围，再 read_file 小片段，不要重复读取整文件。"
       : null,
+    options.reason?.kind === "contextOverflow"
+      ? "继续时把剩余工作拆成更小的检索或阅读批次，不要在一次子任务里堆整份大文件。"
+      : null,
     options.reason?.kind === "webSearchUnavailable"
       ? "配置可用的 SearXNG/搜索 MCP，或让主智能体改用已有知识和可访问 URL。"
       : null
@@ -40,6 +43,7 @@ export function createPartialSubagentResult(options: {
     "",
     "预算暂停原因：",
     options.reason.message,
+    remaining.length ? `\n继续约束：\n${remaining.map((item) => `- ${item}`).join("\n")}` : "",
     "",
     "已完成摘要：",
     completed.length ? completed.map((item) => `- ${item}`).join("\n") : "- 尚无成功工具结果。",

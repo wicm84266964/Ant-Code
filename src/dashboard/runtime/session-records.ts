@@ -550,10 +550,10 @@ export function activeDashboardStatus(state: DashboardActiveSessionState) {
     return "quarantined";
   }
   if (state.interrupting) {
-    return "interrupting";
+    return state.queuedPrompts.some((item) => item.kind === "guide") ? "引导中" : "interrupting";
   }
   if (state.running) {
-    return state.queuedPrompts.some((item) => item.kind === "guide") ? "引导中" : "running";
+    return state.queuedPrompts.some((item) => item.kind === "guide") || state.status === "guided" ? "引导中" : "running";
   }
   return state.status || state.session.status || "active";
 }

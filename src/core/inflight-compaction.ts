@@ -67,6 +67,159 @@ export function compactInFlightToolMessages(messages: Array<Record<string, unkno
   return result(compactedTools > 0, beforeBytes, afterBytes, beforeTokens, afterTokens, compactedTools, triggerTokens);
 }
 
+/**
+ * After tool text is already reduced, live turns can still overflow from older
+ * assistant thinking, long status text, and earlier tool-call rounds.
+ */
+export function compactInFlightLiveContext(
+  messages: Array<Record<string, unknown>>,
+  options: Parameters<typeof compactInFlightToolMessages>[1] & {
+    toolResults?: Array<{ toolCallId?: string }>;
+  } = {}
+) {
+  const beforeBytes = estimateMessagesBytes(messages);
+  const beforeTokens = estimateTokensFromBytes(beforeBytes);
+  const tools = compactInFlightToolMessages(messages, options);
+  const needsCompaction = options.needsCompaction ?? (() => tools.compacted !== true && options.force === true);
+  let strippedThinking = 0;
+  let truncatedAssistants = 0;
+  let droppedRounds = 0;
+
+  if (needsCompaction()) {
+    strippedThinking = stripOlderAssistantThinking(messages);
+  }
+  if (needsCompaction()) {
+    truncatedAssistants = truncateOlderAssistantText(messages);
+  }
+  while (needsCompaction()) {
+    if (!dropOldestCurrentTurnToolRound(messages, options.toolResults)) {
+      break;
+    }
+    droppedRounds += 1;
+  }
+
+  const compacted = tools.compacted === true || strippedThinking > 0 || truncatedAssistants > 0 || droppedRounds > 0;
+  const afterBytes = estimateMessagesBytes(messages);
+  return {
+    ...tools,
+    compacted,
+    beforeBytes,
+    beforeTokens,
+    afterBytes,
+    afterTokens: estimateTokensFromBytes(afterBytes),
+    strippedThinking,
+    truncatedAssistants,
+    droppedRounds
+  };
+}
+
+export function stripOlderAssistantThinking(messages: Array<Record<string, unknown>>) {
+  let lastAssistant = -1;
+  for (let index = 0; index < messages.length; index += 1) {
+    if (messages[index]?.role === "assistant") {
+      lastAssistant = index;
+    }
+  }
+  let stripped = 0;
+  for (let index = 0; index < messages.length; index += 1) {
+    if (index === lastAssistant || messages[index]?.role !== "assistant") {
+      continue;
+    }
+    const message = messages[index];
+    if (message.thinking != null || typeof message.reasoning_content === "string") {
+      delete message.thinking;
+      delete message.reasoning_content;
+      stripped += 1;
+    }
+  }
+  return stripped;
+}
+
+function truncateOlderAssistantText(messages: Array<Record<string, unknown>>, maxChars = 400) {
+  let lastAssistant = -1;
+  for (let index = 0; index < messages.length; index += 1) {
+    if (messages[index]?.role === "assistant") {
+      lastAssistant = index;
+    }
+  }
+  let truncated = 0;
+  for (let index = 0; index < messages.length; index += 1) {
+    if (index === lastAssistant || messages[index]?.role !== "assistant") {
+      continue;
+    }
+    const text = extractText(messages[index]?.content);
+    if (!text || text.length <= maxChars) {
+      continue;
+    }
+    messages[index].content = [{ type: "text", text: `${text.slice(0, maxChars).trimEnd()}\n...[in-flight compacted]` }];
+    truncated += 1;
+  }
+  return truncated;
+}
+
+export function dropOldestCurrentTurnToolRound(
+  messages: Array<Record<string, unknown>>,
+  toolResults?: Array<{ toolCallId?: string }>
+) {
+  let lastUser = -1;
+  for (let index = 0; index < messages.length; index += 1) {
+    if (messages[index]?.role === "user") {
+      lastUser = index;
+    }
+  }
+  let assistantIndex = -1;
+  for (let index = lastUser + 1; index < messages.length; index += 1) {
+    if (hasAssistantToolCalls(messages[index])) {
+      assistantIndex = index;
+      break;
+    }
+  }
+  if (assistantIndex < 0) {
+    return false;
+  }
+  let end = assistantIndex + 1;
+  while (end < messages.length && messages[end]?.role === "tool") {
+    end += 1;
+  }
+  let laterRound = false;
+  for (let index = end; index < messages.length; index += 1) {
+    if (hasAssistantToolCalls(messages[index])) {
+      laterRound = true;
+      break;
+    }
+  }
+  if (!laterRound) {
+    return false;
+  }
+  const droppedIds = new Set<string>();
+  for (let index = assistantIndex; index < end; index += 1) {
+    if (messages[index]?.role !== "tool") {
+      continue;
+    }
+    const id = String(messages[index].toolCallId ?? messages[index].tool_call_id ?? "").trim();
+    if (id) {
+      droppedIds.add(id);
+    }
+  }
+  messages.splice(assistantIndex, end - assistantIndex);
+  if (Array.isArray(toolResults) && droppedIds.size > 0) {
+    for (let index = toolResults.length - 1; index >= 0; index -= 1) {
+      if (droppedIds.has(String(toolResults[index]?.toolCallId ?? "").trim())) {
+        toolResults.splice(index, 1);
+      }
+    }
+  }
+  return true;
+}
+
+function hasAssistantToolCalls(message: Record<string, unknown> | undefined) {
+  return Boolean(
+    message?.role === "assistant" &&
+    Array.isArray(message.toolCalls) &&
+    message.toolCalls.length > 0
+  );
+}
+
 function retentionPriority(message: Record<string, unknown>) {
   const text = extractText(message.content);
   const parsed = parseJson(text);

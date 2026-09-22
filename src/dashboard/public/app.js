@@ -677,7 +677,7 @@ function sessionStatusView(session) {
     }
     return { label: "子智能体后台", tone: "background", detail: Number(session.backgroundCount ?? 0) > 1 ? `${session.backgroundCount} 个任务` : "" };
   }
-  if (raw.includes("引导")) {
+  if (raw === "guided" || raw.includes("引导")) {
     return { label: "引导中", tone: "running", detail: "" };
   }
   if (Number(session.queueLength ?? 0) > 0) {

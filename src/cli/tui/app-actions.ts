@@ -602,9 +602,9 @@ export function useTuiAppActions(s: ReturnType<typeof useTuiAppPanels>) {
   const interruptCurrentTurn = useCallback((stopReason: string) => {
     const controller = currentTurnAbortRef.current;
     if (controller && !controller.signal.aborted) {
-      controller.abort();
+      controller.abort(stopReason);
     }
-    setStream(initialStream({ phase: "interrupted", stopReason }));
+    setStream(initialStream({ phase: stopReason === "guided" ? "idle" : "interrupted", stopReason }));
   }, []);
 
   const interruptPendingGuideAtGatewayBoundary = useCallback(() => {
@@ -1103,13 +1103,14 @@ export function useTuiAppActions(s: ReturnType<typeof useTuiAppPanels>) {
       setStreamOffset(0);
       setStream(initialStream());
     } else if (event.type === "turn_interrupted") {
-      lastTurnStatusRef.current = "interrupted";
+      const steered = String(event.reason ?? "").trim() === "guided";
+      lastTurnStatusRef.current = steered ? "guided" : "interrupted";
       flushStreamDeltasNow();
       const draftText = String(event.draftText ?? "");
       const draftThinkingPreview = limitThinkingPreview(String(event.draftThinking ?? ""));
       const draftThinking = draftThinkingPreview.text;
       if (draftText.trim()) {
-        addEntry("assistant", "中断草稿", draftText, draftThinking
+        addEntry("assistant", steered ? "引导前草稿" : "中断草稿", draftText, draftThinking
           ? {
             thinking: draftThinking,
             thinkingBytes: event.draftThinkingBytes ?? Buffer.byteLength(draftThinking, "utf8"),
@@ -1118,10 +1119,10 @@ export function useTuiAppActions(s: ReturnType<typeof useTuiAppPanels>) {
           }
           : undefined);
       }
-      setStream(initialStream({ phase: "interrupted", stopReason: event.reason ?? "user" }));
-      addEntry("turn", "已中断", draftText.trim()
-        ? "轮次已中断，已保留上方中断草稿，可直接继续纠偏。"
-        : "轮次已在本地中断。尚未收到可保存的助手草稿。");
+      setStream(initialStream({ phase: steered ? "idle" : "interrupted", stopReason: event.reason ?? "user" }));
+      addEntry(steered ? "guide" : "turn", steered ? "引导已接管" : "已中断", draftText.trim()
+        ? (steered ? "上一轮已收束，草稿已保留，正在按引导继续。" : "轮次已中断，已保留上方中断草稿，可直接继续纠偏。")
+        : (steered ? "上一轮已收束，正在按引导继续。" : "轮次已在本地中断。尚未收到可保存的助手草稿。"));
     } else if (event.type === "gateway_error") {
       flushStreamDeltasNow();
       setStream((current) => ({ ...current, active: true, phase: "failed" }));

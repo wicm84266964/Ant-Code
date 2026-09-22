@@ -58,7 +58,9 @@ import {
   buildUserTurnMessage,
   persistableUserTurnMessage,
   normalizeInputAttachments,
-  attachmentMetadataList
+  attachmentMetadataList,
+  liveModelMessages,
+  mergePersistableImageSummaries
 } from "./session-messages.ts";
 import { ingestComposerDocuments } from "../tools/composer-documents.ts";
 import {
@@ -92,10 +94,12 @@ import {
 } from "./session-tools.ts";
 import {
   appendSessionMessages,
+  persistableContextMessages,
   persistSessionMetadata
 } from "./session-persist.ts";
 import {
   finishInterruptedTurn,
+  abortSignalReason,
   createInterruptedDraftCapture,
   captureInterruptedDraftEvent,
   appendFailedGatewayDraft,
@@ -237,7 +241,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
         env: options.env,
         hooksTrusted: options.hooksTrusted,
         draft: interruptedDraft,
-        reason: "preflight"
+        reason: abortSignalReason(options.signal)
       });
   }
 
@@ -314,7 +318,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
         env: options.env,
         hooksTrusted: options.hooksTrusted,
         draft: interruptedDraft,
-        reason: "before_gateway_request"
+        reason: abortSignalReason(options.signal)
       });
     }
     if (round > 0) {
@@ -336,6 +340,10 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
     });
     messages = budgetPreparation.messages;
     if (budgetPreparation.blocked) {
+      session.messages = persistableContextMessages(mergePersistableImageSummaries(
+        liveModelMessages(messages),
+        turnMessages
+      ));
       finalOutput = contextOverflowMessage(budgetPreparation.estimate, session.contextWindow);
       await persistSessionMetadata(sessionStore, metadata, finalOutput, "context_overflow", session, options);
       await emitEvent(eventOptions, {
@@ -399,7 +407,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
         env: options.env,
         hooksTrusted: options.hooksTrusted,
         draft: interruptedDraft,
-        reason: "gateway_aborted"
+        reason: abortSignalReason(options.signal)
       });
     }
 
@@ -481,7 +489,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
         env: options.env,
         hooksTrusted: options.hooksTrusted,
         draft: interruptedDraft,
-        reason: "after_gateway_response"
+        reason: abortSignalReason(options.signal)
       });
     }
 
@@ -608,7 +616,8 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
         thinking,
         thinkingProcess: interruptedDraft.text,
         turnMessages,
-        transcriptMessages: transcriptTurnMessages
+        transcriptMessages: transcriptTurnMessages,
+        modelContextMessages: liveModelMessages(messages)
       });
       await emitEvent(eventOptions, {
         type: "assistant_final",
@@ -694,7 +703,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
         env: options.env,
         hooksTrusted: options.hooksTrusted,
         draft: interruptedDraft,
-        reason: "after_tool_execution"
+        reason: abortSignalReason(options.signal)
       });
     }
     for (const result of toolResults) {

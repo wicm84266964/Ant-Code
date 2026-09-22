@@ -329,6 +329,37 @@ export function normalizeUserTurnMessage(message: SessionMessage | string | Reco
 }
 
 
+export function mergePersistableImageSummaries(messages: SessionMessage[] = [], persistableTurn: SessionMessage[] = []): SessionMessage[] {
+  const persistableUser = persistableTurn.find((message) => message?.role === "user");
+  if (!persistableUser) {
+    return messages;
+  }
+  const summaryBlocks = Array.isArray(persistableUser.content)
+    ? persistableUser.content.filter((block) => Boolean(block) && typeof block === "object" && "type" in block && block.type === "image")
+    : [];
+  if (summaryBlocks.length === 0) {
+    return messages;
+  }
+  const index = messages.findIndex((message) => message?.role === "user");
+  if (index < 0) {
+    return messages;
+  }
+  const live = messages[index];
+  const liveContent = Array.isArray(live.content)
+    ? live.content
+    : (live.content ? [{ type: "text", text: String(live.content) }] : []);
+  if (liveContent.some((block) => Boolean(block) && typeof block === "object" && "type" in block && block.type === "image")) {
+    return messages;
+  }
+  const next = messages.slice();
+  next[index] = {
+    ...live,
+    content: [...liveContent, ...summaryBlocks],
+    ...(persistableUser.attachments ? { attachments: persistableUser.attachments } : {})
+  };
+  return next;
+}
+
 export function persistableUserTurnMessage(prompt: string, attachments: unknown = []): SessionMessage {
   const normalized = normalizeInputAttachments(attachments);
   const documents = Array.isArray(attachments)
@@ -444,6 +475,15 @@ export function attachmentMetadataList(attachments: unknown = []) {
   }));
 }
 
+
+export function liveModelMessages(messages: unknown = []): SessionMessage[] {
+  if (!Array.isArray(messages)) {
+    return [];
+  }
+  return messages.filter((message): message is SessionMessage => (
+    Boolean(message) && typeof message === "object" && (message as SessionMessage).role !== "system"
+  ));
+}
 
 export function messagesForModelContext(messages: unknown = []): SessionMessage[] {
   if (!Array.isArray(messages)) {

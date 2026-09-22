@@ -1157,6 +1157,9 @@ export function dashboardTurnStatus(turnCompleteStatus: unknown, result: Record<
   if (status === "cancelled") {
     return "cancelled";
   }
+  if (status === "guided" || result?.steered === true || String(result?.interruptReason ?? "").trim() === "guided") {
+    return "guided";
+  }
   if (result?.interrupted === true || status === "interrupted") {
     return "interrupted";
   }
