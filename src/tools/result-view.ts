@@ -399,7 +399,7 @@ function formatGit(result: Record<string, unknown>): ViewDraft {
 function formatWrite(result: Record<string, unknown>): ViewDraft {
   const stats = asRecord(result.changeStats);
   const lines = [
-    result.created === true ? "created=true" : result.edited === false ? "edited=false" : "edited=true",
+    writeOutcomeLine(result),
     Number.isFinite(Number(result.bytesWritten)) ? `bytesWritten=${Number(result.bytesWritten)}` : "",
     Number.isFinite(Number(stats.additions)) ? `additions=${Number(stats.additions)} deletions=${Number(stats.deletions ?? 0)}` : ""
   ].filter(Boolean);
@@ -411,6 +411,19 @@ function formatWrite(result: Record<string, unknown>): ViewDraft {
     return { text: lines.join("\n"), truncated };
   }
   return { text: lines.join("\n"), truncated: result.diffTruncated === true };
+}
+
+function writeOutcomeLine(result: Record<string, unknown>): string {
+  if (result.created === true) {
+    return "created=true";
+  }
+  if (result.edited === false) {
+    return "edited=false";
+  }
+  if (result.edited === true || result.created === false) {
+    return "edited=true";
+  }
+  return "";
 }
 
 function formatAgent(execution: ToolResultValue, result: Record<string, unknown>): ViewDraft {
