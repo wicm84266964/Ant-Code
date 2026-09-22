@@ -41,7 +41,7 @@ test("context window compacts older messages into a bounded redacted summary", (
   assert.equal(session.messages.length, 3);
   assert.equal(summary.compacted, 1);
   assert.equal(summary.compactedMessages, 2);
-  assert.match(message.content[0].text, /compacted conversation context/);
+  assert.match(message.content[0].text, /Ant Code compacted older conversation context/);
   assert.doesNotMatch(message.content[0].text, /super-secret/);
   assert.match(message.content[0].text, /token=\[redacted\]/);
   assert.match(message.content[0].text, /path=C:\\private\\file\.txt/);
@@ -477,6 +477,44 @@ test("compaction keeps recent user turns with a token budget instead of only mes
     "recent answer two"
   ]);
   assert.match(session.contextWindow.summary, /old question/);
+});
+
+test("compaction token budget drops older in-turn tool rounds instead of keeping eight huge tools", () => {
+  const tools = Array.from({ length: 12 }, (_, index) => ([
+    { role: "assistant", content: [], toolCalls: [{ id: `t${index}`, name: "read_file", input: {} }] },
+    { role: "tool", toolCallId: `t${index}`, name: "read_file", content: "tool-output-".repeat(400) }
+  ])).flat();
+  const session = {
+    config: {
+      context: {
+        maxTokens: 500,
+        keepRecentMessages: 8,
+        tailTurns: 2,
+        preserveRecentTokens: 120,
+        summaryBytes: 2048
+      }
+    },
+    contextWindow: createContextWindow({
+      context: {
+        maxTokens: 500,
+        keepRecentMessages: 8,
+        tailTurns: 2,
+        preserveRecentTokens: 120,
+        summaryBytes: 2048
+      }
+    }),
+    messages: [
+      { role: "user", content: "continue" },
+      ...tools
+    ]
+  };
+
+  const result = compactSessionContext(session, { force: true });
+  const toolCount = session.messages.filter((message) => message.role === "tool").length;
+  assert.equal(result.compacted, true);
+  assert.ok(session.messages.length < 10);
+  assert.ok(toolCount >= 1 && toolCount < 8);
+  assert.equal(session.messages.some((message) => message.role === "tool"), true);
 });
 
 test("in-flight compaction summarizes older tool results before context limit", () => {

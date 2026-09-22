@@ -110,6 +110,9 @@ export function updateActivity(current: TuiActivity, event: TuiRuntimeEvent): Tu
     return { ...current, status: "就绪", assistantBytes: event.outputBytes ?? current.assistantBytes };
   }
   if (event.type === "turn_interrupted") {
+    if (String(event.reason ?? "").trim() === "guided") {
+      return { ...current, status: "引导中", lastTurn: "引导" };
+    }
     return { ...current, status: "已中断", lastTurn: "已中断" };
   }
   if (event.type === "gateway_error") {

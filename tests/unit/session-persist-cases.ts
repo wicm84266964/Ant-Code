@@ -660,6 +660,60 @@ test("createSession keeps compacted context when restored full archive would exc
   assert.equal(session.resumedFrom.fullContextRestoreLimitReason, "restored_full_context_over_budget");
 });
 
+test("createSession limits restored full archive even when compaction metadata was cleared", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
+  await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
+    context: {
+      maxMessages: 100,
+      maxBytes: 20000,
+      maxTokens: 5000,
+      keepRecentMessages: 2,
+      summaryBytes: 4096,
+      resumeMaxMessages: 100,
+      resumeMaxTokens: 5000,
+      resumeMaxBytes: 20000
+    }
+  }), "utf8");
+  const store = createSessionStore({ cwd });
+  const archiveMessages = [
+    { role: "user", content: `large archived prompt ${"alpha ".repeat(900)}` },
+    { role: "assistant", content: [{ type: "text", text: `large archived answer ${"beta ".repeat(900)}` }] },
+    { role: "user", content: "recent prompt" },
+    { role: "assistant", content: [{ type: "text", text: "recent answer" }] }
+  ];
+  const archive = await store.writeTranscriptChunks("cleared-compaction-resume-session", archiveMessages);
+  await store.writeMetadata({
+    id: "cleared-compaction-resume-session",
+    prompt: "recent prompt",
+    title: "cleared compaction resume",
+    status: "completed",
+    model: "mock-model",
+    transcript: {
+      version: 2,
+      messages: archiveMessages.slice(-2),
+      contextMessages: archiveMessages.slice(-2),
+      contextWindow: {
+        summary: "",
+        compactionCount: 0,
+        compactedMessages: 0,
+        lastReason: "dashboard_full_context_resume"
+      },
+      archive
+    }
+  });
+
+  const session = await createSession({
+    cwd,
+    mode: "interactive",
+    env: {},
+    resume: "cleared-compaction-resume-session",
+    resumeFullContext: true
+  });
+
+  assert.equal(session.resumedFrom.fullContextRestoreLimited, true);
+  assert.ok(JSON.stringify(session.messages).length < JSON.stringify(archiveMessages).length);
+});
+
 test("createSession cleans legacy raw OpenAI stream dumps on resume", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
   const store = createSessionStore({ cwd });

@@ -11,6 +11,8 @@ import { createToolRuntime } from "../tools/runtime.ts";
 import { type ToolResultValue } from "../tools/result.ts";
 import { formatToolResultForModel } from "../tools/result-view.ts";
 import { estimatePromptPayload } from "../core/context-window.ts";
+import { contextOverflowMessage, preparePromptBudgetForGateway } from "../core/session-health.ts";
+import { createSubagentBudgetSession, extractSystemPromptText, asSessionMessages } from "./budget-session.ts";
 import { buildValidationMemory, formatValidationMemory } from "../core/validation-memory.ts";
 import { suggestValidationCommands } from "../core/validation-suggestions.ts";
 import { accumulateProviderUsage } from "../core/provider-usage.ts";
@@ -507,6 +509,14 @@ async function runModelSubagent(options: {
   });
   const budgetTracker = createBudgetTracker(budget as ReturnType<typeof resolveAgentBudget>);
   const sessionId = options.childSessionId ?? `agent-${options.profile.name}-${crypto.randomUUID()}`;
+  const budgetSession = createSubagentBudgetSession({
+    id: sessionId,
+    cwd: options.cwd,
+    config: scopedConfig,
+    model: options.config.modelAlias,
+    tools: toolDefinitions,
+    systemPrompt: extractSystemPromptText(messages[0])
+  });
   let toolResults: Array<Record<string, unknown>> = [];
   const toolExecutions: Array<Record<string, unknown>> = [];
   let finalReportReason: BudgetReason | null = null;
@@ -552,16 +562,62 @@ async function runModelSubagent(options: {
       }, true);
     }
 
-    const promptEstimate = estimatePromptPayload({
-      model: options.config.modelAlias,
-      messages,
-      tools: finalReportRequested ? [] : toolDefinitions,
+    budgetSession.turnCount = round;
+    budgetSession.context.tools = finalReportRequested ? [] : toolDefinitions;
+    const budgetPreparation = await preparePromptBudgetForGateway({
+      session: budgetSession,
+      prompt: options.query,
+      messages: asSessionMessages(messages),
       toolResults,
-      gatewayProtocol: agentGatewayProtocol(options.config)
+      round,
+      gateway: options.gateway,
+      signal: options.signal,
+      env: options.env,
+      hooksTrusted: options.hooksTrusted,
+      eventOptions: {
+        onEvent: async (event: { type?: string }) => {
+          if (event.type === "context_compacting" || event.type === "tool_results_summarizing") {
+            await options.taskStore?.updateTask(options.taskId, {
+              latestProgress: "正在压缩子任务上下文"
+            });
+          }
+          if (event.type === "context_compacted" || event.type === "tool_results_summarized") {
+            await options.taskStore?.updateTask(options.taskId, {
+              latestProgress: "子任务上下文已压缩"
+            });
+          }
+        }
+      }
     });
+    messages.splice(0, messages.length, ...budgetPreparation.messages.map((message) => ({
+      role: message.role,
+      content: message.content ?? [],
+      ...(message.toolCalls ? { toolCalls: message.toolCalls } : {}),
+      ...(message.thinking ? { thinking: message.thinking } : {}),
+      ...(message.toolCallId ? { toolCallId: message.toolCallId } : {}),
+      ...(message.name ? { name: message.name } : {})
+    })));
+    if (budgetPreparation.blocked) {
+      return createPartialSubagentResult({
+        profile: options.profile,
+        query: options.query,
+        reason: {
+          kind: "contextOverflow",
+          message: contextOverflowMessage(budgetPreparation.estimate, budgetSession.contextWindow),
+          tokens: budgetPreparation.estimate.tokens,
+          maxTokens: budgetSession.contextWindow.maxTokens
+        },
+        budget: asBudgetRecord(budget),
+        tools: toolExecutions,
+        contextPack: options.contextPack,
+        model: options.config.modelAlias,
+        mode: asString(options.profile.mode)
+      });
+    }
+    const promptEstimate = budgetPreparation.estimate;
     lastPromptProgress = agentPromptProgress(promptEstimate, {
       round: round + 1,
-      maxTokens: options.config.context?.maxTokens
+      maxTokens: budgetSession.contextWindow?.maxTokens
     });
     await options.taskStore?.updateTask(options.taskId, {
       budgetProgress: agentBudgetProgress(budgetTracker, {

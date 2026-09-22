@@ -36,6 +36,7 @@ export const OUTPUT_HEALTH_RETRY_REQUIRED_REASONS = new Set([
   "missing_terminal_signal",
   "repetitive_thinking_loop",
   "reasoning_only_length",
+  "reasoning_only_empty",
   "promised_tool_without_call"
 ]);
 export const TRANSCRIPT_MEMORY_MESSAGES = 50;

@@ -219,6 +219,52 @@ export function createReasoningOnlyLengthThenHealthyGateway(requests: Array<Reco
   });
 }
 
+export function createReasoningOnlyEmptyThenHealthyGateway(requests: Array<Record<string, unknown>>) {
+  return http.createServer(async (request, response) => {
+    if (request.method !== "POST" || request.url !== "/v1/chat") {
+      response.writeHead(404, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { code: "NOT_FOUND" } }));
+      return;
+    }
+
+    const body = await readRequestJson(request);
+    requests.push(body);
+    response.writeHead(200, { "content-type": "application/json" });
+
+    if (requests.length === 1) {
+      response.end(JSON.stringify({
+        id: "mock-reasoning-only-empty",
+        model: body.model,
+        content: [],
+        thinking: "The model planned the next PPT layout step entirely inside hidden reasoning.".repeat(40),
+        toolCalls: [],
+        stopReason: "stop",
+        usage: {
+          completion_tokens: 900,
+          prompt_tokens: 1000,
+          total_tokens: 1900,
+          completion_tokens_details: {
+            reasoning_tokens: 880
+          }
+        },
+        raw: {
+          thinkingBytes: 4488,
+          textBytes: 0
+        }
+      }));
+      return;
+    }
+
+    response.end(JSON.stringify({
+      id: "mock-reasoning-empty-retry-healthy",
+      model: body.model,
+      content: [{ type: "text", text: "已继续：压缩后仍给出用户可见正文。" }],
+      toolCalls: [],
+      stopReason: "stop"
+    }));
+  });
+}
+
 export function createAlwaysReasoningOnlyLengthGateway(requests) {
   return http.createServer(async (request, response) => {
     if (request.method !== "POST" || request.url !== "/v1/chat") {

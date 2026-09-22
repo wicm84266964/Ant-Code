@@ -9,11 +9,12 @@ import { mapSessionEventToDashboard } from "../../src/dashboard/events.ts";
 import type { AgentSession, SessionMessage } from "../../src/core/session-types.ts";
 import { preparePromptBudgetForGateway } from "../../src/core/session-health.ts";
 import { formatToolResultForModel } from "../../src/tools/result-view.ts";
+import { createWorkflowState } from "../../src/tools/workflow-tools.ts";
 
 async function fixture(t: test.TestContext, enabled = true) {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "ant-tool-summary-"));
   t.after(() => fs.rm(cwd, { recursive: true, force: true }));
-  const session = { id: "summary-test", cwd, config: { transcript: { enabled, retentionDays: 7, encryption: "off" } }, contextWindow: { maxBytes: 2000000, maxTokens: 500000 }, model: "mock", usage: {} } as AgentSession;
+  const session = { id: "summary-test", cwd, config: { transcript: { enabled, retentionDays: 7, encryption: "off" } }, contextWindow: { maxBytes: 2000000, maxTokens: 500000 }, model: "mock", usage: {}, workflow: createWorkflowState() } as AgentSession;
   const messages: SessionMessage[] = Array.from({ length: 10 }, (_, i) => ({ role: "tool", name: "read_file", toolCallId: `call-${i}`, content: `file-${i}: value=3.14159 units=mg\n` + "source data\n".repeat(1000) }));
   const gateway = { configured: true, sendChat: async () => ({ ok: true, data: { text: "Files contain measured value 3.14159 mg. Original records remain authoritative.", usage: { input_tokens: 100, output_tokens: 20 } } }) };
   return { session, messages, gateway, neededBytes: 30000 };
@@ -101,6 +102,192 @@ test("prompt budget batches to reserve space and does not summarize again withou
   await preparePromptBudgetForGateway({ ...budgetInput, messages: first.messages, round: 2 });
   assert.equal(calls, previousCalls);
   assert.match(String(toolResults[0].content), /tool results summary/);
+});
+
+function hugeToolMessages(count: number, chars = 12000): SessionMessage[] {
+  return Array.from({ length: count }, (_, index) => ({
+    role: "tool",
+    name: "read_file",
+    toolCallId: `overflow-${index}`,
+    content: `file-${index}.json\n${"layout-contract ".repeat(Math.ceil(chars / 16))}`
+  }));
+}
+
+test("prompt budget falls back to in-flight tool compaction instead of overflowing", async (t) => {
+  const input = await fixture(t);
+  input.session.contextWindow.maxBytes = 24000;
+  input.session.contextWindow.maxTokens = 6000;
+  input.session.contextWindow.keepRecentMessages = 4;
+  input.session.context = { tools: [] } as unknown as AgentSession["context"];
+  input.session.messages = [];
+  input.session.config.context = {} as AgentSession["config"]["context"];
+  input.session.turnCount = 5;
+  const events: Array<Record<string, unknown>> = [];
+  const live = [
+    { role: "user", content: "continue the deck" },
+    ...hugeToolMessages(8)
+  ];
+  const toolResults = live.filter((message) => message.role === "tool").map((message) => ({
+    toolCallId: message.toolCallId,
+    content: message.content
+  }));
+  const result = await preparePromptBudgetForGateway({
+    ...input,
+    messages: live,
+    toolResults,
+    prompt: "continue the deck",
+    round: 48,
+    eventOptions: { onEvent: (event) => events.push(event) }
+  } as unknown as Parameters<typeof preparePromptBudgetForGateway>[0]);
+  assert.equal(result.blocked, false);
+  assert.ok(result.estimate.tokens < 6000);
+  assert.equal(events.some((event) => event.strategy === "inflight-tools"), true);
+  assert.equal(events.some((event) => event.type === "context_overflow"), false);
+  assert.ok(result.messages.filter((message) => message.role === "tool").some((message) => (
+    JSON.stringify(message.content).includes("[compacted tool result]")
+  )));
+});
+
+test("later rounds still shrink live tools after history fingerprint would skip", async (t) => {
+  const input = await fixture(t);
+  input.session.contextWindow.maxBytes = 24000;
+  input.session.contextWindow.maxTokens = 6000;
+  input.session.contextWindow.keepRecentMessages = 4;
+  input.session.context = { tools: [] } as unknown as AgentSession["context"];
+  input.session.messages = [
+    { role: "user", content: "start" },
+    { role: "assistant", content: "ok" }
+  ];
+  input.session.config.context = {} as AgentSession["config"]["context"];
+  const events: Array<Record<string, unknown>> = [];
+  const budgetInput = {
+    ...input,
+    prompt: "continue the deck",
+    eventOptions: { onEvent: (event) => events.push(event) }
+  };
+
+  const firstLive = [
+    { role: "user", content: "continue the deck" },
+    ...hugeToolMessages(6)
+  ];
+  const first = await preparePromptBudgetForGateway({
+    ...budgetInput,
+    messages: firstLive,
+    toolResults: firstLive.filter((message) => message.role === "tool").map((message) => ({
+      toolCallId: message.toolCallId,
+      content: message.content
+    })),
+    round: 40
+  } as unknown as Parameters<typeof preparePromptBudgetForGateway>[0]);
+  assert.equal(first.blocked, false);
+  assert.deepEqual(input.session.messages, [
+    { role: "user", content: "start" },
+    { role: "assistant", content: "ok" }
+  ]);
+
+  const grown = [
+    ...first.messages,
+    ...hugeToolMessages(4, 16000).map((message, index) => ({
+      ...message,
+      toolCallId: `grown-${index}`
+    }))
+  ];
+  const second = await preparePromptBudgetForGateway({
+    ...budgetInput,
+    messages: grown,
+    toolResults: grown.filter((message) => message.role === "tool").map((message) => ({
+      toolCallId: message.toolCallId,
+      content: message.content
+    })),
+    round: 41
+  } as unknown as Parameters<typeof preparePromptBudgetForGateway>[0]);
+  assert.equal(second.blocked, false);
+  assert.ok(second.estimate.tokens < 6000);
+  assert.equal(events.some((event) => event.strategy === "inflight-tools"), true);
+});
+
+test("history compact shrinks the current-turn tool chain instead of reattaching it raw", async (t) => {
+  const input = await fixture(t);
+  input.session.contextWindow.maxBytes = 32000;
+  input.session.contextWindow.maxTokens = 8000;
+  input.session.contextWindow.keepRecentMessages = 8;
+  input.session.contextWindow.tailTurns = 1;
+  input.session.contextWindow.preserveRecentTokens = 200;
+  input.session.context = { tools: [] } as unknown as AgentSession["context"];
+  input.session.messages = Array.from({ length: 16 }, (_, index) => ({
+    role: index % 2 === 0 ? "user" : "assistant",
+    content: `history-${index} ${"note ".repeat(40)}`
+  }));
+  input.session.config.context = {} as AgentSession["config"]["context"];
+  const events: Array<Record<string, unknown>> = [];
+  const live: SessionMessage[] = [
+    ...input.session.messages,
+    { role: "user", content: "continue the deck" },
+    ...Array.from({ length: 6 }, (_, index) => ([
+      {
+        role: "assistant",
+        content: [],
+        toolCalls: [{ id: `overflow-${index}`, name: "read_file", input: {} }]
+      },
+      ...hugeToolMessages(1, 14000).map((message) => ({ ...message, toolCallId: `overflow-${index}` }))
+    ])).flat()
+  ];
+  const result = await preparePromptBudgetForGateway({
+    ...input,
+    messages: live,
+    toolResults: live.filter((message) => message.role === "tool").map((message) => ({
+      toolCallId: message.toolCallId,
+      content: message.content
+    })),
+    prompt: "continue the deck",
+    round: 12,
+    eventOptions: { onEvent: (event) => events.push(event) }
+  } as unknown as Parameters<typeof preparePromptBudgetForGateway>[0]);
+  assert.equal(result.blocked, false);
+  assert.ok(result.estimate.tokens < 8000);
+  const continuationTools = result.messages.filter((message) => message.role === "tool");
+  assert.ok(continuationTools.length >= 1);
+  assert.ok(continuationTools.length < 6);
+  assert.ok(String(input.session.contextWindow.summary ?? "").length > 0);
+});
+
+test("prompt budget strips older thinking when compacted tools still overflow", async (t) => {
+  const input = await fixture(t);
+  input.session.contextWindow.maxBytes = 32000;
+  input.session.contextWindow.maxTokens = 8000;
+  input.session.context = { tools: [] } as unknown as AgentSession["context"];
+  input.session.messages = [];
+  input.session.config.context = {} as AgentSession["config"]["context"];
+  const events: Array<Record<string, unknown>> = [];
+  const live: SessionMessage[] = [{ role: "user", content: "continue the deck" }];
+  for (let index = 0; index < 18; index += 1) {
+    live.push({
+      role: "assistant",
+      content: [],
+      toolCalls: [{ id: `think-${index}`, name: "bash", input: { command: "true" } }],
+      thinking: { text: "internal plan ".repeat(800), bytes: 11200 }
+    });
+    live.push({
+      role: "tool",
+      toolCallId: `think-${index}`,
+      name: "bash",
+      content: "[compacted tool result]\ntool=bash\nok=true"
+    });
+  }
+  const result = await preparePromptBudgetForGateway({
+    ...input,
+    messages: live,
+    toolResults: live.filter((message) => message.role === "tool").map((message) => ({
+      toolCallId: message.toolCallId,
+      content: message.content
+    })),
+    prompt: "continue the deck",
+    round: 38,
+    eventOptions: { onEvent: (event) => events.push(event) }
+  } as unknown as Parameters<typeof preparePromptBudgetForGateway>[0]);
+  assert.equal(result.blocked, false);
+  assert.ok(result.estimate.tokens < 8000);
+  assert.ok(result.messages.filter((message) => message.role === "assistant" && message.thinking).length <= 1);
 });
 
 test("evidence uses required encryption and follows the model-visible page boundary", async (t) => {

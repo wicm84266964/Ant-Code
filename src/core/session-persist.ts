@@ -54,6 +54,7 @@ import type {
 } from "./session-types.ts";
 import {
   imageAttachmentSummaryBlock,
+  mergePersistableImageSummaries,
   persistableAttachmentChips
 } from "./session-messages.ts";
 import {
@@ -178,6 +179,7 @@ export async function appendSessionMessages(session: AgentSession, data: import(
   thinkingProcess?: unknown;
   turnMessages?: SessionMessage[];
   transcriptMessages?: SessionMessage[];
+  modelContextMessages?: SessionMessage[];
   gateway?: ReturnType<typeof createLabModelGateway>;
   signal?: AbortSignal;
   env?: NodeJS.ProcessEnv;
@@ -215,7 +217,12 @@ export async function appendSessionMessages(session: AgentSession, data: import(
         content: [{ type: "text", text: thinkingProcessText }]
       }]
     : [];
-  session.messages.push(...turnMessages, contextAssistant);
+  session.messages = Array.isArray(options.modelContextMessages)
+    ? persistableContextMessages(mergePersistableImageSummaries(
+      [...options.modelContextMessages, contextAssistant],
+      turnMessages
+    ))
+    : [...session.messages, ...turnMessages, contextAssistant];
   appendTranscriptMessages(session, [...transcriptMessages, ...thinkingProcessMessage, transcriptAssistant]);
   appendModelContextArchiveMessages(session, [...turnMessages, contextAssistant]);
 
@@ -438,7 +445,7 @@ export function persistableMessagesWithOptions(messages: unknown, options: Recor
   }
   return messages
     .map((message) => persistableMessage(message, options))
-    .filter(Boolean);
+    .filter((message): message is SessionMessage => Boolean(message));
 }
 
 

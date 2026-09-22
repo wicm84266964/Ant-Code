@@ -542,7 +542,7 @@ test("readonly researcher reports from successful evidence when github denials a
   }
 });
 
-test("model-driven subagent preserves older tool results while continuing long web research", async () => {
+test("model-driven subagent continues long web research after prompt-budget compaction", async () => {
   const cwd = await makeTempWorkspace();
   const contentServer = await listen(createTextServer("large source evidence ".repeat(1200)), "127.0.0.1");
   const sourceUrl = `${serverUrl(contentServer)}/large-source`;
@@ -567,9 +567,10 @@ test("model-driven subagent preserves older tool results while continuing long w
         networkMode: "lab-only",
         allowedHosts: ["127.0.0.1"],
         context: {
-          maxTokens: 800,
-          inFlightCompactRatio: 0.1,
-          inFlightKeepRecentTools: 1
+          maxTokens: 20000,
+          maxBytes: 80000,
+          tailTurns: 1,
+          preserveRecentTokens: 2000
         },
         lab: {
           gatewayUrl: `${serverUrl(server)}/v1/chat`,
@@ -591,12 +592,11 @@ test("model-driven subagent preserves older tool results while continuing long w
       }
     });
 
-    const laterRequests = requests.slice(2);
-    const compactedSeen = laterRequests.some((request) => JSON.stringify(request.messages).includes("[compacted tool result]"));
+    const toolRequests = requests.filter((request) => Array.isArray(request.tools) && request.tools.length > 0);
     assert.equal(result.ok, true);
+    assert.equal(Boolean(result.partial), false);
     assert.match(result.output, /finished after preserving/);
-    assert.equal(requests.length, 7);
-    assert.equal(compactedSeen, false);
+    assert.ok(toolRequests.length >= 2);
   } finally {
     await close(server);
     await close(contentServer);
@@ -1356,6 +1356,85 @@ test("interrupted subagent keeps completed tool calls in the task record", async
   }
 });
 
+test("model-driven subagent reuses main prompt-budget compaction before the next gateway call", async () => {
+  const cwd = await makeTempWorkspace();
+  await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
+    context: {
+      maxTokens: 20000,
+      maxBytes: 50000,
+      keepRecentMessages: 8,
+      tailTurns: 1,
+      preserveRecentTokens: 800,
+      summaryBytes: 4096
+    }
+  }), "utf8");
+  await Promise.all(Array.from({ length: 8 }, (_, index) => (
+    fs.writeFile(path.join(cwd, `${index}.txt`), "payload ".repeat(2500), "utf8")
+  )));
+  const requests = [];
+  const server = await listen(createCompactingSubagentGateway(requests), "127.0.0.1");
+
+  try {
+    const result = await runSubagent({
+      cwd,
+      profileName: "explorer",
+      query: "read every payload file and report the common token",
+      env: mockGatewayEnv(serverUrl(server))
+    });
+    assert.equal(result.ok, true);
+    assert.equal(Boolean(result.partial), false);
+    assert.match(String(result.output ?? ""), /subagent compact complete/);
+    const toolRequests = requests.filter((body) => Array.isArray(body.tools) && body.tools.length > 0);
+    assert.ok(toolRequests.length >= 2);
+    const followUp = toolRequests.at(-1);
+    const packed = JSON.stringify(followUp.messages);
+    assert.ok(
+      packed.includes("handoff summary")
+      || packed.includes("[compacted tool result]")
+      || packed.includes("[tool results summary]")
+      || packed.includes("Context was compacted")
+      || packed.includes("Ant Code compacted")
+    );
+  } finally {
+    await close(server);
+  }
+});
+
+test("model-driven subagent returns a partial result when compacted context still overflows", async () => {
+  const cwd = await makeTempWorkspace();
+  await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
+    context: {
+      maxTokens: 80,
+      maxBytes: 320,
+      keepRecentMessages: 2,
+      tailTurns: 1,
+      preserveRecentTokens: 40,
+      summaryBytes: 256
+    }
+  }), "utf8");
+  const requests = [];
+  const server = await listen(createToolGateway(requests, {
+    toolCall: { id: "read-notes", name: "read_file", input: { path: "notes.txt" } },
+    finalText: "should not be reached"
+  }), "127.0.0.1");
+
+  try {
+    const result = await runSubagent({
+      cwd,
+      profileName: "explorer",
+      query: "inspect the workspace",
+      env: mockGatewayEnv(serverUrl(server))
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.partial, true);
+    assert.equal(result.budgetExceeded.kind, "contextOverflow");
+    assert.equal(requests.length, 0);
+    assert.match(String(result.continuationPrompt ?? ""), /更小的检索或阅读批次/);
+  } finally {
+    await close(server);
+  }
+});
+
 async function makeTempWorkspace() {
   return fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
 }
@@ -1364,6 +1443,52 @@ async function makeTempWorkspace() {
  * @param {Array<Record<string, any>>} requests
  * @param {{ toolCall: Record<string, any>; finalText: string }} fixture
  */
+function createCompactingSubagentGateway(requests: Array<Record<string, unknown>>) {
+  return http.createServer(async (request, response) => {
+    if (request.method !== "POST" || request.url !== "/v1/chat") {
+      response.writeHead(404, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { code: "NOT_FOUND" } }));
+      return;
+    }
+    const body = await readRequestJson(request);
+    requests.push(body);
+    response.writeHead(200, { "content-type": "application/json" });
+    const hasTools = Array.isArray(body.tools) && body.tools.length > 0;
+    if (!hasTools) {
+      response.end(JSON.stringify({
+        id: "mock-subagent-compact",
+        model: body.model,
+        content: [{ type: "text", text: "Older payload files were inspected. Keep the recent reads and continue." }],
+        toolCalls: [],
+        stopReason: "stop"
+      }));
+      return;
+    }
+    const toolRounds = requests.filter((item) => Array.isArray(item.tools) && item.tools.length > 0).length;
+    if (toolRounds === 1) {
+      response.end(JSON.stringify({
+        id: "mock-subagent-tools",
+        model: body.model,
+        content: [],
+        toolCalls: Array.from({ length: 8 }, (_, index) => ({
+          id: `read-${index}`,
+          name: "read_file",
+          input: { path: `${index}.txt` }
+        })),
+        stopReason: "tool_calls"
+      }));
+      return;
+    }
+    response.end(JSON.stringify({
+      id: "mock-subagent-final",
+      model: body.model,
+      content: [{ type: "text", text: "subagent compact complete" }],
+      toolCalls: [],
+      stopReason: "stop"
+    }));
+  });
+}
+
 function createToolGateway(requests: Array<Record<string, unknown>>, fixture: { toolCall: Record<string, unknown>; finalText: string }) {
   return http.createServer(async (request, response) => {
     if (request.method !== "POST" || request.url !== "/v1/chat") {

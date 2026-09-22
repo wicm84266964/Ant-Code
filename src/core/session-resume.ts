@@ -22,7 +22,7 @@ import { getAgentProfile } from "../agents/profiles.ts";
 import { resolveMaxParallelReadonlyAgentRuns } from "../agents/orchestration-config.ts";
 import { appendDelegationReminderToExecution, createDelegationGuard } from "../agents/delegation-guard.ts";
 import { createReviewGate } from "../agents/review-policy.ts";
-import { buildCompactedContextMessage, compactSessionContextWithModel, createContextWindow, estimatePromptPayload, summarizeContextWindow } from "./context-window.ts";
+import { buildCompactedContextMessage, compactSessionContext, compactSessionContextWithModel, createContextWindow, estimatePromptPayload, summarizeContextWindow } from "./context-window.ts";
 import { buildGoalSystemPromptAppendix, normalizeSessionGoal, serializeSessionGoal, stripGoalStatusFromContent, stripGoalStatusMarkers } from "./goal.ts";
 import { createAntEventNormalizer } from "./events.ts";
 import { accumulateProviderUsage, normalizeProviderUsageAggregate, sanitizeProviderUsage, type ProviderUsageAggregate } from "./provider-usage.ts";
@@ -56,7 +56,7 @@ import {
 } from "./session-messages.ts";
 import {
   isPlainObject,
-  promptEstimateNeedsCompaction
+  promptEstimateOverBudget
 } from "./session-health.ts";
 import {
   persistSessionMetadata,
@@ -143,12 +143,6 @@ export function limitRestoredContextToPromptBudget(restoredContext: RestoredCont
   const fallbackMessages = Array.isArray(restoredContext.persistedMessages)
     ? restoredContext.persistedMessages
     : [];
-  if (!hasPersistedCompaction(options.contextWindow as ReturnType<typeof createContextWindow> | null | undefined) || fallbackMessages.length === 0) {
-    return {
-      ...restoredContext,
-      clearPersistedSummary: options.clearPersistedSummary === true
-    };
-  }
   const contextWindow = createContextWindow(options.config ?? {});
   const estimate = estimatePromptPayload({
     model: String(options.model ?? options.config?.modelAlias ?? ""),
@@ -157,16 +151,32 @@ export function limitRestoredContextToPromptBudget(restoredContext: RestoredCont
     toolResults: [],
     gatewayProtocol: options.config?.lab?.gatewayProtocol
   });
-  if (!promptEstimateNeedsCompaction(estimate, contextWindow, options.config?.context?.promptCompactRatio)) {
+  if (!promptEstimateOverBudget(estimate, contextWindow)) {
     return {
       ...restoredContext,
       clearPersistedSummary: options.clearPersistedSummary === true
     };
   }
+  if (hasPersistedCompaction(options.contextWindow as ReturnType<typeof createContextWindow> | null | undefined) && fallbackMessages.length > 0) {
+    return {
+      ...restoredContext,
+      messages: fallbackMessages,
+      fromArchive: false,
+      limited: true,
+      limitReason: "restored_full_context_over_budget",
+      clearPersistedSummary: false
+    };
+  }
+  const temp = {
+    config: options.config,
+    messages: restoredContext.messages.slice(),
+    contextWindow: createContextWindow(options.config ?? {})
+  };
+  compactSessionContext(temp, { force: true, reason: "resume_prompt_budget" });
   return {
     ...restoredContext,
-    messages: fallbackMessages,
-    fromArchive: false,
+    messages: temp.messages,
+    fromArchive: true,
     limited: true,
     limitReason: "restored_full_context_over_budget",
     clearPersistedSummary: false
@@ -493,16 +503,35 @@ export function nonNegativeInteger(value: unknown, fallback: number | null = 0):
 /**
  * @param {{ session: AgentSession; sessionStore: ReturnType<typeof createSessionStore>; metadata: Record<string, any>; eventOptions: Record<string, any>; prompt?: string; env?: NodeJS.ProcessEnv; hooksTrusted?: boolean; reason: string; draft?: ReturnType<typeof createInterruptedDraftCapture> }} options
  */
+export function abortSignalReason(signal: AbortSignal | undefined, fallback = "user") {
+  if (!signal?.aborted) {
+    return fallback;
+  }
+  const reason = signal.reason;
+  if (typeof reason === "string" && reason.trim()) {
+    return reason.trim();
+  }
+  return fallback;
+}
+
+export function isSteerInterruptReason(reason: unknown) {
+  return String(reason ?? "").trim() === "guided";
+}
+
 export async function finishInterruptedTurn(options: { session: AgentSession; sessionStore: ReturnType<typeof createSessionStore>; metadata: Record<string, unknown>; eventOptions: Record<string, unknown>; prompt?: string; displayPrompt?: string; env?: NodeJS.ProcessEnv; hooksTrusted?: boolean; reason: string; draft?: ReturnType<typeof createInterruptedDraftCapture> }) {
   const draft = normalizeInterruptedDraft(options.draft);
+  const steered = isSteerInterruptReason(options.reason);
+  const persistStatus = steered ? "guided" : "interrupted";
   const finalOutput = draft
     ? [
-      "Turn interrupted by the local user.",
+      steered ? "Turn redirected to user guidance." : "Turn interrupted by the local user.",
       "",
-      "Interrupted assistant draft saved:",
+      steered ? "Saved assistant draft:" : "Interrupted assistant draft saved:",
       draft.text
     ].join("\n")
-    : "Turn interrupted by the local user.";
+    : steered
+      ? "Turn redirected to user guidance."
+      : "Turn interrupted by the local user.";
   if (draft) {
     options.metadata.interruptedDraft = {
       textBytes: draft.bytes,
@@ -528,19 +557,22 @@ export async function finishInterruptedTurn(options: { session: AgentSession; se
     draftThinkingBytes: draft?.thinkingBytes ?? 0,
     outputBytes: Buffer.byteLength(finalOutput, "utf8")
   });
-  await persistSessionMetadata(options.sessionStore, options.metadata, finalOutput, "interrupted", options.session, {
+  await persistSessionMetadata(options.sessionStore, options.metadata, finalOutput, persistStatus, options.session, {
     env: options.env,
     hooksTrusted: options.hooksTrusted
   });
   await emitEvent(options.eventOptions, {
     type: "turn_complete",
-    status: "interrupted",
+    status: persistStatus,
+    reason: options.reason,
     outputBytes: Buffer.byteLength(finalOutput, "utf8")
   });
   return {
     session: options.session,
     output: finalOutput,
-    interrupted: true
+    interrupted: !steered,
+    steered,
+    interruptReason: options.reason
   };
 }
 
@@ -618,10 +650,11 @@ export function appendFailedGatewayDraft(options: {
 
 export function appendInterruptedDraftMessages(session: AgentSession, prompt: string, displayPrompt: unknown, draft: { text?: unknown; thinking?: unknown; thinkingBytes?: unknown }, reason: string) {
   const visibleText = String(draft.text ?? "").trim();
+  const steered = isSteerInterruptReason(reason);
   const transcriptNote = [
-    "[中断草稿，非最终回复]",
+    steered ? "[引导接管前的草稿，非最终回复]" : "[中断草稿，非最终回复]",
     `原因：${reason}`,
-    visibleText ? "" : "本轮在给出可见正文前被上游断开。",
+    visibleText ? "" : (steered ? "本轮在给出可见正文前被引导接管。" : "本轮在给出可见正文前被上游断开。"),
     visibleText
   ].filter((line) => line !== "").join("\n");
   const thinking = normalizeAssistantThinking({

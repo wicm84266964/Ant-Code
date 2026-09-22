@@ -13,6 +13,7 @@ import {
   createLargeToolThenFinalGateway,
   createMalformedThenHealthyGateway,
   createReasoningOnlyLengthThenHealthyGateway,
+  createReasoningOnlyEmptyThenHealthyGateway,
   createAlwaysReasoningOnlyLengthGateway,
   createMissingTerminalThenHealthyGateway,
   createAlwaysMissingTerminalGateway,
@@ -327,7 +328,7 @@ test("session context persists bounded redacted transcript for resume", async ()
     assert.match(requests[5].messages[0].content[0].text, /context compactor/);
     assert.deepEqual(requests[4].messages.map((message) => message.role), ["system", "system", "user", "assistant", "user", "assistant", "user"]);
     const compactedContext = requests[4].messages[1].content[0].text;
-    assert.match(compactedContext, /compacted conversation context/);
+    assert.match(compactedContext, /Ant Code compacted older conversation context/);
     assert.match(compactedContext, /first turn/);
     assert.doesNotMatch(compactedContext, /super-secret/);
 
@@ -346,7 +347,7 @@ test("session context persists bounded redacted transcript for resume", async ()
     assert.match(metadataText, /third turn/);
     assert.match(metadataText, /fourth turn/);
     assert.match(metadataText, /assistant 5/);
-    assert.doesNotMatch(metadataText, /super-secret|compacted conversation context/);
+    assert.doesNotMatch(metadataText, /super-secret|Ant Code compacted older conversation context/);
     assert.match(metadataText, /path=C:\\\\secret-project\\\\paper\.txt/);
 
     const resumed = await createSession({
@@ -404,7 +405,7 @@ test("session compacts before gateway request when full prompt payload exceeds t
     assert.equal(session.contextWindow.lastReason, "automatic_prompt_budget");
     assert.equal(session.contextWindow.lastStrategy, "agent:compaction");
     assert.match(requests[0].messages[0].content[0].text, /context compactor/);
-    assert.ok(requests[1].messages.some((message) => String(message.content?.[0]?.text ?? "").includes("compacted conversation context")));
+    assert.ok(requests[1].messages.some((message) => String(message.content?.[0]?.text ?? "").includes("Ant Code compacted older conversation context")));
     const compactEvent = events.find((event) => event.type === "context_compacted");
     assert.equal(compactEvent?.reason, "automatic_prompt_budget");
     assert.ok(compactEvent.beforeTokens > compactEvent.afterTokens);
@@ -461,7 +462,9 @@ test("session keeps current-turn images after automatic prompt compaction", asyn
     });
 
     const finalRequest = requests.at(-1);
-    const userMessage = finalRequest.messages.findLast((message) => message.role === "user");
+    const userMessage = finalRequest.messages.find((message) => (
+      Array.isArray(message.content) && message.content.some((block) => block?.type === "image")
+    ));
     assert.equal(userMessage.content.some((block) => block.type === "image" && block.data === "aGVsbG8="), true);
     assert.ok(events.some((event) => event.type === "context_compacted" && event.reason === "automatic_prompt_budget"));
   } finally {
@@ -826,6 +829,38 @@ test("session retries a one-line tool promise without sending it back to the mod
     assert.equal(affinities.length, 2);
     assert.notEqual(affinities[1], affinities[0]);
     assert.match(String(session.gatewaySessionAffinity ?? ""), /^retry-/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("session retries thinking-only empty output instead of showing the privacy placeholder", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
+  const requests = [];
+  const events = [];
+  const server = await listen(createReasoningOnlyEmptyThenHealthyGateway(requests), "127.0.0.1");
+
+  try {
+    const env = mockGatewayEnv(serverUrl(server));
+    delete env.LAB_AGENT_TRANSCRIPT_ENABLED;
+    const session = await createSession({
+      cwd,
+      mode: "interactive",
+      env
+    });
+
+    const result = await runSessionTurn(session, {
+      prompt: "continue after compaction",
+      env,
+      onEvent: (event) => events.push(event)
+    });
+
+    assert.equal(result.output, "已继续：压缩后仍给出用户可见正文。");
+    assert.equal(requests.length, 2);
+    assert.equal(events.some((event) => event.type === "output_health_retry"), true);
+    assert.equal(events.find((event) => event.type === "output_health_retry").reasons.includes("reasoning_only_empty"), true);
+    assert.equal(result.output.includes("模型本轮没有返回可展示正文"), false);
+    assert.match(JSON.stringify(requests[1].messages), /Do not put the only reply in thinking/);
   } finally {
     await close(server);
   }
@@ -1987,7 +2022,7 @@ test("session turns can be interrupted after gateway response before tool execut
 
     assert.equal(requests.length, 1);
     assert.equal(result.interrupted, true);
-    assert.equal(events.find((event) => event.type === "turn_interrupted").reason, "after_gateway_response");
+    assert.equal(events.find((event) => event.type === "turn_interrupted").reason, "user");
     assert.deepEqual(events.map((event) => event.type), [
       "turn_start",
       "gateway_request_start",
@@ -1995,6 +2030,44 @@ test("session turns can be interrupted after gateway response before tool execut
       "turn_interrupted",
       "turn_complete"
     ]);
+  } finally {
+    await close(server);
+  }
+});
+
+test("guided abort records a steer takeover instead of a user interrupt", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
+  const requests = [];
+  const events = [];
+  const server = await listen(createToolGateway(requests), "127.0.0.1");
+
+  try {
+    const env = mockGatewayEnv(serverUrl(server));
+    const session = await createSession({
+      cwd,
+      mode: "interactive",
+      env
+    });
+    const controller = new AbortController();
+
+    const result = await runSessionTurn(session, {
+      prompt: "read notes",
+      env,
+      signal: controller.signal,
+      onEvent: (event) => {
+        events.push(event);
+        if (event.type === "gateway_response") {
+          controller.abort("guided");
+        }
+      }
+    });
+
+    assert.equal(result.interrupted, false);
+    assert.equal(result.steered, true);
+    assert.match(result.output, /Turn redirected to user guidance/);
+    assert.equal(events.find((event) => event.type === "turn_interrupted").reason, "guided");
+    assert.equal(events.find((event) => event.type === "turn_complete").status, "guided");
+    assert.doesNotMatch(result.output, /Turn interrupted by the local user/);
   } finally {
     await close(server);
   }
@@ -2300,7 +2373,7 @@ test("session turns interrupt an in-flight shell tool and finish locally", async
     assert.equal(finish.name, shellTool);
     assert.equal(finish.interrupted, true);
     assert.equal(finish.errorCode, "SHELL_INTERRUPTED");
-    assert.equal(events.find((event) => event.type === "turn_interrupted").reason, "after_tool_execution");
+    assert.equal(events.find((event) => event.type === "turn_interrupted").reason, "user");
     assert.equal(requests.length, 1);
     assert.equal(events.at(-1).type, "turn_complete");
     assert.equal(events.at(-1).status, "interrupted");

@@ -367,10 +367,12 @@ export function buildCompactedContextMessage(session: { contextWindow?: ReturnTy
     content: [{
       type: "text",
       text: [
-        "Ant Code compacted conversation context (session-local, bounded, redacted before local transcript retention):",
-        summary,
+        "Ant Code compacted older conversation context into this handoff summary.",
+        "Continue the current task from the summary and the recent messages that follow.",
+        "If work is unfinished, call tools. If you can answer, write visible text for the user.",
+        "The summary is a handoff, not a completed reply. Re-read files or rerun tools when exact details matter.",
         "",
-        "Use this as background only. Re-read files or rerun tools when exact details matter."
+        summary
       ].join("\n")
     }]
   };
@@ -493,6 +495,7 @@ function buildModelCompactionRequest(session: { contextWindow?: ContextWindow; g
     "- Preserve the conversation spine: user requests and assistant final conclusions are more important than raw telemetry.",
     "- Preserve user goals, decisions, constraints, file paths, commands, validation results, unresolved bugs, and next steps.",
     "- Preserve code identifiers, command names, slash commands, model ids, config keys, and error strings exactly when useful.",
+    "- Older in-turn tool rounds are compactable history. Keep only the facts needed to continue; do not copy raw tool payloads.",
     "- Summarize large tool outputs, web fetches, file contents, logs, and repetitive progress instead of copying them verbatim.",
     "- Prefer the user's language for product-facing notes; keep technical names unchanged.",
     "- Do not invent facts. If something is uncertain, say it is uncertain.",
@@ -589,7 +592,10 @@ function selectRecentConversationContext(messages: Array<Record<string, unknown>
   const tailTurns = Math.max(0, Number.isInteger(window.tailTurns) ? window.tailTurns : DEFAULT_TAIL_TURNS);
   const preserveTokens = Math.max(1, Number.isInteger(window.preserveRecentTokens) ? window.preserveRecentTokens : DEFAULT_PRESERVE_RECENT_TOKENS);
   const fallbackKeep = Math.min(messages.length, Math.max(0, window.keepRecentMessages));
-  if (!Array.isArray(messages) || messages.length === 0 || tailTurns <= 0) {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return { keepCount: 0, reason: "empty" };
+  }
+  if (tailTurns <= 0) {
     return { keepCount: fallbackKeep, reason: "fallback_keep_recent_messages" };
   }
 
@@ -608,7 +614,8 @@ function selectRecentConversationContext(messages: Array<Record<string, unknown>
     startIndex = 0;
   }
 
-  while (startIndex < messages.length && estimateMessagesTokens(messages.slice(startIndex)) > preserveTokens) {
+  const minimumStart = minimumTailStartIndex(messages);
+  while (startIndex < minimumStart && estimateMessagesTokens(messages.slice(startIndex)) > preserveTokens) {
     let absoluteNextUser = -1;
     for (let index = startIndex + 1; index < messages.length; index += 1) {
       if (messages[index]?.role === "user") {
@@ -616,22 +623,52 @@ function selectRecentConversationContext(messages: Array<Record<string, unknown>
         break;
       }
     }
-    if (absoluteNextUser <= startIndex) {
-      startIndex += 1;
-    } else {
+    if (absoluteNextUser > startIndex && absoluteNextUser <= minimumStart) {
       startIndex = absoluteNextUser;
+    } else {
+      startIndex += 1;
     }
   }
 
-  if (startIndex <= 0 && messages.length > fallbackKeep) {
-    startIndex = messages.length - fallbackKeep;
+  startIndex = snapToToolPairStart(messages, Math.min(startIndex, minimumStart));
+  if (startIndex <= 0 && estimateMessagesTokens(messages) <= preserveTokens && messages.length > fallbackKeep) {
+    startIndex = snapToToolPairStart(messages, messages.length - fallbackKeep);
   }
 
-  const keepCount = Math.max(fallbackKeep, messages.length - startIndex);
   return {
-    keepCount: Math.min(messages.length, keepCount),
+    keepCount: Math.min(messages.length, Math.max(1, messages.length - startIndex)),
     reason: "tail_turns_with_token_budget"
   };
+}
+
+function minimumTailStartIndex(messages: Array<Record<string, unknown>>) {
+  let lastUser = -1;
+  let lastAssistantTools = -1;
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (message?.role === "user") {
+      lastUser = index;
+    }
+    const toolCalls = message?.toolCalls;
+    if (message?.role === "assistant" && Array.isArray(toolCalls) && toolCalls.length > 0) {
+      lastAssistantTools = index;
+    }
+  }
+  if (lastAssistantTools >= 0) {
+    return lastAssistantTools;
+  }
+  if (lastUser >= 0) {
+    return lastUser;
+  }
+  return Math.max(0, messages.length - 1);
+}
+
+function snapToToolPairStart(messages: Array<Record<string, unknown>>, startIndex: number) {
+  let index = Math.max(0, Math.min(startIndex, Math.max(0, messages.length - 1)));
+  while (index > 0 && messages[index]?.role === "tool") {
+    index -= 1;
+  }
+  return index;
 }
 
 function summarizeConversationSpine(messages: Array<Record<string, unknown>>) {
