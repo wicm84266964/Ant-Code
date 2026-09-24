@@ -4,6 +4,8 @@
 
 ## 2.0.19 - 2026-09-24
 
+Published 2026-09-24: [v2.0.19](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.19).
+
 Parent sessions receive each child's complete final handoff report. Guide takeover keeps thinking drafts labeled as steered. Failed write receipts no longer claim the file was edited.
 
 ## 2.0.18 - 2026-09-22
