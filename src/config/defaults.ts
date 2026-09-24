@@ -133,7 +133,7 @@ export const DEFAULT_CONFIG = Object.freeze({
       maxConcurrentBackground: 3,
       defaultWaitFor: "all",
       autoQueueParentPrompt: true,
-      maxWakeSummaryBytes: 12000
+      maxWakeSummaryBytes: 96000
     },
     reviewGate: {
       enabled: true,

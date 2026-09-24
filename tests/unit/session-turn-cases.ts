@@ -2068,6 +2068,10 @@ test("guided abort records a steer takeover instead of a user interrupt", async 
     assert.equal(events.find((event) => event.type === "turn_interrupted").reason, "guided");
     assert.equal(events.find((event) => event.type === "turn_complete").status, "guided");
     assert.doesNotMatch(result.output, /Turn interrupted by the local user/);
+    const draftEvent = events.find((event) => event.type === "assistant_interrupted_draft");
+    if (draftEvent) {
+      assert.equal(draftEvent.reason, "guided");
+    }
   } finally {
     await close(server);
   }

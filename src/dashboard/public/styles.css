@@ -1167,6 +1167,15 @@ button {
   color: #e07a7a;
 }
 
+.message.draft-message.guided {
+  border-color: rgba(232, 197, 71, 0.38);
+  background: rgba(232, 197, 71, 0.08);
+}
+
+.message.draft-message.guided .message-label {
+  color: var(--accent-2);
+}
+
 .draft-plain-text {
   contain: content;
   white-space: pre-wrap;

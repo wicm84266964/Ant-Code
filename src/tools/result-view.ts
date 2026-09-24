@@ -1,4 +1,4 @@
-import { capToolResultText, DEFAULT_TOOL_RESULT_MAX_BYTES, type SerializedToolResult, type ToolResultValue } from "./result.ts";
+import { capToolResultText, DEFAULT_AGENT_HANDOFF_MAX_BYTES, DEFAULT_TOOL_RESULT_MAX_BYTES, utf8Truncate, type SerializedToolResult, type ToolResultValue } from "./result.ts";
 
 const SEARCH_VIEW_MATCHES = 40;
 const SEARCH_LINE_CHARS = 200;
@@ -7,7 +7,7 @@ const SHELL_TAIL_CHARS = 4_000;
 const FETCH_EXCERPT_CHARS = 8_000;
 const GIT_EXCERPT_CHARS = 8_000;
 const GENERIC_EXCERPT_CHARS = 8_000;
-const AGENT_OUTPUT_CHARS = 8_000;
+
 const WEB_SEARCH_RESULTS = 8;
 const DIFF_PREVIEW_LINES = 24;
 
@@ -21,9 +21,11 @@ export function formatToolResultForModel(
   execution: ToolResultValue,
   options: { maxBytes?: number; evidence?: Array<{ id?: string; name?: string; bytes?: number }> } = {}
 ): SerializedToolResult {
-  const view = renderToolResultView(String(name ?? "unknown"), execution, options.evidence, options.maxBytes);
+  const toolName = String(name ?? "unknown");
+  const maxBytes = options.maxBytes ?? (toolName === "agent_run" ? DEFAULT_AGENT_HANDOFF_MAX_BYTES : DEFAULT_TOOL_RESULT_MAX_BYTES);
+  const view = renderToolResultView(toolName, execution, options.evidence, maxBytes);
   return capToolResultText(view.text, {
-    maxBytes: options.maxBytes ?? DEFAULT_TOOL_RESULT_MAX_BYTES,
+    maxBytes,
     truncated: view.truncated
   });
 }
@@ -32,21 +34,32 @@ export function renderToolResultView(
   name: string,
   execution: ToolResultValue,
   evidence: Array<{ id?: string; name?: string; bytes?: number }> = [],
-  maxBytes: number = DEFAULT_TOOL_RESULT_MAX_BYTES
+  maxBytes?: number
 ): ViewDraft {
+  const toolName = String(name ?? "unknown");
+  const budget = Number.isInteger(maxBytes) && Number(maxBytes) > 0
+    ? Number(maxBytes)
+    : (toolName === "agent_run" ? DEFAULT_AGENT_HANDOFF_MAX_BYTES : DEFAULT_TOOL_RESULT_MAX_BYTES);
   const result = asRecord(execution?.result);
   const lines = [
-    ...statusLines(name, execution),
-    ...locatorLines(name, execution, result),
+    ...statusLines(toolName, execution),
+    ...locatorLines(toolName, execution, result),
     ...evidenceLines(evidence)
   ];
-  const bodyBudget = Math.max(0, maxBytes - Buffer.byteLength(lines.join("\n"), "utf8") - 512 - Buffer.byteLength(stringField(result.systemReminder), "utf8"));
-  const body = bodyForTool(name, execution, result, bodyBudget);
+  const bodyBudget = Math.max(0, budget - Buffer.byteLength(lines.join("\n"), "utf8") - 512 - Buffer.byteLength(stringField(result.systemReminder), "utf8"));
+  const body = bodyForTool(toolName, execution, result, bodyBudget);
   if (body.text) {
     lines.push(body.text);
   }
   if (body.truncated) {
-    lines.push("需要更多内容时再调用同一工具并缩小范围。");
+    if (toolName === "agent_run") {
+      const taskId = stringField(result.taskId) || stringField(execution.taskId);
+      lines.push(taskId
+        ? `完整交接报告在 .lab-agent/tasks/${taskId}.json 的 output 字段。`
+        : "完整交接报告在对应任务记录的 output 字段。");
+    } else {
+      lines.push("需要更多内容时再调用同一工具并缩小范围。");
+    }
   }
   const reminder = stringField(result.systemReminder);
   if (reminder) {
@@ -99,7 +112,7 @@ function bodyForTool(name: string, execution: ToolResultValue, result: Record<st
     return formatWrite(result);
   }
   if (name === "agent_run") {
-    return formatAgent(execution, result);
+    return formatAgent(execution, result, budget);
   }
   if (name === "mcp_call" || name === "mcp_list") {
     return formatMcpList(name, execution, result);
@@ -399,7 +412,7 @@ function formatGit(result: Record<string, unknown>): ViewDraft {
 function formatWrite(result: Record<string, unknown>): ViewDraft {
   const stats = asRecord(result.changeStats);
   const lines = [
-    result.created === true ? "created=true" : result.edited === false ? "edited=false" : "edited=true",
+    writeOutcomeLine(result),
     Number.isFinite(Number(result.bytesWritten)) ? `bytesWritten=${Number(result.bytesWritten)}` : "",
     Number.isFinite(Number(stats.additions)) ? `additions=${Number(stats.additions)} deletions=${Number(stats.deletions ?? 0)}` : ""
   ].filter(Boolean);
@@ -413,12 +426,27 @@ function formatWrite(result: Record<string, unknown>): ViewDraft {
   return { text: lines.join("\n"), truncated: result.diffTruncated === true };
 }
 
-function formatAgent(execution: ToolResultValue, result: Record<string, unknown>): ViewDraft {
-  const output = String(result.outputSummary ?? result.output ?? execution.outputSummary ?? execution.output ?? "").trim();
-  const excerpt = headTail(output, AGENT_OUTPUT_CHARS / 2, AGENT_OUTPUT_CHARS / 2);
+function writeOutcomeLine(result: Record<string, unknown>): string {
+  if (result.created === true) {
+    return "created=true";
+  }
+  if (result.edited === false) {
+    return "edited=false";
+  }
+  if (result.edited === true || result.created === false) {
+    return "edited=true";
+  }
+  return "";
+}
+
+function formatAgent(execution: ToolResultValue, result: Record<string, unknown>, budget: number): ViewDraft {
+  const output = String(result.output ?? execution.output ?? result.outputSummary ?? execution.outputSummary ?? "").trim();
+  const limit = Math.max(0, Number.isInteger(budget) ? budget : DEFAULT_AGENT_HANDOFF_MAX_BYTES);
+  const text = utf8Truncate(output, limit);
+  const truncated = text !== output || result.outputTruncated === true;
   return {
-    text: excerpt.text || "no output",
-    truncated: excerpt.truncated || result.outputTruncated === true
+    text: text || "no output",
+    truncated
   };
 }
 

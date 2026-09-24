@@ -328,6 +328,14 @@ test("dashboard maps turn completion according to its real terminal status", () 
   const userInterrupt = mapSessionEventToDashboard({ type: "turn_interrupted", reason: "user" })[0];
   assert.equal(userInterrupt.title, "任务已中断");
   assert.equal(userInterrupt.status, "interrupted");
+  assert.equal(guidedInterrupt.reason, "guided");
+  const guidedDraft = mapSessionEventToDashboard({
+    type: "assistant_interrupted_draft",
+    reason: "guided",
+    text: "partial answer"
+  })[0];
+  assert.equal(guidedDraft.type, "assistant_interrupted_draft");
+  assert.equal(guidedDraft.reason, "guided");
   assert.equal(failed.terminalStatus, "gateway_error");
 });
 

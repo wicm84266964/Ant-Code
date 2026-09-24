@@ -151,6 +151,14 @@ export function mapSessionEventToDashboard(event: Record<string, unknown>) {
       wakePromptBytes: Buffer.byteLength(String(event.wakePrompt ?? ""), "utf8")
     })];
   }
+  if (type === "assistant_interrupted_draft") {
+    return [{
+      type: "assistant_interrupted_draft",
+      reason: event.reason ?? null,
+      text: String(event.text ?? ""),
+      bytes: event.outputBytes ?? event.bytes ?? Buffer.byteLength(String(event.text ?? ""), "utf8")
+    }];
+  }
   if (type === "assistant_final") {
     return [{
       type: "assistant_final",
@@ -170,9 +178,9 @@ export function mapSessionEventToDashboard(event: Record<string, unknown>) {
   }
   if (type === "turn_interrupted") {
     if (isSteerInterruptReason(event.reason)) {
-      return [activity("turn-guided", "引导已接管", "上一轮已收束，按你的引导继续", "running", "session", event, { coalesceKey: "turn" })];
+      return [activity("turn-guided", "引导已接管", "上一轮已收束，按你的引导继续", "running", "session", event, { coalesceKey: "turn", reason: "guided" })];
     }
-    return [activity("turn-interrupted", "任务已中断", event.reason ?? "用户中断", "interrupted", "session", event)];
+    return [activity("turn-interrupted", "任务已中断", event.reason ?? "用户中断", "interrupted", "session", event, { reason: event.reason ?? "user" })];
   }
   if (type === "context_overflow") {
     return [activity(

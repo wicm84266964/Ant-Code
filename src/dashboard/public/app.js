@@ -2735,7 +2735,9 @@ function handleDashboardEvent3(event) {
   }
   if (event.type === "activity") {
     if (event.rawType === "turn_interrupted") {
-      keepInterruptedAssistantDrafts();
+      keepInterruptedAssistantDrafts({
+        steered: String(event.reason ?? "").trim() === "guided" || event.title === "引导已接管" || shouldKeepGuideFeedback3()
+      });
     }
     if (isBackgroundSubagentActivity3(event)) {
       handleBackgroundSubagentActivity3(event);
@@ -2812,7 +2814,9 @@ function handleDashboardEvent3(event) {
     return;
   }
   if (event.type === "assistant_interrupted_draft") {
-    keepInterruptedAssistantDrafts();
+    keepInterruptedAssistantDrafts({
+      steered: String(event.reason ?? "").trim() === "guided" || shouldKeepGuideFeedback3()
+    });
     return;
   }
   if (event.type === "assistant_final") {
@@ -7021,24 +7025,35 @@ function collapseAssistantDrafts3(finalText = "") {
   appendTranscriptNode3(node);
   scrollTranscript({ onlyIfNearBottom: true });
 }
-function keepInterruptedAssistantDrafts() {
+var GUIDED_DRAFT_MARKER = "[引导接管前的草稿，非最终回复]";
+var INTERRUPTED_DRAFT_MARKER = "[中断草稿，非最终回复]";
+function isSteerDraftReason(reason) {
+  return String(reason ?? "").trim() === "guided";
+}
+function keepInterruptedAssistantDrafts(options = {}) {
+  const steered = options.steered === true;
   for (const draft of state.assistantDrafts.values()) {
     cancelScheduledAnimationFrame2(draft, "renderFrame");
     renderAssistantDraft4(draft, { force: true });
     const node = draft.node;
     if (node instanceof HTMLElement) {
-      markInterruptedDraftNode(node, Number.isFinite(draft.round) ? Number(draft.round) : null);
+      markInterruptedDraftNode(node, Number.isFinite(draft.round) ? Number(draft.round) : null, { steered });
     }
   }
   state.assistantDrafts.clear();
 }
-function markInterruptedDraftNode(node, round = null) {
-  node.classList.add("interrupted");
+function markInterruptedDraftNode(node, round = null, options = {}) {
+  const steered = options.steered === true;
+  node.classList.toggle("interrupted", !steered);
+  node.classList.toggle("guided", steered);
   const label = node.querySelector(".message-label");
   if (label) {
-    const prefix = Number.isInteger(round) ? `思考 · 第 ${round} 轮` : "思考";
-    label.textContent = `${prefix} · 已中断 · 非最终回复`;
+    label.textContent = interruptedDraftLabel(round, steered);
   }
+}
+function interruptedDraftLabel(round, steered) {
+  const prefix = Number.isInteger(round) ? `思考 · 第 ${round} 轮` : "思考";
+  return steered ? `${prefix} · 引导已接管` : `${prefix} · 已中断 · 非最终回复`;
 }
 function isThinkingProcessMessage(message) {
   return isPlainObject(message) && message.thinkingProcess === true && visibleTranscriptRole(String(message.role ?? "")) === "assistant";
@@ -7084,24 +7099,32 @@ function isInterruptedDraftMessage(message) {
   if (message.interruptedDraft === true) {
     return true;
   }
-  return /^\[中断草稿，非最终回复\]/.test(messageDisplayText3(message.content));
+  const text = messageDisplayText3(message.content);
+  return text.startsWith(INTERRUPTED_DRAFT_MARKER) || text.startsWith(GUIDED_DRAFT_MARKER);
+}
+function isSteerDraftMessage(message) {
+  if (!isPlainObject(message)) {
+    return false;
+  }
+  return String(messageDisplayText3(message.content) ?? "").includes(GUIDED_DRAFT_MARKER);
 }
 function interruptedDraftDisplayText(content) {
-  return String(messageDisplayText3(content) ?? "").replace(/^\[中断草稿，非最终回复\]\s*/u, "").replace(/^原因：[^\n]*\s*/u, "").replace(/^本轮在给出可见正文前被上游断开。\s*/u, "").trim();
+  return String(messageDisplayText3(content) ?? "").replace(/^\[引导接管前的草稿，非最终回复\]\s*/u, "").replace(/^\[中断草稿，非最终回复\]\s*/u, "").replace(/^原因：[^\n]*\s*/u, "").replace(/^本轮在给出可见正文前被引导接管。\s*/u, "").replace(/^本轮在给出可见正文前被上游断开。\s*/u, "").trim();
 }
 function createInterruptedDraftNode(message) {
   const record = isPlainObject(message) ? message : {};
+  const steered = isSteerDraftMessage(record);
   const body = interruptedDraftDisplayText(record.content);
   const node = document.createElement("article");
-  node.className = "message assistant draft-message interrupted";
+  node.className = steered ? "message assistant draft-message guided" : "message assistant draft-message interrupted";
   node.setAttribute("aria-live", "off");
   node.innerHTML = `
-    <div class="message-label">思考 · 已中断 · 非最终回复</div>
+    <div class="message-label">${interruptedDraftLabel(null, steered)}</div>
     <div class="message-body draft-plain-text"></div>
   `;
   const bodyNode = node.querySelector(".message-body");
   if (bodyNode) {
-    bodyNode.textContent = body || "本轮在给出可见正文前被上游断开。模型内部思考没有作为最终回复展示。";
+    bodyNode.textContent = body || (steered ? "本轮在给出可见正文前被引导接管。" : "本轮在给出可见正文前被上游断开。模型内部思考没有作为最终回复展示。");
   }
   return node;
 }
@@ -10476,6 +10499,7 @@ export {
   initializeSettingsFormTracking5 as initializeSettingsFormTracking,
   interruptTurn,
   interruptedDraftDisplayText,
+  interruptedDraftLabel,
   isAbortError,
   isBackgroundSubagentActivity3 as isBackgroundSubagentActivity,
   isConfigRevisionConflict7 as isConfigRevisionConflict,
@@ -10491,6 +10515,8 @@ export {
   isPlainObject,
   isProtectedTranscriptNode3 as isProtectedTranscriptNode,
   isSafeInlineBitmapUrl10 as isSafeInlineBitmapUrl,
+  isSteerDraftMessage,
+  isSteerDraftReason,
   isThinkingProcessMessage,
   isTranscriptNearBottom3 as isTranscriptNearBottom,
   isWorkspaceRelativeToBase11 as isWorkspaceRelativeToBase,
