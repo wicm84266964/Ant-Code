@@ -331,15 +331,16 @@ test("dashboard app exposes session actions and reconnects active sessions", asy
   assert.match(source, /appendActivity\(\{/);
   assert.match(source, /collapseCompletedActivities\(\);\s*clearPendingGuide\(\)/s);
   assert.match(source, /event\.type === "assistant_interrupted_draft"/);
-  assert.match(source, /keepInterruptedAssistantDrafts\(\)/);
+  assert.match(source, /keepInterruptedAssistantDrafts\(\{/);
   assert.match(source, /createInterruptedDraftNode\(message\)/);
   assert.match(source, /isThinkingProcessMessage\(message\)/);
   assert.match(source, /createThinkingProcessNode\(message\)/);
   assert.match(source, /function isInterruptedDraftMessage\(/);
   assert.match(source, /message\.interruptedDraft === true/);
   assert.match(source, /已中断 · 非最终回复/);
+  assert.match(source, /引导已接管/);
   assert.match(source, /function keepInterruptedAssistantDrafts\(/);
-  assert.match(source, /if \(event\.type === "assistant_interrupted_draft"\) \{\s*keepInterruptedAssistantDrafts\(\);/s);
+  assert.match(source, /if \(event\.type === "assistant_interrupted_draft"\) \{\s*keepInterruptedAssistantDrafts\(\{/s);
   assert.match(source, /function latestBackgroundSessionId\(\)/);
   assert.match(source, /window\.localStorage\?\.setItem\(CURRENT_SESSION_STORAGE_KEY, id\)/);
   assert.match(source, /function copySessionId\(sessionId/);

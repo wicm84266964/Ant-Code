@@ -150,25 +150,39 @@ export function collapseAssistantDrafts(finalText: unknown = "") {
   scrollTranscript({ onlyIfNearBottom: true });
 }
 
-export function keepInterruptedAssistantDrafts() {
+const GUIDED_DRAFT_MARKER = "[引导接管前的草稿，非最终回复]";
+const INTERRUPTED_DRAFT_MARKER = "[中断草稿，非最终回复]";
+
+export function isSteerDraftReason(reason: unknown) {
+  return String(reason ?? "").trim() === "guided";
+}
+
+export function keepInterruptedAssistantDrafts(options: { steered?: boolean } = {}) {
+  const steered = options.steered === true;
   for (const draft of state.assistantDrafts.values()) {
     cancelScheduledAnimationFrame(draft, "renderFrame");
     renderAssistantDraft(draft, { force: true });
     const node = draft.node;
     if (node instanceof HTMLElement) {
-      markInterruptedDraftNode(node, Number.isFinite(draft.round) ? Number(draft.round) : null);
+      markInterruptedDraftNode(node, Number.isFinite(draft.round) ? Number(draft.round) : null, { steered });
     }
   }
   state.assistantDrafts.clear();
 }
 
-export function markInterruptedDraftNode(node: HTMLElement, round: number | null = null) {
-  node.classList.add("interrupted");
+export function markInterruptedDraftNode(node: HTMLElement, round: number | null = null, options: { steered?: boolean } = {}) {
+  const steered = options.steered === true;
+  node.classList.toggle("interrupted", !steered);
+  node.classList.toggle("guided", steered);
   const label = node.querySelector(".message-label");
   if (label) {
-    const prefix = Number.isInteger(round) ? `思考 · 第 ${round} 轮` : "思考";
-    label.textContent = `${prefix} · 已中断 · 非最终回复`;
+    label.textContent = interruptedDraftLabel(round, steered);
   }
+}
+
+export function interruptedDraftLabel(round: number | null, steered: boolean) {
+  const prefix = Number.isInteger(round) ? `思考 · 第 ${round} 轮` : "思考";
+  return steered ? `${prefix} · 引导已接管` : `${prefix} · 已中断 · 非最终回复`;
 }
 
 export function isThinkingProcessMessage(message: unknown) {
@@ -217,30 +231,43 @@ export function isInterruptedDraftMessage(message: unknown) {
   if (message.interruptedDraft === true) {
     return true;
   }
-  return /^\[中断草稿，非最终回复\]/.test(messageDisplayText(message.content));
+  const text = messageDisplayText(message.content);
+  return text.startsWith(INTERRUPTED_DRAFT_MARKER) || text.startsWith(GUIDED_DRAFT_MARKER);
+}
+
+export function isSteerDraftMessage(message: unknown) {
+  if (!isPlainObject(message)) {
+    return false;
+  }
+  return String(messageDisplayText(message.content) ?? "").includes(GUIDED_DRAFT_MARKER);
 }
 
 export function interruptedDraftDisplayText(content: unknown) {
   return String(messageDisplayText(content) ?? "")
+    .replace(/^\[引导接管前的草稿，非最终回复\]\s*/u, "")
     .replace(/^\[中断草稿，非最终回复\]\s*/u, "")
     .replace(/^原因：[^\n]*\s*/u, "")
+    .replace(/^本轮在给出可见正文前被引导接管。\s*/u, "")
     .replace(/^本轮在给出可见正文前被上游断开。\s*/u, "")
     .trim();
 }
 
 export function createInterruptedDraftNode(message: unknown) {
   const record = isPlainObject(message) ? message : {};
+  const steered = isSteerDraftMessage(record);
   const body = interruptedDraftDisplayText(record.content);
   const node = document.createElement("article");
-  node.className = "message assistant draft-message interrupted";
+  node.className = steered ? "message assistant draft-message guided" : "message assistant draft-message interrupted";
   node.setAttribute("aria-live", "off");
   node.innerHTML = `
-    <div class="message-label">思考 · 已中断 · 非最终回复</div>
+    <div class="message-label">${interruptedDraftLabel(null, steered)}</div>
     <div class="message-body draft-plain-text"></div>
   `;
   const bodyNode = node.querySelector(".message-body");
   if (bodyNode) {
-    bodyNode.textContent = body || "本轮在给出可见正文前被上游断开。模型内部思考没有作为最终回复展示。";
+    bodyNode.textContent = body || (steered
+      ? "本轮在给出可见正文前被引导接管。"
+      : "本轮在给出可见正文前被上游断开。模型内部思考没有作为最终回复展示。");
   }
   return node;
 }

@@ -14,7 +14,7 @@ import { runHooks } from "../hooks/runner.ts";
 import { createMcpRuntime } from "../mcp/runtime.ts";
 import { appendThinkingPreview, limitThinkingPreview } from "../model-gateway/thinking-budget.ts";
 import { createSessionStore } from "../storage/session-store.ts";
-import { DEFAULT_TOOL_RESULT_MAX_BYTES } from "../tools/result.ts";
+import { DEFAULT_AGENT_HANDOFF_MAX_BYTES, DEFAULT_TOOL_RESULT_MAX_BYTES } from "../tools/result.ts";
 import { formatToolResultForModel } from "../tools/result-view.ts";
 import { extractImagePayloads, registerVisualEvidence } from "./visual-evidence.ts";
 import { countLineChanges, previewUnifiedDiff } from "../tools/diff.ts";
@@ -237,7 +237,7 @@ export async function executeOneToolCall(call: import("../model-gateway/protocol
     }
   }
   const serialized = formatToolResultForModel(call.name, executionForModel, {
-    maxBytes: resolveParentToolResultMaxBytes(toolRuntime.config),
+    maxBytes: resolveParentToolResultMaxBytes(toolRuntime.config, call.name),
     evidence
   });
   await emitEvent(options, {
@@ -275,10 +275,15 @@ export async function executeOneToolCall(call: import("../model-gateway/protocol
   };
 }
 
-function resolveParentToolResultMaxBytes(config: LabAgentConfig | undefined) {
+function resolveParentToolResultMaxBytes(config: LabAgentConfig | undefined, toolName = "") {
   const configured = Number(config?.context && typeof config.context === "object"
     ? (config.context as { maxToolResultBytes?: unknown }).maxToolResultBytes
     : undefined);
+  if (toolName === "agent_run") {
+    return Number.isInteger(configured) && configured > 0
+      ? Math.max(configured, DEFAULT_AGENT_HANDOFF_MAX_BYTES)
+      : DEFAULT_AGENT_HANDOFF_MAX_BYTES;
+  }
   if (Number.isInteger(configured) && configured > 0) {
     return configured;
   }

@@ -1133,7 +1133,13 @@ async function persistVisibleInterruptedDraft(state: DashboardActiveSessionState
     return;
   }
   const prompt = String(state.currentPrompt ?? "");
-  appendInterruptedDraftMessages(state.session, prompt, prompt, { text }, `turn:${state.status || "failed"}`);
+  appendInterruptedDraftMessages(
+    state.session,
+    prompt,
+    prompt,
+    { text },
+    String(state.status ?? "").trim() === "guided" ? "guided" : `turn:${state.status || "failed"}`
+  );
   try {
     await persistSessionSnapshot(state.session, { env, requireExisting: false });
     state.persisted = true;

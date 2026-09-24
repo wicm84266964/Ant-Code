@@ -1,4 +1,5 @@
 export const DEFAULT_TOOL_RESULT_MAX_BYTES = 32_000;
+export const DEFAULT_AGENT_HANDOFF_MAX_BYTES = 96_000;
 const TRUNCATION_MARKER = "\n...[tool result truncated]";
 
 export type ToolResultValue = {
@@ -50,6 +51,10 @@ export function capToolResultText(
 function positiveInteger(value: unknown) {
   const number = Number(value);
   return Number.isInteger(number) && number > 0 ? number : null;
+}
+
+export function utf8Truncate(text: string, maxBytes: number) {
+  return utf8Prefix(text, maxBytes);
 }
 
 function utf8Prefix(text: string, maxBytes: number) {

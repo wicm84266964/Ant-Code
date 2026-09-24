@@ -484,7 +484,9 @@ export function handleDashboardEvent(event: DashboardStreamEvent) {
   }
   if (event.type === "activity") {
     if (event.rawType === "turn_interrupted") {
-      keepInterruptedAssistantDrafts();
+      keepInterruptedAssistantDrafts({
+        steered: String(event.reason ?? "").trim() === "guided" || event.title === "引导已接管" || shouldKeepGuideFeedback()
+      });
     }
     if (isBackgroundSubagentActivity(event)) {
       handleBackgroundSubagentActivity(event);
@@ -561,7 +563,9 @@ export function handleDashboardEvent(event: DashboardStreamEvent) {
     return;
   }
   if (event.type === "assistant_interrupted_draft") {
-    keepInterruptedAssistantDrafts();
+    keepInterruptedAssistantDrafts({
+      steered: String(event.reason ?? "").trim() === "guided" || shouldKeepGuideFeedback()
+    });
     return;
   }
   if (event.type === "assistant_final") {

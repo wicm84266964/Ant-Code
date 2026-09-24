@@ -68,6 +68,66 @@ test("write_file model view drops the full diff", () => {
   assert.ok(view.text.split("\n").length < 40);
 });
 
+test("failed write_file without a result does not claim edited=true", () => {
+  const view = renderToolResultView("write_file", {
+    ok: false,
+    error: {
+      code: "ENOENT",
+      message: "ENOENT: no such file or directory, open 'missing/dir/notes.txt'"
+    }
+  });
+
+  assert.match(view.text, /ok=false tool=write_file/);
+  assert.match(view.text, /error=ENOENT: ENOENT: no such file or directory, open 'missing\/dir\/notes\.txt'/);
+  assert.doesNotMatch(view.text, /edited=true/);
+  assert.doesNotMatch(view.text, /created=true/);
+});
+
+test("failed edit_file without a result does not claim edited=true", () => {
+  const view = renderToolResultView("edit_file", {
+    ok: false,
+    error: {
+      code: "FILE_NOT_FOUND",
+      message: "file not found"
+    }
+  });
+
+  assert.match(view.text, /ok=false tool=edit_file/);
+  assert.match(view.text, /error=FILE_NOT_FOUND: file not found/);
+  assert.doesNotMatch(view.text, /edited=true/);
+});
+
+test("write_file overwrite still reports edited=true", () => {
+  const view = renderToolResultView("write_file", {
+    ok: true,
+    result: {
+      path: "notes.txt",
+      created: false,
+      bytesWritten: 12,
+      changeStats: { additions: 1, deletions: 1 }
+    }
+  });
+
+  assert.match(view.text, /ok=true tool=write_file/);
+  assert.match(view.text, /path=notes\.txt/);
+  assert.match(view.text, /edited=true/);
+  assert.doesNotMatch(view.text, /created=true/);
+});
+
+test("edit_file success and no-op keep their edited flags", () => {
+  const edited = renderToolResultView("edit_file", {
+    ok: true,
+    result: { path: "notes.txt", edited: true, bytesWritten: 20 }
+  });
+  const skipped = renderToolResultView("edit_file", {
+    ok: true,
+    result: { path: "notes.txt", edited: false }
+  });
+
+  assert.match(edited.text, /edited=true/);
+  assert.match(skipped.text, /edited=false/);
+});
+
 test("mcp image payloads are omitted from the model view", () => {
   const view = renderToolResultView("mcp_call", {
     ok: true,
@@ -101,7 +161,26 @@ test("agent_run model view keeps the report and drops nested tool dumps", () => 
 
   assert.match(view.text, /profile=explorer/);
   assert.match(view.text, /found 2 files/);
+  assert.match(view.text, /next: read src\/a.ts/);
   assert.doesNotMatch(view.text, /xxxx/);
+});
+
+test("agent_run model view prefers the full handoff report over the eight-line summary", () => {
+  const findings = Array.from({ length: 8 }, (_, index) => `F-${index + 1} 正文对照 L${index + 10}`).join("\n");
+  const view = renderToolResultView("agent_run", {
+    ok: true,
+    result: {
+      profile: "reviewer",
+      status: "completed",
+      outputSummary: "I have sufficient evidence. Writing the report now.",
+      output: `# 复核报告\n${findings}`
+    }
+  });
+
+  assert.match(view.text, /F-1 正文对照 L10/);
+  assert.match(view.text, /F-8 正文对照 L17/);
+  assert.doesNotMatch(view.text, /I have sufficient evidence/);
+  assert.equal(view.truncated, false);
 });
 
 test("skill_list, todo_read, rg_count, and empty mcp_list keep array payloads", () => {

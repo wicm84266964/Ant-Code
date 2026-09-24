@@ -329,10 +329,11 @@ export function includeInterruptedDraftsFromEvents(messages: unknown, state: Das
   if (!text.trim()) {
     return list;
   }
+  const steered = String(state.status ?? "").trim() === "guided";
   list.push({
     role: "assistant",
     interruptedDraft: true,
-    content: [{ type: "text", text: `[中断草稿，非最终回复]\n${text}` }]
+    content: [{ type: "text", text: `${steered ? "[引导接管前的草稿，非最终回复]" : "[中断草稿，非最终回复]"}\n${text}` }]
   });
   return list;
 }
@@ -348,7 +349,8 @@ export function isInterruptedDraftTranscriptMessage(message: unknown) {
   if (message.interruptedDraft === true) {
     return true;
   }
-  return /^\[中断草稿，非最终回复\]/.test(messageContentText(message.content));
+  const text = messageContentText(message.content);
+  return /^\[中断草稿，非最终回复\]/.test(text) || /^\[引导接管前的草稿，非最终回复\]/.test(text);
 }
 
 export function mergeActiveTranscriptPage(storedPage: TranscriptPageView, state: DashboardActiveSessionState, options: Record<string, unknown> = {}) {
