@@ -4,6 +4,8 @@
 
 ## 2.0.20 - 2026-10-06
 
+Published 2026-10-06: [v2.0.20](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.20).
+
 Dashboard adds a left-edge filament rail for sent prompts, Enter-to-search saved prompts and replies, and a button to copy the current project path. Restart Dashboard and refresh the browser so the search route is available. Existing configuration and sessions can continue.
 
 ## 2.0.19 - 2026-09-24
