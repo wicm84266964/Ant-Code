@@ -2233,6 +2233,112 @@ test("permission approval dialog stays on screen and does not leave a stuck wait
   }
 });
 
+test("prompt rail grows on hover and jumps back to that prompt", async () => {
+  const longReply = `尾部说明\n\n${"补充行\n".repeat(80)}`;
+  runtime.transcriptOverrides.set("session-b", [
+    { role: "user", content: "先整理实验记录" },
+    { role: "assistant", content: "已整理第一批记录。" },
+    { role: "user", content: "再核对分类标签" },
+    { role: "assistant", content: "标签已核对。" },
+    { role: "user", content: "最后生成简报" },
+    { role: "assistant", content: longReply }
+  ]);
+  try {
+    await withDashboardPage({ width: 1280, height: 900 }, async (page) => {
+      await page.locator(".thread-open", { hasText: "Session B" }).click();
+      const rail = page.locator("#prompt-rail");
+      await rail.waitFor({ state: "visible" });
+      const marks = page.locator("#prompt-rail-marks button");
+      assert.equal(await marks.count(), 3);
+      assert.equal(await page.locator("#prompt-input").inputValue(), "");
+      await marks.nth(1).hover();
+      assert.equal(await page.locator("#prompt-rail-preview").getAttribute("hidden"), "");
+      await page.waitForFunction(() => {
+        const preview = document.querySelector("#prompt-rail-preview");
+        return preview instanceof HTMLElement
+          && !preview.hidden
+          && preview.textContent?.includes("再核对分类标签")
+          && preview.textContent.includes("标签已核对");
+      });
+      const placement = await page.evaluate(() => {
+        const rail = document.querySelector("#prompt-rail");
+        const handle = document.querySelector("#preview-resize-handle");
+        const preview = document.querySelector("#prompt-rail-preview");
+        const stage = document.querySelector(".transcript-stage");
+        if (!(rail instanceof HTMLElement) || !(handle instanceof HTMLElement) || !(preview instanceof HTMLElement) || !(stage instanceof HTMLElement)) return null;
+        const railBox = rail.getBoundingClientRect();
+        const handleBox = handle.getBoundingClientRect();
+        const previewBox = preview.getBoundingClientRect();
+        const stageBox = stage.getBoundingClientRect();
+        return {
+          railInset: railBox.left - stageBox.left,
+          railRight: railBox.right,
+          handleLeft: handleBox.left,
+          previewLeft: previewBox.left,
+          index: preview.querySelector(".prompt-rail-index")?.textContent ?? ""
+        };
+      });
+      assert.ok(placement, "prompt rail placement was not measurable");
+      assert.ok(placement.railInset < 24, `rail should sit on the conversation's left edge, inset=${placement.railInset}`);
+      assert.ok(placement.railRight < placement.handleLeft - 24, "rail should stay clear of the file-panel drag handle");
+      assert.ok(placement.previewLeft > placement.railRight - 4, "specimen tag should open into the conversation");
+      assert.equal(placement.index, "02");
+      assert.equal(await marks.nth(1).evaluate((node) => node.style.getPropertyValue("--prompt-width")), "40px");
+      assert.equal(await marks.nth(0).evaluate((node) => node.style.getPropertyValue("--prompt-width")), "30px");
+      assert.equal(await marks.nth(2).evaluate((node) => node.style.getPropertyValue("--prompt-width")), "30px");
+      await page.waitForFunction(() => {
+        const transcript = document.querySelector("#transcript");
+        const first = document.querySelector(".message.user");
+        if (!(transcript instanceof HTMLElement) || !(first instanceof HTMLElement)) return false;
+        return first.getBoundingClientRect().top < transcript.getBoundingClientRect().top - 40;
+      });
+      await marks.nth(0).click();
+      await page.waitForFunction(() => document.querySelector(".message.user.prompt-jump-target")?.textContent?.includes("先整理实验记录"));
+      const jump = await page.evaluate(() => {
+        const transcript = document.querySelector("#transcript");
+        const target = document.querySelector(".message.user.prompt-jump-target");
+        if (!(transcript instanceof HTMLElement) || !(target instanceof HTMLElement)) return null;
+        return {
+          delta: target.getBoundingClientRect().top - transcript.getBoundingClientRect().top,
+          scrollTop: transcript.scrollTop
+        };
+      });
+      assert.ok(jump, "clicked prompt did not highlight a transcript message");
+      assert.ok(jump.delta >= -2 && jump.delta < 48, `prompt should sit near the top, delta=${jump.delta}`);
+      assert.equal(await page.locator("#prompt-input").inputValue(), "");
+      await assertNoPageOverflow(page, "prompt rail");
+      await page.evaluate(axeSource);
+      const violations = await page.evaluate(async () => globalThis.axe.run(document.querySelector("#prompt-rail"), {
+        runOnly: { type: "tag", values: ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"] },
+        resultTypes: ["violations"]
+      }));
+      const blocking = violations.violations.filter((violation) => ["serious", "critical"].includes(violation.impact));
+      assert.deepEqual(blocking.map((violation) => violation.id), []);
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.waitForFunction(() => getComputedStyle(document.querySelector("#prompt-rail")).display === "none");
+      await assertNoPageOverflow(page, "prompt rail mobile");
+    });
+  } finally {
+    runtime.transcriptOverrides.delete("session-b");
+  }
+});
+
+test("project path copy button writes the current project path", async () => {
+  await withDashboardPage({ width: 1280, height: 900 }, async (page) => {
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    const button = page.locator("#copy-project-path");
+    await button.waitFor();
+    assert.equal(await button.isDisabled(), false);
+    assert.equal(await page.locator("#project-path").textContent(), ROOT);
+    await button.click();
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), ROOT);
+    await page.waitForFunction(() => document.querySelector("#copy-project-path")?.textContent === "已复制");
+    await assertNoPageOverflow(page, "project path copy");
+    await page.setViewportSize({ width: 390, height: 844 });
+    await assertNoPageOverflow(page, "project path copy mobile");
+  });
+});
+
 test("dashboard has no serious or critical axe violations", async () => {
   await withDashboardPage({ width: 1280, height: 900 }, async (page) => {
     await page.evaluate(axeSource);
@@ -2324,6 +2430,7 @@ function createBrowserRuntime(remoteImageUrl) {
     modelCapabilityProbeCalls: [],
     modelCapabilityProbeResponses: [],
     modelCapabilityProbeSettledCalls: [],
+    transcriptOverrides: new Map(),
     modelSwitchCalls: [],
     defaultModelCalls: [],
     activeSessionIds: new Set(),
@@ -2386,7 +2493,8 @@ function createBrowserRuntime(remoteImageUrl) {
         paths: { global: "C:\\settings\\global.json", project: "C:\\project\\.lab-agent\\settings.json" },
         revisions: { global: "global-r1", project: "project-r1", credentials: "credentials-r1" }
       },
-      settings: browserSettings()
+      settings: browserSettings(),
+      cwd: ROOT
     }),
     trustStatus: async () => ({ ok: true, trust: { trusted: true } }),
     trustWorkspace: async () => ({ ok: true, trust: { trusted: true } }),
@@ -2410,6 +2518,12 @@ function createBrowserRuntime(remoteImageUrl) {
         if (model) {
           response.session.model = model;
           response.session.sessionStatus.model = model;
+        }
+        const transcript = this.transcriptOverrides.get(id);
+        if (Array.isArray(transcript)) {
+          response.session.transcript = transcript;
+          response.session.transcriptPage = { cursor: null, hasMore: false, total: transcript.length };
+          delete response.session.failure;
         }
         return response;
       }

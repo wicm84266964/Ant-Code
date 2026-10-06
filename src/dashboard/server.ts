@@ -660,6 +660,13 @@ async function routeRequest(req: http.IncomingMessage, res: http.ServerResponse,
   if (req.method === "GET" && url.pathname === "/api/sessions") {
     return sendJson(res, 200, { ok: true, sessions: await options.runtime.listSessionRecords() });
   }
+  if (req.method === "GET" && url.pathname === "/api/sessions/search") {
+    if (typeof options.runtime.searchSessionContent !== "function") {
+      return sendJson(res, 501, { ok: false, error: "内容搜索不可用" });
+    }
+    const result = await options.runtime.searchSessionContent(url.searchParams.get("q") ?? "");
+    return sendJson(res, responseStatus(result, 200, 400), result);
+  }
   if (req.method === "GET" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/transcript")) {
     const id = decodeURIComponent(url.pathname.slice("/api/sessions/".length, -"/transcript".length));
     const result = await options.runtime.readTranscriptPage({

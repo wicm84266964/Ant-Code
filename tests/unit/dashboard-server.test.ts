@@ -777,6 +777,29 @@ test("dashboard gateway profile route forwards delete requests", async () => {
   }
 });
 
+test("dashboard content search route is not treated as a session id", async () => {
+  const calls = [];
+  const server = createDashboardServer({
+    cwd: process.cwd(),
+    runtime: {
+      ...createRuntimeStub(),
+      searchSessionContent: async (query) => {
+        calls.push(query);
+        return { ok: true, query, hits: [], unreadable: 0, truncated: false };
+      }
+    }
+  });
+  await listen(server, "127.0.0.1", 0);
+  try {
+    const response = await fetchJson(server, "/api/sessions/search?q=alpha-tag");
+    assert.equal(response.status, 200);
+    assert.equal(response.body.ok, true);
+    assert.deepEqual(calls, ["alpha-tag"]);
+  } finally {
+    await close(server);
+  }
+});
+
 test("dashboard server serves static assets from configured public dir", async () => {
   const publicDir = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-public-"));
   await fs.mkdir(path.join(publicDir, "vendor"), { recursive: true });

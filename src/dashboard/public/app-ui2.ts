@@ -284,6 +284,152 @@ export function renderSessions() {
   }
 }
 
+export function clearContentSearch() {
+  state.contentSearch = {
+    query: "",
+    status: "idle",
+    hits: [],
+    unreadable: 0,
+    truncated: false,
+    error: "",
+    pendingJump: state.contentSearch.pendingJump
+  };
+  renderContentSearchResults();
+}
+
+export async function searchSessionContent() {
+  const query = String(els.sessionSearch?.value ?? "").trim();
+  state.sessionSearchQuery = query;
+  renderSessions();
+  if (!query) {
+    clearContentSearch();
+    return;
+  }
+  const request = beginScopedRequest("content-search", query);
+  state.contentSearch = {
+    query,
+    status: "loading",
+    hits: [],
+    unreadable: 0,
+    truncated: false,
+    error: "",
+    pendingJump: null
+  };
+  renderContentSearchResults();
+  const result = await getJson(`/api/sessions/search?${new URLSearchParams({ q: query })}`, { signal: request.signal })
+    .catch((error: unknown): DashboardApiResult => ({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      aborted: isAbortError(error)
+    }));
+  if (!isCurrentScopedRequest(request)) return;
+  finishScopedRequest(request);
+  if (result.aborted) return;
+  if (!result.ok) {
+    state.contentSearch.status = "error";
+    state.contentSearch.error = String(result.error ?? "搜索记录失败");
+    renderContentSearchResults();
+    return;
+  }
+  state.contentSearch = {
+    query,
+    status: "done",
+    hits: Array.isArray(result.hits) ? result.hits : [],
+    unreadable: Number(result.unreadable) || 0,
+    truncated: result.truncated === true,
+    error: "",
+    pendingJump: null
+  };
+  renderContentSearchResults();
+}
+
+export function renderContentSearchResults() {
+  const root = els.contentSearchResults;
+  if (!(root instanceof HTMLElement)) return;
+  const search = state.contentSearch;
+  if (search.status === "idle") {
+    root.classList.add("hidden");
+    root.replaceChildren();
+    return;
+  }
+  root.classList.remove("hidden");
+  root.replaceChildren();
+  const status = document.createElement("div");
+  status.className = "content-search-status";
+  if (search.status === "loading") {
+    status.textContent = "正在搜索记录…";
+    root.append(status);
+    return;
+  }
+  if (search.status === "error") {
+    status.textContent = search.error || "搜索记录失败";
+    root.append(status);
+    return;
+  }
+  const notes = [];
+  notes.push(search.hits.length > 0 ? `记录里找到 ${search.hits.length} 处` : "记录里没有找到");
+  if (search.unreadable > 0) notes.push(`${search.unreadable} 个会话无法读取`);
+  if (search.truncated) notes.push("结果已截断");
+  status.textContent = notes.join(" · ");
+  root.append(status);
+  for (const hit of search.hits) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "content-search-hit";
+    button.innerHTML = `
+      <span class="content-search-title">${escapeHtml(hit.title || "未命名任务")}</span>
+      <span class="content-search-excerpt">${escapeHtml(`${hit.role === "assistant" ? "Ant Code" : "你"} · ${hit.excerpt}`)}</span>
+    `;
+    button.addEventListener("click", () => {
+      void openContentSearchHit(hit);
+    });
+    root.append(button);
+  }
+}
+
+export async function openContentSearchHit(hit: { sessionId: string; excerpt: string; position: number; role: "user" | "assistant" }) {
+  state.contentSearch.pendingJump = hit;
+  if (state.currentSessionId === hit.sessionId && revealContentSearchNode(hit)) {
+    state.contentSearch.pendingJump = null;
+    return;
+  }
+  await openSession(hit.sessionId);
+}
+
+export async function revealContentSearchHit() {
+  const hit = state.contentSearch.pendingJump;
+  if (!hit || state.currentSessionId !== hit.sessionId) return;
+  for (let attempt = 0; attempt < 24; attempt += 1) {
+    if (revealContentSearchNode(hit)) {
+      state.contentSearch.pendingJump = null;
+      return;
+    }
+    if (!state.transcriptPaging.hasMore) break;
+    await loadOlderTranscript();
+  }
+  state.contentSearch.pendingJump = null;
+  announceStatus("这条记录不在当前已载入的页面里");
+}
+
+function revealContentSearchNode(hit: { excerpt: string; role: "user" | "assistant" }) {
+  const transcript = els.transcript;
+  if (!(transcript instanceof HTMLElement)) return false;
+  const core = hit.excerpt.replace(/^…/, "").replace(/…$/, "").trim();
+  const selector = hit.role === "assistant" ? ".message.assistant" : ".message.user";
+  const node = Array.from(transcript.querySelectorAll(selector)).find((item) => {
+    const text = item.textContent?.replace(/\s+/g, " ") ?? "";
+    return core ? text.includes(core) : false;
+  });
+  if (!(node instanceof HTMLElement)) return false;
+  const delta = node.getBoundingClientRect().top - transcript.getBoundingClientRect().top;
+  transcript.scrollTo({ top: Math.max(0, transcript.scrollTop + delta - 24), behavior: "auto" });
+  transcript.querySelectorAll(".prompt-jump-target").forEach((item) => item.classList.remove("prompt-jump-target"));
+  node.classList.add("prompt-jump-target");
+  state.transcriptFollowing = false;
+  updateTranscriptJump();
+  return true;
+}
+
 export function sessionMatchesQuery(session: DashboardSessionSummary, query: unknown) {
   const needle = String(query ?? "").trim().toLowerCase();
   if (!needle) {
@@ -464,7 +610,11 @@ export async function openSession(id: string, options: { restore?: boolean } = {
   setTranscriptPaging(loadedSession.transcriptPage);
   renderTranscriptMessages(loadedSession.transcript ?? []);
   renderSessionFailure(loadedSession.failure);
-  scrollTranscript({ force: true });
+  if (state.contentSearch.pendingJump?.sessionId === id) {
+    await revealContentSearchHit();
+  } else {
+    scrollTranscript({ force: true });
+  }
   const hasBackground = restoreBackgroundSnapshot(loadedSession.backgroundSnapshot);
   if (loadedSession.active && loadedSession.running) {
     rememberEventCursor(loadedSession.eventCursor);

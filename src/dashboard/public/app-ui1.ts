@@ -1,5 +1,7 @@
+import { bindPromptRail } from "./prompt-rail.ts";
 import { renderMarkdown } from "./markdown.ts";
-import { classifyComposerFile, composerHasOutboundContent } from "./app-ui2.ts";
+import { classifyComposerFile, clearContentSearch, composerHasOutboundContent, searchSessionContent } from "./app-ui2.ts";
+import { copyProjectPath, setProjectPath } from "./app-ui9.ts";
 import { hydrateRichContent } from "./rich-renderers.ts";
 import { visibleTranscriptRole } from "./transcript.ts";
 import { MANUAL_AGENT_MODEL_VALUE, state, els, MODE_DESCRIPTIONS, LOCAL_FILE_EXTENSIONS, FILE_REFERENCE_PATTERN, TRANSCRIPT_DOM_LIMIT, EVENT_STALE_AFTER_MS, EVENT_CONNECT_TIMEOUT_MS, EVENT_RECONNECT_MAX_ATTEMPTS, DASHBOARD_REQUEST_TIMEOUT_MS, DASHBOARD_TURN_START_TIMEOUT_MS, DASHBOARD_API_VERSION, DASHBOARD_LIFECYCLE_TIMEOUT_MS, DASHBOARD_SHUTDOWN_TIMEOUT_MS, DASHBOARD_INTERRUPT_TIMEOUT_MS, MAX_IMAGE_ATTACHMENTS, MAX_IMAGE_ATTACHMENT_BYTES, CURRENT_SESSION_STORAGE_KEY, DASHBOARD_CLIENT_STORAGE_KEY, PREVIEW_WIDTH_STORAGE_KEY, PREVIEW_WIDTH_DEFAULT, PREVIEW_WIDTH_MIN, PREVIEW_WIDTH_MAX, PREVIEW_WORKSPACE_MIN , emptySessionStatus, emptyBackgroundSubagent } from "./app-core.ts";
@@ -38,9 +40,7 @@ export async function bootstrapDashboard() {
       providerId: status.sessionStatus?.providerId ?? state.gatewayConfig?.activeProfileId ?? ""
     });
     rememberNewTaskModelState();
-    if (els.projectPath) {
-      els.projectPath.textContent = String(status.cwd ?? "");
-    }
+    setProjectPath(String(status.cwd ?? ""));
     const trust = await loadTrust({ signal: request.signal, silent: true });
     if (!trust?.ok) {
       throw dashboardPayloadError(trust, "无法读取工作区信任状态");
@@ -88,7 +88,25 @@ export function bindEvents() {
   els.refreshSessions.addEventListener("click", () => loadSessions({ feedback: true }));
   els.sessionSearch?.addEventListener("input", () => {
     state.sessionSearchQuery = String(els.sessionSearch.value ?? "");
+    if (state.contentSearch.query && state.contentSearch.query !== state.sessionSearchQuery.trim()) {
+      clearContentSearch();
+    }
     renderSessions();
+  });
+  els.sessionSearch?.addEventListener("keydown", (event: KeyboardEvent) => {
+    if (event.key !== "Enter" || event.isComposing) {
+      return;
+    }
+    event.preventDefault();
+    void searchSessionContent();
+  });
+  els.copyProjectPath?.addEventListener("click", () => {
+    void copyProjectPath();
+  });
+  els.sessionSearch?.addEventListener("search", () => {
+    if (!String(els.sessionSearch.value ?? "").trim()) {
+      clearContentSearch();
+    }
   });
   els.collapseSidebar.addEventListener("click", () => {
     if (responsiveLayoutMode() === "desktop") {
@@ -212,6 +230,7 @@ export function bindEvents() {
     hideModelPanel();
   });
   els.transcript.addEventListener("scroll", handleTranscriptScroll);
+  bindPromptRail();
   els.workflowStrip.addEventListener("click", (event: Event) => {
     if (!eventTargetOf(event).closest("button[data-action='toggle-workflow']")) {
       return;
