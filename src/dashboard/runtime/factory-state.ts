@@ -62,6 +62,7 @@ export type DashboardRuntimeApi = {
   trustStatus(): Promise<unknown>;
   trustWorkspace(): Promise<unknown>;
   listSessionRecords(): Promise<unknown>;
+  searchSessionContent?(query: unknown): Promise<unknown>;
   readSession(selector: unknown): Promise<unknown>;
   readTranscriptPage(input?: DashboardRequestInput): Promise<unknown>;
   deleteSession(input?: DashboardRequestInput): Promise<unknown>;

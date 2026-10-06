@@ -598,6 +598,15 @@ export type DashboardUiState = {
   sessionsRefreshDueAt: number;
   sidebarCollapsed: boolean;
   sessionSearchQuery: string;
+  contentSearch: {
+    query: string;
+    status: "idle" | "loading" | "done" | "error";
+    hits: Array<{ sessionId: string; title: string; role: "user" | "assistant"; excerpt: string; position: number }>;
+    unreadable: number;
+    truncated: boolean;
+    error: string;
+    pendingJump: { sessionId: string; excerpt: string; position: number; role: "user" | "assistant" } | null;
+  };
   deletingSessions: Set<unknown>;
   deleteConfirmSessionId: string;
   files: DashboardFile[];
@@ -711,6 +720,17 @@ export type DashboardUiState = {
   previewResizeStartWidth: number | null;
   transcriptFollowing: boolean;
   newReplyAvailable: boolean;
+  promptRail: {
+    turns: Array<{ id: string; prompt: string; response: string; node: HTMLElement }>;
+    hoverIndex: number;
+    activeIndex: number;
+    nextId: number;
+    pointerInside: boolean;
+    responseOpen: boolean;
+    labelIndex: number;
+    labelTimer: ReturnType<typeof setTimeout> | null;
+    highlightTimer: ReturnType<typeof setTimeout> | null;
+  };
   modalContext: {
     modal: HTMLElement;
     returnFocus?: Element | null;
@@ -771,6 +791,15 @@ export const state: DashboardUiState = {
   sessionsRefreshDueAt: 0,
   sidebarCollapsed: false,
   sessionSearchQuery: "",
+  contentSearch: {
+    query: "",
+    status: "idle",
+    hits: [],
+    unreadable: 0,
+    truncated: false,
+    error: "",
+    pendingJump: null
+  },
   deletingSessions: new Set(),
   deleteConfirmSessionId: "",
   files: [],
@@ -867,6 +896,17 @@ export const state: DashboardUiState = {
   previewResizeStartWidth: /** @type {number | null} */ (null),
   transcriptFollowing: true,
   newReplyAvailable: false,
+  promptRail: {
+    turns: [],
+    hoverIndex: -1,
+    activeIndex: -1,
+    nextId: 0,
+    pointerInside: false,
+    responseOpen: false,
+    labelIndex: -1,
+    labelTimer: null,
+    highlightTimer: null
+  },
   modalContext: null,
   shutdownActivity: null,
   shutdownStatusVersion: 0,
@@ -875,8 +915,10 @@ export const state: DashboardUiState = {
 
 export const els = {
   projectPath: document.querySelector("#project-path"),
+  copyProjectPath: document.querySelector("#copy-project-path"),
   threadList: document.querySelector("#thread-list"),
   sessionSearch: document.querySelector("#session-search"),
+  contentSearchResults: document.querySelector("#content-search-results"),
   refreshSessions: document.querySelector("#refresh-sessions"),
   collapseSidebar: document.querySelector("#collapse-sidebar"),
   sessionsStatus: document.querySelector("#sessions-status"),
@@ -886,6 +928,11 @@ export const els = {
   workflowStrip: document.querySelector("#workflow-strip"),
   transcript: document.querySelector("#transcript"),
   transcriptJump: document.querySelector("#transcript-jump"),
+  promptRail: document.querySelector("#prompt-rail"),
+  promptRailFrame: document.querySelector("#prompt-rail-frame"),
+  promptRailScroller: document.querySelector("#prompt-rail-scroller"),
+  promptRailMarks: document.querySelector("#prompt-rail-marks"),
+  promptRailPreview: document.querySelector("#prompt-rail-preview"),
   emptyState: document.querySelector("#empty-state"),
   promptInput: document.querySelector("#prompt-input"),
   attachmentInput: document.querySelector("#attachment-input"),

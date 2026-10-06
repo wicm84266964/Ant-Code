@@ -1,3 +1,4 @@
+import { resetPromptRail } from "./prompt-rail.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { hydrateRichContent } from "./rich-renderers.ts";
 import { visibleTranscriptRole } from "./transcript.ts";
@@ -644,6 +645,7 @@ export function setPermissionMode(mode: string | undefined) {
 
 export function clearTranscript() {
   cancelTranscriptAnimationFrames();
+  resetPromptRail();
   resetTranscriptWindow();
   els.transcript.innerHTML = "";
   state.transcriptHistoryNode = null;
@@ -705,8 +707,43 @@ export function showNotice(message: string, detail: unknown = "本地配置已�
   });
 }
 
+const PROJECT_PATH_PLACEHOLDERS = new Set(["", "加载中", "正在连接", "配置错误", "服务异常", "连接失败"]);
+
+export function setProjectPath(text: string) {
+  const value = String(text ?? "");
+  if (els.projectPath) {
+    els.projectPath.textContent = value;
+    els.projectPath.title = value;
+  }
+  const button = els.copyProjectPath;
+  if (!(button instanceof HTMLButtonElement)) return;
+  const copyable = value.trim().length > 0 && !PROJECT_PATH_PLACEHOLDERS.has(value.trim());
+  button.disabled = !copyable;
+  button.dataset.path = copyable ? value : "";
+  if (button.textContent === "已复制" || button.textContent === "复制失败") {
+    button.textContent = "复制";
+  }
+}
+
+export async function copyProjectPath() {
+  const button = els.copyProjectPath;
+  const pathText = button instanceof HTMLButtonElement ? button.dataset.path ?? "" : "";
+  if (!pathText) return;
+  try {
+    await navigator.clipboard.writeText(pathText);
+    if (button instanceof HTMLButtonElement) button.textContent = "已复制";
+    announceStatus("项目路径已复制");
+    window.setTimeout(() => {
+      if (button instanceof HTMLButtonElement && button.textContent === "已复制") button.textContent = "复制";
+    }, 1600);
+  } catch {
+    if (button instanceof HTMLButtonElement) button.textContent = "复制失败";
+    announceStatus("复制项目路径失败");
+  }
+}
+
 export function renderBootstrapLoading() {
-  els.projectPath.textContent = "正在连接";
+  setProjectPath("正在连接");
   els.runStatus.textContent = "连接中";
   els.sendButton.disabled = true;
   setConnectionState("connecting");
@@ -715,7 +752,7 @@ export function renderBootstrapLoading() {
 export function renderBootstrapFailure(error: unknown) {
   const failure = bootstrapFailurePresentation(error, navigator.onLine !== false);
   setConnectionState(failure.connectionState);
-  els.projectPath.textContent = failure.projectLabel;
+  setProjectPath(failure.projectLabel);
   els.runStatus.textContent = "初始化失败";
   els.sendButton.disabled = true;
   cancelTranscriptAnimationFrames();

@@ -1,3 +1,4 @@
+import { adoptPromptRailEntries, closePromptRailResponse, notePromptRailResponse, registerPromptTurn, syncPromptRailActive } from "./prompt-rail.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { hydrateRichContent } from "./rich-renderers.ts";
 import { visibleTranscriptRole } from "./transcript.ts";
@@ -652,6 +653,7 @@ export function beginEventTurn(event: DashboardStreamEvent) {
 
 export function renderTranscriptMessages(messages: unknown, options: Record<string, unknown> = {}) {
   const nodes = [];
+  const railEntries: Array<{ role: "user" | "assistant"; text: string; node: HTMLElement }> = [];
   const list = Array.isArray(messages) ? messages : [];
   for (const message of list) {
     if (isThinkingProcessMessage(message)) {
@@ -676,6 +678,8 @@ export function renderTranscriptMessages(messages: unknown, options: Record<stri
       : userTranscriptDisplayText(message.content, attachments);
     const node = createMessageNode(role, role === "assistant" ? "Ant Code" : "你", text, attachments);
     node.setAttribute("aria-live", "off");
+    if (role === "user") node.dataset.promptTurn = "true";
+    railEntries.push({ role, text: text ?? "", node });
     nodes.push(node);
   }
   if (options.prepend) {
@@ -685,12 +689,14 @@ export function renderTranscriptMessages(messages: unknown, options: Record<stri
       els.transcript.insertBefore(node, anchor);
     }
     trimTranscriptWindow({ direction: "prepend", preserveAnchor: false });
+    adoptPromptRailEntries(railEntries, { prepend: true });
     return nodes;
   }
   for (const node of nodes) {
     appendTranscriptNode(node, { deferTrim: true });
   }
   trimTranscriptWindow({ direction: "append", preserveAnchor: !state.transcriptFollowing });
+  adoptPromptRailEntries(railEntries);
   return nodes;
 }
 
@@ -768,6 +774,7 @@ export function transcriptFirstContentNode() {
 
 export function handleTranscriptScroll() {
   syncTranscriptFollowState();
+  syncPromptRailActive();
   if (els.transcript.scrollTop > 180) {
     return;
   }
@@ -926,7 +933,11 @@ export function summarizeWorkflow(workflow: { todos?: Array<{ status?: string }>
 export function appendMessage(kind: string, label: string, text: string | null | undefined, attachments: unknown = []) {
   const wasAtBottom = isTranscriptNearBottom();
   const node = createMessageNode(kind, label, text, attachments);
+  if (kind === "user" && label === "你") node.dataset.promptTurn = "true";
   appendTranscriptNode(node);
+  if (kind === "user" && label === "你") registerPromptTurn(node, text ?? "");
+  else if (kind === "user") closePromptRailResponse();
+  else if (kind === "assistant") notePromptRailResponse(text ?? "");
   scrollTranscript({ onlyIfNearBottom: true, wasAtBottom });
   if (kind === "assistant") announceStatus("收到新的助手回复");
 }
@@ -1020,5 +1031,6 @@ export function isProtectedTranscriptNode(node: Element) {
     || node === state.workflowNode
     || node === state.transcriptWindow.olderNode
     || node === state.transcriptWindow.newerNode
-    || node.classList.contains("draft-message");
+    || node.classList.contains("draft-message")
+    || (node instanceof HTMLElement && node.dataset.promptTurn === "true");
 }

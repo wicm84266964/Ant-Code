@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Ant Code Dashboard</title>
     <link rel="stylesheet" href="/assets/vendor/katex.min.css" />
-    <link rel="stylesheet" href="/assets/styles.css?v=2.0.19" />
+    <link rel="stylesheet" href="/assets/styles.css?v=2.0.20" />
   </head>
   <body data-dashboard-view="conversation">
     <div class="atmosphere" aria-hidden="true"></div>
@@ -23,7 +23,10 @@
         <button class="primary-action" id="new-task" type="button">新任务</button>
         <div class="sidebar-section">
           <div class="section-label">当前项目</div>
-          <div class="project-path" id="project-path">加载中</div>
+          <div class="project-path-row">
+            <div class="project-path" id="project-path" title="加载中">加载中</div>
+            <button class="project-path-copy" id="copy-project-path" type="button" title="复制项目路径" aria-label="复制项目路径" disabled>复制</button>
+          </div>
         </div>
         <div class="sidebar-section grow">
           <div class="section-row">
@@ -35,9 +38,10 @@
             </div>
           </div>
           <label class="thread-search">
-            <span class="visually-hidden">搜索会话</span>
-            <input id="session-search" type="search" placeholder="搜索会话" autocomplete="off" />
+            <span class="visually-hidden">搜索会话标题，按回车搜索对话记录</span>
+            <input id="session-search" type="search" placeholder="搜索标题，回车搜记录" autocomplete="off" enterkeyhint="search" />
           </label>
+          <div class="content-search-results hidden" id="content-search-results" aria-live="polite"></div>
           <div class="thread-list" id="thread-list"></div>
         </div>
         <div class="sidebar-footer">
@@ -117,6 +121,18 @@
             </div>
           </section>
           <button class="transcript-jump hidden" id="transcript-jump" type="button">回到底部</button>
+          <nav class="prompt-rail hidden" id="prompt-rail" aria-label="已发送提示" hidden>
+            <div class="prompt-rail-frame" id="prompt-rail-frame">
+              <div class="prompt-rail-scroller" id="prompt-rail-scroller">
+                <div class="prompt-rail-marks" id="prompt-rail-marks"></div>
+              </div>
+              <div class="prompt-rail-preview hidden" id="prompt-rail-preview" role="tooltip" hidden>
+                <div class="prompt-rail-index"></div>
+                <div class="prompt-rail-prompt"></div>
+                <div class="prompt-rail-response"></div>
+              </div>
+            </div>
+          </nav>
         </div>
 
         <section class="composer-shell">
@@ -229,6 +245,6 @@
         </div>
       </div>
     </div>
-    <script src="/assets/app.js?v=2.0.19" type="module"></script>
+    <script src="/assets/app.js?v=2.0.20" type="module"></script>
   </body>
 </html>

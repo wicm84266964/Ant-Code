@@ -46,6 +46,7 @@ import {
   runtimeReadTranscriptPage,
   runtimeDeleteSession
 } from "./runtime/api-sessions.ts";
+import { runtimeSearchSessionContent } from "./runtime/session-search.ts";
 import {
   runtimeStartTurn,
   runtimeApplyGoal,
@@ -404,6 +405,7 @@ export function createDashboardRuntime(options: CreateDashboardRuntimeOptions) {
     trustStatus: () => runtimeTrustStatus(ctx),
     trustWorkspace: () => runtimeTrustWorkspace(ctx),
     listSessionRecords: () => runtimeListSessionRecords(ctx),
+    searchSessionContent: (query: unknown) => runtimeSearchSessionContent(ctx, query),
     readSession: (selector: unknown) => runtimeReadSession(ctx, selector),
     readTranscriptPage: (input: DashboardRequestInput = {}) => runtimeReadTranscriptPage(ctx, input),
     deleteSession: (input: DashboardRequestInput = {}) => runtimeDeleteSession(ctx, input),
