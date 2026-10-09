@@ -104,8 +104,11 @@ async function verifyConfigTemplate() {
   if (!parsed.lab?.gatewayUrl || !parsed.lab?.gatewayHealthUrl) {
     failures.push(`${relativePath} must declare lab gateway and health URLs`);
   }
-  if (parsed.transcript?.retentionDays > 30) {
-    failures.push(`${relativePath} transcript retention must be 30 days or lower`);
+  const retentionDays = parsed.transcript?.retentionDays;
+  const permanentRetention = retentionDays === null || retentionDays === undefined;
+  const finiteRetention = Number.isInteger(retentionDays) && retentionDays >= 0 && retentionDays <= 3650;
+  if (!permanentRetention && !finiteRetention) {
+    failures.push(`${relativePath} transcript retention must be permanent or an integer from 0 to 3650`);
   }
   if (!["off", "optional", "required"].includes(parsed.transcript?.encryption)) {
     failures.push(`${relativePath} must declare transcript encryption policy`);

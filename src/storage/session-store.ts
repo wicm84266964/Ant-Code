@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { resolveTranscriptRetentionDays } from "../config/retention.ts";
 import {
   atomicWriteFile,
   ensureContainedDirectory,
@@ -816,9 +817,7 @@ function assertPolicyReady(policy: { enabled: boolean; retentionDays: number | n
 function normalizeTranscriptPolicy(transcript: Record<string, unknown> = {}): TranscriptPolicy {
   return {
     enabled: transcript.enabled !== false,
-    retentionDays: transcript.retentionDays === null
-      ? null
-      : typeof transcript.retentionDays === "number" && Number.isFinite(transcript.retentionDays) ? transcript.retentionDays : 30,
+    retentionDays: resolveTranscriptRetentionDays(transcript.retentionDays),
     encryption: (transcript.encryption ?? "off") as string
   };
 }

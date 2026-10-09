@@ -24,6 +24,7 @@ import {
   GOAL_MAX_AUTO_CONTINUES,
   GOAL_MIN_AUTO_CONTINUES
 } from "../core/goal.ts";
+import { DEFAULT_TRANSCRIPT_RETENTION_DAYS } from "./retention.ts";
 
 export const NETWORK_MODES: readonly string[] = Object.freeze([
   "offline",
@@ -83,7 +84,7 @@ export const DEFAULT_CONFIG = Object.freeze({
   allowedHosts: [] as string[],
   transcript: {
     enabled: true,
-    retentionDays: 30 as number | null,
+    retentionDays: DEFAULT_TRANSCRIPT_RETENTION_DAYS,
     includeToolOutput: "policy" as string,
     encryption: "off" as string
   },

@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { resolveTranscriptRetentionDays } from "../../config/retention.ts";
 import { sourceCredentialState } from "../../config/source-credentials.ts";
 import path from "node:path";
 import { createHash, createHmac, randomBytes, type Hash } from "node:crypto";
@@ -178,9 +179,7 @@ export function publicDashboardSettings(config: LabAgentConfig, env: NodeJS.Proc
   return {
     transcript: {
       enabled: transcript.enabled !== false,
-      retentionDays: transcript.retentionDays === null
-        ? null
-        : Number.isFinite(transcript.retentionDays) ? transcript.retentionDays : 30,
+      retentionDays: resolveTranscriptRetentionDays(transcript.retentionDays),
       encryption: ["off", "optional", "required"].includes(transcript.encryption) ? transcript.encryption : "off",
       encryptionKeyConfigured: Boolean(String(env.LAB_AGENT_TRANSCRIPT_KEY ?? "").trim())
     },

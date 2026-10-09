@@ -45,7 +45,7 @@
   },
   "transcript": {
     "enabled": true,
-    "retentionDays": 30,
+    "retentionDays": null,
     "includeToolOutput": "policy",
     "encryption": "optional"
   },

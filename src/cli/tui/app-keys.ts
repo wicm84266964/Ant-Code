@@ -22,6 +22,7 @@ import { createLabModelGateway } from "../../model-gateway/client.ts";
 import { listConfiguredModels, type LabModel } from "../../model-gateway/models.ts";
 import { appendThinkingPreview, limitThinkingPreview } from "../../model-gateway/thinking-budget.ts";
 import { resolveWorkspaceTrust, trustWorkspace } from "../../permissions/workspace-trust.ts";
+import { resolveTranscriptRetentionDays } from "../../config/retention.ts";
 import { createSessionStore } from "../../storage/session-store.ts";
 import { getAntCodeVersion } from "../../version.ts";
 import {
@@ -672,9 +673,7 @@ export function useTuiAppKeys(s: ReturnType<typeof useTuiAppTurn>) {
               env: props.env
             });
             const result = await store.cleanupExpiredSessions(
-              sessionRef.current.config.transcript?.retentionDays === undefined
-                ? 30
-                : sessionRef.current.config.transcript.retentionDays
+              resolveTranscriptRetentionDays(sessionRef.current.config.transcript?.retentionDays)
             );
             addEntry("session", "metadata 清理", `已删除 ${result.deleted.length} 条过期记录。`);
             await loadSessionRecords();

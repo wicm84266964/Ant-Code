@@ -25,6 +25,38 @@ if (typeof globalThis.document === "undefined") {
   };
 }
 
+function cssBraceDepth(css) {
+  let depth = 0;
+  let quote = "";
+  for (let index = 0; index < css.length; index += 1) {
+    const char = css[index];
+    if (quote) {
+      if (char === "\\") {
+        index += 1;
+        continue;
+      }
+      if (char === quote) quote = "";
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (char === "/" && css[index + 1] === "*") {
+      index = css.indexOf("*/", index + 2);
+      if (index < 0) return 1;
+      index += 1;
+      continue;
+    }
+    if (char === "{") depth += 1;
+    else if (char === "}") {
+      depth -= 1;
+      if (depth < 0) return depth;
+    }
+  }
+  return depth;
+}
+
 test("empty conversation copy changes on narrow viewports", async () => {
   const module = await loadAppExports(["emptyStateCopy"]);
   assert.equal(module.emptyStateCopy(1280), "过程折叠。结果展开。文件留在右侧。");
@@ -283,6 +315,12 @@ test("dashboard app exposes session actions and reconnects active sessions", asy
   assert.match(source, /data-action="copy-id"/);
   assert.match(html, /id="collapse-sidebar"/);
   assert.match(html, /id="session-search"/);
+  assert.match(html, /id="thread-scrollbar" role="scrollbar"[^>]*aria-controls="thread-list"/);
+  assert.match(css, /\.thread-list\s*\{[^}]*overflow:\s*auto;/s);
+  assert.match(css, /\.thread-scrollbar\s*\{[^}]*width:\s*10px;/s);
+  assert.equal(cssBraceDepth(css), 0);
+  assert.match(source, /function bindThreadScrollbar\(/);
+  assert.match(source, /function syncThreadScrollbar\(/);
   assert.match(source, /function sessionMatchesQuery\(/);
   assert.match(source, /function syncVisionCheckboxForModel\(/);
   assert.match(source, /function scheduleUncertainVisionProbe\(/);

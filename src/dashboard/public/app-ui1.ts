@@ -1,6 +1,6 @@
 import { bindPromptRail } from "./prompt-rail.ts";
 import { renderMarkdown } from "./markdown.ts";
-import { classifyComposerFile, clearContentSearch, composerHasOutboundContent, searchSessionContent } from "./app-ui2.ts";
+import { bindThreadScrollbar, classifyComposerFile, clearContentSearch, composerHasOutboundContent, searchSessionContent } from "./app-ui2.ts";
 import { copyProjectPath, setProjectPath } from "./app-ui9.ts";
 import { hydrateRichContent } from "./rich-renderers.ts";
 import { visibleTranscriptRole } from "./transcript.ts";
@@ -85,6 +85,7 @@ export function updateRunStatusTone() {
 }
 
 export function bindEvents() {
+  bindThreadScrollbar();
   els.refreshSessions.addEventListener("click", () => loadSessions({ feedback: true }));
   els.sessionSearch?.addEventListener("input", () => {
     state.sessionSearchQuery = String(els.sessionSearch.value ?? "");

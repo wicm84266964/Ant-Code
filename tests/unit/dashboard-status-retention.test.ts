@@ -51,7 +51,11 @@ test("dashboard status and session list do not wait for session retention cleanu
 
 test("new dashboard turn does not wait for background session retention", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-turn-retention-"));
-  const store = createSessionStore({ cwd });
+  await fs.mkdir(path.join(cwd, ".lab-agent"), { recursive: true });
+  await fs.writeFile(path.join(cwd, ".lab-agent", "config.json"), JSON.stringify({
+    transcript: { enabled: true, retentionDays: 1, encryption: "off" }
+  }), "utf8");
+  const store = createSessionStore({ cwd, transcript: { enabled: true, retentionDays: 1, encryption: "off" } });
   const expiredPath = await store.writeMetadata({ id: "expired-session" });
   const oldTime = new Date("2020-01-01T00:00:00.000Z");
   await fs.utimes(expiredPath, oldTime, oldTime);

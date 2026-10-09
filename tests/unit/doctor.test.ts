@@ -23,7 +23,7 @@ test("doctor reports deployment readiness checks and next steps", async () => {
   assert.ok(report.checks.some((check) => check.name === "model gateway" && check.status === "warn"));
   assert.ok(report.hints.some((hint) => /LAB_MODEL_GATEWAY_URL/.test(hint)));
   assert.match(text, /Ant Code doctor/);
-  assert.match(text, /metadata: enabled=true, retention=30d, encryption=optional/);
+  assert.match(text, /metadata: enabled=true, retention=forever, encryption=optional/);
   assert.match(text, /Next steps/);
 });
 

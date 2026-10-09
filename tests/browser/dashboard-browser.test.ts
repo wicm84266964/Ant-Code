@@ -2323,6 +2323,58 @@ test("prompt rail grows on hover and jumps back to that prompt", async () => {
   }
 });
 
+test("session list drag bar reaches threads below the fold", async () => {
+  const extra = Array.from({ length: 24 }, (_, index) => sessionRecord(`session-extra-${index}`, `Extra session ${index + 1}`));
+  try {
+    await withDashboardPage({ width: 1440, height: 800 }, async (page) => {
+      runtime.sessions.push(...extra);
+      await page.locator("#refresh-sessions").click();
+      await page.waitForFunction(() => document.querySelectorAll("#thread-list .thread-item").length >= 20);
+      const before = await page.evaluate(() => {
+        const list = document.querySelector("#thread-list");
+        const bar = document.querySelector("#thread-scrollbar");
+        const last = list?.querySelector(".thread-item:last-child");
+        if (!(list instanceof HTMLElement) || !(bar instanceof HTMLElement) || !(last instanceof HTMLElement)) return null;
+        const listBox = list.getBoundingClientRect();
+        return {
+          overflow: getComputedStyle(list).overflowY,
+          hidden: bar.hidden,
+          lastBelow: last.getBoundingClientRect().top > listBox.bottom + 8
+        };
+      });
+      assert.ok(before, "session list scrollbar was not measurable");
+      assert.equal(before.overflow, "auto");
+      assert.equal(before.hidden, false);
+      assert.equal(before.lastBelow, true);
+      const thumb = page.locator("#thread-scrollbar-thumb");
+      const track = page.locator("#thread-scrollbar");
+      const thumbBox = await thumb.boundingBox();
+      const trackBox = await track.boundingBox();
+      assert.ok(thumbBox && trackBox, "drag bar was not visible");
+      await page.mouse.move(thumbBox.x + thumbBox.width / 2, thumbBox.y + thumbBox.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(trackBox.x + trackBox.width / 2, trackBox.y + trackBox.height - 8, { steps: 8 });
+      await page.mouse.up();
+      const after = await page.evaluate(() => {
+        const list = document.querySelector("#thread-list");
+        const last = list?.querySelector(".thread-item:last-child");
+        if (!(list instanceof HTMLElement) || !(last instanceof HTMLElement)) return null;
+        const listBox = list.getBoundingClientRect();
+        const lastBox = last.getBoundingClientRect();
+        return {
+          scrollTop: list.scrollTop,
+          lastInside: lastBox.top < listBox.bottom && lastBox.bottom <= listBox.bottom + 2
+        };
+      });
+      assert.ok(after, "session list did not remain measurable after dragging");
+      assert.ok(after.scrollTop > 40, `drag bar did not move the list, scrollTop=${after.scrollTop}`);
+      assert.equal(after.lastInside, true);
+    });
+  } finally {
+    runtime.sessions.splice(2);
+  }
+});
+
 test("project path copy button writes the current project path", async () => {
   await withDashboardPage({ width: 1280, height: 900 }, async (page) => {
     await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);

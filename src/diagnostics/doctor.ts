@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { loadConfig, type LabAgentConfig } from "../config/load-config.ts";
+import { resolveTranscriptRetentionDays } from "../config/retention.ts";
 import { resolvePackageRoot } from "../version.ts";
 
 const execFileAsync = promisify(execFile);
@@ -93,7 +94,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
       labConfigPath: config.lab.configPath,
       transcript: {
         enabled: config.transcript?.enabled !== false,
-        retentionDays: config.transcript?.retentionDays === undefined ? 30 : config.transcript.retentionDays,
+        retentionDays: resolveTranscriptRetentionDays(config.transcript?.retentionDays),
         encryption: config.transcript?.encryption ?? "off"
       },
       mcpServers: config.mcp?.servers?.length ?? 0
@@ -348,8 +349,8 @@ function checkSensitivityMode(config: LabAgentConfig) {
  * @param {NodeJS.ProcessEnv} env
  */
 function checkTranscriptPolicy(config: LabAgentConfig, env: NodeJS.ProcessEnv) {
-  const transcript = config.transcript ?? { enabled: true, retentionDays: 30 as number | null, encryption: "off" };
-  const retentionDays = transcript.retentionDays === undefined ? 30 : transcript.retentionDays;
+  const transcript = config.transcript ?? { enabled: true, retentionDays: null as number | null, encryption: "off" };
+  const retentionDays = resolveTranscriptRetentionDays(transcript.retentionDays);
   const encryption = transcript.encryption ?? "off";
   if (encryption === "required" && !env.LAB_AGENT_TRANSCRIPT_KEY) {
     return {
@@ -368,15 +369,8 @@ function checkTranscriptPolicy(config: LabAgentConfig, env: NodeJS.ProcessEnv) {
   if (retentionDays === null) {
     return {
       name: "metadata retention",
-      status: "warn",
+      status: "ok",
       message: `retention is unlimited, encryption=${encryption}`
-    };
-  }
-  if (retentionDays > 30) {
-    return {
-      name: "metadata retention",
-      status: "warn",
-      message: `${retentionDays}d retention exceeds the recommended 30d deployment default`
     };
   }
   return {

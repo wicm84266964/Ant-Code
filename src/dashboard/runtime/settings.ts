@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { resolveTranscriptRetentionDays } from "../../config/retention.ts";
 import { gatewayProfileOwner } from "./public-config.ts";
 import path from "node:path";
 import { createHash, createHmac, randomBytes, type Hash } from "node:crypto";
@@ -138,7 +139,7 @@ export function normalizeDashboardSettingsInput(input: DashboardRequestInput, co
     }
     const managedError = changedManagedSetting([
       ["LAB_AGENT_TRANSCRIPT_ENABLED", enabled, config.transcript?.enabled !== false, "历史记录开关"],
-      ["LAB_AGENT_TRANSCRIPT_RETENTION_DAYS", retentionDays, config.transcript?.retentionDays === undefined ? 30 : config.transcript.retentionDays, "历史记录保留期限"],
+      ["LAB_AGENT_TRANSCRIPT_RETENTION_DAYS", retentionDays, resolveTranscriptRetentionDays(config.transcript?.retentionDays), "历史记录保留期限"],
       ["LAB_AGENT_TRANSCRIPT_ENCRYPTION", encryption, String(config.transcript?.encryption ?? "off"), "历史记录加密模式"]
     ], env);
     if (managedError) return managedError;
