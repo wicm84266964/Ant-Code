@@ -2,6 +2,7 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { persistSessionSnapshot, runSessionTurn, SessionModelSelectionUnresolvedError } from "../core/session.ts";
 import { GATEWAY_PROTOCOLS, globalConfigPath, loadConfig, localProjectConfigPath, type LabAgentConfig } from "../config/load-config.ts";
+import { resolveTranscriptRetentionDays } from "../config/retention.ts";
 import { listConfiguredModels, normalizeReasoningEfforts, resolveModelSelection } from "../model-gateway/models.ts";
 import { createSessionStore } from "../storage/session-store.ts";
 import { collectSessionFiles } from "./files.ts";
@@ -301,9 +302,7 @@ export function createDashboardRuntime(options: CreateDashboardRuntimeOptions) {
       return Promise.resolve({ ok: true, deleted: [], skipped: "throttled" });
     }
     lastRetentionMaintenanceAt = requestedAt;
-    const retentionDays = config.transcript?.retentionDays === null
-      ? null
-      : Number.isFinite(config.transcript?.retentionDays) ? config.transcript.retentionDays : 30;
+    const retentionDays = resolveTranscriptRetentionDays(config.transcript?.retentionDays);
     const run = retentionMaintenanceTail.then(async () => {
       try {
         // Do not take active-capacity: new turns need that lock, and cleanup can

@@ -63,7 +63,7 @@ export function validateConfig(config: Record<string, unknown>) {
   }
 
   const retentionDays = transcript?.retentionDays === undefined
-    ? 30
+    ? null
     : transcript.retentionDays;
   if (retentionDays !== null && (typeof retentionDays !== "number" || !Number.isInteger(retentionDays) || retentionDays < 0 || retentionDays > 3650)) {
     throw new Error(`Unsupported transcript.retentionDays: ${retentionDays}`);

@@ -487,9 +487,9 @@ export function normalizeDashboardSettings(value: unknown): DashboardSettings {
   return {
     transcript: {
       enabled: transcript.enabled !== false,
-      retentionDays: transcript.retentionDays === null
+      retentionDays: transcript.retentionDays === null || transcript.retentionDays === undefined
         ? null
-        : Number.isInteger(Number(transcript.retentionDays)) ? Number(transcript.retentionDays) : 30,
+        : Number.isInteger(Number(transcript.retentionDays)) ? Number(transcript.retentionDays) : null,
       encryption: transcript.encryption === "off" || transcript.encryption === "optional" || transcript.encryption === "required" ? transcript.encryption : "off",
       encryptionKeyConfigured: transcript.encryptionKeyConfigured === true
     },

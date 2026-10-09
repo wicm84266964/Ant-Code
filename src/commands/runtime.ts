@@ -11,6 +11,7 @@ import { formatAgentRoute, routeAgentTask } from "../agents/router.ts";
 import { createTaskWorktree, removeTaskWorktree } from "../agents/worktree.ts";
 import { formatCapabilities, listCapabilities } from "../capabilities/registry.ts";
 import { loadConfig, type LabAgentConfig } from "../config/load-config.ts";
+import { resolveTranscriptRetentionDays } from "../config/retention.ts";
 import { buildDeliveryStatus, formatDeliveryStatus } from "../core/delivery.ts";
 import { buildRepoMap, formatRepoMap } from "../core/repo-map.ts";
 import { buildValidationMemory, formatValidationMemory } from "../core/validation-memory.ts";
@@ -2310,7 +2311,7 @@ async function runSessionsCommand(options: Parameters<typeof runSlashCommand>[0]
 
   if (subcommand === "cleanup") {
     const result = await store.cleanupExpiredSessions(
-      config.transcript?.retentionDays === undefined ? 30 : config.transcript.retentionDays
+      resolveTranscriptRetentionDays(config.transcript?.retentionDays)
     );
     return formatObject(result);
   }

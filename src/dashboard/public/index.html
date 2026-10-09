@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Ant Code Dashboard</title>
     <link rel="stylesheet" href="/assets/vendor/katex.min.css" />
-    <link rel="stylesheet" href="/assets/styles.css?v=2.0.20" />
+    <link rel="stylesheet" href="/assets/styles.css?v=2.0.21" />
   </head>
   <body data-dashboard-view="conversation">
     <div class="atmosphere" aria-hidden="true"></div>
@@ -42,7 +42,12 @@
             <input id="session-search" type="search" placeholder="搜索标题，回车搜记录" autocomplete="off" enterkeyhint="search" />
           </label>
           <div class="content-search-results hidden" id="content-search-results" aria-live="polite"></div>
-          <div class="thread-list" id="thread-list"></div>
+          <div class="thread-scroller" id="thread-scroller">
+            <div class="thread-list" id="thread-list"></div>
+            <div class="thread-scrollbar" id="thread-scrollbar" role="scrollbar" aria-controls="thread-list" aria-orientation="vertical" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-label="拖动查看更多会话" tabindex="0" hidden>
+              <div class="thread-scrollbar-thumb" id="thread-scrollbar-thumb"></div>
+            </div>
+          </div>
         </div>
         <div class="sidebar-footer">
           <button class="shutdown-button" id="shutdown-button" type="button">关闭 Dashboard</button>
@@ -245,6 +250,6 @@
         </div>
       </div>
     </div>
-    <script src="/assets/app.js?v=2.0.20" type="module"></script>
+    <script src="/assets/app.js?v=2.0.21" type="module"></script>
   </body>
 </html>

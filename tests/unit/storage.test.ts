@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { resolveTranscriptRetentionDays } from "../../src/config/retention.ts";
 import { createSessionStore } from "../../src/storage/session-store.ts";
 
 test("session store writes redacted metadata", async () => {
@@ -32,6 +33,28 @@ test("session store cleanup removes expired metadata", async () => {
 
   assert.deepEqual(result.deleted, [filePath]);
   assert.deepEqual(await store.listSessions(), []);
+});
+
+test("missing transcript retention stays permanent and does not delete old sessions", async () => {
+  assert.equal(resolveTranscriptRetentionDays(undefined), null);
+  assert.equal(resolveTranscriptRetentionDays(null), null);
+  assert.equal(resolveTranscriptRetentionDays(""), null);
+  assert.equal(resolveTranscriptRetentionDays(30), 30);
+  assert.equal(resolveTranscriptRetentionDays(0), 0);
+  assert.equal(resolveTranscriptRetentionDays(1.5), null);
+
+  const cwd = await makeTempWorkspace();
+  const store = createSessionStore({ cwd });
+  const filePath = await store.writeMetadata({ id: "unset-retention-session" });
+  const oldTime = new Date("2000-01-01T00:00:00.000Z");
+  await fs.utimes(filePath, oldTime, oldTime);
+
+  const result = await store.cleanupExpiredSessions(resolveTranscriptRetentionDays(undefined), {
+    now: new Date("2026-10-09T00:00:00.000Z")
+  });
+
+  assert.deepEqual(result, { deleted: [], skipped: "forever" });
+  assert.equal((await store.readMetadataExact("unset-retention-session")).ok, true);
 });
 
 test("session store permanent retention skips cleanup without deleting old metadata", async () => {

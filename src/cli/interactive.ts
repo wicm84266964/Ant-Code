@@ -301,7 +301,10 @@ function formatMetadataPolicy(transcript: Record<string, unknown> = {}) {
   if (transcript.retentionDays === null) {
     return `forever, encryption=${transcript.encryption ?? "off"}`;
   }
-  return `${transcript.retentionDays ?? 30}d, encryption=${transcript.encryption ?? "off"}`;
+  if (transcript.retentionDays === undefined) {
+    return `forever, encryption=${transcript.encryption ?? "off"}`;
+  }
+  return `${transcript.retentionDays}d, encryption=${transcript.encryption ?? "off"}`;
 }
 
 /**

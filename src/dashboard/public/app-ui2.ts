@@ -231,6 +231,7 @@ export function renderSessions() {
     empty.className = "thread-meta";
     empty.textContent = "暂无历史任务";
     threadList.append(empty);
+    syncThreadScrollbar();
     return;
   }
   if (visibleSessions.length === 0) {
@@ -238,6 +239,7 @@ export function renderSessions() {
     empty.className = "thread-meta";
     empty.textContent = "没有匹配的会话";
     threadList.append(empty);
+    syncThreadScrollbar();
     return;
   }
   for (const session of visibleSessions) {
@@ -282,6 +284,86 @@ export function renderSessions() {
     });
     threadList.append(item);
   }
+  syncThreadScrollbar();
+}
+
+export function bindThreadScrollbar() {
+  const list = els.threadList;
+  const bar = els.threadScrollbar;
+  const thumb = els.threadScrollbarThumb;
+  if (!(list instanceof HTMLElement) || !(bar instanceof HTMLElement) || !(thumb instanceof HTMLElement)) return;
+  if (bar.dataset.bound === "true") return;
+  bar.dataset.bound = "true";
+  list.addEventListener("scroll", syncThreadScrollbar, { passive: true });
+  if (typeof ResizeObserver === "function") {
+    const observer = new ResizeObserver(() => syncThreadScrollbar());
+    observer.observe(list);
+    if (els.threadScroller instanceof HTMLElement) observer.observe(els.threadScroller);
+  }
+  thumb.addEventListener("pointerdown", (event: PointerEvent) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    thumb.setPointerCapture(event.pointerId);
+    bar.classList.add("is-dragging");
+    bar.dataset.dragPointer = String(event.pointerId);
+    bar.dataset.dragStartY = String(event.clientY);
+    bar.dataset.dragStartScroll = String(list.scrollTop);
+  });
+  thumb.addEventListener("pointermove", (event: PointerEvent) => {
+    if (bar.dataset.dragPointer !== String(event.pointerId)) return;
+    const overflow = Math.max(0, list.scrollHeight - list.clientHeight);
+    const maxTop = Math.max(1, bar.clientHeight - thumb.offsetHeight);
+    const delta = event.clientY - Number(bar.dataset.dragStartY);
+    list.scrollTop = Number(bar.dataset.dragStartScroll) + (delta / maxTop) * overflow;
+  });
+  const endDrag = (event: PointerEvent) => {
+    if (bar.dataset.dragPointer !== String(event.pointerId)) return;
+    delete bar.dataset.dragPointer;
+    bar.classList.remove("is-dragging");
+  };
+  thumb.addEventListener("pointerup", endDrag);
+  thumb.addEventListener("pointercancel", endDrag);
+  bar.addEventListener("pointerdown", (event: PointerEvent) => {
+    if (event.button !== 0 || event.target === thumb) return;
+    const rect = bar.getBoundingClientRect();
+    const ratio = rect.height <= 0 ? 0 : (event.clientY - rect.top) / rect.height;
+    list.scrollTop = ratio * Math.max(0, list.scrollHeight - list.clientHeight);
+  });
+  bar.addEventListener("keydown", (event: KeyboardEvent) => {
+    const page = Math.max(48, Math.round(list.clientHeight * 0.85));
+    if (event.key === "ArrowDown") list.scrollTop += 48;
+    else if (event.key === "ArrowUp") list.scrollTop -= 48;
+    else if (event.key === "PageDown") list.scrollTop += page;
+    else if (event.key === "PageUp") list.scrollTop -= page;
+    else if (event.key === "Home") list.scrollTop = 0;
+    else if (event.key === "End") list.scrollTop = list.scrollHeight;
+    else return;
+    event.preventDefault();
+  });
+  syncThreadScrollbar();
+}
+
+export function syncThreadScrollbar() {
+  const list = els.threadList;
+  const bar = els.threadScrollbar;
+  const thumb = els.threadScrollbarThumb;
+  const scroller = els.threadScroller;
+  if (!(list instanceof HTMLElement) || !(bar instanceof HTMLElement) || !(thumb instanceof HTMLElement)) return;
+  const overflow = list.scrollHeight - list.clientHeight;
+  const needed = overflow > 1;
+  bar.hidden = !needed;
+  bar.setAttribute("aria-hidden", needed ? "false" : "true");
+  if (scroller instanceof HTMLElement) scroller.classList.toggle("has-overflow", needed);
+  if (!needed) return;
+  const track = bar.clientHeight;
+  const thumbHeight = Math.max(28, Math.min(track, Math.round((list.clientHeight / list.scrollHeight) * track)));
+  const maxTop = Math.max(0, track - thumbHeight);
+  const top = maxTop === 0 ? 0 : Math.round((list.scrollTop / overflow) * maxTop);
+  thumb.style.height = `${thumbHeight}px`;
+  thumb.style.transform = `translateY(${top}px)`;
+  bar.setAttribute("aria-valuemax", String(Math.round(overflow)));
+  bar.setAttribute("aria-valuenow", String(Math.round(list.scrollTop)));
 }
 
 export function clearContentSearch() {

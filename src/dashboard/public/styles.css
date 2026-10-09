@@ -518,9 +518,11 @@ button {
 
 .content-search-results {
   display: grid;
+  flex: 0 0 auto;
   gap: 6px;
   margin-top: 8px;
   max-height: 196px;
+  min-height: 0;
   min-width: 0;
   overflow: auto;
 }
@@ -567,6 +569,14 @@ button {
   color: var(--text-soft);
   font-size: var(--fs-caption);
 }
+
+.thread-scroller {
+  display: flex;
+  flex: 1;
+  margin-top: 10px;
+  min-height: 0;
+  min-width: 0;
+  position: relative;
 }
 
 .thread-list {
@@ -574,9 +584,67 @@ button {
   flex: 1;
   flex-direction: column;
   gap: 8px;
-  margin-top: 10px;
   min-height: 0;
+  min-width: 0;
   overflow: auto;
+  scrollbar-width: none;
+}
+
+.thread-list::-webkit-scrollbar {
+  display: none;
+  height: 0;
+  width: 0;
+}
+
+.thread-scroller.has-overflow .thread-list {
+  padding-right: 14px;
+}
+
+.thread-scrollbar {
+  background: #2a261f;
+  border-radius: 999px;
+  bottom: 4px;
+  cursor: pointer;
+  position: absolute;
+  right: 1px;
+  top: 4px;
+  touch-action: none;
+  width: 10px;
+  z-index: 2;
+}
+
+.thread-scrollbar[hidden] {
+  display: none;
+}
+
+.thread-scrollbar-thumb {
+  background: #7a7164;
+  border-radius: 999px;
+  cursor: grab;
+  left: 0;
+  min-height: 28px;
+  position: absolute;
+  right: 0;
+  touch-action: none;
+}
+
+.thread-scrollbar:hover .thread-scrollbar-thumb,
+.thread-scrollbar:focus-visible .thread-scrollbar-thumb,
+.thread-scrollbar.is-dragging .thread-scrollbar-thumb {
+  background: #c9b27a;
+}
+
+.thread-scrollbar.is-dragging,
+.thread-scrollbar.is-dragging .thread-scrollbar-thumb {
+  cursor: grabbing;
+}
+
+.sidebar-collapsed .thread-scrollbar {
+  display: none;
+}
+
+.sidebar-collapsed .thread-scroller.has-overflow .thread-list {
+  padding-right: 0;
 }
 
 .thread-item {
