@@ -4,6 +4,8 @@
 
 ## 2.0.21 - 2026-10-09
 
+Published 2026-10-09: [v2.0.21](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.21).
+
 The session list shows a drag bar when threads extend below the screen. Session history stays permanently when retention days are not set. Restart Dashboard and refresh the browser. Existing configuration and sessions can continue. A saved day count still expires on that schedule. Zero retention and high-sensitivity projects still keep no history.
 
 ## 2.0.20 - 2026-10-06
