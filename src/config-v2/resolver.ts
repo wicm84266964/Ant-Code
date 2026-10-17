@@ -439,12 +439,15 @@ function assertResolvedModelReference(
     referenceFailure(`${path}.model`, `model "${reference.model}" is reserved for agent routing`);
   }
   if (reference.reasoningEffort !== undefined) {
-    const efforts = new Set((model.reasoning?.efforts ?? []).map((effort) => effort.id));
-    if (!efforts.has(reference.reasoningEffort)) {
-      referenceFailure(
-        `${path}.reasoningEffort`,
-        `model "${reference.model}" does not support reasoning effort "${reference.reasoningEffort}"`
-      );
+    const declared = model.reasoning?.efforts ?? [];
+    if (declared.length > 0) {
+      const efforts = new Set(declared.map((effort) => effort.id));
+      if (!efforts.has(reference.reasoningEffort)) {
+        referenceFailure(
+          `${path}.reasoningEffort`,
+          `model "${reference.model}" does not support reasoning effort "${reference.reasoningEffort}"`
+        );
+      }
     }
   }
 }

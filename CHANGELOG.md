@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 2.0.23 - 2026-10-18
+
+Published 2026-10-18: [v2.0.23](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.23).
+
+Model sources are saved as named routes and import the returned catalog at once. Chat switching uses the route name. Thinking effort can be selected for third-party models that do not publish a list. Scheduled tasks can be viewed and created from Settings. Restart Dashboard and refresh the browser. Existing configuration and sessions can continue.
+
 ## 2.0.22 - 2026-10-17
 
 Published 2026-10-17: [v2.0.22](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.22).

@@ -8,6 +8,23 @@ export function modelPickerLabel(model: { id: string; label?: string; switchProf
   return `${label} (配置 ${duplicates.findIndex((other) => other.switchProfileId === model.switchProfileId) + 1})`;
 }
 
+export function providerRouteLabel(profile: DashboardGatewayProfile) {
+  const label = String(profile.label ?? "").trim();
+  if (label && !/^https?:\/\//i.test(label)) return label;
+  const id = String(profile.id ?? "").trim();
+  if (id && !/^gw-[a-f0-9]+$/i.test(id)) return id;
+  const model = profile.models?.[0];
+  return model?.label || model?.id || id || "未命名路线";
+}
+
+export function providerRouteGroups(profiles: DashboardGatewayProfile[]) {
+  return profiles.map((profile) => ({
+    id: profile.id,
+    label: providerRouteLabel(profile),
+    profiles: [profile]
+  }));
+}
+
 export function modelConnectionGroups(profiles: DashboardGatewayProfile[]) {
   const groups = new Map<string, { id: string; label: string; profiles: DashboardGatewayProfile[] }>();
   for (const profile of profiles) {

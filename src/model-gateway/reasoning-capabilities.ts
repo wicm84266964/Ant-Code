@@ -52,7 +52,7 @@ const SUPPORT_PATHS = Object.freeze([
 const KNOWN_PRESETS: readonly ReasoningPreset[] = Object.freeze([
   Object.freeze({
     id: "xai.grok-4.5-4.6",
-    modelIds: Object.freeze(["grok-4.5", "grok-4.6"]),
+    modelIds: Object.freeze(["grok-4.5", "grok-4.6", "grok-4.7"]),
     protocols: Object.freeze(["openai-responses"]),
     efforts: Object.freeze(["low", "medium", "high", "xhigh"]),
     defaultEffort: "high"
@@ -94,9 +94,62 @@ const KNOWN_PRESETS: readonly ReasoningPreset[] = Object.freeze([
  * @param {unknown} rawModel
  * @param {{ protocol?: unknown }} [context]
  */
+const STANDARD_THINKING_EFFORTS = Object.freeze(["low", "medium", "high", "xhigh"]);
+const MAX_FAMILY_EFFORTS = Object.freeze(["low", "medium", "high", "xhigh", "max"]);
+
+export function modelFamilyId(modelId: unknown) {
+  const id = String(modelId ?? "").trim();
+  const slash = id.lastIndexOf("/");
+  return (slash >= 0 ? id.slice(slash + 1) : id).toLowerCase();
+}
+
+export function preferPrefixedCatalog<T extends { id: string }>(models: T[]) {
+  const coveredBare = new Set<string>();
+  for (const model of models) {
+    const id = String(model.id ?? "").trim();
+    const slash = id.lastIndexOf("/");
+    if (slash > 0 && slash < id.length - 1) coveredBare.add(id.slice(slash + 1).toLowerCase());
+  }
+  return models.filter((model) => {
+    const id = String(model.id ?? "").trim();
+    if (!id || id.includes("/")) return Boolean(id);
+    return !coveredBare.has(id.toLowerCase());
+  });
+}
+
+export function selectableReasoningEffortIds(modelId: unknown, stored: unknown = []) {
+  const declared = normalizeReasoningEfforts(stored).map((effort) => effort.id).filter(Boolean);
+  if (declared.length > 0) return declared;
+  const family = standardThinkingEffortIds(modelId);
+  if (family.length > 0) return family;
+  const id = String(modelId ?? "").trim().toLowerCase();
+  if (!id || isNonThinkingModel(id)) return [];
+  return [...STANDARD_THINKING_EFFORTS];
+}
+
+export function standardThinkingEffortIds(modelId: unknown) {
+  const id = modelFamilyId(modelId);
+  if (!id || isNonThinkingModel(id)) return [];
+  if (isMaxEffortFamily(id)) return [...MAX_FAMILY_EFFORTS];
+  if (isThinkingModel(id)) return [...STANDARD_THINKING_EFFORTS];
+  return [];
+}
+
+function isNonThinkingModel(id: string) {
+  return /embed|embedding|tts|whisper|audio|image|vision-only|moderation|rerank/.test(id);
+}
+
+function isMaxEffortFamily(id: string) {
+  return /deepseek|\bgpt[-_.]|openai|^o[134](?:[-_.]|$)/.test(id);
+}
+
+function isThinkingModel(id: string) {
+  return /grok|claude|qwen|glm|gemini|thinking|reason|\br1\b/.test(id);
+}
+
 export function inferCatalogReasoning(rawModel: unknown, context: { protocol?: unknown } = {}) {
   const model = isPlainObject(rawModel) ? rawModel : {};
-  const modelId = String(model.id ?? "").trim().toLowerCase();
+  const modelId = modelFamilyId(model.id);
   const protocol = String(context.protocol ?? "").trim().toLowerCase();
   const warnings: string[] = [];
   const support = firstPathValue(model, SUPPORT_PATHS);
@@ -153,14 +206,14 @@ export function inferCatalogReasoning(rawModel: unknown, context: { protocol?: u
   if (preset) warnings.push(`Known preset expects protocol ${presetProtocols.join(" or ")}.`);
 
   if (support.found && support.value === true) {
-    return capabilityResult({
-      efforts: [],
-      source: "generic-capability",
-      confidence: "unknown",
-      path: support.path,
-      supportsReasoning: true,
-      warnings: ["Upstream reports reasoning support without enumerating accepted effort values."]
-    });
+    return standardThinkingResult(modelId, support.path, [
+      "Upstream reports reasoning support without enumerating accepted effort values."
+    ]);
+  }
+
+  const standard = standardThinkingEffortIds(modelId);
+  if (standard.length > 0) {
+    return standardThinkingResult(modelId);
   }
 
   return capabilityResult({
@@ -205,6 +258,20 @@ export function normalizeCapabilityEfforts(value: unknown) {
 /**
  * @param {{ efforts?: Array<Record<string, any>>; defaultEffort?: string | null; source: string; confidence: string; path?: string | null; presetId?: string | null; supportsReasoning?: boolean | null; warnings?: string[]; probeAvailable?: boolean }} input
  */
+function standardThinkingResult(modelId: string, path: string | null = null, warnings: string[] = []) {
+  const ids = standardThinkingEffortIds(modelId);
+  const efforts = ids.length > 0 ? ids : [...STANDARD_THINKING_EFFORTS];
+  return capabilityResult({
+    efforts: normalizeReasoningEfforts(efforts),
+    defaultEffort: "high",
+    source: "standard-thinking",
+    confidence: "preset",
+    path,
+    supportsReasoning: true,
+    warnings
+  });
+}
+
 function capabilityResult(input: { efforts?: LabReasoningEffort[]; defaultEffort?: string | null; source: string; confidence: string; path?: string | null; presetId?: string | null; supportsReasoning?: boolean | null; warnings?: string[]; probeAvailable?: boolean }) {
   const efforts = Array.isArray(input.efforts) ? input.efforts : [];
   const requestedDefault = String(input.defaultEffort ?? "").trim().toLowerCase();

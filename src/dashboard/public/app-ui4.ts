@@ -1,5 +1,6 @@
 import { renderMarkdown } from "./markdown.ts";
-import { modelConnectionGroups, modelPickerLabel } from "./model-groups.ts";
+import { preferPrefixedCatalog } from "../../model-gateway/reasoning-capabilities.ts";
+import { modelPickerLabel, providerRouteGroups } from "./model-groups.ts";
 import { hydrateRichContent } from "./rich-renderers.ts";
 import { visibleTranscriptRole } from "./transcript.ts";
 import { MANUAL_AGENT_MODEL_VALUE, state, els, MODE_DESCRIPTIONS, LOCAL_FILE_EXTENSIONS, FILE_REFERENCE_PATTERN, TRANSCRIPT_DOM_LIMIT, EVENT_STALE_AFTER_MS, EVENT_CONNECT_TIMEOUT_MS, EVENT_RECONNECT_MAX_ATTEMPTS, DASHBOARD_REQUEST_TIMEOUT_MS, DASHBOARD_API_VERSION, DASHBOARD_LIFECYCLE_TIMEOUT_MS, DASHBOARD_SHUTDOWN_TIMEOUT_MS, DASHBOARD_INTERRUPT_TIMEOUT_MS, MAX_IMAGE_ATTACHMENTS, MAX_IMAGE_ATTACHMENT_BYTES, CURRENT_SESSION_STORAGE_KEY, DASHBOARD_CLIENT_STORAGE_KEY, PREVIEW_WIDTH_STORAGE_KEY, PREVIEW_WIDTH_DEFAULT, PREVIEW_WIDTH_MIN, PREVIEW_WIDTH_MAX, PREVIEW_WORKSPACE_MIN , emptySessionStatus, emptyBackgroundSubagent } from "./app-core.ts";
@@ -1024,34 +1025,30 @@ export function renderModelPanel() {
   }
   const profiles = state.gatewayProfiles ?? [];
   const selection = currentModelSelection();
-  const unresolved = selection.resolved === false;
   const activeProfileId = selection.profile?.id || "";
   const activeModelId = selection.model?.id || "";
-  const groups = modelConnectionGroups(profiles);
-  const activeGroup = groups.find((group) => group.profiles.some((profile) => profile.id === activeProfileId));
-  const models = activeGroup
-    ? activeGroup.profiles.flatMap((profile) => (profile.models ?? []).map((model) => ({ ...model, switchProfileId: profile.id, switchReady: profile.ready !== false })))
-    : (profiles.length === 0 ? state.models ?? [] : []).map((model) => ({ ...model, switchProfileId: "", switchReady: true }));
+  const groups = providerRouteGroups(profiles).map((group) => ({
+    ...group,
+    models: preferPrefixedCatalog(group.profiles.flatMap((profile) => (profile.models ?? []).map((model) => ({
+      ...model,
+      switchProfileId: profile.id,
+      switchReady: profile.ready !== false
+    }))))
+  })).filter((group) => group.models.length > 0);
   els.modelPanel.innerHTML = `
     <div class="model-panel-head">
       <div class="model-panel-title">模型</div>
-      <div class="model-panel-subtitle">当前会话</div>
+      <div class="model-panel-subtitle">只切换当前会话，不改子智能体</div>
     </div>
-    <div class="model-switch-fields">
-      <label>
-        <span>模型来源</span>
-        <select data-action="switch-source" ${state.running || state.modelSwitching || profiles.length === 0 ? "disabled" : ""}>
-          ${profiles.length > 0
-            ? `${unresolved ? `<option value="" selected disabled>请选择模型来源</option>` : ""}${groups.map((group) => `<option value="${escapeAttribute(group.profiles.find((profile) => profile.ready !== false)?.id || group.profiles[0].id)}"${!unresolved && group.id === activeGroup?.id ? " selected" : ""}${group.profiles.every((profile) => profile.ready === false) ? " disabled" : ""}>${escapeHtml(group.label)}</option>`).join("")}`
-            : `<option value="">${unresolved ? "没有可用模型来源" : escapeHtml(modelSourceLabel(selection.model))}</option>`}
-        </select>
-      </label>
-      <label>
-        <span>模型名称</span>
-        <select data-action="switch-model" ${state.running || state.modelSwitching || unresolved || models.length === 0 ? "disabled" : ""}>
-          ${unresolved ? `<option value="" selected>请先选择模型来源</option>` : models.map((model) => `<option value="${escapeAttribute(model.id)}" data-profile-id="${escapeAttribute(model.switchProfileId)}"${model.id === activeModelId && model.switchProfileId === activeProfileId ? " selected" : ""}${model.switchReady ? "" : " disabled"}>${escapeHtml(modelPickerLabel(model, models))}</option>`).join("") || `<option value="">未配置模型</option>`}
-        </select>
-      </label>
+    <div class="model-source-list">
+      ${groups.map((group) => `
+        <section>
+          <h3>${escapeHtml(group.label)}</h3>
+          <div>
+            ${group.models.map((model) => `<button type="button" data-action="pick-model" data-model-id="${escapeAttribute(model.id)}" data-profile-id="${escapeAttribute(model.switchProfileId)}"${model.id === activeModelId && model.switchProfileId === activeProfileId ? ` class="active" aria-current="true"` : ""}${model.switchReady && !state.running && !state.modelSwitching ? "" : " disabled"}>${escapeHtml(modelPickerLabel(model, group.models))}</button>`).join("")}
+          </div>
+        </section>
+      `).join("") || `<p class="model-panel-empty">尚未读取模型</p>`}
     </div>
   `;
 }

@@ -277,6 +277,8 @@ export type DashboardSessionStatus = {
   [key: string]: unknown;
 };
 
+export type AgentRoute = { provider: string; model: string };
+
 export type DashboardApiResult = {
   ok?: boolean;
   error?: string;
@@ -291,7 +293,10 @@ export type DashboardApiResult = {
   models?: DashboardModelOption[];
   gatewayConfig?: DashboardGatewayConfig;
   gatewayProfiles?: DashboardGatewayProfile[];
+  officialSources?: Array<{ id: string; label: string; envKey: string; keyConfigured: boolean }>;
+  modelCount?: number;
   agentModelTiers?: unknown;
+  agentRouting?: { cheap?: AgentRoute | null; default?: AgentRoute | null; strong?: AgentRoute | null; vision?: AgentRoute | null };
   visionAgent?: unknown;
   settings?: Record<string, unknown>;
   session?: {
@@ -643,6 +648,9 @@ export type DashboardUiState = {
   gatewayConfig: DashboardGatewayConfig | null;
   gatewayProfiles: DashboardGatewayProfile[];
   agentModelTiers: Record<string, string>;
+  agentRouting: { cheap: AgentRoute | null; default: AgentRoute | null; strong: AgentRoute | null; vision: AgentRoute | null };
+  officialSources: Array<{ id: string; label: string; envKey: string; keyConfigured: boolean }>;
+  schedules: Array<Record<string, unknown>>;
   visionAgent: DashboardVisionAgent | null;
   modelPanelOpen: boolean;
   applyAgentDefaultsOnSwitch: boolean;
@@ -822,6 +830,9 @@ export const state: DashboardUiState = {
   gatewayConfig: /** @type {any} */ (null),
   gatewayProfiles: /** @type {any[]} */ ([]),
   agentModelTiers: {},
+  agentRouting: { cheap: null, default: null, strong: null, vision: null },
+  officialSources: [],
+  schedules: [],
   visionAgent: /** @type {any} */ (null),
   modelPanelOpen: false,
   applyAgentDefaultsOnSwitch: true,

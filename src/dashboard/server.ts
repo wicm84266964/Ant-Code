@@ -530,9 +530,11 @@ async function routeRequest(req: http.IncomingMessage, res: http.ServerResponse,
       sessionStatus: "sessionStatus" in status ? status.sessionStatus : null,
       models: "models" in status ? status.models : [],
       agentModelTiers: "agentModelTiers" in status ? status.agentModelTiers : {},
+      agentRouting: "agentRouting" in status ? status.agentRouting : null,
       visionAgent: "visionAgent" in status ? status.visionAgent : null,
       gatewayConfig: "gatewayConfig" in status ? status.gatewayConfig : null,
       gatewayProfiles: "gatewayProfiles" in status ? status.gatewayProfiles : [],
+      officialSources: "officialSources" in status ? status.officialSources : [],
       settings: "settings" in status ? status.settings : null,
       configV2: "configV2" in status ? status.configV2 : null,
       configRevisions: "configRevisions" in status
@@ -656,6 +658,26 @@ async function routeRequest(req: http.IncomingMessage, res: http.ServerResponse,
     sendJson(res, 200, { ...result, ok: true, message: "Dashboard 正在关闭" });
     options.requestShutdown?.();
     return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/sources/agents") {
+    const body = isJsonObject(requestBody) ? requestBody : EMPTY_JSON;
+    const result = await options.runtime.saveProviderAgentModels(body);
+    return sendJson(res, responseStatus(result, 200, 400), result);
+  }
+  if (req.method === "POST" && url.pathname === "/api/agent-routing") {
+    const body = isJsonObject(requestBody) ? requestBody : EMPTY_JSON;
+    const result = await options.runtime.saveAgentRouting(body);
+    return sendJson(res, responseStatus(result, 200, 400), result);
+  }
+  if (req.method === "POST" && url.pathname === "/api/sources/import") {
+    const body = isJsonObject(requestBody) ? requestBody : EMPTY_JSON;
+    const result = await options.runtime.importModelSource(body);
+    return sendJson(res, responseStatus(result, 200, 400), result);
+  }
+  if (req.method === "POST" && url.pathname === "/api/schedules") {
+    const body = isJsonObject(requestBody) ? requestBody : EMPTY_JSON;
+    const result = await options.runtime.createSchedule(body);
+    return sendJson(res, responseStatus(result, 200, 400), result);
   }
   if (req.method === "GET" && url.pathname === "/api/schedules") {
     return sendJson(res, 200, await options.runtime.listSchedules());

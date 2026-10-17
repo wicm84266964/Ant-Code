@@ -9,6 +9,8 @@ import {
   listSchedules,
   nextScheduleRunAt,
   parseScheduleCadence,
+  parseScheduleInteger,
+  parseScheduleTime,
   scheduleFireDecision,
   writeSchedule
 } from "../../src/schedules/store.ts";
@@ -35,6 +37,12 @@ test("a one-time schedule fires five minutes later and does not repeat", () => {
   const due = scheduleFireDecision(record, now + 5 * 60_000, { running: false, goalEnabled: false, queued: false });
   assert.equal(due.action, "fire");
   if (due.action === "fire") assert.equal(due.once, true);
+});
+
+test("schedule time accepts a Chinese colon and fullwidth digits", () => {
+  assert.equal(parseScheduleTime("０９：００"), "09:00");
+  assert.equal(parseScheduleTime("9:5"), "09:05");
+  assert.equal(parseScheduleInteger("１５。"), 15);
 });
 
 test("daily schedule lands on the next local time", () => {

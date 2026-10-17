@@ -1,6 +1,8 @@
 import type { DashboardFactoryState } from "./factory-state.ts";
 import type { DashboardRequestInput, DashboardEventListener } from "./types.ts";
 import { loadConfig, type LabAgentConfig, GATEWAY_PROTOCOLS, localProjectConfigPath, globalConfigPath } from "../../config/load-config.ts";
+import { officialSourceStatus } from "../../model-gateway/official-sources.ts";
+import { publicAgentRouting } from "./public-config.ts";
 import { persistSessionSnapshot, runSessionTurn, SessionModelSelectionUnresolvedError } from "../../core/session.ts";
 import { listConfiguredModels, normalizeReasoningEfforts, resolveModelSelection } from "../../model-gateway/models.ts";
 import { createSessionStore } from "../../storage/session-store.ts";
@@ -189,12 +191,14 @@ export async function runtimeStatus(ctx: DashboardFactoryState, input: Dashboard
     sessionStatus: sessionStatusFromConfig(modelConfig),
     models: modelOptions(modelConfig),
     agentModelTiers: publicAgentModelTiers(modelConfig),
+    agentRouting: publicAgentRouting(modelConfig),
     visionAgent: publicVisionAgent(modelConfig),
     gatewayConfig: publicGatewayConfig(modelConfig),
     gatewayProfiles: publicGatewayProfiles(modelConfig),
     settings: publicDashboardSettings(modelConfig, ctx.runtimeEnv),
     configV2,
-    configRevisions: configV2.revisions
+    configRevisions: configV2.revisions,
+    officialSources: officialSourceStatus(configEnv)
   };
 }
 

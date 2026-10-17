@@ -81,14 +81,25 @@ export function clampSchedulePermission(requested: unknown, current: SchedulePer
 }
 
 export function parseScheduleTime(value: unknown) {
-  const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(String(value ?? "").trim());
+  const text = normalizeScheduleText(value).replace(/：/g, ":").replace(/\s+/g, "");
+  const match = /^([01]?\d|2[0-3]):([0-5]?\d)$/.exec(text);
   if (!match) return null;
-  return `${match[1]}:${match[2]}`;
+  return `${match[1].padStart(2, "0")}:${match[2].padStart(2, "0")}`;
+}
+
+export function parseScheduleInteger(value: unknown) {
+  const text = normalizeScheduleText(value).replace(/[。．.，,]/g, "").replace(/\s+/g, "");
+  if (!/^\d+$/.test(text)) return null;
+  return Number(text);
+}
+
+function normalizeScheduleText(value: unknown) {
+  return String(value ?? "").trim().replace(/[０-９]/g, (digit) => String("０１２３４５６７８９".indexOf(digit)));
 }
 
 export function parseWeekday(value: unknown) {
   if (typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 6) return value;
-  const text = String(value ?? "").trim().toLowerCase();
+  const text = normalizeScheduleText(value).toLowerCase();
   const names: Record<string, number> = {
     sun: 0, sunday: 0, 日: 0, 周日: 0, 星期日: 0,
     mon: 1, monday: 1, 一: 1, 周一: 1, 星期一: 1,
@@ -117,8 +128,8 @@ export function parseScheduleCadence(input: Record<string, unknown>): { ok: true
     return { ok: true, cadence: { type: "weekly", weekday, time } };
   }
   if (type === "interval") {
-    const everyMinutes = Number(input.everyMinutes ?? input.minutes);
-    if (!Number.isInteger(everyMinutes) || everyMinutes < MIN_INTERVAL_MINUTES || everyMinutes > MAX_INTERVAL_MINUTES) {
+    const everyMinutes = parseScheduleInteger(input.everyMinutes ?? input.minutes);
+    if (everyMinutes == null || everyMinutes < MIN_INTERVAL_MINUTES || everyMinutes > MAX_INTERVAL_MINUTES) {
       return { ok: false, error: `间隔需要 ${MIN_INTERVAL_MINUTES} 到 ${MAX_INTERVAL_MINUTES} 之间的整数分钟` };
     }
     return { ok: true, cadence: { type: "interval", everyMinutes } };
@@ -132,8 +143,8 @@ export function parseScheduleCadence(input: Record<string, unknown>): { ok: true
 function parseOnceCadence(input: Record<string, unknown>): { ok: true; cadence: ScheduleCadence } | { ok: false; error: string } {
   const now = typeof input.now === "number" ? input.now : Date.now();
   const timeZone = String(input.timeZone ?? "").trim() || "UTC";
-  const delay = Number(input.delayMinutes ?? input.inMinutes ?? input.afterMinutes);
-  if (Number.isInteger(delay)) {
+  const delay = parseScheduleInteger(input.delayMinutes ?? input.inMinutes ?? input.afterMinutes);
+  if (delay != null) {
     if (delay < MIN_ONCE_DELAY_MINUTES || delay > MAX_ONCE_DELAY_MINUTES) {
       return { ok: false, error: `一次性任务的 delayMinutes 需要在 ${MIN_ONCE_DELAY_MINUTES} 到 ${MAX_ONCE_DELAY_MINUTES} 之间` };
     }

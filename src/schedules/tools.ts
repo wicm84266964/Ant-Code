@@ -23,6 +23,36 @@ export async function scheduleListTool(cwd: string) {
   };
 }
 
+export async function createConfirmedSchedule(input: Record<string, unknown>, options: {
+  cwd: string;
+  sessionId?: string;
+  timeZone?: string;
+  now?: number;
+}) {
+  const title = String(input.title ?? "").trim();
+  const prompt = String(input.prompt ?? "").trim();
+  if (!title || title.length > 80) {
+    return { ok: false as const, error: "定时任务需要 1 到 80 字的标题" };
+  }
+  if (!prompt || prompt.length > 4000) {
+    return { ok: false as const, error: "定时任务需要一段不超过 4000 字的提示词" };
+  }
+  const timeZone = safeTimeZone(options.timeZone ?? input.timeZone);
+  const cadence = parseScheduleCadence({ ...input, now: options.now, timeZone });
+  if (!cadence.ok) return { ok: false as const, error: cadence.error };
+  const draft = createScheduleRecord({
+    title,
+    prompt,
+    permissionMode: "fullAccess",
+    sessionId: String(options.sessionId ?? "").trim(),
+    cadence: cadence.cadence,
+    timeZone,
+    now: options.now
+  });
+  await writeSchedule(options.cwd, draft);
+  return { ok: true as const, schedule: publicSchedule(draft) };
+}
+
 export async function scheduleCreateTool(input: Record<string, unknown>, options: {
   cwd: string;
   sessionId?: string;

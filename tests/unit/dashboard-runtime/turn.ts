@@ -1869,14 +1869,14 @@ test("dashboard catalog inference combines declared metadata with exact Grok and
     const grok = grokCatalog.models.find((model) => model.id === "grok-4.6");
     assert.deepEqual(grok.reasoningEfforts.map((effort) => effort.id), ["low", "medium", "high", "xhigh"]);
     assert.equal(grok.reasoningDiscovery.presetId, "xai.grok-4.5-4.6");
-    assert.equal(grokCatalog.models.find((model) => model.id === "grok-4.6-preview").reasoningDiscovery.source, "unknown");
+    assert.equal(grokCatalog.models.find((model) => model.id === "grok-4.6-preview").reasoningDiscovery.source, "standard-thinking");
 
     assert.equal(deepSeekCatalog.ok, true);
     const deepSeek = deepSeekCatalog.models.find((model) => model.id === "deepseek-v4-pro");
     assert.deepEqual(deepSeek.reasoningEfforts.map((effort) => effort.id), ["off", "high", "max"]);
     assert.equal(deepSeek.defaultReasoningEffort, "high");
     assert.equal(deepSeek.reasoningDiscovery.presetId, "deepseek.v4-pro");
-    assert.equal(deepSeekCatalog.models.find((model) => model.id === "deepseek-v4-pro-plus").reasoningDiscovery.source, "unknown");
+    assert.equal(deepSeekCatalog.models.find((model) => model.id === "deepseek-v4-pro-plus").reasoningDiscovery.source, "standard-thinking");
     assert.deepEqual(requests, [
       { method: "GET", url: "/v1/models?catalog=grok" },
       { method: "GET", url: "/v1/models?catalog=deepseek" }

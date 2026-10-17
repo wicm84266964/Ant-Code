@@ -103,9 +103,16 @@ export async function prepareVisionAttachmentsForTurn(options: {
     const reports: string[] = [];
     let reportChars = 0;
     try {
-      // Check routing before rendering potentially large documents.
-      if (!modelSupportsImages(options.session.config, options.session.model) && !resolveVisionAgentModel(options.session.config)) {
-        return { ok: false, status: "vision_unavailable", output: "PDF 按页识别需要视觉模型。请切换到支持图片的主模型，或启用同网关的视觉模型后重试。" };
+      if (!resolveVisionAgentModel(options.session.config)) {
+        const rendered: InputImageAttachment[] = [];
+        for (const document of options.pdfDocuments) {
+          await emitEvent(options.eventOptions, { type: "pdf_vision_progress", name: document.name, stage: "rendering" });
+          for await (const batch of renderPdfBatches(document, { signal: options.signal })) {
+            rendered.push(...batch.images);
+            await emitEvent(options.eventOptions, { type: "pdf_vision_progress", name: document.name, pageStart: batch.pageStart, pageEnd: batch.pageEnd, totalPages: batch.totalPages, stage: "completed" });
+          }
+        }
+        return { ok: true, attachments: rendered, analysisText: "" };
       }
       for (const document of options.pdfDocuments) {
         await emitEvent(options.eventOptions, { type: "pdf_vision_progress", name: document.name, stage: "rendering" });
@@ -136,29 +143,9 @@ export async function prepareVisionAttachmentsForTurn(options: {
   if (attachments.length === 0) {
     return { ok: true, attachments, analysisText: "" };
   }
-  if (!options.forceVisionAnalysis && modelSupportsImages(options.session.config, options.session.model)) {
-    return { ok: true, attachments, analysisText: "" };
-  }
-
-  const visionModel = options.forceVisionAnalysis && modelSupportsImages(options.session.config, options.session.model)
-    ? { id: options.session.model }
-    : resolveVisionAgentModel(options.session.config);
+  const visionModel = resolveVisionAgentModel(options.session.config);
   if (!visionModel) {
-    const output = [
-      "当前主模型不支持图片输入，且当前网关配置里没有可用的视觉模型。",
-      "请切换到带“视觉”标签的模型，或在同一个网关/Key 下配置一个视觉子智能体模型后重试。",
-      "当前架构只允许一个网关/Key 生效，因此不会跨网关调用其他厂商模型做图片分析。"
-    ].join("\n");
-    await emitEvent(options.eventOptions, {
-      type: "vision_unavailable",
-      model: options.session.model,
-      attachmentCount: attachments.length,
-      outputBytes: Buffer.byteLength(output, "utf8")
-    });
-    if (options.metadata) {
-      options.metadata.gatewayErrors.push("VISION_MODEL_NOT_CONFIGURED");
-    }
-    return { ok: false, status: "vision_unavailable", output };
+    return { ok: true, attachments, analysisText: "" };
   }
 
   await emitEvent(options.eventOptions, {
@@ -262,14 +249,11 @@ export function resolveVisionAgentModel(config: LabAgentConfig) {
   const models = listConfiguredModels(config);
   const routingModels = listRoutingModels(config);
   const configured = String(vision.model ?? "").trim();
-  if (configured) {
-    const folded = configured.toLowerCase();
-    const model = [...models, ...routingModels].find((item) => (
-      item.id === configured || item.label?.toLowerCase() === folded
-    ));
-    return modelSupportsImagesEntry(model) ? model : null;
-  }
-  return models.find(modelSupportsImagesEntry) ?? null;
+  if (!configured) return null;
+  const folded = configured.toLowerCase();
+  return [...models, ...routingModels].find((item) => (
+    item.id === configured || item.label?.toLowerCase() === folded
+  )) ?? { id: configured };
 }
 
 

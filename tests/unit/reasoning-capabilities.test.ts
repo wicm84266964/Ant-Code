@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   inferCatalogReasoning,
   isLegacyGpt56UltraPreset,
+  preferPrefixedCatalog,
   reasoningProbeEffortIds
 } from "../../src/model-gateway/reasoning-capabilities.ts";
 
@@ -92,6 +93,29 @@ test("an explicitly empty effort list prevents a known preset", () => {
   ]);
 });
 
+test("keeps prefixed catalog ids and recognizes reasoning from the unprefixed name", () => {
+  const models = preferPrefixedCatalog([
+    { id: "hy3" },
+    { id: "workbuddy/hy3" },
+    { id: "traework/glm-5.3" },
+    { id: "glm-5.3" }
+  ]);
+  assert.deepEqual(models.map((model) => model.id), ["workbuddy/hy3", "traework/glm-5.3"]);
+  const reasoning = inferCatalogReasoning({ id: "workbuddy/deepseek-v4-pro" }, { protocol: "openai-chat" });
+  assert.equal(reasoning.reasoningEfforts.some((effort) => effort.id === "max"), true);
+});
+
+test("assigns the common thinking tiers when a model is known to think", () => {
+  const grok = inferCatalogReasoning({ id: "grok-custom" }, { protocol: "openai-chat" });
+  assert.deepEqual(grok.reasoningEfforts.map((effort) => effort.id), ["low", "medium", "high", "xhigh"]);
+
+  const gpt = inferCatalogReasoning({ id: "gpt-4.1" }, { protocol: "openai-chat" });
+  assert.deepEqual(gpt.reasoningEfforts.map((effort) => effort.id), ["low", "medium", "high", "xhigh", "max"]);
+
+  const plain = inferCatalogReasoning({ id: "embed-small" }, { protocol: "openai-chat" });
+  assert.deepEqual(plain.reasoningEfforts, []);
+});
+
 test("uses exact Grok presets when upstream metadata is absent", () => {
   for (const modelId of ["grok-4.5", "grok-4.6"]) {
     const result = inferCatalogReasoning({ id: modelId }, { protocol: "openai-responses" });
@@ -156,36 +180,26 @@ test("recognizes only the exact obsolete GPT 5.6 ultra preset fingerprint", () =
   assert.equal(isLegacyGpt56UltraPreset("gpt-5.6-sol-preview", "openai-responses", obsolete), false);
 });
 
-test("does not transfer a known preset across protocols", () => {
+test("uses the common thinking tiers when an exact preset does not match the protocol", () => {
   const grokChat = inferCatalogReasoning({ id: "grok-4.6" }, { protocol: "openai-chat" });
-  const deepseekResponses = inferCatalogReasoning({ id: "deepseek-v4-pro" }, { protocol: "openai-responses" });
+  assert.deepEqual(grokChat.reasoningEfforts.map((effort) => effort.id), ["low", "medium", "high", "xhigh"]);
 
-  for (const result of [grokChat, deepseekResponses]) {
-    assert.deepEqual(result.reasoningEfforts, []);
-    assert.equal(result.defaultReasoningEffort, null);
-    assert.equal(result.reasoningDiscovery.source, "unknown");
-    assert.equal(result.reasoningDiscovery.presetId, null);
-    assert.equal(result.reasoningDiscovery.warnings.length, 1);
-  }
+  const deepseekResponses = inferCatalogReasoning({ id: "deepseek-v4-pro" }, { protocol: "openai-responses" });
+  assert.deepEqual(deepseekResponses.reasoningEfforts.map((effort) => effort.id), ["low", "medium", "high", "xhigh", "max"]);
 });
 
-test("does not apply presets to similar model ids", () => {
-  for (const modelId of [
-    "grok-4.60",
-    "grok-4.6-preview",
-    "grok-4.5-mini",
-    "deepseek-v4-pro-plus",
-    "not-deepseek-v4-pro",
-    "gpt-5.6-sol-preview",
-    "not-gpt-5.6-sol"
-  ]) {
+test("uses family tiers for nearby thinking model ids and skips non-thinking models", () => {
+  for (const modelId of ["grok-4.6-preview", "grok-4.5-mini"]) {
     const result = inferCatalogReasoning({ id: modelId });
-
+    assert.deepEqual(result.reasoningEfforts.map((effort) => effort.id), ["low", "medium", "high", "xhigh"], modelId);
+  }
+  for (const modelId of ["deepseek-v4-pro-plus", "gpt-5.6-sol-preview"]) {
+    const result = inferCatalogReasoning({ id: modelId });
+    assert.deepEqual(result.reasoningEfforts.map((effort) => effort.id), ["low", "medium", "high", "xhigh", "max"], modelId);
+  }
+  for (const modelId of ["embed-small", "whisper-1", "image-gen"]) {
+    const result = inferCatalogReasoning({ id: modelId });
     assert.deepEqual(result.reasoningEfforts, [], modelId);
-    assert.equal(result.defaultReasoningEffort, null, modelId);
-    assert.equal(result.reasoningDiscovery.source, "unknown", modelId);
-    assert.equal(result.reasoningDiscovery.presetId, null, modelId);
-    assert.equal(result.reasoningDiscovery.supportsReasoning, null, modelId);
   }
 });
 

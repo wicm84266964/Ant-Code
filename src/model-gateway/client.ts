@@ -17,6 +17,7 @@ import {
   parseAnthropicMessagesStream
 } from "./anthropic-messages.ts";
 import { findModelMetadata } from "./models.ts";
+import { selectableReasoningEffortIds } from "./reasoning-capabilities.ts";
 import { createGatewayRequest, normalizeGatewayResponse, type NormalizedGatewayResponse } from "./protocol.ts";
 import { parseGatewayStream } from "./streaming.ts";
 import { emitGatewayEvent, isGatewayEventCallbackError } from "./event-callback.ts";
@@ -1043,13 +1044,13 @@ function resolveReasoningEffort(config: import("../config/load-config.ts").LabAg
   }
   const current = String(config.modelAlias ?? "").trim();
   const model = findModelMetadata(config, current, { includeRouting: true });
-  const efforts = Array.isArray(model?.reasoningEfforts) ? model.reasoningEfforts : [];
+  const efforts = selectableReasoningEffortIds(current, model?.reasoningEfforts);
   const requested = String(config.reasoningEffort ?? "").trim().toLowerCase();
-  if (requested && efforts.some((effort) => effort.id === requested)) {
+  if (requested && efforts.includes(requested)) {
     return requested;
   }
   const fallback = String(model?.defaultReasoningEffort ?? "").trim().toLowerCase();
-  return efforts.some((effort) => effort.id === fallback) ? fallback : null;
+  return efforts.includes(fallback) ? fallback : null;
 }
 
 /**
