@@ -207,6 +207,7 @@ export type DashboardActiveSessionState = {
   currentAttachmentBytes: number;
   currentTranscriptStart: number;
   currentPermissionMode: string;
+  unattendedSchedule?: boolean;
   turnEnv: NodeJS.ProcessEnv | null;
   turnChangeStats: DashboardChangeStats;
   queuedPrompts: DashboardQueueItem[];

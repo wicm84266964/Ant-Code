@@ -365,6 +365,17 @@ test("dashboard app exposes session actions and reconnects active sessions", asy
   assert.match(source, /await openSession\(sessionId, \{ restore: !listed \}\)/);
   assert.match(source, /export async function openSession\(id: string, options: \{ restore\?: boolean \} = \{\}\)/);
   assert.match(source, /options\.restore !== true/);
+  assert.match(source, /function loadSchedules\(/);
+  assert.match(source, /\/api\/schedules/);
+  assert.match(source, /function isRecoverableToolFailure\(/);
+  assert.match(source, /activity\.toolName/);
+  assert.match(source, /state\.running === true && activity\.source !== "session"/);
+  assert.match(source, /if \(isRecoverableToolFailure\(activity\)\) \{\s*appendActivity\(\{[\s\S]*?severity: "notice"/);
+  assert.match(source, /function recoverableToolFailureTitle\(/);
+  assert.match(source, /replace\(\/失败\$\/, "未成功"\)/);
+  assert.match(source, /本轮继续/);
+  assert.match(source, /event\.status === "failed" && !isRecoverableToolFailure\(event\)/);
+  assert.match(css, /\.activity-card\.notice\s*\{/);
   assert.match(source, /if \(activity\.status === "failed" \|\| activity\.status === "blocked"\) \{/);
   assert.match(source, /appendActivity\(\{/);
   assert.match(source, /collapseCompletedActivities\(\);\s*clearPendingGuide\(\)/s);

@@ -968,6 +968,8 @@ export const els = {
   lightboxCanvas: document.querySelector("#lightbox-canvas"),
   lightboxTable: document.querySelector("#lightbox-table"),
   collapsePreview: document.querySelector("#collapse-preview"),
+  scheduleList: document.querySelector("#schedule-list"),
+  refreshSchedules: document.querySelector("#refresh-schedules"),
   shutdownButton: document.querySelector("#shutdown-button"),
   headerShutdownButton: document.querySelector("#header-shutdown-button"),
   shutdownPanel: document.querySelector("#shutdown-panel"),

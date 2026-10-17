@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Ant Code Dashboard</title>
     <link rel="stylesheet" href="/assets/vendor/katex.min.css" />
-    <link rel="stylesheet" href="/assets/styles.css?v=2.0.21" />
+    <link rel="stylesheet" href="/assets/styles.css?v=2.0.22" />
   </head>
   <body data-dashboard-view="conversation">
     <div class="atmosphere" aria-hidden="true"></div>
@@ -48,6 +48,13 @@
               <div class="thread-scrollbar-thumb" id="thread-scrollbar-thumb"></div>
             </div>
           </div>
+        </div>
+        <div class="sidebar-section schedule-section">
+          <div class="section-row">
+            <div class="section-label">定时任务</div>
+            <button class="icon-button" id="refresh-schedules" type="button" title="刷新定时任务" aria-label="刷新定时任务">↻</button>
+          </div>
+          <div class="schedule-list" id="schedule-list" aria-live="polite"></div>
         </div>
         <div class="sidebar-footer">
           <button class="shutdown-button" id="shutdown-button" type="button">关闭 Dashboard</button>
@@ -250,6 +257,6 @@
         </div>
       </div>
     </div>
-    <script src="/assets/app.js?v=2.0.21" type="module"></script>
+    <script src="/assets/app.js?v=2.0.22" type="module"></script>
   </body>
 </html>

@@ -657,6 +657,25 @@ async function routeRequest(req: http.IncomingMessage, res: http.ServerResponse,
     options.requestShutdown?.();
     return;
   }
+  if (req.method === "GET" && url.pathname === "/api/schedules") {
+    return sendJson(res, 200, await options.runtime.listSchedules());
+  }
+  if (url.pathname.startsWith("/api/schedules/")) {
+    const rest = decodeURIComponent(url.pathname.slice("/api/schedules/".length));
+    const [id, action] = rest.split("/");
+    if (req.method === "POST" && action === "pause") {
+      const result = await options.runtime.pauseSchedule(id);
+      return sendJson(res, responseStatus(result, 200, 404), result);
+    }
+    if (req.method === "POST" && action === "resume") {
+      const result = await options.runtime.resumeSchedule(id);
+      return sendJson(res, responseStatus(result, 200, 404), result);
+    }
+    if (req.method === "DELETE" && !action) {
+      const result = await options.runtime.deleteSchedule(id);
+      return sendJson(res, responseStatus(result, 200, 404), result);
+    }
+  }
   if (req.method === "GET" && url.pathname === "/api/sessions") {
     return sendJson(res, 200, { ok: true, sessions: await options.runtime.listSessionRecords() });
   }

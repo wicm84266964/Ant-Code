@@ -14,6 +14,66 @@ export async function init() {
   await bootstrapDashboard();
 }
 
+export async function loadSchedules() {
+  const list = els.scheduleList;
+  if (!(list instanceof HTMLElement)) return;
+  const result = await getJson("/api/schedules").catch(() => ({ ok: false })) as { ok?: boolean; schedules?: unknown };
+  const schedules = Array.isArray(result.schedules) ? result.schedules as Array<Record<string, unknown>> : null;
+  if (!result.ok || !schedules) {
+    list.innerHTML = `<div class="schedule-empty">暂时读不到定时任务</div>`;
+    return;
+  }
+  if (schedules.length === 0) {
+    list.innerHTML = `<div class="schedule-empty">还没有定时任务。在对话里说明时间和要做的事，确认后会保存在这里。</div>`;
+    return;
+  }
+  list.innerHTML = schedules.map((schedule) => scheduleCard(schedule)).join("");
+}
+
+function scheduleCard(schedule: Record<string, unknown>) {
+  const id = escapeAttribute(String(schedule.id ?? ""));
+  const enabled = schedule.enabled !== false;
+  const once = isPlainObject(schedule.cadence) && schedule.cadence.type === "once";
+  const next = formatTime(schedule.nextRunAt);
+  const last = schedule.lastStatus ? `${scheduleStatusLabel(schedule.lastStatus)}` : "尚未运行";
+  const stateLabel = enabled ? `下次 ${next}` : once && schedule.lastStatus ? "已运行一次" : "已暂停";
+  return `
+    <article class="schedule-item${enabled ? "" : " paused"}">
+      <div class="schedule-title">${escapeHtml(String(schedule.title ?? "定时任务"))}</div>
+      <div class="schedule-meta">${escapeHtml(String(schedule.cadenceLabel ?? ""))} · ${escapeHtml(String(schedule.permissionLabel ?? ""))}</div>
+      <div class="schedule-meta">${escapeHtml(stateLabel)} · ${escapeHtml(last)}</div>
+      <div class="schedule-actions">
+        <button type="button" data-schedule-action="${enabled ? "pause" : "resume"}" data-schedule-id="${id}">${enabled ? "暂停" : "恢复"}</button>
+        <button type="button" data-schedule-action="delete" data-schedule-id="${id}">删除</button>
+      </div>
+    </article>
+  `;
+}
+
+function scheduleStatusLabel(status: unknown) {
+  const value = String(status ?? "");
+  if (value === "completed") return "上次完成";
+  if (value === "failed") return "上次失败";
+  if (value === "skipped") return "上次跳过";
+  if (value === "queued") return "已入队";
+  if (value === "interrupted") return "上次已中断";
+  return value;
+}
+
+export async function handleScheduleAction(event: Event) {
+  const button = eventElement(event)?.closest("button[data-schedule-action]");
+  if (!(button instanceof HTMLButtonElement)) return;
+  const id = button.dataset.scheduleId ?? "";
+  const action = button.dataset.scheduleAction ?? "";
+  if (!id || !action) return;
+  if (action === "delete") {
+    await deleteJson(`/api/schedules/${encodeURIComponent(id)}`);
+  } else {
+    await postJson(`/api/schedules/${encodeURIComponent(id)}/${action}`, {});
+  }
+  await loadSchedules();
+}
+
 export async function bootstrapDashboard() {
   const request = beginScopedRequest("bootstrap");
   renderBootstrapLoading();
@@ -47,6 +107,7 @@ export async function bootstrapDashboard() {
     }
     if (!isCurrentScopedRequest(request)) return;
     await loadSessions();
+    void loadSchedules();
     if (!isCurrentScopedRequest(request)) return;
     await restoreInitialSession();
     if (!isCurrentScopedRequest(request)) return;
@@ -183,6 +244,8 @@ export function bindEvents() {
   els.previewResizeHandle?.addEventListener("dblclick", () => {
     setPreviewWidth(PREVIEW_WIDTH_DEFAULT, { persist: true, announce: true });
   });
+  els.refreshSchedules?.addEventListener("click", () => void loadSchedules());
+  els.scheduleList?.addEventListener("click", (event: Event) => void handleScheduleAction(event));
   els.shutdownButton.addEventListener("click", showShutdownPanel);
   els.headerShutdownButton.addEventListener("click", showShutdownPanel);
   els.shutdownCancel.addEventListener("click", hideShutdownPanel);

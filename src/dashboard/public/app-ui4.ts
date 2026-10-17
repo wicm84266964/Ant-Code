@@ -180,12 +180,56 @@ export function contextBoundaryText(event: Record<string, unknown> = {}) {
   return "聊天内容已压缩，以下回复基于压缩后的上下文继续";
 }
 
+const TURN_ENDING_ACTIVITY_TYPES = new Set([
+  "gateway_error",
+  "gateway_not_configured",
+  "turn_complete",
+  "pdf_vision_error",
+  "turn_interrupted"
+]);
+
+export function isRecoverableToolFailure(activity: DashboardActivity | DashboardStreamEvent | null | undefined) {
+  if (!activity || activity.status !== "failed") {
+    return false;
+  }
+  const rawType = String(activity.rawType ?? "");
+  if (TURN_ENDING_ACTIVITY_TYPES.has(rawType) || activity.source === "gateway") {
+    return false;
+  }
+  if (
+    activity.source === "tool"
+    || rawType === "tool_finish"
+    || rawType === "tool_start"
+    || activity.toolName
+    || activity.toolUseId
+  ) {
+    return true;
+  }
+  return state.running === true && activity.source !== "session";
+}
+
+export function recoverableToolFailureTitle(activity: DashboardActivity) {
+  const raw = String(activity.title ?? "").trim().replace(/失败$/, "未成功");
+  const title = raw || "工具未成功";
+  return title.includes("本轮继续") ? title : `${title}，本轮继续`;
+}
+
 export function handleActivity(activity: DashboardActivity) {
   if (activity.status === "running" || activity.status === "waiting") {
     updateLiveActivity(activity);
     return;
   }
   removeLiveActivity(activity);
+  if (isRecoverableToolFailure(activity)) {
+    appendActivity({
+      ...activity,
+      title: recoverableToolFailureTitle(activity),
+      detail: String(activity.detail ?? ""),
+      severity: "notice",
+      collapsed: true
+    });
+    return;
+  }
   if (activity.status === "failed") {
     keepInterruptedAssistantDrafts();
   }

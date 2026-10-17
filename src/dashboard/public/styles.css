@@ -2362,6 +2362,90 @@ button {
   background: var(--danger);
 }
 
+.activity-card.notice {
+  border-color: rgba(255, 255, 255, 0.08);
+  color: var(--text-muted);
+}
+
+.activity-card.notice .activity-head {
+  min-height: 32px;
+  padding: 6px 12px;
+}
+
+.activity-card.notice .status-dot {
+  background: var(--text-muted);
+  height: 6px;
+  width: 6px;
+}
+
+.activity-card.notice .activity-title {
+  color: var(--text-soft);
+  font-weight: 500;
+}
+
+.schedule-section {
+  border-top: 1px solid var(--line-soft);
+  display: grid;
+  gap: 8px;
+  max-height: 168px;
+  padding-top: 10px;
+}
+
+.schedule-list {
+  display: grid;
+  gap: 6px;
+  overflow: auto;
+}
+
+.schedule-empty {
+  color: var(--text-muted);
+  font-size: var(--fs-ui);
+  line-height: 1.4;
+}
+
+.schedule-item {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  display: grid;
+  gap: 4px;
+  padding: 8px 10px;
+}
+
+.schedule-item.paused {
+  opacity: 0.62;
+}
+
+.schedule-title {
+  color: var(--text-soft);
+  font-size: var(--fs-ui);
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.schedule-meta {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.schedule-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.schedule-actions button {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  color: var(--text-soft);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 8px;
+}
+
 .activity-title {
   color: var(--text);
   font-size: var(--fs-ui);

@@ -40,6 +40,7 @@ export type DashboardFactoryState = {
   rerunWithSessionConfigLock: (input: DashboardRequestInput, rerun: (lockedInput: DashboardRequestInput) => Promise<unknown>) => unknown;
   runtime: DashboardRuntimeApi;
   activeSweepTimer: ReturnType<typeof setInterval>;
+  scheduleTickTimer: ReturnType<typeof setInterval>;
 };
 
 export type DashboardRuntimeApi = {
@@ -84,4 +85,8 @@ export type DashboardRuntimeApi = {
   sweepIdleSessions(): Promise<unknown>;
   shutdown(input?: DashboardRequestInput): Promise<unknown>;
   sessionFiles(sessionId: string): unknown;
+  listSchedules(): Promise<unknown>;
+  pauseSchedule(id: string): Promise<unknown>;
+  resumeSchedule(id: string): Promise<unknown>;
+  deleteSchedule(id: string): Promise<unknown>;
 };

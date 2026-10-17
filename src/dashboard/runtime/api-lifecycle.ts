@@ -401,6 +401,7 @@ export async function runtimeShutdown(ctx: DashboardFactoryState, input: Dashboa
       };
     }
     clearInterval(ctx.activeSweepTimer);
+    clearInterval(ctx.scheduleTickTimer);
     for (const state of ctx.active.values()) {
       if (state.session?.goal?.enabled) {
         state.session.goal.status = "paused";

@@ -31,7 +31,7 @@ export const AGENT_PROFILES = Object.freeze([
     mode: "write-capable",
     aliases: ["default"],
     hidden: true,
-    tools: ["read_file", "list_files", "glob", "grep", "git_status", "git_diff", "web_fetch", "web_search", "document_intake", "write_file", "edit_file", "powershell", "bash", "background_shell", "background_terminal_list", "background_terminal_cancel", "mcp_list", "mcp_call", "skill_list", "skill_read", "skill_run", "agent_run", "todo_read", "todo_write", "plan_update", "ask_user"],
+    tools: ["read_file", "list_files", "glob", "grep", "git_status", "git_diff", "web_fetch", "web_search", "document_intake", "write_file", "edit_file", "powershell", "bash", "background_shell", "background_terminal_list", "background_terminal_cancel", "mcp_list", "mcp_call", "skill_list", "skill_read", "skill_run", "agent_run", "todo_read", "todo_write", "plan_update", "ask_user", "schedule_list", "schedule_create"],
     description: "默认构建代理：综合读代码、改代码、运行验证和分派子任务。",
     triggerHints: ["实现", "修复", "重构", "编辑", "写代码", "改代码", "run tests", "implement", "fix"],
     outputContract: {
