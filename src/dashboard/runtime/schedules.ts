@@ -1,5 +1,5 @@
 import { listSchedules, publicSchedule, scheduleFireDecision, schedulePromptText, updateSchedule } from "../../schedules/store.ts";
-import { pauseSchedule, removeSchedule, resumeSchedule } from "../../schedules/tools.ts";
+import { createConfirmedSchedule, pauseSchedule, removeSchedule, resumeSchedule } from "../../schedules/tools.ts";
 import type { DashboardFactoryState } from "./factory-state.ts";
 import type { DashboardActiveSessionState } from "./types.ts";
 
@@ -57,6 +57,10 @@ export async function tickDashboardSchedules(ctx: Pick<DashboardFactoryState, "c
     fired += 1;
   }
   return { ok: true, fired, skipped };
+}
+
+export async function createDashboardSchedule(cwd: string, input: { title?: unknown; prompt?: unknown; cadence?: unknown; time?: unknown; weekday?: unknown; delayMinutes?: unknown; everyMinutes?: unknown; sessionId?: unknown }) {
+  return createConfirmedSchedule(input, { cwd, sessionId: String(input.sessionId ?? "") });
 }
 
 export async function listDashboardSchedules(cwd: string) {

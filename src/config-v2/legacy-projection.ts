@@ -327,7 +327,12 @@ function legacyAgentRouting(
   providerAgents: ConfigV2ProviderAgents | undefined,
   activeProviderId: string | null
 ) {
-  if (!routing) return cloneJson(providerAgents ?? EMPTY_OBJECT);
+  const local = cloneJson(providerAgents ?? EMPTY_OBJECT);
+  if (!routing || !activeProviderId) return local;
+  const tiers = routing.modelTiers ?? EMPTY_MODEL_REFS;
+  const visionRef = routing.vision?.model;
+  const references = [...Object.values(tiers), ...(visionRef ? [visionRef] : [])];
+  if (references.some((reference) => reference.provider !== activeProviderId)) return local;
   const modelTiers: JsonObject = {};
   const modelSelections: JsonObject = {};
   for (const [tier, reference] of Object.entries(routing.modelTiers ?? EMPTY_MODEL_REFS)) {
@@ -348,10 +353,27 @@ function legacyAgentRouting(
     projected.vision = vision;
   }
   if (routing.compat !== undefined) projected.compat = cloneJson(routing.compat);
+  if (isPlainObject(local.modelTiers)) {
+    projected.modelTiers = {
+      ...(isPlainObject(projected.modelTiers) ? projected.modelTiers : {}),
+      ...local.modelTiers
+    };
+  }
+  if (projected.vision === undefined && local.vision !== undefined) projected.vision = cloneJson(local.vision);
   return projected;
 }
 
 /** @param {Record<string, any>} reference @param {string | null} activeProviderId @param {string} path */
+function isPlainObject(value: unknown): value is JsonObject {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function providerHasOwnAgentModels(agents: JsonObject) {
+  const tiers = isPlainObject(agents.modelTiers) ? agents.modelTiers : {};
+  const vision = isPlainObject(agents.vision) ? agents.vision : {};
+  return Object.keys(tiers).length > 0 || Boolean(String(vision.model ?? "").trim());
+}
+
 function assertLegacyProvider(reference: ConfigV2ModelRef, activeProviderId: string | null, path: string) {
   if (!activeProviderId) projectionFailure(path, "legacy routing needs an active provider");
   if (reference.provider !== activeProviderId) {

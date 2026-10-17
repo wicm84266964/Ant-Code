@@ -760,7 +760,7 @@ test("dashboard model edits can clear optional capabilities across restart", asy
   assert.equal(saved.ok, true);
   const savedModel = saved.models.find((candidate) => candidate.id === modelId);
   assert.equal(savedModel.contextTokens, null);
-  assert.deepEqual(savedModel.reasoningEfforts, []);
+  assert.deepEqual(savedModel.reasoningEfforts.map((effort) => effort.id), ["low", "medium", "high", "xhigh"]);
   assert.equal(savedModel.defaultReasoningEffort, null);
   assert.deepEqual(savedModel.agentModelTiers, {});
   assert.equal(savedModel.thinking, false);
@@ -793,7 +793,7 @@ test("dashboard model edits can clear optional capabilities across restart", asy
   const restarted = await createDashboardRuntime({ cwd, env: { USERPROFILE: cwd } }).status();
   const restartedModel = restarted.models.find((candidate) => candidate.id === modelId);
   assert.equal(restartedModel.contextTokens, null);
-  assert.deepEqual(restartedModel.reasoningEfforts, []);
+  assert.deepEqual(restartedModel.reasoningEfforts.map((effort) => effort.id), ["low", "medium", "high", "xhigh"]);
   assert.equal(restartedModel.defaultReasoningEffort, null);
   assert.deepEqual(restartedModel.agentModelTiers, {});
   assert.equal(restartedModel.thinking, false);

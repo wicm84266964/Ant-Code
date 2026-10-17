@@ -44,7 +44,8 @@ import { listConfiguredModels, normalizeAgentModelTiers, normalizeReasoningEffor
 import {
   inferCatalogReasoning,
   normalizeCapabilityEfforts,
-  reasoningProbeEffortIds
+  reasoningProbeEffortIds,
+  selectableReasoningEffortIds
 } from "../../model-gateway/reasoning-capabilities.ts";
 import { resolveWorkspaceTrust, trustWorkspace as saveWorkspaceTrust } from "../../permissions/workspace-trust.ts";
 import { createSessionStore } from "../../storage/session-store.ts";
@@ -106,7 +107,7 @@ export function modelOptions(config: LabAgentConfig) {
 
 /** @param {Record<string, any>} model @param {string} currentModelId @param {string} defaultModelId @param {Record<string, any>} sources @param {Record<string, any>} options */
 export function publicModelOption(model: LabModel, currentModelId: string = "", defaultModelId: string = "", sources: { modelAlias?: unknown; models?: unknown } = {}, options: { reasoningEffort?: unknown; source?: unknown } = {}) {
-  const reasoningEfforts = normalizeReasoningEfforts(model.reasoningEfforts);
+  const reasoningEfforts = normalizeReasoningEfforts(selectableReasoningEffortIds(model.id, model.reasoningEfforts));
   const selectedReasoningEffort = resolveReasoningEffortSelection(
     { ...model, reasoningEfforts },
     options.reasoningEffort,
@@ -334,6 +335,25 @@ export function publicGatewaySource(profile: Record<string, unknown> | null | un
 
 export function publicAgentModelTiers(config: LabAgentConfig) {
   return normalizeAgentModelTiers(config.agents?.modelTiers);
+}
+
+export function publicAgentRouting(config: LabAgentConfig) {
+  const agents = config.agents as { modelSelections?: Record<string, unknown>; vision?: { selection?: unknown } } | undefined;
+  const selections = agents?.modelSelections ?? {};
+  return {
+    cheap: agentRoute(selections.cheap),
+    default: agentRoute(selections.default),
+    strong: agentRoute(selections.strong),
+    vision: agentRoute(agents?.vision?.selection)
+  };
+}
+
+function agentRoute(value: unknown) {
+  if (!value || typeof value !== "object") return null;
+  const record = value as { provider?: unknown; model?: unknown };
+  const provider = String(record.provider ?? "").trim();
+  const model = String(record.model ?? "").trim();
+  return provider && model ? { provider, model } : null;
 }
 
 

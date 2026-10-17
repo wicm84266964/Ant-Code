@@ -201,8 +201,14 @@ for (const failure of ["empty", "gateway", "cancel", "unavailable"]) {
     const controller = new AbortController();
     if (failure === "cancel") controller.abort();
     const result = await prepareVisionAttachmentsForTurn({ session, pdfDocuments: [{ name: "five.pdf", path: file }], signal: controller.signal, eventOptions: {} });
+    if (failure !== "cancel") {
+      assert.equal(result.ok, true);
+      assert.ok((result.attachments ?? []).length > 0);
+      assert.equal(requests, 0);
+      return;
+    }
     assert.equal(result.ok, false);
-    assert.equal(result.status, failure === "cancel" ? "interrupted" : failure === "unavailable" ? "vision_unavailable" : "vision_error");
-    assert.equal(requests, ["cancel", "unavailable"].includes(failure) ? 0 : 1);
+    assert.equal(result.status, "interrupted");
+    assert.equal(requests, 0);
   });
 }

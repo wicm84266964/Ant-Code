@@ -434,6 +434,12 @@ export async function loadConfigV2Runtime({ cwd, env, readGlobal }: { cwd: strin
     ? projectionLab.gatewayProfiles.filter(isPlainObject)
     : [];
   await Promise.all(profiles.map(async (profile) => {
+    if (profile.gatewayCredentialMode === "ambient") {
+      const { officialSourceApiKey } = await import("../model-gateway/official-sources.ts");
+      const secret = officialSourceApiKey(String(profile.id ?? ""), env);
+      if (secret) profile.gatewayApiKey = secret;
+      return;
+    }
     if (profile.gatewayCredentialMode !== "credential" || typeof profile.gatewayCredentialRef !== "string") return;
     const secret = await credentialStore.resolve(profile.gatewayCredentialRef);
     if (secret) profile.gatewayApiKey = secret;

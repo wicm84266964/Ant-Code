@@ -203,7 +203,7 @@ test("mobile settings expose every category without horizontal scrolling", async
       })
     }));
     assert.equal(layout.scrollWidth, layout.clientWidth);
-    assert.equal(layout.buttons.length, 5);
+    assert.equal(layout.buttons.length, 6);
     assert.equal(layout.buttons.every((button) => button.left >= 0 && button.right <= 390 && button.width >= 44), true);
     await assertNoPageOverflow(page, "mobile settings");
   });
@@ -230,9 +230,10 @@ test("model controls keep switching compact while settings owns configuration", 
     assert.equal(await page.locator("#settings-view").isVisible(), true);
     assert.equal(await page.locator(".transcript-stage").isVisible(), false);
     assert.equal(await page.locator("#settings-add-source").isVisible(), true);
-    assert.equal(await page.locator("#settings-add-model").isVisible(), true);
-    assert.equal(await page.locator("[data-action='edit-model']").count(), 1);
-    assert.equal(await page.locator("#settings-rail button[data-settings-section]").count(), 5);
+    assert.equal(await page.locator("#settings-add-model").count(), 0);
+    assert.equal(await page.locator("[data-action='use-model']").count(), 1);
+    assert.equal(await page.locator("[data-action='edit-model'], [data-action='delete-model']").count(), 0);
+    assert.equal(await page.locator("#settings-rail button[data-settings-section]").count(), 6);
     const backControl = await page.locator("#settings-back").evaluate((button) => {
       const icon = button.querySelector(".settings-back-icon");
       const buttonBounds = button.getBoundingClientRect();
@@ -264,7 +265,7 @@ test("model controls keep switching compact while settings owns configuration", 
     assert.ok(compactSettings.formWidth <= 680, `settings form too wide: ${compactSettings.formWidth}px`);
     assert.equal(compactSettings.selectColorScheme, "dark");
     assert.notEqual(compactSettings.optionBackground, "rgb(255, 255, 255)");
-    for (const section of ["transcript", "network", "agents", "reliability", "models"]) {
+    for (const section of ["transcript", "network", "agents", "schedules", "reliability", "models"]) {
       await page.locator(`#settings-rail button[data-settings-section='${section}']`).click();
       await page.waitForFunction((active) => document.querySelector("#settings-rail button.active")?.dataset.settingsSection === active, section);
       assert.equal(await page.locator(`#settings-rail button[data-settings-section='${section}']`).getAttribute("aria-current"), "page");
@@ -282,7 +283,7 @@ test("model controls keep switching compact while settings owns configuration", 
         backgroundWakeupEnabled: true,
         backgroundByDefault: false,
         reviewGateEnabled: true,
-        syncModelTiersOnSwitch: true,
+        syncModelTiersOnSwitch: false,
         goalMaxAutoContinues: 12
       },
       changedFields: ["maxParallelReadonlyAgentRuns"]
@@ -298,13 +299,10 @@ test("model controls keep switching compact while settings owns configuration", 
     await page.locator("#model-status-toggle").click();
     const modelPanel = page.locator("#model-panel");
     assert.equal(await modelPanel.isVisible(), true);
-    assert.equal(await modelPanel.locator("select[data-action='switch-source']").count(), 1);
-    assert.equal(await modelPanel.locator("select[data-action='switch-model']").count(), 1);
+    assert.equal(await modelPanel.locator("button[data-action='pick-model']").count(), 1);
+    assert.equal(await modelPanel.locator("select[data-action='switch-source'], select[data-action='switch-model']").count(), 0);
     assert.equal(await modelPanel.locator("[data-action='add-model'], [data-action='edit-model'], [data-action='delete-model']").count(), 0);
-    assert.deepEqual(
-      await modelPanel.locator(".model-switch-fields select").evaluateAll((selects) => selects.map((select) => getComputedStyle(select).fontSize)),
-      ["13px", "13px"]
-    );
+    assert.equal(await modelPanel.locator("h3").textContent(), "Test source");
 
     await page.keyboard.press("Escape");
     await page.locator("#reasoning-effort-select").selectOption("xhigh");
@@ -375,128 +373,107 @@ test("reasoning controls render only the configured disabled effort alias", asyn
 
       await page.locator("#settings-button").click();
       await page.waitForFunction(() => document.querySelector("#settings-content")?.getAttribute("aria-busy") !== "true");
-      await page.locator(".settings-model-row", { hasText: "Test model" })
-        .locator("button[data-action='edit-model']").click();
-      const form = page.locator("#model-config-form");
-      assert.equal(await form.locator("input[name='reasoningEfforts'][value='none']").count(), 1);
-      assert.equal(await form.locator("input[name='reasoningEfforts'][value='off']").count(), 0);
-      assert.equal(await form.locator("select[name='defaultReasoningEffort']").inputValue(), "none");
+      assert.equal(await page.locator("button[data-action='edit-model']").count(), 0);
+      assert.equal(await page.locator(".settings-model-row", { hasText: "Test model" }).locator("button[data-action='use-model']").count(), 1);
     });
   } finally {
     runtime.status = originalStatus;
   }
 });
 
-test("settings separates new sources from adding a model to the inspected source", async () => {
-  runtime.modelConfigCalls.length = 0;
-  runtime.modelConfigResponses.length = 0;
-  runtime.modelConfigResponses.push({
-    result: { ok: false, status: 422, error: "stop after payload capture" }
-  });
-  try {
-    await withDashboardPage({ width: 1280, height: 900 }, async (page) => {
-      await page.locator("#settings-button").click();
-      await page.waitForFunction(() => document.querySelector("#settings-content")?.getAttribute("aria-busy") !== "true");
+test("settings adds a named source and reads its catalog instead of registering one model", async () => {
+  await withDashboardPage({ width: 1280, height: 900 }, async (page) => {
+    await page.locator("#settings-button").click();
+    await page.waitForFunction(() => document.querySelector("#settings-content")?.getAttribute("aria-busy") !== "true");
+    assert.equal(await page.locator("#settings-add-model").count(), 0);
+    assert.equal(await page.locator("[data-action='edit-model']").count(), 0);
 
-      await page.locator("#settings-add-model").click();
-      const modelForm = page.locator("#model-config-form");
-      await modelForm.waitFor();
-      assert.equal(await modelForm.locator("#model-config-title").textContent(), "添加模型");
-      const modelFormTypography = await modelForm.evaluate((form) => {
-        const protocol = form.querySelector("select[name='gatewayProtocol']");
-        const agentModel = form.querySelector("select[data-agent-model-select]");
-        const reasoningLabel = form.querySelector(".model-reasoning-options label");
-        const reasoningDefault = form.querySelector("select[name='defaultReasoningEffort']");
-        return {
-          protocol: protocol ? getComputedStyle(protocol).fontSize : "",
-          agentModel: agentModel ? getComputedStyle(agentModel).fontSize : "",
-          reasoningLabel: reasoningLabel ? getComputedStyle(reasoningLabel).fontSize : "",
-          reasoningDefault: reasoningDefault ? getComputedStyle(reasoningDefault).fontSize : "",
-          protocolColorScheme: protocol ? getComputedStyle(protocol).colorScheme : "",
-          protocolBackground: protocol ? getComputedStyle(protocol).backgroundColor : ""
-        };
-      });
-      assert.deepEqual(modelFormTypography, {
-        protocol: "13px",
-        agentModel: "13px",
-        reasoningLabel: "13px",
-        reasoningDefault: "13px",
-        protocolColorScheme: "dark",
-        protocolBackground: "rgba(255, 255, 255, 0.055)"
-      });
-      assert.equal(await modelForm.locator("input[name='gatewayUrl']").inputValue(), "https://models.test/v1/responses");
-      assert.equal(await modelForm.locator("input[name='modelId']").inputValue(), "");
-      await modelForm.locator("input[name='modelId']").fill("test-model-2");
-      await modelForm.locator("input[name='label']").fill("Test model 2");
-      await modelForm.locator("button[type='submit']").click();
-      await waitUntil(() => runtime.modelConfigCalls.length === 1);
-      await modelForm.locator(".model-config-feedback").waitFor({ state: "visible" });
-      assert.equal(runtime.modelConfigCalls[0].providerId, "test-source");
-      assert.equal(runtime.modelConfigCalls[0].profileId, "test-source");
-      assert.equal(runtime.modelConfigCalls[0].previousModelId, "");
-      assert.equal(runtime.modelConfigCalls[0].modelId, "test-model-2");
-      assert.equal(runtime.modelConfigCalls[0].credentialAction, "keep");
-
-      await modelForm.locator("button[data-action='close-model-config']").first().click();
-      await page.locator("#settings-add-source").click();
-      const sourceForm = page.locator("#model-config-form");
-      await sourceForm.waitFor();
-      assert.equal(await sourceForm.locator("#model-config-title").textContent(), "添加模型来源");
-      assert.equal(await sourceForm.locator("input[name='gatewayUrl']").inputValue(), "");
-      assert.equal(await sourceForm.locator("input[name='modelId']").inputValue(), "");
-      assert.equal(await sourceForm.locator("input[name='agentCheapModel']").inputValue(), "");
-      assert.equal(await sourceForm.locator("input[name='visionAgentModel']").inputValue(), "");
+    await page.locator("#settings-add-source").click();
+    const sourceForm = page.locator("#model-config-form");
+    await sourceForm.waitFor();
+    assert.equal(await sourceForm.locator("#model-config-title").textContent(), "添加模型来源");
+    const sourceFormTypography = await sourceForm.evaluate((form) => {
+      const protocol = form.querySelector("select[name='gatewayProtocol']");
+      const agentModel = form.querySelector("select[data-agent-model-select]");
+      return {
+        protocol: protocol ? getComputedStyle(protocol).fontSize : "",
+        agentModel: agentModel ? getComputedStyle(agentModel).fontSize : "",
+        protocolColorScheme: protocol ? getComputedStyle(protocol).colorScheme : "",
+        protocolBackground: protocol ? getComputedStyle(protocol).backgroundColor : ""
+      };
     });
-  } finally {
-    runtime.modelConfigResponses.length = 0;
-  }
+    assert.deepEqual(sourceFormTypography, {
+      protocol: "13px",
+      agentModel: "13px",
+      protocolColorScheme: "dark",
+      protocolBackground: "rgba(255, 255, 255, 0.055)"
+    });
+    assert.equal(await sourceForm.locator("input[name='routeName']").inputValue(), "");
+    assert.equal(await sourceForm.locator("input[name='gatewayUrl']").inputValue(), "");
+    assert.equal(await sourceForm.locator("input[name='modelId']").count(), 0);
+    assert.equal(await sourceForm.locator("input[name='reasoningEfforts']").count(), 0);
+    assert.match(await sourceForm.locator("button[data-action='probe-gateway']").textContent(), /读取全部模型/);
+    assert.equal(await sourceForm.locator("input[name='agentCheapModel']").inputValue(), "");
+    assert.equal(await sourceForm.locator("input[name='visionAgentModel']").inputValue(), "");
+  });
 });
 
-test("successful model saves refresh settings and the new-task model snapshot immediately", async () => {
+test("successful source import refreshes settings and the new-task model snapshot", async () => {
   const originalStatus = runtime.status;
-  runtime.modelConfigCalls.length = 0;
-  runtime.modelConfigResponses.length = 0;
-  const previousModel = { ...browserModel(), current: false };
+  runtime.sourceImportCalls.length = 0;
+  runtime.sourceImportResponses.length = 0;
   const savedModel = {
     ...browserModel(),
     id: "test-model-2",
     label: "Test model 2",
-    current: true
+    current: true,
+    source: { id: "work", profileId: "work", label: "work" }
   };
   const savedResponse = {
     ...browserModelRuntimeResponse({ reasoningEffort: "high", model: savedModel }),
     modelId: savedModel.id,
-    models: [previousModel, savedModel],
+    modelCount: 1,
+    models: [savedModel],
+    gatewayConfig: {
+      gatewayUrl: "https://models.test/v1/responses",
+      gatewayProtocol: "openai-responses",
+      apiKeyConfigured: true,
+      activeProfileId: "work"
+    },
     gatewayProfiles: [{
-      id: "test-source",
-      label: "Test source",
+      id: "work",
+      label: "work",
       gatewayUrl: "https://models.test/v1/responses",
       gatewayProtocol: "openai-responses",
       apiKeyConfigured: true,
       modelAlias: savedModel.id,
-      modelCount: 2,
+      modelCount: 1,
       saveTarget: "project",
       current: true,
-      models: [previousModel, savedModel]
+      models: [savedModel]
     }]
   };
-  runtime.modelConfigResponses.push({ result: savedResponse });
+  runtime.sourceImportResponses.push({ result: savedResponse });
 
   try {
     await withDashboardPage({ width: 1280, height: 900 }, async (page) => {
       await page.locator("#settings-button").click();
       await page.waitForFunction(() => document.querySelector("#settings-content")?.getAttribute("aria-busy") !== "true");
-      await page.locator("#settings-add-model").click();
+      await page.locator("#settings-add-source").click();
       const form = page.locator("#model-config-form");
-      await form.locator("input[name='modelId']").fill(savedModel.id);
-      await form.locator("input[name='label']").fill(savedModel.label);
+      await form.locator("input[name='routeName']").fill("work");
+      await form.locator("input[name='gatewayUrl']").fill("https://models.test/v1/responses");
+      await form.locator("input[name='gatewayApiKey']").fill("test-key");
       await form.locator("button[type='submit']").click();
-      await waitUntil(() => runtime.modelConfigCalls.length === 1);
+      await waitUntil(() => runtime.sourceImportCalls.length === 1);
       await form.waitFor({ state: "detached" });
 
       const savedRow = page.locator(".settings-model-row", { hasText: savedModel.label });
       await savedRow.waitFor({ state: "visible" });
       assert.match(await savedRow.textContent(), /test-model-2/);
+      assert.equal(runtime.sourceImportCalls[0].kind, "custom");
+      assert.equal(runtime.sourceImportCalls[0].routeName, "work");
+      assert.equal(Object.prototype.hasOwnProperty.call(runtime.sourceImportCalls[0], "catalogModels"), false);
 
       runtime.status = async () => {
         await delay(250);
@@ -516,8 +493,8 @@ test("successful model saves refresh settings and the new-task model snapshot im
     });
   } finally {
     runtime.status = originalStatus;
-    runtime.modelConfigCalls.length = 0;
-    runtime.modelConfigResponses.length = 0;
+    runtime.sourceImportCalls.length = 0;
+    runtime.sourceImportResponses.length = 0;
   }
 });
 
@@ -525,8 +502,8 @@ test("gateway discovery offers exact agent model ids and passes only its opaque 
   runtime.gatewayProbeCalls.length = 0;
   runtime.gatewayProbeResponses.length = 0;
   runtime.gatewayProbeSettledCalls.length = 0;
-  runtime.modelConfigCalls.length = 0;
-  runtime.modelConfigResponses.length = 0;
+  runtime.sourceImportCalls.length = 0;
+  runtime.sourceImportResponses.length = 0;
   runtime.gatewayProbeResponses.push({
     result: {
       ok: true,
@@ -557,15 +534,17 @@ test("gateway discovery offers exact agent model ids and passes only its opaque 
       }]
     }
   });
-  runtime.modelConfigResponses.push({
+  runtime.sourceImportResponses.push({
     result: { ok: false, status: 422, error: "stop after payload capture" }
   });
   try {
     await withDashboardPage({ width: 1280, height: 900 }, async (page) => {
       await page.locator("#settings-button").click();
-      await page.locator("#settings-add-model").click();
+      await page.locator("#settings-add-source").click();
       const form = page.locator("#model-config-form");
-      await form.locator("input[name='modelId']").fill("grok-4.6");
+      await form.locator("input[name='routeName']").fill("work");
+      await form.locator("input[name='gatewayUrl']").fill("https://models.test/v1/responses");
+      await form.locator("input[name='gatewayApiKey']").fill("test-key");
       await form.locator("button[data-action='probe-gateway']").click();
       await waitUntil(() => runtime.gatewayProbeCalls.length === 1);
 
@@ -580,12 +559,8 @@ test("gateway discovery offers exact agent model ids and passes only its opaque 
       assert.equal(await defaultSelect.locator("option[value='deepseek-v4-pro']").count(), 1);
       assert.equal(await strongSelect.locator("option[value='claude-opus-4-1']").count(), 1);
       assert.equal(await visionSelect.locator("option[value='gemini-2.5-pro-vision']").count(), 1);
-
-      assert.equal(await form.locator("input[name='modelId']").inputValue(), "grok-4.6");
-      assert.equal(await form.locator("input[name='contextTokens']").inputValue(), "131072");
-      assert.equal(await form.locator("input[name='vision']").isChecked(), true);
-      assert.equal(await form.locator("input[name='reasoningEfforts'][value='xhigh']").isChecked(), true);
-      assert.equal(await form.locator("select[name='defaultReasoningEffort']").inputValue(), "high");
+      assert.equal(await form.locator("input[name='modelId']").count(), 0);
+      assert.equal(await form.locator("input[name='reasoningEfforts']").count(), 0);
 
       await cheapSelect.selectOption("gpt-5.6-luna");
       await defaultSelect.selectOption("deepseek-v4-pro");
@@ -596,25 +571,24 @@ test("gateway discovery offers exact agent model ids and passes only its opaque 
       assert.equal(await form.locator("input[name='agentStrongModel']").inputValue(), "claude-opus-4-1");
       assert.equal(await form.locator("input[name='visionAgentModel']").inputValue(), "gemini-2.5-pro-vision");
       await form.locator("button[type='submit']").click();
-      await waitUntil(() => runtime.modelConfigCalls.length === 1);
+      await waitUntil(() => runtime.sourceImportCalls.length === 1);
       await form.locator(".model-config-feedback").waitFor({ state: "visible" });
-      assert.equal(runtime.modelConfigCalls[0].modelId, "grok-4.6");
-      assert.equal(runtime.modelConfigCalls[0].agentCheapModel, "gpt-5.6-luna");
-      assert.equal(runtime.modelConfigCalls[0].agentDefaultModel, "deepseek-v4-pro");
-      assert.equal(runtime.modelConfigCalls[0].agentStrongModel, "claude-opus-4-1");
-      assert.equal(runtime.modelConfigCalls[0].visionAgentModel, "gemini-2.5-pro-vision");
-      assert.equal(runtime.modelConfigCalls[0].gatewayDiscoveryToken, "discovery-proof-exact");
-      assert.deepEqual(runtime.modelConfigCalls[0].manualAgentModelIds, []);
-      assert.equal(Object.prototype.hasOwnProperty.call(runtime.modelConfigCalls[0], "catalogModelIds"), false);
-      assert.equal(Object.prototype.hasOwnProperty.call(runtime.modelConfigCalls[0], "catalogModels"), false);
-      assert.deepEqual(runtime.modelConfigCalls[0].reasoningEfforts, ["low", "medium", "high", "xhigh"]);
+      assert.equal(runtime.sourceImportCalls[0].kind, "custom");
+      assert.equal(runtime.sourceImportCalls[0].routeName, "work");
+      assert.equal(runtime.sourceImportCalls[0].agentCheapModel, "gpt-5.6-luna");
+      assert.equal(runtime.sourceImportCalls[0].agentDefaultModel, "deepseek-v4-pro");
+      assert.equal(runtime.sourceImportCalls[0].agentStrongModel, "claude-opus-4-1");
+      assert.equal(runtime.sourceImportCalls[0].visionAgentModel, "gemini-2.5-pro-vision");
+      assert.equal(Object.prototype.hasOwnProperty.call(runtime.sourceImportCalls[0], "catalogModelIds"), false);
+      assert.equal(Object.prototype.hasOwnProperty.call(runtime.sourceImportCalls[0], "catalogModels"), false);
+      assert.equal(Object.prototype.hasOwnProperty.call(runtime.sourceImportCalls[0], "models"), false);
     });
   } finally {
     runtime.gatewayProbeCalls.length = 0;
     runtime.gatewayProbeResponses.length = 0;
     runtime.gatewayProbeSettledCalls.length = 0;
-    runtime.modelConfigCalls.length = 0;
-    runtime.modelConfigResponses.length = 0;
+    runtime.sourceImportCalls.length = 0;
+    runtime.sourceImportResponses.length = 0;
   }
 });
 
@@ -623,8 +597,8 @@ test("agent model pickers retain catalog-missing saved ids and keep manual input
   runtime.gatewayProbeCalls.length = 0;
   runtime.gatewayProbeResponses.length = 0;
   runtime.gatewayProbeSettledCalls.length = 0;
-  runtime.modelConfigCalls.length = 0;
-  runtime.modelConfigResponses.length = 0;
+  runtime.sourceImportCalls.length = 0;
+  runtime.sourceImportResponses.length = 0;
   runtime.status = async () => {
     const status = await originalStatus();
     status.gatewayProfiles[0] = {
@@ -647,7 +621,7 @@ test("agent model pickers retain catalog-missing saved ids and keep manual input
   }, {
     result: { ok: false, status: 502, error: "temporary catalog failure" }
   });
-  runtime.modelConfigResponses.push({
+  runtime.sourceImportResponses.push({
     result: { ok: false, status: 422, error: "stop after payload capture" }
   });
 
@@ -655,9 +629,9 @@ test("agent model pickers retain catalog-missing saved ids and keep manual input
     await withDashboardPage({ width: 1280, height: 900 }, async (page) => {
       await page.locator("#settings-button").click();
       await page.waitForFunction(() => document.querySelector("#settings-content")?.getAttribute("aria-busy") !== "true");
-      await page.locator("#settings-add-model").click();
+      await page.locator(".settings-profile-row", { hasText: "Test source" }).locator("button[data-action='edit-gateway-profile']").click();
       const form = page.locator("#model-config-form");
-      await form.locator("input[name='modelId']").fill("catalog-main-exact");
+      await form.locator("input[name='routeName']").fill("test-source");
       await form.locator("button[data-action='probe-gateway']").click();
       await waitUntil(() => runtime.gatewayProbeSettledCalls.length === 1);
       await form.locator("select[data-agent-model-select] option[value='catalog-worker-exact']").first().waitFor({ state: "attached" });
@@ -682,16 +656,15 @@ test("agent model pickers retain catalog-missing saved ids and keep manual input
       await form.locator("select[data-agent-model-select='agentStrongModel']").selectOption("catalog-worker-exact");
 
       await form.locator("button[type='submit']").click();
-      await waitUntil(() => runtime.modelConfigCalls.length === 1);
+      await waitUntil(() => runtime.sourceImportCalls.length === 1);
       await form.locator(".model-config-feedback").waitFor({ state: "visible" });
-      assert.equal(runtime.modelConfigCalls[0].agentCheapModel, "legacy-cheap-exact");
-      assert.equal(runtime.modelConfigCalls[0].agentDefaultModel, "manual/default-exact");
-      assert.equal(runtime.modelConfigCalls[0].agentStrongModel, "catalog-worker-exact");
-      assert.equal(runtime.modelConfigCalls[0].visionAgentModel, "legacy-vision-exact");
-      assert.equal(runtime.modelConfigCalls[0].gatewayDiscoveryToken, "discovery-proof-manual");
-      assert.deepEqual(runtime.modelConfigCalls[0].manualAgentModelIds, ["manual/default-exact"]);
-      assert.equal(Object.prototype.hasOwnProperty.call(runtime.modelConfigCalls[0], "catalogModelIds"), false);
-      assert.equal(Object.prototype.hasOwnProperty.call(runtime.modelConfigCalls[0], "catalogModels"), false);
+      assert.equal(runtime.sourceImportCalls[0].kind, "refresh");
+      assert.equal(runtime.sourceImportCalls[0].agentCheapModel, "legacy-cheap-exact");
+      assert.equal(runtime.sourceImportCalls[0].agentDefaultModel, "manual/default-exact");
+      assert.equal(runtime.sourceImportCalls[0].agentStrongModel, "catalog-worker-exact");
+      assert.equal(runtime.sourceImportCalls[0].visionAgentModel, "legacy-vision-exact");
+      assert.equal(Object.prototype.hasOwnProperty.call(runtime.sourceImportCalls[0], "catalogModelIds"), false);
+      assert.equal(Object.prototype.hasOwnProperty.call(runtime.sourceImportCalls[0], "catalogModels"), false);
 
       await form.locator("button[data-action='probe-gateway']").click();
       await waitUntil(() => runtime.gatewayProbeSettledCalls.length === 2);
@@ -706,8 +679,8 @@ test("agent model pickers retain catalog-missing saved ids and keep manual input
     runtime.gatewayProbeCalls.length = 0;
     runtime.gatewayProbeResponses.length = 0;
     runtime.gatewayProbeSettledCalls.length = 0;
-    runtime.modelConfigCalls.length = 0;
-    runtime.modelConfigResponses.length = 0;
+    runtime.sourceImportCalls.length = 0;
+    runtime.sourceImportResponses.length = 0;
   }
 });
 
@@ -716,8 +689,8 @@ test("changed endpoints cannot submit a stale discovered model catalog", async (
   runtime.gatewayProbeCalls.length = 0;
   runtime.gatewayProbeResponses.length = 0;
   runtime.gatewayProbeSettledCalls.length = 0;
-  runtime.modelConfigCalls.length = 0;
-  runtime.modelConfigResponses.length = 0;
+  runtime.sourceImportCalls.length = 0;
+  runtime.sourceImportResponses.length = 0;
   runtime.gatewayProbeResponses.push({
     delayMs: 160,
     result: {
@@ -725,7 +698,7 @@ test("changed endpoints cannot submit a stale discovered model catalog", async (
       models: [{ id: "stale-catalog-model", displayName: "Stale Catalog Model" }]
     }
   });
-  runtime.modelConfigResponses.push({
+  runtime.sourceImportResponses.push({
     result: { ok: false, status: 422, error: "stop after payload capture" }
   });
   runtime.status = async () => {
@@ -756,9 +729,9 @@ test("changed endpoints cannot submit a stale discovered model catalog", async (
   try {
     await withDashboardPage({ width: 1280, height: 900 }, async (page) => {
       await page.locator("#settings-button").click();
-      await page.locator("#settings-add-model").click();
+      await page.locator(".settings-profile-row", { hasText: "Test source" }).locator("button[data-action='edit-gateway-profile']").click();
       const form = page.locator("#model-config-form");
-      await form.locator("input[name='modelId']").fill("draft-main-model");
+      await form.locator("input[name='routeName']").fill("test-source");
       assert.equal(await form.locator("input[name='agentCheapModel']").inputValue(), "old-cheap-model");
       assert.equal(await form.locator("input[name='agentDefaultModel']").inputValue(), "old-default-model");
       assert.equal(await form.locator("input[name='agentStrongModel']").inputValue(), "old-strong-model");
@@ -786,26 +759,24 @@ test("changed endpoints cannot submit a stale discovered model catalog", async (
       await cheapSelect.selectOption("__manual_agent_model_id__");
       await form.locator("input[name='agentCheapModel']").fill("manual-new-endpoint-worker");
       await form.locator("button[type='submit']").click();
-      await waitUntil(() => runtime.modelConfigCalls.length === 1);
+      await waitUntil(() => runtime.sourceImportCalls.length === 1);
       await form.locator(".model-config-feedback").waitFor({ state: "visible" });
-      assert.equal(runtime.modelConfigCalls[0].gatewayDiscoveryToken, "");
-      assert.deepEqual(runtime.modelConfigCalls[0].manualAgentModelIds, ["manual-new-endpoint-worker"]);
-      assert.equal(Object.prototype.hasOwnProperty.call(runtime.modelConfigCalls[0], "catalogModelIds"), false);
-      assert.equal(Object.prototype.hasOwnProperty.call(runtime.modelConfigCalls[0], "catalogModels"), false);
-      assert.equal(runtime.modelConfigCalls[0].gatewayUrl, "https://new-endpoint.test/v1/responses");
-      assert.equal(runtime.modelConfigCalls[0].credentialAction, "clear");
-      assert.equal(runtime.modelConfigCalls[0].agentCheapModel, "manual-new-endpoint-worker");
-      assert.equal(runtime.modelConfigCalls[0].agentDefaultModel, "");
-      assert.equal(runtime.modelConfigCalls[0].agentStrongModel, "");
-      assert.equal(runtime.modelConfigCalls[0].visionAgentModel, "");
+      assert.equal(Object.prototype.hasOwnProperty.call(runtime.sourceImportCalls[0], "catalogModels"), false);
+      assert.equal(runtime.sourceImportCalls[0].kind, "refresh");
+      assert.equal(runtime.sourceImportCalls[0].gatewayUrl, "https://new-endpoint.test/v1/responses");
+      assert.equal(runtime.sourceImportCalls[0].gatewayApiKey, "");
+      assert.equal(runtime.sourceImportCalls[0].agentCheapModel, "manual-new-endpoint-worker");
+      assert.equal(runtime.sourceImportCalls[0].agentDefaultModel, "");
+      assert.equal(runtime.sourceImportCalls[0].agentStrongModel, "");
+      assert.equal(runtime.sourceImportCalls[0].visionAgentModel, "");
     });
   } finally {
     runtime.status = originalStatus;
     runtime.gatewayProbeCalls.length = 0;
     runtime.gatewayProbeResponses.length = 0;
     runtime.gatewayProbeSettledCalls.length = 0;
-    runtime.modelConfigCalls.length = 0;
-    runtime.modelConfigResponses.length = 0;
+    runtime.sourceImportCalls.length = 0;
+    runtime.sourceImportResponses.length = 0;
   }
 });
 
@@ -852,7 +823,7 @@ test("agent model selections follow endpoint changes while key rotation preserve
   try {
     await withDashboardPage({ width: 1280, height: 900 }, async (page) => {
       await page.locator("#settings-button").click();
-      await page.locator("#settings-add-model").click();
+      await page.locator(".settings-profile-row", { hasText: "Test source" }).locator("button[data-action='edit-gateway-profile']").click();
       const form = page.locator("#model-config-form");
       const gatewayUrl = form.locator("input[name='gatewayUrl']");
       const pickerInputs = form.locator("input[name='agentCheapModel'], input[name='agentDefaultModel'], input[name='agentStrongModel'], input[name='visionAgentModel']");
@@ -901,38 +872,40 @@ test("agent model selections follow endpoint changes while key rotation preserve
   }
 });
 
-test("changed gateway protocols clear an unchanged endpoint credential in the save payload", async () => {
-  runtime.modelConfigCalls.length = 0;
-  runtime.modelConfigResponses.length = 0;
-  runtime.modelConfigResponses.push({
+test("changed gateway protocols do not send the previous key with a source refresh", async () => {
+  runtime.sourceImportCalls.length = 0;
+  runtime.sourceImportResponses.length = 0;
+  runtime.sourceImportResponses.push({
     result: { ok: false, status: 422, error: "stop after payload capture" }
   });
 
   try {
     await withDashboardPage({ width: 1280, height: 900 }, async (page) => {
       await page.locator("#settings-button").click();
-      await page.locator("#settings-add-model").click();
+      await page.locator(".settings-profile-row", { hasText: "Test source" }).locator("button[data-action='edit-gateway-profile']").click();
       const form = page.locator("#model-config-form");
-      await form.locator("input[name='modelId']").fill("protocol-change-model");
+      await form.locator("input[name='routeName']").fill("test-source");
       await form.locator("select[name='gatewayProtocol']").selectOption("openai-chat");
+      assert.equal(await form.locator("input[name='gatewayApiKey']").getAttribute("placeholder"), "地址或协议已变化，请重新输入 Key");
       await form.locator("button[type='submit']").click();
-      await waitUntil(() => runtime.modelConfigCalls.length === 1);
+      await waitUntil(() => runtime.sourceImportCalls.length === 1);
       await form.locator(".model-config-feedback").waitFor({ state: "visible" });
 
-      assert.equal(runtime.modelConfigCalls[0].gatewayUrl, "https://models.test/v1/responses");
-      assert.equal(runtime.modelConfigCalls[0].previousGatewayProtocol, "openai-responses");
-      assert.equal(runtime.modelConfigCalls[0].credentialAction, "clear");
+      assert.equal(runtime.sourceImportCalls[0].kind, "refresh");
+      assert.equal(runtime.sourceImportCalls[0].gatewayUrl, "https://models.test/v1/responses");
+      assert.equal(runtime.sourceImportCalls[0].gatewayProtocol, "openai-chat");
+      assert.equal(runtime.sourceImportCalls[0].gatewayApiKey, "");
     });
   } finally {
-    runtime.modelConfigCalls.length = 0;
-    runtime.modelConfigResponses.length = 0;
+    runtime.sourceImportCalls.length = 0;
+    runtime.sourceImportResponses.length = 0;
   }
 });
 
-test("API key rotation preserves stored reasoning while endpoint and protocol changes invalidate it", async () => {
-  runtime.modelConfigCalls.length = 0;
-  runtime.modelConfigResponses.length = 0;
-  runtime.modelConfigResponses.push({
+test("source editing rotates the key without a per-model reasoning editor", async () => {
+  runtime.sourceImportCalls.length = 0;
+  runtime.sourceImportResponses.length = 0;
+  runtime.sourceImportResponses.push({
     result: { ok: false, status: 422, error: "stop after key-only payload capture" }
   });
 
@@ -940,216 +913,57 @@ test("API key rotation preserves stored reasoning while endpoint and protocol ch
     await withDashboardPage({ width: 1280, height: 900 }, async (page) => {
       await page.locator("#settings-button").click();
       await page.waitForFunction(() => document.querySelector("#settings-content")?.getAttribute("aria-busy") !== "true");
-      const openStoredModel = async () => {
-        await page.locator(".settings-model-row", { hasText: "Test model" })
-          .locator("button[data-action='edit-model']").click();
-        return page.locator("#model-config-form");
-      };
-
-      let form = await openStoredModel();
-      assert.equal(await form.locator("input[name='reasoningEfforts']:checked").count(), 4);
-      assert.equal(await form.locator("select[name='defaultReasoningEffort']").inputValue(), "medium");
-
-      await form.locator("input[name='gatewayApiKey']").fill("rotated-key-only");
-      assert.equal(await form.locator("input[name='reasoningEfforts']:checked").count(), 4);
-      assert.equal(await form.locator("select[name='defaultReasoningEffort']").inputValue(), "medium");
-      await form.locator("button[type='submit']").click();
-      await waitUntil(() => runtime.modelConfigCalls.length === 1);
-      await form.locator(".model-config-feedback").waitFor({ state: "visible" });
-      assert.equal(runtime.modelConfigCalls[0].credentialAction, "replace");
-      assert.deepEqual(runtime.modelConfigCalls[0].reasoningEfforts, ["low", "medium", "high", "xhigh"]);
-      assert.equal(runtime.modelConfigCalls[0].defaultReasoningEffort, "medium");
-
-      await form.locator("button[data-action='close-model-config']").first().click();
-      form = await openStoredModel();
-      await form.locator("input[name='gatewayUrl']").fill("https://changed-reasoning-endpoint.test/v1/responses");
-      assert.equal(await form.locator("input[name='reasoningEfforts']:checked").count(), 0);
-      assert.equal(await form.locator("select[name='defaultReasoningEffort']").inputValue(), "");
-
-      await form.locator("button[data-action='close-model-config']").first().click();
-      form = await openStoredModel();
-      await form.locator("select[name='gatewayProtocol']").selectOption("openai-chat");
-      assert.equal(await form.locator("input[name='reasoningEfforts']:checked").count(), 0);
-      assert.equal(await form.locator("select[name='defaultReasoningEffort']").inputValue(), "");
-    });
-  } finally {
-    runtime.modelConfigCalls.length = 0;
-    runtime.modelConfigResponses.length = 0;
-  }
-});
-
-test("manual reasoning edits win over a delayed capability probe until discovery is applied", async () => {
-  runtime.modelCapabilityProbeCalls.length = 0;
-  runtime.modelCapabilityProbeResponses.length = 0;
-  runtime.modelCapabilityProbeSettledCalls.length = 0;
-  runtime.modelConfigCalls.length = 0;
-  runtime.modelConfigResponses.length = 0;
-  runtime.modelCapabilityProbeResponses.push({
-    delayMs: 180,
-    result: {
-      ok: true,
-      modelId: "probe-model",
-      discoveryToken: "active-capability-proof",
-      reasoningEfforts: [{ id: "minimal", label: "Minimal" }, { id: "high", label: "High" }],
-      defaultReasoningEffort: "minimal",
-      reasoningDiscovery: {
-        source: "explicit-probe",
-        confidence: "probed",
-        supportsReasoning: true,
-        probeAvailable: true,
-        warnings: []
-      }
-    }
-  });
-  try {
-    await withDashboardPage({ width: 1280, height: 900 }, async (page) => {
-      await page.locator("#settings-button").click();
-      await page.locator("#settings-add-model").click();
+      await page.locator(".settings-profile-row", { hasText: "Test source" }).locator("button[data-action='edit-gateway-profile']").click();
       const form = page.locator("#model-config-form");
-      await form.locator("input[name='modelId']").fill("probe-model");
-      await form.locator("button[data-action='detect-reasoning-capabilities']").click();
-      await waitUntil(() => runtime.modelCapabilityProbeCalls.length === 1);
-      await form.locator("input[name='reasoningEfforts'][value='max']").check();
-      await waitUntil(() => runtime.modelCapabilityProbeSettledCalls.length === 1);
-
-      const apply = form.locator("button[data-action='apply-reasoning-capabilities']");
-      await apply.waitFor({ state: "visible" });
-      assert.equal(await form.locator("input[name='reasoningEfforts'][value='max']").isChecked(), true);
-      assert.equal(await form.locator("input[name='reasoningEfforts'][value='minimal']").count(), 0);
-      assert.match(await form.locator("#reasoning-capability-status").textContent(), /手动设置.*发现 2 档/);
-
-      await apply.click();
-      assert.equal(await form.locator("input[name='reasoningEfforts'][value='minimal']").isChecked(), true);
-      assert.equal(await form.locator("input[name='reasoningEfforts'][value='high']").isChecked(), true);
-      assert.equal(await form.locator("input[name='reasoningEfforts'][value='max']").isChecked(), false);
-      assert.equal(await form.locator("select[name='defaultReasoningEffort']").inputValue(), "minimal");
-
-      assert.match(runtime.modelCapabilityProbeCalls[0].clientId, /^dashboard-/);
-      assert.equal(["global", "project"].includes(runtime.modelCapabilityProbeCalls[0].saveTarget), true);
-      runtime.modelConfigResponses.push({
-        result: { ok: false, status: 422, error: "stop after active proof payload capture" }
-      });
+      assert.equal(await form.locator("input[name='reasoningEfforts']").count(), 0);
+      assert.equal(await form.locator("button[data-action='detect-reasoning-capabilities']").count(), 0);
+      await form.locator("input[name='routeName']").fill("test-source");
+      await form.locator("input[name='gatewayApiKey']").fill("rotated-key-only");
       await form.locator("button[type='submit']").click();
-      await waitUntil(() => runtime.modelConfigCalls.length === 1);
+      await waitUntil(() => runtime.sourceImportCalls.length === 1);
       await form.locator(".model-config-feedback").waitFor({ state: "visible" });
-      assert.equal(runtime.modelConfigCalls[0].gatewayDiscoveryToken, "active-capability-proof");
+      assert.equal(runtime.sourceImportCalls[0].kind, "refresh");
+      assert.equal(runtime.sourceImportCalls[0].gatewayApiKey, "rotated-key-only");
+      assert.equal(runtime.sourceImportCalls[0].gatewayUrl, "https://models.test/v1/responses");
     });
   } finally {
-    runtime.modelCapabilityProbeCalls.length = 0;
-    runtime.modelCapabilityProbeResponses.length = 0;
-    runtime.modelCapabilityProbeSettledCalls.length = 0;
-    runtime.modelConfigCalls.length = 0;
-    runtime.modelConfigResponses.length = 0;
+    runtime.sourceImportCalls.length = 0;
+    runtime.sourceImportResponses.length = 0;
   }
 });
 
-test("editing a stored model prefers actionable discovery and keeps stored efforts when discovery is unknown", async () => {
+test("closed source dialogs ignore a delayed catalog probe", async () => {
   runtime.gatewayProbeCalls.length = 0;
   runtime.gatewayProbeResponses.length = 0;
   runtime.gatewayProbeSettledCalls.length = 0;
   runtime.gatewayProbeResponses.push({
+    delayMs: 180,
     result: {
       ok: true,
-      message: "catalog without capabilities",
-      discoveryToken: "stored-model-unknown",
-      models: [{ id: "test-model", displayName: "Test model" }]
-    }
-  }, {
-    result: {
-      ok: true,
-      message: "catalog with capabilities",
-      discoveryToken: "stored-model-actionable",
-      models: [{
-        id: "test-model",
-        displayName: "Test model",
-        reasoningEfforts: [{ id: "max", label: "Max" }, { id: "ultra", label: "Ultra" }]
-      }]
+      models: [{ id: "stale-close-model", displayName: "Stale close" }]
     }
   });
-
   try {
     await withDashboardPage({ width: 1280, height: 900 }, async (page) => {
       await page.locator("#settings-button").click();
-      await page.waitForFunction(() => document.querySelector("#settings-content")?.getAttribute("aria-busy") !== "true");
-      await page.locator(".settings-model-row", { hasText: "Test model" })
-        .locator("button[data-action='edit-model']").click();
-      const form = page.locator("#model-config-form");
-
-      assert.equal(await form.locator("input[name='reasoningEfforts'][value='medium']").isChecked(), true);
+      await page.locator("#settings-add-source").click();
+      let form = page.locator("#model-config-form");
+      await form.locator("input[name='gatewayUrl']").fill("https://old-dialog.test/v1/responses");
       await form.locator("button[data-action='probe-gateway']").click();
+      await waitUntil(() => runtime.gatewayProbeCalls.length === 1);
+      await form.locator("button[data-action='close-model-config']").first().click();
+
+      await page.locator("#settings-add-source").click();
+      form = page.locator("#model-config-form");
+      await form.locator("input[name='gatewayUrl']").fill("https://new-dialog.test/v1/responses");
       await waitUntil(() => runtime.gatewayProbeSettledCalls.length === 1);
-      assert.equal(await form.locator("input[name='reasoningEfforts'][value='medium']").isChecked(), true);
-      assert.equal(await form.locator("select[name='defaultReasoningEffort']").inputValue(), "medium");
-
-      await form.locator("button[data-action='probe-gateway']").click();
-      await waitUntil(() => runtime.gatewayProbeSettledCalls.length === 2);
-      await page.waitForFunction(() => document.querySelector("input[name='reasoningEfforts'][value='ultra']")?.checked === true);
-      assert.equal(await form.locator("input[name='reasoningEfforts'][value='low']").isChecked(), false);
-      assert.equal(await form.locator("input[name='reasoningEfforts'][value='medium']").isChecked(), false);
-      assert.equal(await form.locator("input[name='reasoningEfforts'][value='max']").isChecked(), true);
-      assert.equal(await form.locator("input[name='reasoningEfforts'][value='ultra']").isChecked(), true);
-      assert.equal(await form.locator("select[name='defaultReasoningEffort']").inputValue(), "");
-      assert.equal(await form.locator("button[data-action='apply-reasoning-capabilities']").isVisible(), false);
-      assert.match(await form.locator("#reasoning-capability-status").textContent(), /上游已提供 2 档/);
+      assert.equal(await form.locator("option[value='stale-close-model']").count(), 0);
+      assert.equal(await form.locator("input[name='reasoningEfforts']").count(), 0);
     });
   } finally {
     runtime.gatewayProbeCalls.length = 0;
     runtime.gatewayProbeResponses.length = 0;
     runtime.gatewayProbeSettledCalls.length = 0;
-  }
-});
-
-test("closed dialogs and changed endpoints reject delayed capability results", async () => {
-  runtime.modelCapabilityProbeCalls.length = 0;
-  runtime.modelCapabilityProbeResponses.length = 0;
-  runtime.modelCapabilityProbeSettledCalls.length = 0;
-  runtime.modelCapabilityProbeResponses.push({
-    delayMs: 160,
-    result: {
-      ok: true,
-      modelId: "old-dialog-model",
-      reasoningEfforts: [{ id: "stale-close", label: "Stale close" }],
-      reasoningDiscovery: { source: "explicit-probe", supportsReasoning: true, probeAvailable: true }
-    }
-  }, {
-    delayMs: 160,
-    result: {
-      ok: true,
-      modelId: "old-endpoint-model",
-      reasoningEfforts: [{ id: "stale-endpoint", label: "Stale endpoint" }],
-      reasoningDiscovery: { source: "explicit-probe", supportsReasoning: true, probeAvailable: true }
-    }
-  });
-  try {
-    await withDashboardPage({ width: 1280, height: 900 }, async (page) => {
-      await page.locator("#settings-button").click();
-      await page.locator("#settings-add-model").click();
-      let form = page.locator("#model-config-form");
-      await form.locator("input[name='modelId']").fill("old-dialog-model");
-      await form.locator("button[data-action='detect-reasoning-capabilities']").click();
-      await waitUntil(() => runtime.modelCapabilityProbeCalls.length === 1);
-      await form.locator("button[data-action='close-model-config']").first().click();
-
-      await page.locator("#settings-add-model").click();
-      form = page.locator("#model-config-form");
-      await form.locator("input[name='modelId']").fill("new-dialog-model");
-      await waitUntil(() => runtime.modelCapabilityProbeSettledCalls.length === 1);
-      assert.equal(await form.locator("input[name='reasoningEfforts'][value='stale-close']").count(), 0);
-      assert.match(await form.locator("#reasoning-capability-status").textContent(), /未自动发现档位/);
-
-      await form.locator("input[name='modelId']").fill("old-endpoint-model");
-      await form.locator("button[data-action='detect-reasoning-capabilities']").click();
-      await waitUntil(() => runtime.modelCapabilityProbeCalls.length === 2);
-      await form.locator("input[name='gatewayUrl']").fill("https://changed-endpoint.test/v1/responses");
-      await waitUntil(() => runtime.modelCapabilityProbeSettledCalls.length === 2);
-      assert.equal(await form.locator("input[name='gatewayUrl']").inputValue(), "https://changed-endpoint.test/v1/responses");
-      assert.equal(await form.locator("input[name='reasoningEfforts'][value='stale-endpoint']").count(), 0);
-      assert.match(await form.locator("#reasoning-capability-status").textContent(), /未自动发现档位/);
-    });
-  } finally {
-    runtime.modelCapabilityProbeCalls.length = 0;
-    runtime.modelCapabilityProbeResponses.length = 0;
-    runtime.modelCapabilityProbeSettledCalls.length = 0;
   }
 });
 
@@ -1298,10 +1112,10 @@ test("transcript settings save permanent retention as an explicit null policy", 
   });
 });
 
-test("gateway profile edit prefills its own endpoint and keeps model credentials after failure", async () => {
-  runtime.modelConfigCalls.length = 0;
-  runtime.modelConfigResponses.length = 0;
-  runtime.modelConfigResponses.push({
+test("gateway profile edit prefills its own endpoint and keeps the draft after failure", async () => {
+  runtime.sourceImportCalls.length = 0;
+  runtime.sourceImportResponses.length = 0;
+  runtime.sourceImportResponses.push({
     delayMs: 500,
     result: { ok: false, status: 409, code: "SESSION_RUNNING", error: "测试模型保存失败" }
   });
@@ -1319,28 +1133,19 @@ test("gateway profile edit prefills its own endpoint and keeps model credentials
 
       assert.equal(await form.locator("input[name='gatewayUrl']").inputValue(), "https://repair.test/v1/responses");
       assert.equal(await form.locator("select[name='gatewayProtocol']").inputValue(), "openai-responses");
-      assert.equal(await form.locator("input[name='modelId']").inputValue(), "");
+      assert.equal(await form.locator("input[name='modelId']").count(), 0);
+      assert.equal(await form.locator("input[name='reasoningEfforts']").count(), 0);
       assert.equal(await form.locator("input[name='saveTarget'][value='global']").isChecked(), true);
       assert.equal(await form.locator("input[name='saveTarget'][value='global']").isEnabled(), true);
       assert.equal(await form.locator("input[name='saveTarget'][value='project']").isDisabled(), true);
-      assert.match(await form.locator(".model-config-scope-note").textContent(), /全局配置/);
-      assert.equal(await form.locator("input[name='reasoningEfforts'][value='xhigh']").count(), 1);
-      assert.equal(await form.locator("input[name='reasoningEfforts'][value='xhigh']").isChecked(), false);
-      const offEffort = form.locator("input[name='reasoningEfforts'][value='off']");
-      assert.equal(await offEffort.count(), 1);
-      assert.equal(await offEffort.isChecked(), false);
-      const maxEffort = form.locator("input[name='reasoningEfforts'][value='max']");
-      assert.equal(await maxEffort.count(), 1);
-      assert.equal(await maxEffort.isChecked(), false);
-      await maxEffort.check();
-      await form.locator("select[name='defaultReasoningEffort']").selectOption("max");
+      assert.match(await form.getByText("已有档案需保存回所属的全局配置。").textContent(), /全局配置/);
 
+      await form.locator("input[name='routeName']").fill("repair");
       await form.locator("input[name='gatewayUrl']").fill("https://repaired.test/v1/responses");
-      await form.locator("input[name='modelId']").fill("grok-repaired");
       await form.locator("input[name='gatewayApiKey']").fill("sk-browser-draft-only");
       await form.locator("button[type='submit']").click();
 
-      await waitUntil(() => runtime.modelConfigCalls.length === 1);
+      await waitUntil(() => runtime.sourceImportCalls.length === 1);
       await page.waitForFunction(() => document.querySelector("#model-config-form")?.getAttribute("aria-busy") === "true");
       assert.equal(await form.locator("input[name='gatewayUrl']").isDisabled(), true);
       assert.equal(await form.locator("input[name='gatewayApiKey']").isDisabled(), true);
@@ -1348,25 +1153,23 @@ test("gateway profile edit prefills its own endpoint and keeps model credentials
       assert.match(await form.locator(".model-config-feedback").textContent(), /测试模型保存失败/);
       assert.doesNotMatch(await form.locator(".model-config-feedback").textContent(), /另一个窗口更新/);
       assert.equal(await form.locator("input[name='gatewayUrl']").inputValue(), "https://repaired.test/v1/responses");
-      assert.equal(await form.locator("input[name='modelId']").inputValue(), "grok-repaired");
+      assert.equal(await form.locator("input[name='routeName']").inputValue(), "repair");
       assert.equal(await form.locator("input[name='gatewayApiKey']").inputValue(), "sk-browser-draft-only");
       assert.equal(await form.locator("input[name='gatewayApiKey']").isEnabled(), true);
-      assert.equal(runtime.modelConfigCalls[0].profileId, "repair-source");
-      assert.equal(runtime.modelConfigCalls[0].saveTarget, "global");
-      assert.equal(runtime.modelConfigCalls[0].previousGatewayUrl, "https://repair.test/v1/responses");
-      assert.equal(runtime.modelConfigCalls[0].credentialAction, "replace");
-      assert.deepEqual(runtime.modelConfigCalls[0].reasoningEfforts, ["max"]);
-      assert.equal(runtime.modelConfigCalls[0].defaultReasoningEffort, "max");
+      assert.equal(runtime.sourceImportCalls[0].kind, "refresh");
+      assert.equal(runtime.sourceImportCalls[0].profileId, "repair-source");
+      assert.equal(runtime.sourceImportCalls[0].saveTarget, "global");
+      assert.equal(runtime.sourceImportCalls[0].gatewayApiKey, "sk-browser-draft-only");
     });
   } finally {
-    runtime.modelConfigResponses.length = 0;
+    runtime.sourceImportResponses.length = 0;
   }
 });
 
-test("stale model settings keep the draft and send scoped config revisions", async () => {
-  runtime.modelConfigCalls.length = 0;
-  runtime.modelConfigResponses.length = 0;
-  runtime.modelConfigResponses.push({
+test("stale source settings keep the draft and send scoped config revisions", async () => {
+  runtime.sourceImportCalls.length = 0;
+  runtime.sourceImportResponses.length = 0;
+  runtime.sourceImportResponses.push({
     result: {
       ok: false,
       status: 409,
@@ -1381,27 +1184,26 @@ test("stale model settings keep the draft and send scoped config revisions", asy
       await page.locator(".settings-profile-row", { hasText: "Repair source" })
         .locator("button[data-action='edit-gateway-profile']").click();
       const form = page.locator("#model-config-form");
+      await form.locator("input[name='routeName']").fill("repair");
       await form.locator("input[name='gatewayUrl']").fill("https://draft.test/v1/responses");
-      await form.locator("input[name='modelId']").fill("draft-model");
       await form.locator("input[name='gatewayApiKey']").fill("sk-draft-only");
-      await form.locator("input[name='reasoningEfforts'][value='max']").check();
       await form.locator("button[type='submit']").click();
 
       await form.locator(".model-config-feedback").waitFor({ state: "visible" });
       assert.match(await form.locator(".model-config-feedback").textContent(), /另一个窗口更新/);
       assert.equal(await form.locator("input[name='gatewayUrl']").inputValue(), "https://draft.test/v1/responses");
-      assert.equal(await form.locator("input[name='modelId']").inputValue(), "draft-model");
+      assert.equal(await form.locator("input[name='routeName']").inputValue(), "repair");
       assert.equal(await form.locator("input[name='gatewayApiKey']").inputValue(), "sk-draft-only");
-      assert.equal(await form.locator("input[name='reasoningEfforts'][value='max']").isChecked(), true);
 
-      const call = runtime.modelConfigCalls[0];
+      const call = runtime.sourceImportCalls[0];
+      assert.equal(call.kind, "refresh");
       assert.equal(call.scope, "global");
       assert.equal(call.providerId, "repair-source");
       assert.equal(call.expectedRevision, "global-r1");
       assert.equal(call.expectedCredentialsRevision, "credentials-r1");
     });
   } finally {
-    runtime.modelConfigResponses.length = 0;
+    runtime.sourceImportResponses.length = 0;
   }
 });
 
@@ -1647,21 +1449,17 @@ test("model picker groups connections and switches the original provider on desk
       await withDashboardPage(viewport, async (page) => {
         await page.locator("#model-status-toggle").click();
         const panel = page.locator("#model-panel");
-        const sources = panel.locator("select[data-action='switch-source'] option");
-        assert.equal(await sources.count(), 2);
-        assert.equal(new Set(await sources.allTextContents()).size, 2);
-        const models = panel.locator("select[data-action='switch-model']");
-        assert.deepEqual(await models.locator("option").allTextContents(), ["model-0 (Model 0)", "model-1 (Model 1)"]);
-        await models.selectOption("model-1");
+        assert.equal(await panel.locator("select").count(), 0);
+        assert.deepEqual(
+          await panel.locator("button[data-action='pick-model']").evaluateAll((buttons) => buttons.map((button) => button.dataset.modelId)),
+          ["model-0", "model-1", "model-2"]
+        );
+        await panel.locator("button[data-action='pick-model'][data-profile-id='local-b'][data-model-id='model-1']").click();
         await waitUntil(() => current === "local-b");
         await page.waitForFunction(() => document.querySelector("#model-status")?.textContent?.includes("Model 1"));
         await page.locator("#settings-button").click();
         await page.waitForFunction(() => document.querySelector("#settings-content")?.getAttribute("aria-busy") !== "true");
-        const key = page.locator("input[data-action='select-source-credential'][data-profile-id='local-b']");
-        await key.check();
-        await waitUntil(() => credential === "local-b");
-        await page.waitForFunction(() => document.querySelector("#settings-content")?.getAttribute("aria-busy") !== "true");
-        assert.equal(await key.isChecked(), true);
+        assert.equal(await page.locator("input[data-action='select-source-credential']").count(), 0);
       });
     }
   } finally {
@@ -1787,12 +1585,10 @@ test("legacy sessions keep provider, model list, and reasoning effort atomic", a
 
       await page.locator("#model-status-toggle").click();
       const panel = page.locator("#model-panel");
-      const sourceSelect = panel.locator("select[data-action='switch-source']");
-      assert.deepEqual(await sourceSelect.locator("option").allTextContents(), ["https://grok.test/v1/responses", "https://deepseek.test/v1/chat/completions"]);
-      await sourceSelect.selectOption("deepseek");
+      assert.deepEqual(await panel.locator("h3").allTextContents(), ["Grok", "DeepSeek"]);
+      await panel.locator("button[data-action='pick-model'][data-profile-id='deepseek'][data-model-id='deepseek-v4-pro']").click();
       await page.waitForFunction(() => /DeepSeek\s*·\s*DeepSeek V4 Pro/.test(document.querySelector("#model-status")?.textContent ?? ""));
       assert.equal(await page.locator("#reasoning-effort-select option[value='max']").count(), 1);
-      assert.deepEqual(await sourceSelect.locator("option").allTextContents(), ["https://grok.test/v1/responses", "https://deepseek.test/v1/chat/completions"]);
 
       await page.locator("#settings-button").click();
       await page.waitForFunction(() => document.querySelector("#settings-content")?.getAttribute("aria-busy") !== "true");
@@ -1809,10 +1605,9 @@ test("legacy sessions keep provider, model list, and reasoning effort atomic", a
 
       await page.locator("#model-status-toggle").click();
       const panel = page.locator("#model-panel");
-      assert.equal(await panel.locator("select[data-action='switch-source']").inputValue(), "deepseek");
-      assert.equal(await panel.locator("select[data-action='switch-model']").inputValue(), "glm-5.2");
+      assert.equal(await panel.locator("button[data-action='pick-model'][data-profile-id='deepseek'][data-model-id='glm-5.2']").getAttribute("aria-current"), "true");
       assert.deepEqual(
-        await panel.locator("select[data-action='switch-model'] option").allTextContents(),
+        await panel.locator("section").nth(1).locator("button").allTextContents(),
         ["deepseek-v4-pro (DeepSeek V4 Pro)", "glm-5.2 (GLM 5.2)", "shared-model (Shared model)"]
       );
 
@@ -1883,14 +1678,11 @@ test("legacy sessions keep provider, model list, and reasoning effort atomic", a
 
       await page.locator("#model-status-toggle").click();
       const panel = page.locator("#model-panel");
-      const sourceSelect = panel.locator("select[data-action='switch-source']");
-      const modelSelect = panel.locator("select[data-action='switch-model']");
-      assert.equal(await sourceSelect.inputValue(), "");
-      assert.deepEqual(await sourceSelect.locator("option").allTextContents(), ["请选择模型来源", "https://grok.test/v1/responses", "https://deepseek.test/v1/chat/completions"]);
-      assert.equal(await modelSelect.isDisabled(), true);
-      assert.deepEqual(await modelSelect.locator("option").allTextContents(), ["请先选择模型来源"]);
+      assert.equal(await panel.locator("button[data-action='pick-model'][aria-current='true']").count(), 0);
+      assert.equal(await panel.locator("button[data-action='pick-model'][data-profile-id='grok'][data-model-id='shared-model']").count(), 1);
+      assert.equal(await panel.locator("button[data-action='pick-model'][data-profile-id='deepseek'][data-model-id='shared-model']").count(), 1);
 
-      await sourceSelect.selectOption("grok");
+      await panel.locator("button[data-action='pick-model'][data-profile-id='grok'][data-model-id='grok-4.6']").click();
       await page.waitForFunction(() => /Grok\s*·\s*Grok 4\.6/.test(document.querySelector("#model-status")?.textContent ?? ""));
       assert.deepEqual(
         { providerId: runtime.modelSwitchCalls.at(-1).providerId, modelId: runtime.modelSwitchCalls.at(-1).modelId },
@@ -2476,6 +2268,8 @@ function createBrowserRuntime(remoteImageUrl) {
     settingsConfigResponses: [],
     modelConfigCalls: [],
     modelConfigResponses: [],
+    sourceImportCalls: [],
+    sourceImportResponses: [],
     gatewayProbeCalls: [],
     gatewayProbeResponses: [],
     gatewayProbeSettledCalls: [],
@@ -2686,6 +2480,12 @@ function createBrowserRuntime(remoteImageUrl) {
       const queued = this.modelConfigResponses.shift();
       if (queued?.delayMs) await delay(queued.delayMs);
       return queued?.result ?? { ok: false, status: 422, error: "mock model save failure" };
+    },
+    async importModelSource(body) {
+      this.sourceImportCalls.push(body);
+      const queued = this.sourceImportResponses.shift();
+      if (queued?.delayMs) await delay(queued.delayMs);
+      return queued?.result ?? { ok: false, status: 422, error: "mock source import failure" };
     },
     deleteSession: async () => ({ ok: false }),
     deleteGatewayProfile: async () => ({ ok: false }),

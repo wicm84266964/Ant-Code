@@ -680,15 +680,16 @@ test("dashboard composer controls keep confirmations reviewable and critical sta
   assert.match(app, /status\.version !== DASHBOARD_API_VERSION/);
   assert.match(app, /Dashboard 前后端版本不一致，请重启 Dashboard 服务后刷新页面/);
   assert.match(app, /if \(view !== "settings" && state\.settingsOpen\)/);
-  assert.match(modelPanelRender, /data-action="switch-source"/);
-  assert.match(modelPanelRender, /data-action="switch-model"/);
+  assert.match(modelPanelRender, /data-action="pick-model"/);
+  assert.match(modelPanelRender, /providerRouteGroups/);
   assert.doesNotMatch(modelPanelRender, /add-model|edit-model|delete-model|delete-gateway-profile/);
-  assert.match(settingsRender, /data-action="add-model"/);
   assert.match(settingsRender, /data-action="add-source"/);
+  assert.match(settingsRender, /data-action="refresh-source"/);
+  assert.match(settingsRender, /data-action="use-model"/);
+  assert.match(settingsRender, /此范围默认/);
   assert.match(settingsRender, /showModelConfigPanel\("", action\.dataset\.profileId \|\| settingsInspectedGatewayProfile\(\)\?\.id \|\| "", "add-model"\)/);
-  assert.match(settingsRender, /data-action="edit-model"/);
+  assert.doesNotMatch(settingsRender, /data-action="add-model"|data-action="edit-model"|data-action="delete-model"/);
   assert.match(settingsRender, /data-action="delete-gateway-profile"/);
-  assert.match(settingsRender, /data-action="delete-model"/);
   assert.match(settingsRender, /data-settings-form="transcript"/);
   assert.match(settingsRender, /data-settings-form="network"/);
   assert.match(settingsRender, /data-settings-form="agents"/);
@@ -743,7 +744,8 @@ test("dashboard composer controls keep confirmations reviewable and critical sta
   assert.match(app, /const scope = configScope\(data\.get\("saveTarget"\), "global"\)/);
   assert.match(app, /saveTarget: scope/);
   assert.match(app, /showNotice\(result\.clearedGateway \? "当前网关配置已清空" : "模型配置已删除"\)/);
-  assert.match(app, /这是当前来源最后一个模型，会清空当前网关配置/);
+  assert.match(app, /再次点击确认删除；删除当前来源后不会自动切换到其他来源/);
+  assert.doesNotMatch(app, /data-action="delete-model"/);
   assert.match(app, /deleteJson\(`\/api\/model-config\/\$\{encodeURIComponent\(modelId\)\}`/);
   assert.match(css, /\.settings-open \.workspace\s*\{[^}]*grid-template-areas:[^}]*"settings";/s);
   assert.match(css, /\.settings-layout\s*\{[^}]*grid-template-columns: 176px minmax\(0, 1fr\);/s);
@@ -1015,14 +1017,15 @@ test("dashboard qualifies model deletion state by provider and classifies only r
   const sharedModel = { id: "shared-model", label: "Shared model", reasoningEfforts: [] };
   const grok = { id: "grok", editable: true };
   const deepseek = { id: "deepseek", editable: true };
-  module.state.deleteConfirmModelKey = module.providerModelKey(grok.id, sharedModel.id);
+  module.state.modelDefaultScope = "global";
+  module.state.modelDefaultSelections = { global: { provider: "grok", model: "shared-model" }, project: null };
 
   const grokHtml = module.settingsModelHtml(sharedModel, grok, 2);
   const deepseekHtml = module.settingsModelHtml(sharedModel, deepseek, 2);
-  assert.match(grokHtml, /settings-model-row confirming-delete/);
-  assert.match(grokHtml, />确认删除<\/button>/);
-  assert.doesNotMatch(deepseekHtml, /confirming-delete/);
-  assert.match(deepseekHtml, />删除<\/button>/);
+  assert.match(grokHtml, /此范围默认/);
+  assert.match(grokHtml, /data-action="use-model"/);
+  assert.doesNotMatch(deepseekHtml, /此范围默认/);
+  assert.doesNotMatch(grokHtml, /data-action="delete-model"/);
 });
 
 test("dashboard exposes responsive navigation and accessible interaction semantics", async () => {

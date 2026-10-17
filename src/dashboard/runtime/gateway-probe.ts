@@ -42,7 +42,8 @@ import { listConfiguredModels, normalizeAgentModelTiers, normalizeReasoningEffor
 import {
   inferCatalogReasoning,
   normalizeCapabilityEfforts,
-  reasoningProbeEffortIds
+  reasoningProbeEffortIds,
+  standardThinkingEffortIds
 } from "../../model-gateway/reasoning-capabilities.ts";
 import { resolveWorkspaceTrust, trustWorkspace as saveWorkspaceTrust } from "../../permissions/workspace-trust.ts";
 import { createSessionStore } from "../../storage/session-store.ts";
@@ -655,7 +656,7 @@ export async function probeModelReasoningCapabilities(input: DashboardRequestInp
   }
 
   if (supportsReasoning) {
-    warnings.push("已确认返回中包含思考内容。上游未提供可观测的档位列表时，请手动勾选强度。");
+    warnings.push("已确认返回中包含思考内容。未声明档位时，聊天栏使用通用档。");
   } else if (attempts.length > 0) {
     warnings.push("请求已成功或被忽略未知字段，但返回中没有思考内容，不能当作已测出档位。");
   }

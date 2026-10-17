@@ -153,6 +153,17 @@ test("replaces a base provider atomically from global without merging model list
   assert.equal(resolved.provenance.providers.deepseek, "global");
 });
 
+test("allows a saved reasoning effort when the model does not declare an effort list", () => {
+  const provider = grokProvider();
+  provider.models = [{ id: "grok-4.7", displayName: "Grok 4.7", inputModalities: ["text"] }];
+  const document = settingsDocument({
+    providers: { grok: provider },
+    selection: { provider: "grok", model: "grok-4.7", reasoningEffort: "xhigh" }
+  });
+  const resolved = resolveSettingsLayers({ global: document });
+  assert.equal(resolved.namespaces["default-model"].selection.reasoningEffort, "xhigh");
+});
+
 test("validates provider-qualified references and exact-model efforts after layering", () => {
   const unsupported = settingsDocument({
     providers: { grok: grokProvider() },

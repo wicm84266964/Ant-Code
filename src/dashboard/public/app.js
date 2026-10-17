@@ -125,6 +125,9 @@ var state = {
     []
   ),
   agentModelTiers: {},
+  agentRouting: { cheap: null, default: null, strong: null, vision: null },
+  officialSources: [],
+  schedules: [],
   visionAgent: (
     /** @type {any} */
     null
@@ -3709,6 +3712,8 @@ async function loadSchedules() {
   if (!(list instanceof HTMLElement)) return;
   const result = await getJson("/api/schedules").catch(() => ({ ok: false }));
   const schedules = Array.isArray(result.schedules) ? result.schedules : null;
+  if (schedules) state.schedules = schedules;
+  if (state.settingsOpen && state.settingsSection === "schedules") renderSettingsView3();
   if (!result.ok || !schedules) {
     list.innerHTML = `<div class="schedule-empty">暂时读不到定时任务</div>`;
     return;
@@ -3777,6 +3782,8 @@ async function bootstrapDashboard2() {
     state.gatewayConfig = normalizeGatewayConfig(status.gatewayConfig);
     state.gatewayProfiles = normalizeGatewayProfiles(status.gatewayProfiles);
     state.agentModelTiers = normalizeAgentModelTiers(status.agentModelTiers);
+    state.agentRouting = normalizeAgentRouting(status.agentRouting);
+    state.officialSources = Array.isArray(status.officialSources) ? status.officialSources : [];
     state.visionAgent = normalizeVisionAgent(status.visionAgent);
     state.settings = normalizeDashboardSettings3(status.settings);
     updateConfigRevisions(status);
@@ -5614,6 +5621,162 @@ function isProtectedTranscriptNode4(node) {
   return node === els.emptyState || node === state.transcriptHistoryNode || node === state.workflowNode || node === state.transcriptWindow.olderNode || node === state.transcriptWindow.newerNode || node.classList.contains("draft-message") || node instanceof HTMLElement && node.dataset.promptTurn === "true";
 }
 
+// src/model-gateway/vision-capabilities.ts
+var VISION_HINT = /vision|visual|image|omni|multimodal|(?:^|[^a-z0-9])vl(?:$|[^a-z0-9])|-vl|qwen-vl/i;
+var TEXT_ONLY = /(?:^|[^a-z0-9])(?:luna|embed(?:ding)?|whisper|tts|asr)(?:$|[^a-z0-9])/i;
+function inferModelSupportsImages(modelId, catalogModalities) {
+  const evidence = classifyModelVisionEvidence(modelId, catalogModalities);
+  return evidence === "catalog" || evidence === "hint";
+}
+function classifyModelVisionEvidence(modelId, catalogModalities) {
+  if (catalogListsImageModality(catalogModalities)) {
+    return "catalog";
+  }
+  const id = String(modelId ?? "").trim().toLowerCase();
+  if (!id) {
+    return "uncertain";
+  }
+  if (TEXT_ONLY.test(id)) {
+    return "text-only";
+  }
+  if (VISION_HINT.test(id)) {
+    return "hint";
+  }
+  return "uncertain";
+}
+function needsVisionCapabilityProbe(modelId, catalogModalities) {
+  const evidence = classifyModelVisionEvidence(modelId, catalogModalities);
+  return evidence === "uncertain" || evidence === "hint";
+}
+function catalogListsImageModality(modalities) {
+  if (!Array.isArray(modalities)) {
+    return false;
+  }
+  return modalities.some((entry) => {
+    const text = String(entry ?? "").trim().toLowerCase();
+    return ["image", "images", "vision", "visual", "multimodal", "图片", "视觉"].includes(text);
+  });
+}
+
+// src/model-gateway/models.ts
+var DEFAULT_MODEL_OPTIONS = Object.freeze([
+  {
+    id: "claude-sonnet-4-5-20250929",
+    label: "Sonnet 4.5",
+    description: "Balanced coding model exposed by the local lab adapter.",
+    thinking: false,
+    modalities: ["text"],
+    contextTokens: 2e5
+  },
+  {
+    id: "claude-sonnet-4-5-20250929-thinking",
+    label: "Sonnet 4.5 Thinking",
+    description: "Adapter model with provider-exposed reasoning deltas when available.",
+    thinking: true,
+    modalities: ["text"],
+    contextTokens: 2e5
+  },
+  {
+    id: "claude-haiku-4-5-20251001",
+    label: "Haiku 4.5",
+    description: "Lower-latency local adapter model for lighter work.",
+    thinking: false,
+    modalities: ["text"],
+    contextTokens: 2e5
+  }
+]);
+
+// src/model-gateway/reasoning-capabilities.ts
+var PROBE_EFFORT_IDS = Object.freeze(["none", "off", "low", "medium", "high", "xhigh", "max", "ultra"]);
+var LEGACY_GPT56_ULTRA_PRESET_IDS = Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]);
+var EFFORT_PATHS = Object.freeze([
+  ["reasoningEfforts"],
+  ["supportedReasoningEfforts"],
+  ["reasoning_efforts"],
+  ["supported_reasoning_efforts"],
+  ["supported_reasoning_levels"],
+  ["reasoning", "efforts"],
+  ["reasoning", "supportedEfforts"],
+  ["reasoning", "supported_efforts"],
+  ["capabilities", "reasoning", "efforts"],
+  ["capabilities", "reasoning", "supported_efforts"],
+  ["capabilities", "reasoningEfforts"],
+  ["capabilities", "reasoning_efforts"]
+]);
+var DEFAULT_PATHS = Object.freeze([
+  ["defaultReasoningEffort"],
+  ["default_reasoning_effort"],
+  ["reasoningEffort"],
+  ["reasoning_effort"],
+  ["reasoning", "default"],
+  ["reasoning", "defaultEffort"],
+  ["reasoning", "default_effort"],
+  ["capabilities", "reasoning", "default"],
+  ["capabilities", "reasoning", "default_effort"]
+]);
+var SUPPORT_PATHS = Object.freeze([
+  ["supportsReasoningEffort"],
+  ["supports_reasoning_effort"],
+  ["supportsReasoning"],
+  ["supports_reasoning"],
+  ["reasoning", "supported"],
+  ["reasoning", "enabled"],
+  ["capabilities", "reasoning", "supported"],
+  ["capabilities", "reasoning", "enabled"]
+]);
+var KNOWN_PRESETS = Object.freeze([
+  Object.freeze({
+    id: "xai.grok-4.5-4.6",
+    modelIds: Object.freeze(["grok-4.5", "grok-4.6", "grok-4.7"]),
+    protocols: Object.freeze(["openai-responses"]),
+    efforts: Object.freeze(["low", "medium", "high", "xhigh"]),
+    defaultEffort: "high"
+  }),
+  Object.freeze({
+    id: "deepseek.v4-pro",
+    modelIds: Object.freeze(["deepseek-v4-pro"]),
+    protocols: Object.freeze(["openai-chat"]),
+    efforts: Object.freeze(["off", "high", "max"]),
+    defaultEffort: "high"
+  }),
+  Object.freeze({
+    id: "gpt-5.6.sol",
+    modelIds: Object.freeze(["gpt-5.6-sol"]),
+    protocols: Object.freeze(["openai-chat", "openai-responses"]),
+    efforts: Object.freeze(["none", "low", "medium", "high", "xhigh", "max"]),
+    defaultEffort: null
+  }),
+  Object.freeze({
+    id: "gpt-5.6.terra",
+    modelIds: Object.freeze(["gpt-5.6-terra"]),
+    protocols: Object.freeze(["openai-chat", "openai-responses"]),
+    efforts: Object.freeze(["none", "low", "medium", "high", "xhigh", "max"]),
+    defaultEffort: null
+  }),
+  Object.freeze({
+    id: "gpt-5.6.luna",
+    modelIds: Object.freeze(["gpt-5.6-luna"]),
+    protocols: Object.freeze(["openai-chat", "openai-responses"]),
+    efforts: Object.freeze(["none", "low", "medium", "high", "xhigh", "max"]),
+    defaultEffort: null
+  })
+]);
+var STANDARD_THINKING_EFFORTS = Object.freeze(["low", "medium", "high", "xhigh"]);
+var MAX_FAMILY_EFFORTS = Object.freeze(["low", "medium", "high", "xhigh", "max"]);
+function preferPrefixedCatalog(models) {
+  const coveredBare = /* @__PURE__ */ new Set();
+  for (const model of models) {
+    const id = String(model.id ?? "").trim();
+    const slash = id.lastIndexOf("/");
+    if (slash > 0 && slash < id.length - 1) coveredBare.add(id.slice(slash + 1).toLowerCase());
+  }
+  return models.filter((model) => {
+    const id = String(model.id ?? "").trim();
+    if (!id || id.includes("/")) return Boolean(id);
+    return !coveredBare.has(id.toLowerCase());
+  });
+}
+
 // src/dashboard/public/model-groups.ts
 function modelPickerLabel(model, models) {
   const remark = model.label && model.label !== model.id ? model.label : "";
@@ -5622,27 +5785,20 @@ function modelPickerLabel(model, models) {
   if (duplicates.length < 2) return label;
   return `${label} (配置 ${duplicates.findIndex((other) => other.switchProfileId === model.switchProfileId) + 1})`;
 }
-function modelConnectionGroups(profiles) {
-  const groups = /* @__PURE__ */ new Map();
-  for (const profile of profiles) {
-    const id = String(profile.connectionGroupId || profile.id);
-    let group = groups.get(id);
-    if (!group) {
-      group = { id, label: profile.gatewayUrl || profile.label || profile.id, profiles: [] };
-      groups.set(id, group);
-    }
-    group.profiles.push(profile);
-  }
-  const result = [...groups.values()];
-  const counts = /* @__PURE__ */ new Map();
-  for (const group of result) counts.set(group.label, (counts.get(group.label) || 0) + 1);
-  for (const group of result) {
-    if ((counts.get(group.label) || 0) > 1) {
-      const profile = group.profiles[0];
-      group.label += ` (${profile.gatewayUrl || profile.id}; ${profile.id})`;
-    }
-  }
-  return result;
+function providerRouteLabel(profile) {
+  const label = String(profile.label ?? "").trim();
+  if (label && !/^https?:\/\//i.test(label)) return label;
+  const id = String(profile.id ?? "").trim();
+  if (id && !/^gw-[a-f0-9]+$/i.test(id)) return id;
+  const model = profile.models?.[0];
+  return model?.label || model?.id || id || "未命名路线";
+}
+function providerRouteGroups(profiles) {
+  return profiles.map((profile) => ({
+    id: profile.id,
+    label: providerRouteLabel(profile),
+    profiles: [profile]
+  }));
 }
 
 // src/dashboard/public/app-ui4.ts
@@ -6264,7 +6420,7 @@ function updateSessionStatus(status) {
   };
   state.models = markCurrentModel(state.models, state.sessionStatus.model);
   renderComposerStatus3();
-  renderSettingsView5();
+  renderSettingsView3();
 }
 function updateTurnChangeStats(stats, options = {}) {
   if (options.reset) {
@@ -6342,7 +6498,7 @@ function renderComposerStatus3() {
 function modelStatusHtml5(modelInfo, fallbackModel) {
   const label = modelInfo?.label || fallbackModel || "未配置";
   const source = modelSourceLabel5(modelInfo);
-  const efforts = normalizeReasoningEfforts5(modelInfo?.reasoningEfforts);
+  const efforts = normalizeReasoningEfforts6(modelInfo?.reasoningEfforts);
   const sessionDefinesEffort = Object.prototype.hasOwnProperty.call(state.sessionStatus ?? emptySessionStatus, "reasoningEffort");
   const selectedEffort = configuredReasoningEffort5(
     sessionDefinesEffort ? state.sessionStatus?.reasoningEffort : modelInfo?.reasoningEffort,
@@ -6429,7 +6585,7 @@ function showSettingsWorkspace3() {
   els.settingsButton?.setAttribute("aria-pressed", "true");
   els.settingsButton?.setAttribute("aria-label", "设置已打开");
   hideModelPanel();
-  renderSettingsView5();
+  renderSettingsView3();
   syncResponsiveNavigation();
   requestAnimationFrame(() => els.settingsBack?.focus?.({ preventScroll: true }));
   if (opening) refreshSettingsConfiguration5();
@@ -6438,7 +6594,7 @@ async function refreshSettingsConfiguration5() {
   if (state.settingsRefreshing || state.settingsSaving || state.modelConfigSaving) return;
   const request = beginScopedRequest("settings-refresh");
   state.settingsRefreshing = true;
-  renderSettingsView5();
+  renderSettingsView3();
   try {
     const result = await getJson(statusUrl(), { signal: request.signal });
     if (!isCurrentScopedRequest(request) || !state.settingsOpen) return;
@@ -6452,18 +6608,18 @@ async function refreshSettingsConfiguration5() {
     state.applyAgentDefaultsOnSwitch = state.settings.agents.syncModelTiersOnSwitch;
     updateConfigRevisions(result);
     state.settingsFeedback = null;
-    renderSettingsView5();
+    renderSettingsView3();
     renderComposerStatus3();
   } catch (error) {
     if (!isAbortError(error) && isCurrentScopedRequest(request) && state.settingsOpen) {
       state.settingsFeedback = { tone: "error", message: error instanceof Error ? error.message : "读取设置失败" };
-      renderSettingsView5();
+      renderSettingsView3();
     }
   } finally {
     const current = isCurrentScopedRequest(request);
     if (current) state.settingsRefreshing = false;
     finishScopedRequest(request);
-    if (current && state.settingsOpen) renderSettingsView5();
+    if (current && state.settingsOpen) renderSettingsView3();
   }
 }
 function hideSettingsWorkspace(options = {}) {
@@ -6544,69 +6700,32 @@ function renderModelPanel5() {
   }
   const profiles = state.gatewayProfiles ?? [];
   const selection = currentModelSelection5();
-  const unresolved = selection.resolved === false;
   const activeProfileId = selection.profile?.id || "";
   const activeModelId = selection.model?.id || "";
-  const groups = modelConnectionGroups(profiles);
-  const activeGroup = groups.find((group) => group.profiles.some((profile) => profile.id === activeProfileId));
-  const models = activeGroup ? activeGroup.profiles.flatMap((profile) => (profile.models ?? []).map((model) => ({ ...model, switchProfileId: profile.id, switchReady: profile.ready !== false }))) : (profiles.length === 0 ? state.models ?? [] : []).map((model) => ({ ...model, switchProfileId: "", switchReady: true }));
+  const groups = providerRouteGroups(profiles).map((group) => ({
+    ...group,
+    models: preferPrefixedCatalog(group.profiles.flatMap((profile) => (profile.models ?? []).map((model) => ({
+      ...model,
+      switchProfileId: profile.id,
+      switchReady: profile.ready !== false
+    }))))
+  })).filter((group) => group.models.length > 0);
   els.modelPanel.innerHTML = `
     <div class="model-panel-head">
       <div class="model-panel-title">模型</div>
-      <div class="model-panel-subtitle">当前会话</div>
+      <div class="model-panel-subtitle">只切换当前会话，不改子智能体</div>
     </div>
-    <div class="model-switch-fields">
-      <label>
-        <span>模型来源</span>
-        <select data-action="switch-source" ${state.running || state.modelSwitching || profiles.length === 0 ? "disabled" : ""}>
-          ${profiles.length > 0 ? `${unresolved ? `<option value="" selected disabled>请选择模型来源</option>` : ""}${groups.map((group) => `<option value="${escapeAttribute(group.profiles.find((profile) => profile.ready !== false)?.id || group.profiles[0].id)}"${!unresolved && group.id === activeGroup?.id ? " selected" : ""}${group.profiles.every((profile) => profile.ready === false) ? " disabled" : ""}>${escapeHtml(group.label)}</option>`).join("")}` : `<option value="">${unresolved ? "没有可用模型来源" : escapeHtml(modelSourceLabel5(selection.model))}</option>`}
-        </select>
-      </label>
-      <label>
-        <span>模型名称</span>
-        <select data-action="switch-model" ${state.running || state.modelSwitching || unresolved || models.length === 0 ? "disabled" : ""}>
-          ${unresolved ? `<option value="" selected>请先选择模型来源</option>` : models.map((model) => `<option value="${escapeAttribute(model.id)}" data-profile-id="${escapeAttribute(model.switchProfileId)}"${model.id === activeModelId && model.switchProfileId === activeProfileId ? " selected" : ""}${model.switchReady ? "" : " disabled"}>${escapeHtml(modelPickerLabel(model, models))}</option>`).join("") || `<option value="">未配置模型</option>`}
-        </select>
-      </label>
+    <div class="model-source-list">
+      ${groups.map((group) => `
+        <section>
+          <h3>${escapeHtml(group.label)}</h3>
+          <div>
+            ${group.models.map((model) => `<button type="button" data-action="pick-model" data-model-id="${escapeAttribute(model.id)}" data-profile-id="${escapeAttribute(model.switchProfileId)}"${model.id === activeModelId && model.switchProfileId === activeProfileId ? ` class="active" aria-current="true"` : ""}${model.switchReady && !state.running && !state.modelSwitching ? "" : " disabled"}>${escapeHtml(modelPickerLabel(model, group.models))}</button>`).join("")}
+          </div>
+        </section>
+      `).join("") || `<p class="model-panel-empty">尚未读取模型</p>`}
     </div>
   `;
-}
-
-// src/model-gateway/vision-capabilities.ts
-var VISION_HINT = /vision|visual|image|omni|multimodal|(?:^|[^a-z0-9])vl(?:$|[^a-z0-9])|-vl|qwen-vl/i;
-var TEXT_ONLY = /(?:^|[^a-z0-9])(?:luna|embed(?:ding)?|whisper|tts|asr)(?:$|[^a-z0-9])/i;
-function inferModelSupportsImages(modelId, catalogModalities) {
-  const evidence = classifyModelVisionEvidence(modelId, catalogModalities);
-  return evidence === "catalog" || evidence === "hint";
-}
-function classifyModelVisionEvidence(modelId, catalogModalities) {
-  if (catalogListsImageModality(catalogModalities)) {
-    return "catalog";
-  }
-  const id = String(modelId ?? "").trim().toLowerCase();
-  if (!id) {
-    return "uncertain";
-  }
-  if (TEXT_ONLY.test(id)) {
-    return "text-only";
-  }
-  if (VISION_HINT.test(id)) {
-    return "hint";
-  }
-  return "uncertain";
-}
-function needsVisionCapabilityProbe(modelId, catalogModalities) {
-  const evidence = classifyModelVisionEvidence(modelId, catalogModalities);
-  return evidence === "uncertain" || evidence === "hint";
-}
-function catalogListsImageModality(modalities) {
-  if (!Array.isArray(modalities)) {
-    return false;
-  }
-  return modalities.some((entry) => {
-    const text = String(entry ?? "").trim().toLowerCase();
-    return ["image", "images", "vision", "visual", "multimodal", "图片", "视觉"].includes(text);
-  });
 }
 
 // src/dashboard/public/app-ui5.ts
@@ -6621,8 +6740,11 @@ function modelCapabilityLabels6(model) {
   if (model?.thinking) labels.push("thinking");
   return labels.length > 0 ? labels : ["文本"];
 }
-function handleModelPanelClick3(event) {
+async function handleModelPanelClick3(event) {
   event.stopPropagation();
+  const button = eventElement(event)?.closest("button[data-action='pick-model']");
+  if (!(button instanceof HTMLButtonElement) || button.disabled) return;
+  await switchModel6(button.dataset.modelId || "", { profileId: button.dataset.profileId || "" });
 }
 async function handleModelPanelChange3(event) {
   event.stopPropagation();
@@ -6636,11 +6758,11 @@ async function handleModelPanelChange3(event) {
     await switchModel6(select.value, { profileId: select.selectedOptions[0]?.dataset.profileId || currentModelSelection5().profile?.id || "" });
   }
 }
-function renderSettingsView5() {
+function renderSettingsView3() {
   if (!els.settingsContent || !state.settingsOpen) return;
   els.settingsContent.toggleAttribute("aria-busy", state.settingsRefreshing);
   syncSettingsRail6();
-  const sectionHtml = state.settingsSection === "transcript" ? transcriptSettingsHtml6() : state.settingsSection === "network" ? networkSettingsHtml6() : state.settingsSection === "agents" ? agentSettingsHtml6() : state.settingsSection === "reliability" ? reliabilitySettingsHtml6() : modelSettingsHtml6();
+  const sectionHtml = state.settingsSection === "transcript" ? transcriptSettingsHtml6() : state.settingsSection === "network" ? networkSettingsHtml6() : state.settingsSection === "agents" ? agentSettingsHtml6() : state.settingsSection === "schedules" ? scheduleSettingsHtml() : state.settingsSection === "reliability" ? reliabilitySettingsHtml6() : modelSettingsHtml6();
   els.settingsContent.innerHTML = `${settingsFeedbackHtml6()}${sectionHtml}`;
   els.settingsContent.querySelectorAll("form[data-settings-form]").forEach((form) => {
     initializeSettingsFormTracking6(
@@ -6648,6 +6770,11 @@ function renderSettingsView5() {
       form
     );
   });
+  const scheduleForm = els.settingsContent.querySelector("form[data-settings-form='schedule-create']");
+  if (scheduleForm instanceof HTMLFormElement) {
+    scheduleForm.querySelector("select[name='cadence']")?.addEventListener("change", () => syncScheduleCadenceFields(scheduleForm));
+    syncScheduleCadenceFields(scheduleForm);
+  }
 }
 function syncSettingsRail6() {
   els.settingsRail?.querySelectorAll("button[data-settings-section]").forEach((button) => {
@@ -6660,7 +6787,7 @@ function syncSettingsRail6() {
 function modelSettingsHtml6() {
   const profiles = state.gatewayProfiles ?? [];
   const inspectedProfile = settingsInspectedGatewayProfile6();
-  const models = inspectedProfile?.models ?? [];
+  const models = preferPrefixedCatalog(inspectedProfile?.models ?? []);
   const scopedDefault = state.modelDefaultSelections[state.modelDefaultScope];
   return `
     <section class="settings-section" aria-labelledby="settings-sources-title">
@@ -6687,8 +6814,9 @@ function modelSettingsHtml6() {
         <strong>${escapeHtml(inspectedProfile?.label || "未选择来源")}</strong>
         <span>${escapeHtml(inspectedProfile?.gatewayUrl || "未配置网关")}</span>
       </div>
+      ${settingsFeedbackHtml6()}
       <div class="settings-profile-list">
-        ${modelConnectionGroups(profiles).map((group) => `<div class="settings-source-group"><h3>${escapeHtml(group.label)}</h3>${group.profiles[0].credentialSelectionRequired ? `<p role="status">请选择生效凭据</p>` : ""}${group.profiles.map((profile) => settingsGatewayProfileHtml6(profile)).join("")}</div>`).join("") || `<div class="settings-empty">尚未保存模型来源</div>`}
+        ${providerRouteGroups(profiles).map((group) => `<div class="settings-source-group"><h3>${escapeHtml(group.label)}</h3>${group.profiles.map((profile) => settingsGatewayProfileHtml6(profile)).join("")}</div>`).join("") || `<div class="settings-empty">尚未保存模型来源</div>`}
       </div>
     </section>
     <section class="settings-section" aria-labelledby="settings-models-title">
@@ -6699,11 +6827,11 @@ function modelSettingsHtml6() {
         </div>
         <div class="settings-section-tools">
           <span class="settings-section-count">${models.length} 个</span>
-          <button class="settings-primary-action" id="settings-add-model" type="button" data-action="add-model" data-profile-id="${escapeAttribute(inspectedProfile?.id || "")}"${!inspectedProfile || inspectedProfile.editable === false || state.settingsRefreshing || state.running ? " disabled" : ""}>添加模型</button>
+          <button class="settings-primary-action" type="button" data-action="refresh-source" data-profile-id="${escapeAttribute(inspectedProfile?.id || "")}"${!inspectedProfile || state.settingsRefreshing || state.running ? " disabled" : ""}>刷新目录</button>
         </div>
       </div>
       <div class="settings-model-list">
-        ${models.map((model) => settingsModelHtml6(model, inspectedProfile, models.length)).join("") || `<div class="settings-empty">该来源没有已注册模型</div>`}
+        ${models.map((model) => settingsModelHtml6(model, inspectedProfile, models.length)).join("") || `<div class="settings-empty">该来源还没有模型。添加来源时会一次读入目录。</div>`}
       </div>
     </section>
   `;
@@ -6807,7 +6935,6 @@ function agentSettingsHtml6() {
           ${settingsToggleHtml6("backgroundWakeupEnabled", "允许后台子智能体", agents.backgroundWakeupEnabled)}
           ${settingsToggleHtml6("backgroundByDefault", "模型子任务默认后台运行", agents.backgroundByDefault)}
           ${settingsToggleHtml6("reviewGateEnabled", "交付前审查提醒", agents.reviewGateEnabled)}
-          ${settingsToggleHtml6("syncModelTiersOnSwitch", "切换主模型时同步子智能体", agents.syncModelTiersOnSwitch, agentModelTiersSummary6(state.agentModelTiers))}
         </div>
       </section>
       <section class="settings-section" aria-labelledby="settings-goal-title">
@@ -6821,6 +6948,65 @@ function agentSettingsHtml6() {
       </section>
       ${settingsFormActions6()}
     </form>
+  `;
+}
+function scheduleSettingsHtml() {
+  const schedules = state.schedules ?? [];
+  return `
+    <section class="settings-section" aria-labelledby="settings-schedules-title">
+      ${settingsSectionHeading6("定时任务", "查看与管理", "settings-schedules-title")}
+      <p class="settings-source-note">到点由本机 Dashboard 把保存的提示词再发一轮，使用完全访问，不再弹出放权。手动添加即视为确认。</p>
+      <form class="settings-form schedule-settings-form" data-settings-form="schedule-create">
+        <label class="settings-field-row"><span><strong>标题</strong></span><input name="title" maxlength="80" required placeholder="例如：早间检查" /></label>
+        <label class="settings-field-row"><span><strong>提示词</strong></span><textarea name="prompt" required maxlength="4000" rows="4" placeholder="到点要让模型做什么"></textarea></label>
+        <label class="settings-field-row"><span><strong>周期</strong></span>
+          <select name="cadence" data-action="schedule-cadence">
+            <option value="once">只跑一次</option>
+            <option value="daily">每天</option>
+            <option value="weekly">每周</option>
+            <option value="interval">固定间隔</option>
+          </select>
+        </label>
+        <label class="settings-field-row" data-schedule-field="once"><span><strong>几分钟后</strong></span><input name="delayMinutes" inputmode="numeric" value="5" /></label>
+        <label class="settings-field-row" data-schedule-field="daily"><span><strong>每天时间</strong></span><input name="dailyTime" value="09:00" /></label>
+        <label class="settings-field-row" data-schedule-field="weekly"><span><strong>星期</strong></span>
+          <select name="weekday">
+            <option value="1" selected>周一</option>
+            <option value="2">周二</option>
+            <option value="3">周三</option>
+            <option value="4">周四</option>
+            <option value="5">周五</option>
+            <option value="6">周六</option>
+            <option value="0">周日</option>
+          </select>
+        </label>
+        <label class="settings-field-row" data-schedule-field="weekly"><span><strong>时间</strong></span><input name="weeklyTime" value="09:00" /></label>
+        <label class="settings-field-row" data-schedule-field="interval"><span><strong>间隔分钟</strong></span><input name="everyMinutes" inputmode="numeric" value="60" /></label>
+        <footer class="settings-form-actions">
+          <button type="submit"${settingsDisabled6(false)}>添加定时任务</button>
+        </footer>
+      </form>
+      <div class="schedule-settings-list">
+        ${schedules.map((schedule) => scheduleSettingsCard(schedule)).join("") || `<div class="settings-empty">还没有定时任务</div>`}
+      </div>
+    </section>
+  `;
+}
+function scheduleSettingsCard(schedule) {
+  const id = escapeAttribute(String(schedule.id ?? ""));
+  const enabled = schedule.enabled !== false;
+  return `
+    <article class="source-card">
+      <div>
+        <strong>${escapeHtml(String(schedule.title ?? "定时任务"))}</strong>
+        <span>${escapeHtml(String(schedule.cadenceLabel ?? ""))} · ${escapeHtml(String(schedule.permissionLabel ?? "完全访问"))}</span>
+        <small>${enabled ? `下次 ${escapeHtml(formatTime(schedule.nextRunAt))}` : "已暂停"} · ${escapeHtml(String(schedule.lastStatus ?? "尚未运行"))}</small>
+      </div>
+      <div class="source-card-actions">
+        <button type="button" data-schedule-action="${enabled ? "pause" : "resume"}" data-schedule-id="${id}">${enabled ? "暂停" : "恢复"}</button>
+        <button type="button" data-schedule-action="delete" data-schedule-id="${id}">删除</button>
+      </div>
+    </article>
   `;
 }
 function reliabilitySettingsHtml6() {
@@ -6883,12 +7069,11 @@ function settingsGatewayProfileHtml6(profile) {
     <div class="settings-profile-row${inspected ? " active" : ""}${confirmingDelete ? " confirming-delete" : ""}">
       <span class="settings-source-indicator" aria-hidden="true"></span>
       <div class="settings-row-main">
-        <strong>${escapeHtml(profile.label || profile.gatewayUrl || profile.id)}</strong>
+        <strong>${escapeHtml(providerRouteLabel(profile))}</strong>
         <span>${escapeHtml(profile.gatewayUrl || profile.id)}</span>
         <small>${escapeHtml(profile.ready === false ? `${protocolDisplayName6(profile.gatewayProtocol)} · 配置不完整` : `${protocolDisplayName6(profile.gatewayProtocol)} · ${profile.apiKeyConfigured ? "Key 已配置" : "无 Key"} · ${count} 模型`)}</small>
       </div>
       <div class="settings-row-actions">
-        <label title="使用此配置保存的凭据；保存范围由上方项目/全局选项决定"><input type="radio" name="credential-${escapeAttribute(String(profile.connectionGroupId || profile.id))}" data-action="select-source-credential" data-profile-id="${escapeAttribute(profile.id)}" ${profile.activeCredentialProfileId === profile.id ? "checked" : ""} ${state.running || state.settingsRefreshing ? "disabled" : ""}>生效凭据</label>
         <button type="button" data-action="inspect-profile" data-profile-id="${escapeAttribute(profile.id)}" aria-pressed="${inspected}" ${state.settingsRefreshing ? "disabled" : ""}>${inspected ? "正在查看" : "查看模型"}</button>
         <button type="button" data-action="use-profile" data-profile-id="${escapeAttribute(profile.id)}" ${profile.ready === false || state.settingsRefreshing || state.running || state.modelSwitching ? "disabled" : ""}>设为默认</button>
         <button type="button" data-action="edit-gateway-profile" data-profile-id="${escapeAttribute(profile.id)}"${profile.editable === false ? ` title="${escapeAttribute(gatewayProfileReadonlyLabel6(profile))}"` : ""} ${profile.editable === false || state.settingsRefreshing || state.running || Boolean(state.deletingGatewayProfileId) ? "disabled" : ""}>${profile.editable === false ? "只读" : "编辑"}</button>
@@ -6915,24 +7100,16 @@ function scopedDefaultModelLabel6(selection) {
   return modelLabel === selection.model ? `${sourceLabel9} · ${selection.model}` : `${sourceLabel9} · ${modelLabel} (${selection.model})`;
 }
 function settingsModelHtml6(model, profile, modelCount) {
-  const source = modelSourceOf(model);
-  const modelEditable = source?.editable !== false && profile?.editable !== false;
   const tags = modelCapabilityLabels6(model);
-  const efforts = normalizeReasoningEfforts5(model.reasoningEfforts);
+  const efforts = normalizeReasoningEfforts6(model.reasoningEfforts);
   const context = Number.isFinite(model.contextTokens) ? `${formatTokenCount6(model.contextTokens)} 上下文` : "";
-  const modelKey = providerModelKey6(profile?.id || source?.profileId || source?.id, model.id);
   const scopedDefault = state.modelDefaultSelections[state.modelDefaultScope];
-  const isScopedDefault = scopedDefault?.provider === (profile?.id || source?.profileId || source?.id) && scopedDefault?.model === model.id;
-  const confirmingDelete = state.deleteConfirmModelKey === modelKey;
-  const deleting = state.deletingModelKey === modelKey;
-  const isLastModel = modelCount <= 1;
-  const confirmCopy = isLastModel ? "再次点击确认删除；这是当前来源最后一个模型，会清空当前网关配置。" : "再次点击确认删除；删除当前模型后会切换到同一来源的下一个模型。";
+  const isScopedDefault = scopedDefault?.provider === (profile?.id || "") && scopedDefault?.model === model.id;
   return `
-    <div class="settings-model-row${model.current ? " active" : ""}${isScopedDefault ? " scope-default" : ""}${confirmingDelete ? " confirming-delete" : ""}">
+    <div class="settings-model-row${isScopedDefault ? " scope-default" : ""}">
       <div class="settings-row-main">
         <div class="settings-row-title">
           <strong>${escapeHtml(model.label || model.id)}</strong>
-          ${model.current ? `<span>当前</span>` : ""}
           ${isScopedDefault ? `<span>此范围默认</span>` : ""}
         </div>
         <span>${escapeHtml(model.id)}</span>
@@ -6944,10 +7121,7 @@ function settingsModelHtml6(model, profile, modelCount) {
       </div>
       <div class="settings-row-actions">
         <button type="button" data-action="use-model" data-model-id="${escapeAttribute(model.id)}" data-profile-id="${escapeAttribute(profile?.id || "")}" ${isScopedDefault || state.settingsRefreshing || state.running || state.modelSwitching ? "disabled" : ""}>${isScopedDefault ? "已设为默认" : "设为默认"}</button>
-        <button type="button" data-action="edit-model" data-model-id="${escapeAttribute(model.id)}" data-profile-id="${escapeAttribute(profile?.id || "")}" ${!modelEditable || state.settingsRefreshing || state.running || Boolean(state.deletingModelKey) ? "disabled" : ""}>${modelEditable ? "编辑" : "只读"}</button>
-        <button class="danger" type="button" data-action="delete-model" data-model-id="${escapeAttribute(model.id)}" data-profile-id="${escapeAttribute(profile?.id || "")}" data-save-target="${escapeAttribute(source?.saveTarget || profile?.saveTarget || "")}" ${!modelEditable || state.settingsRefreshing || state.running || Boolean(state.deletingModelKey) ? "disabled" : ""}>${deleting ? "删除中" : confirmingDelete ? "确认删除" : "删除"}</button>
       </div>
-      ${confirmingDelete ? `<div class="settings-delete-confirm">${escapeHtml(confirmCopy)}</div>` : ""}
     </div>
   `;
 }
@@ -6955,8 +7129,9 @@ function handleSettingsRailClick3(event) {
   const button = eventTargetOf(event).closest("button[data-settings-section]");
   if (!button || state.settingsSaving) return;
   state.settingsSection = button.dataset.settingsSection || "models";
+  if (state.settingsSection === "schedules") void loadSchedules();
   state.settingsFeedback = null;
-  renderSettingsView5();
+  renderSettingsView3();
 }
 function initializeSettingsFormTracking6(form) {
   for (const control of form.querySelectorAll("[name]")) {
@@ -7011,11 +7186,121 @@ function renderSettingsFeedbackInPlace6() {
   feedback.setAttribute("role", state.settingsFeedback.tone === "error" ? "alert" : "status");
   feedback.textContent = state.settingsFeedback.message;
 }
+function routeFromSelect(value) {
+  const [provider, model] = value.split("::");
+  return provider && model ? { provider, model } : null;
+}
+function syncScheduleCadenceFields(form) {
+  if (!(form instanceof HTMLFormElement)) return;
+  const cadence = String(new FormData(form).get("cadence") ?? "once");
+  form.querySelectorAll("[data-schedule-field]").forEach((field) => {
+    const active = field.dataset.scheduleField === cadence;
+    field.classList.toggle("is-inactive", !active);
+    field.querySelectorAll("input, select").forEach((input) => {
+      if (input instanceof HTMLInputElement || input instanceof HTMLSelectElement) input.disabled = !active;
+    });
+  });
+}
+async function saveScheduleForm(form) {
+  const data = new FormData(form);
+  const cadence = String(data.get("cadence") ?? "once");
+  const body = {
+    title: String(data.get("title") ?? ""),
+    prompt: String(data.get("prompt") ?? ""),
+    cadence,
+    sessionId: state.currentSessionId
+  };
+  if (cadence === "once") body.delayMinutes = Number(data.get("delayMinutes"));
+  if (cadence === "daily") body.time = String(data.get("dailyTime") ?? "").trim();
+  if (cadence === "weekly") {
+    body.time = String(data.get("weeklyTime") ?? "").trim();
+    body.weekday = String(data.get("weekday") ?? "");
+  }
+  if (cadence === "interval") body.everyMinutes = Number(data.get("everyMinutes"));
+  state.settingsSaving = true;
+  try {
+    const result = await postJson("/api/schedules", body);
+    if (!result.ok) throw new Error(result.error || "添加定时任务失败");
+    showNotice2("定时任务已添加", "到点会用完全访问自动发送");
+    await loadSchedules();
+  } catch (error) {
+    state.settingsFeedback = { tone: "error", message: errorMessageOf(error) || "添加定时任务失败" };
+    renderSettingsView3();
+  } finally {
+    state.settingsSaving = false;
+  }
+}
+async function saveSourceAgentForm(form) {
+  const data = new FormData(form);
+  const scope = state.modelDefaultScope === "project" ? "project" : "global";
+  state.settingsSaving = true;
+  try {
+    const result = await postJson("/api/sources/agents", {
+      saveTarget: scope,
+      ...configMutationMetadata6(scope),
+      providerId: form.dataset.profileId,
+      cheap: String(data.get("cheap") ?? ""),
+      defaultModel: String(data.get("defaultModel") ?? ""),
+      strong: String(data.get("strong") ?? ""),
+      visionModel: String(data.get("visionModel") ?? "")
+    });
+    if (!result.ok) throw new Error(result.error || "保存子智能体模型失败");
+    updateConfigRevisions({ ...result, scope });
+    state.gatewayProfiles = normalizeGatewayProfiles(result.gatewayProfiles);
+    showNotice2("子智能体模型已保存", "只作用于这个渠道");
+  } catch (error) {
+    state.settingsFeedback = { tone: "error", message: errorMessageOf(error) || "保存子智能体模型失败" };
+  } finally {
+    state.settingsSaving = false;
+    renderSettingsView3();
+  }
+}
+async function saveAgentRoutingForm(form) {
+  const data = new FormData(form);
+  const scope = state.modelDefaultScope === "project" ? "project" : "global";
+  state.settingsSaving = true;
+  try {
+    const result = await postJson("/api/agent-routing", {
+      saveTarget: scope,
+      ...configMutationMetadata6(scope),
+      tiers: {
+        cheap: routeFromSelect(String(data.get("cheap") ?? "")),
+        default: routeFromSelect(String(data.get("default") ?? "")),
+        strong: routeFromSelect(String(data.get("strong") ?? ""))
+      },
+      visionModel: routeFromSelect(String(data.get("vision") ?? ""))
+    });
+    if (!result.ok) throw new Error(result.error || "保存子智能体模型失败");
+    updateConfigRevisions({ ...result, scope });
+    state.agentModelTiers = normalizeAgentModelTiers(result.agentModelTiers);
+    state.agentRouting = normalizeAgentRouting(result.agentRouting ?? {
+      cheap: routeFromSelect(String(data.get("cheap") ?? "")),
+      default: routeFromSelect(String(data.get("default") ?? "")),
+      strong: routeFromSelect(String(data.get("strong") ?? "")),
+      vision: routeFromSelect(String(data.get("vision") ?? ""))
+    });
+    state.visionAgent = normalizeVisionAgent(result.visionAgent);
+    showNotice2("子智能体模型已保存", "聊天切换不会改写这些档位");
+  } catch (error) {
+    state.settingsFeedback = { tone: "error", message: errorMessageOf(error) || "保存子智能体模型失败" };
+  } finally {
+    state.settingsSaving = false;
+    renderSettingsView3();
+  }
+}
 async function saveSettingsConfig3(event) {
   const form = eventTargetOf(event).closest("form[data-settings-form]");
   if (!(form instanceof HTMLFormElement)) return;
   event.preventDefault();
   if (state.settingsSaving || state.running) return;
+  if (form.dataset.settingsForm === "schedule-create") {
+    await saveScheduleForm(form);
+    return;
+  }
+  if (form.dataset.settingsForm === "source-agents") {
+    await saveSourceAgentForm(form);
+    return;
+  }
   const section = form.dataset.settingsForm;
   const field = (name) => (
     /** @type {HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | null} */
@@ -7064,7 +7349,7 @@ async function saveSettingsConfig3(event) {
     state.settingsSaving = false;
     if (els.settingsBack) els.settingsBack.disabled = false;
     if (result.sessionStatus) updateSessionStatus(result.sessionStatus);
-    else renderSettingsView5();
+    else renderSettingsView3();
     announceStatus("设置已保存");
   } catch (error) {
     state.settingsFeedback = { tone: "error", message: error instanceof Error ? error.message : "设置保存失败" };
@@ -7075,12 +7360,21 @@ async function saveSettingsConfig3(event) {
   }
 }
 async function handleSettingsClick3(event) {
+  const scheduleButton = eventTargetOf(event).closest("button[data-schedule-action]");
+  if (scheduleButton instanceof HTMLButtonElement && state.settingsSection === "schedules") {
+    const id = scheduleButton.dataset.scheduleId ?? "";
+    const scheduleAction = scheduleButton.dataset.scheduleAction ?? "";
+    if (scheduleAction === "delete") await deleteJson(`/api/schedules/${encodeURIComponent(id)}`);
+    else await postJson(`/api/schedules/${encodeURIComponent(id)}/${scheduleAction}`, {});
+    await loadSchedules();
+    return;
+  }
   const action = eventTargetOf(event).closest("[data-action]");
   if (!action) return;
   if (action.dataset.action === "select-default-scope") {
     state.modelDefaultScope = configScope6(action.dataset.scope, "project");
     state.settingsFeedback = null;
-    renderSettingsView5();
+    renderSettingsView3();
   } else if (action.dataset.action === "select-source-credential") {
     state.settingsRefreshing = true;
     try {
@@ -7092,13 +7386,20 @@ async function handleSettingsClick3(event) {
       state.settingsFeedback = { tone: "error", message: errorMessageOf(error) };
     } finally {
       state.settingsRefreshing = false;
-      renderSettingsView5();
+      renderSettingsView3();
     }
   } else if (action.dataset.action === "inspect-profile") {
     state.settingsProviderId = action.dataset.profileId || "";
     state.deleteConfirmModelKey = "";
     state.settingsFeedback = null;
-    renderSettingsView5();
+    renderSettingsView3();
+  } else if (action.dataset.action === "import-custom-source") {
+    const url = document.querySelector("#custom-source-url")?.value.trim() ?? "";
+    const protocol = document.querySelector("#custom-source-protocol")?.value ?? "openai-chat";
+    const apiKey = document.querySelector("#custom-source-key")?.value.trim() ?? "";
+    await importModelSource({ kind: "custom", gatewayUrl: url, gatewayProtocol: protocol, gatewayApiKey: apiKey, activateFirst: false });
+  } else if (action.dataset.action === "refresh-source") {
+    await importModelSource({ kind: "refresh", providerId: action.dataset.profileId, profileId: action.dataset.profileId, activateFirst: false });
   } else if (action.dataset.action === "add-source") {
     showModelConfigPanel5("", "", "add-source");
   } else if (action.dataset.action === "add-model") {
@@ -7163,6 +7464,8 @@ function renderModelConfigPanel5() {
   const editingProfile = gatewayProfileById5(state.editingGatewayProfileId);
   const editing = state.editingModelId ? editingProfile?.models?.find((model) => model.id === state.editingModelId) ?? currentModelInfo5(state.editingModelId) : null;
   const addingSource = state.modelConfigIntent === "add-source";
+  const editingChannel = state.modelConfigIntent === "edit-profile";
+  const channelForm = addingSource || editingChannel;
   const addingModel = state.modelConfigIntent === "add-model";
   const current = editing ?? { id: "" };
   const gateway = editingProfile ? {
@@ -7218,12 +7521,12 @@ function renderModelConfigPanel5() {
     strong: current.agentModelTiers?.strong ?? profileAgentTiers.strong ?? ""
   };
   const visionAgentModel = editingProfile ? editingProfile.visionAgent?.model ?? "" : addingSource ? "" : state.visionAgent?.model ?? firstVisionModelId6() ?? "";
-  const currentEfforts = normalizeReasoningEfforts5(current.reasoningEfforts);
+  const currentEfforts = normalizeReasoningEfforts6(current.reasoningEfforts);
   const selectedEffortIds = new Set(currentEfforts.map((effort) => effort.id));
   const effortChoices = reasoningEffortCatalog6(currentEfforts);
   const defaultReasoningEffort = configuredReasoningEffort5(current.defaultReasoningEffort, currentEfforts);
   const panelKicker = addingSource ? "模型来源" : addingModel ? editingProfile?.label || "当前来源" : "模型配置";
-  const panelTitle = addingSource ? "添加模型来源" : addingModel ? "添加模型" : state.modelConfigIntent === "edit-profile" ? "编辑模型来源" : "编辑模型";
+  const panelTitle = addingSource ? "添加模型来源" : editingChannel ? "编辑模型来源" : addingModel ? "添加模型" : "编辑模型";
   els.modelConfigPanel.innerHTML = `
     <button class="model-config-backdrop" type="button" data-action="close-model-config" aria-label="关闭模型配置"></button>
     <form class="model-config-card" id="model-config-form">
@@ -7253,6 +7556,11 @@ function renderModelConfigPanel5() {
         ${lockedSaveTarget ? `<p class="model-config-scope-note">已有档案需保存回所属的${lockedSaveTarget === "global" ? "全局" : "项目"}配置。</p>` : ""}
       </fieldset>
       <div class="model-config-grid">
+        ${channelForm ? `<label>
+          <span>路线名</span>
+          <input name="routeName" required maxlength="64" spellcheck="false" placeholder="例如 work、personal" />
+          <small class="gateway-url-hint">同一地址的不同密钥请用不同路线名，例如 work、personal。聊天里按这个名字切换。</small>
+        </label>` : ""}
         <label>
           <span>网关 URL</span>
           <input name="gatewayUrl" type="url" required spellcheck="false" value="${escapeAttribute(gateway.gatewayUrl || "")}" placeholder="${escapeAttribute(gatewayUrlPlaceholder6(gatewayProtocol))}" />
@@ -7275,14 +7583,14 @@ function renderModelConfigPanel5() {
           <input name="gatewayHealthUrl" type="url" spellcheck="false" value="${escapeAttribute(gateway.gatewayHealthUrl || "")}" placeholder="可选" />
         </label>
         <div class="gateway-probe-row">
-          <button type="button" data-action="probe-gateway" ${state.gatewayProbeRunning ? "disabled" : ""}>${state.gatewayProbeRunning ? "连接中" : "测试连接 / 发现模型"}</button>
+          <button type="button" data-action="probe-gateway" ${state.gatewayProbeRunning ? "disabled" : ""}>${state.gatewayProbeRunning ? "连接中" : channelForm ? "读取全部模型" : "测试连接 / 发现模型"}</button>
           <div class="gateway-probe-result" id="gateway-probe-result" aria-live="polite"></div>
         </div>
-        <label>
+        ${channelForm ? `<p class="model-config-scope-note">保存时会写入这次读到的全部模型。子智能体只从这些模型里选，不需要再指定渠道。</p>` : `<label>
           <span>模型 ID</span>
           <input name="modelId" required spellcheck="false" value="${escapeAttribute(current.id || "")}" placeholder="example-coding-model" />
-        </label>
-        <label>
+        </label>`}
+        ${channelForm ? "" : `<label>
           <span>模型备注</span>
           <input name="label" maxlength="160" spellcheck="false" value="${escapeAttribute(current.label === current.id ? "" : current.label || "")}" placeholder="例如：科研分析、代码开发" />
         </label>
@@ -7290,7 +7598,7 @@ function renderModelConfigPanel5() {
         <label>
           <span>上下文窗口</span>
           <input name="contextTokens" inputmode="numeric" pattern="[0-9]*" value="${escapeAttribute(current.contextTokens || "")}" placeholder="例如 400000" />
-        </label>
+        </label>`}
       </div>
       <fieldset class="agent-model-config">
         <legend>子智能体模型</legend>
@@ -7302,7 +7610,7 @@ function renderModelConfigPanel5() {
           ${agentModelPickerHtml6("visionAgentModel", "vision", visionAgentModel)}
         </div>
       </fieldset>
-      <fieldset class="model-reasoning-config" data-reasoning-mode="${state.modelConfigReasoningLocked ? "manual" : "auto"}" data-reasoning-source="${escapeAttribute(state.modelConfigReasoningSource)}">
+      ${channelForm ? "" : `<fieldset class="model-reasoning-config" data-reasoning-mode="${state.modelConfigReasoningLocked ? "manual" : "auto"}" data-reasoning-source="${escapeAttribute(state.modelConfigReasoningSource)}">
         <legend>思考强度</legend>
         <div class="model-reasoning-discovery">
           <span class="model-reasoning-status" id="reasoning-capability-status" role="status" aria-live="polite"></span>
@@ -7326,14 +7634,14 @@ function renderModelConfigPanel5() {
             ${effortChoices.filter((effort) => selectedEffortIds.has(effort.id)).map((effort) => `<option value="${escapeAttribute(effort.id)}"${defaultReasoningEffort === effort.id ? " selected" : ""}>${escapeHtml(effort.label)}</option>`).join("")}
           </select>
         </label>
-      </fieldset>
+      </fieldset>`}
       <div class="model-config-toggles">
-        <label><input name="text" type="checkbox" checked disabled /> 文本</label>
+        ${channelForm ? "" : `<label><input name="text" type="checkbox" checked disabled /> 文本</label>
         <label class="model-vision-toggle"><input name="vision" type="checkbox"${Array.isArray(current.modalities) && current.modalities.includes("image") || inferModelSupportsImages(current.id) ? " checked" : ""} /> 视觉<span class="model-capability-status" aria-live="polite"></span></label>
-        <label><input name="thinking" type="checkbox"${current.thinking ? " checked" : ""} /> thinking</label>
+        <label><input name="thinking" type="checkbox"${current.thinking ? " checked" : ""} /> thinking</label>`}
         <label><input name="clearGatewayApiKey" type="checkbox"${gateway.apiKeyConfigured ? "" : " disabled"} /> 清除已保存 Key</label>
-        <label><input name="switchToModel" type="checkbox"${editing && !current.default ? "" : " checked"} /> 保存为该范围默认模型</label>
-        <label><input name="applyAgentDefaults" type="checkbox" /> 保存后同步子智能体</label>
+        ${channelForm ? "" : `<label><input name="switchToModel" type="checkbox"${editing && !current.default ? "" : " checked"} /> 保存为该范围默认模型</label>
+        <label><input name="applyAgentDefaults" type="checkbox" /> 保存后同步子智能体</label>`}
       </div>
       <div class="model-config-note">
         <div>${escapeHtml(sourceNote)}</div>
@@ -7343,7 +7651,7 @@ function renderModelConfigPanel5() {
       <div class="model-config-feedback hidden" role="alert" aria-live="assertive"></div>
       <div class="model-config-actions">
         <button type="button" data-action="close-model-config">取消</button>
-        <button type="submit" ${state.modelConfigSaving ? "disabled" : ""}>${state.modelConfigSaving ? "保存中" : "保存"}</button>
+        <button type="submit" ${state.modelConfigSaving ? "disabled" : ""}>${state.modelConfigSaving ? "保存中" : channelForm ? "保存来源" : "保存"}</button>
       </div>
     </form>
   `;
@@ -7489,7 +7797,6 @@ function handleModelConfigModelIdChanged6(form) {
   const discoveredModel = state.gatewayProbeResult?.models?.find((model) => model.id === modelId) ?? null;
   if (discoveredModel && applyGatewayDiscoveredModel7(form, discoveredModel)) return;
   syncVisionCheckboxForModel(form, modelId);
-  scheduleUncertainVisionProbe(form, modelId);
   scheduleThinkingCapabilityProbe(form);
   renderReasoningCapabilityStatus6();
 }
@@ -7853,7 +8160,8 @@ function renderGatewayProbeResult6(options = {}) {
   );
   if (button) {
     button.disabled = state.gatewayProbeRunning;
-    button.textContent = state.gatewayProbeRunning ? "连接中" : "测试连接 / 发现模型";
+    const readingCatalog = state.modelConfigIntent === "add-source" || state.modelConfigIntent === "edit-profile";
+    button.textContent = state.gatewayProbeRunning ? "连接中" : readingCatalog ? "读取全部模型" : "测试连接 / 发现模型";
   }
   if (state.gatewayProbeRunning) {
     target.className = "gateway-probe-result loading";
@@ -8039,7 +8347,6 @@ function applyGatewayDiscoveredModel7(form, discoveredModel) {
     });
   }
   applyReasoningCapabilityCandidate7(form, reasoningCapabilityCandidate7(discoveredModel));
-  scheduleUncertainVisionProbe(form, discoveredModel.id);
   return true;
 }
 function applySuggestedGatewayUrl6(button) {
@@ -8081,7 +8388,7 @@ function normalizeGatewayProbeModels7(value) {
     const model = typeof modelValue === "string" ? { id: modelValue, label: modelValue } : isPlainObject(modelValue) ? modelValue : {};
     const reasoning = isPlainObject(model.reasoning) ? model.reasoning : {};
     const id = String(model.id ?? model.model ?? "").trim();
-    const reasoningEfforts = normalizeReasoningEfforts5(model.reasoningEfforts ?? reasoning.efforts);
+    const reasoningEfforts = normalizeReasoningEfforts6(model.reasoningEfforts ?? reasoning.efforts);
     const requestedDefault = normalizedReasoningEffort7(model.defaultReasoningEffort ?? reasoning.default);
     const configuredDefault = configuredReasoningEffort5(requestedDefault, reasoningEfforts);
     const rawModalities = model.modalities ?? model.inputModalities;
@@ -8192,7 +8499,7 @@ function applyReasoningCapabilityCandidate7(form, candidate, options = {}) {
 function ensureReasoningEffortOptions7(form, efforts) {
   const container = form.querySelector(".model-reasoning-options");
   if (!container) return;
-  const normalizedEfforts = normalizeReasoningEfforts5(efforts);
+  const normalizedEfforts = normalizeReasoningEfforts6(efforts);
   const configuredDisabled = normalizedEfforts.find((effort) => isDisabledReasoningEffort7(effort.id))?.id ?? "";
   if (configuredDisabled) {
     for (
@@ -8229,7 +8536,7 @@ function applyPendingReasoningCapabilities6(form) {
 }
 function reasoningCapabilityIsActionable7(candidate) {
   if (!candidate) return false;
-  return normalizeReasoningEfforts5(candidate.reasoningEfforts).length > 0 || candidate.reasoningDiscovery?.supportsReasoning === true || candidate.reasoningDiscovery?.supportsReasoning === false;
+  return normalizeReasoningEfforts6(candidate.reasoningEfforts).length > 0 || candidate.reasoningDiscovery?.supportsReasoning === true || candidate.reasoningDiscovery?.supportsReasoning === false;
 }
 function renderReasoningCapabilityStatus6() {
   const form = (
@@ -8289,7 +8596,7 @@ function reasoningCapabilityStatusText7(candidate) {
   return `${base}，${reasoningDiscoveryStatusText7(candidate, true)}`;
 }
 function reasoningDiscoveryStatusText7(candidate, pending = false) {
-  const efforts = normalizeReasoningEfforts5(candidate?.reasoningEfforts);
+  const efforts = normalizeReasoningEfforts6(candidate?.reasoningEfforts);
   const discovery = candidate?.reasoningDiscovery;
   const prefix = pending ? "发现" : "";
   if (discovery?.supportsReasoning === false) return `${prefix}未返回思考内容`;
@@ -8331,7 +8638,7 @@ async function probeModelCapabilities6(form) {
       credentialAction: gatewayCredentialAction7(data, profile ?? state.gatewayConfig),
       clientId: dashboardClientId(),
       saveTarget,
-      ...configMutationMetadata7(saveTarget),
+      ...configMutationMetadata6(saveTarget),
       gatewayDiscoveryToken,
       profileId: profile?.id || state.gatewayConfig?.activeProfileId || "",
       previousGatewayUrl: profile?.gatewayUrl || state.gatewayConfig?.gatewayUrl || "",
@@ -8434,6 +8741,34 @@ function manualAgentModelIds7(form) {
 }
 
 // src/dashboard/public/app-ui7.ts
+async function importModelSource(input) {
+  const scope = input.saveTarget === "project" ? "project" : "global";
+  state.settingsRefreshing = true;
+  renderSettingsView3();
+  try {
+    const result = await postJson("/api/sources/import", {
+      ...input,
+      saveTarget: scope,
+      ...configMutationMetadata6(scope)
+    });
+    if (!result.ok) throw new Error(result.error || "读取模型失败");
+    updateConfigRevisions({ ...result, scope });
+    state.models = normalizeModels(result.models);
+    mergeGatewayConfig8(result.gatewayConfig);
+    state.gatewayProfiles = normalizeGatewayProfiles(result.gatewayProfiles);
+    state.agentModelTiers = normalizeAgentModelTiers(result.agentModelTiers);
+    state.visionAgent = normalizeVisionAgent(result.visionAgent);
+    if (Array.isArray(result.officialSources)) state.officialSources = result.officialSources;
+    updateSessionStatus(result.sessionStatus);
+    showNotice2("模型来源已保存", `已读取 ${Number(result.modelCount ?? 0) || (result.gatewayProfiles?.length ?? 0)} 个模型`);
+  } catch (error) {
+    state.settingsFeedback = { tone: "error", message: errorMessageOf(error) || "读取模型失败" };
+  } finally {
+    state.settingsRefreshing = false;
+    renderSettingsView3();
+    renderComposerStatus3();
+  }
+}
 async function saveModelConfig3(event) {
   event.preventDefault();
   if (state.modelConfigSaving) {
@@ -8451,10 +8786,11 @@ async function saveModelConfig3(event) {
   const discoveryToken = state.modelCapabilityDiscoveryToken || currentGatewayProbeResult7(form)?.discoveryToken || "";
   const payload = {
     saveTarget: scope,
-    ...configMutationMetadata7(scope),
+    ...configMutationMetadata6(scope),
     profileId: editingProfile?.id || "",
     providerId: editingProfile?.id || "",
     clientId: dashboardClientId(),
+    routeName: data.get("routeName"),
     gatewayUrl: data.get("gatewayUrl"),
     gatewayProtocol: data.get("gatewayProtocol"),
     gatewayApiKey: data.get("gatewayApiKey"),
@@ -8488,7 +8824,23 @@ async function saveModelConfig3(event) {
   clearModelConfigFailure7(form);
   setModelConfigFormSaving7(form, true);
   try {
-    const result = await postJson("/api/model-config", payload);
+    const result = state.modelConfigIntent === "add-source" || state.modelConfigIntent === "edit-profile" ? await postJson("/api/sources/import", {
+      kind: state.modelConfigIntent === "edit-profile" ? "refresh" : "custom",
+      saveTarget: scope,
+      ...configMutationMetadata6(scope),
+      providerId: payload.providerId,
+      profileId: payload.profileId,
+      routeName: payload.routeName,
+      displayName: payload.routeName,
+      gatewayUrl: payload.gatewayUrl,
+      gatewayProtocol: payload.gatewayProtocol,
+      gatewayApiKey: payload.gatewayApiKey,
+      activateFirst: payload.switchToModel,
+      agentCheapModel: payload.agentCheapModel,
+      agentDefaultModel: payload.agentDefaultModel,
+      agentStrongModel: payload.agentStrongModel,
+      visionAgentModel: payload.visionAgentModel
+    }) : await postJson("/api/model-config", payload);
     if (!result.ok) {
       updateConfigRevisions({ ...result, scope });
       throw Object.assign(new Error(isConfigRevisionConflict8(result) ? configRevisionConflictMessage8() : result.error ?? "保存模型配置失败"), {
@@ -8506,7 +8858,7 @@ async function saveModelConfig3(event) {
     state.modelConfigSaving = false;
     hideModelConfigPanel();
     hideModelPanel();
-    renderSettingsView5();
+    renderSettingsView3();
     renderComposerStatus3();
     if (payload.switchToModel) {
       const defaultModelId = String(result.modelId ?? payload.modelId ?? "").trim();
@@ -8530,7 +8882,7 @@ async function saveDefaultModelSelection6(modelId, providerId, scope) {
   const reasoningEffort = normalizedReasoningEffort7(model?.defaultReasoningEffort) || null;
   state.modelSwitching = true;
   state.settingsFeedback = null;
-  renderSettingsView5();
+  renderSettingsView3();
   try {
     const result = await postJson("/api/default-model", {
       scope,
@@ -8557,7 +8909,7 @@ async function saveDefaultModelSelection6(modelId, providerId, scope) {
     announceStatus(state.settingsFeedback.message);
   } finally {
     state.modelSwitching = false;
-    renderSettingsView5();
+    renderSettingsView3();
   }
 }
 async function switchModel6(modelId, options = {}) {
@@ -8569,7 +8921,7 @@ async function switchModel6(modelId, options = {}) {
   state.modelSwitching = true;
   renderComposerStatus3();
   renderModelPanel5();
-  renderSettingsView5();
+  renderSettingsView3();
   try {
     const providerId = options.profileId || currentGatewayProfile6()?.id || "";
     const reasoningEffort = options.reasoningEffort ?? null;
@@ -8580,7 +8932,7 @@ async function switchModel6(modelId, options = {}) {
       reasoningEffort,
       sessionId: requestSessionId,
       clientId: requestClientId,
-      applyAgentDefaults: state.applyAgentDefaultsOnSwitch
+      applyAgentDefaults: false
     });
     if (!result.ok) {
       throw new Error(result.error ?? "切换模型失败");
@@ -8609,7 +8961,7 @@ async function switchModel6(modelId, options = {}) {
     state.modelSwitching = false;
     renderComposerStatus3();
     renderModelPanel5();
-    renderSettingsView5();
+    renderSettingsView3();
     updateSendButton();
   }
 }
@@ -8657,7 +9009,7 @@ async function switchReasoningEffort8(reasoningEffort) {
   } finally {
     state.reasoningEffortSwitching = false;
     renderComposerStatus3();
-    renderSettingsView5();
+    renderSettingsView3();
   }
 }
 async function deleteGatewayProfile6(profileId) {
@@ -8666,11 +9018,11 @@ async function deleteGatewayProfile6(profileId) {
   }
   if (state.deleteConfirmGatewayProfileId !== profileId) {
     state.deleteConfirmGatewayProfileId = profileId;
-    renderSettingsView5();
+    renderSettingsView3();
     return;
   }
   state.deletingGatewayProfileId = profileId;
-  renderSettingsView5();
+  renderSettingsView3();
   const requestSessionId = state.currentSessionId;
   const profile = gatewayProfileById5(profileId);
   const scope = configScope6(profile?.saveTarget) || "project";
@@ -8679,7 +9031,7 @@ async function deleteGatewayProfile6(profileId) {
       sessionId: requestSessionId,
       providerId: profileId,
       saveTarget: scope,
-      ...configMutationMetadata7(scope)
+      ...configMutationMetadata6(scope)
     });
     if (state.currentSessionId !== requestSessionId) return;
     if (!result.ok) {
@@ -8696,7 +9048,7 @@ async function deleteGatewayProfile6(profileId) {
     state.visionAgent = normalizeVisionAgent(result.visionAgent);
     updateSessionStatus(result.sessionStatus);
     state.deleteConfirmGatewayProfileId = "";
-    renderSettingsView5();
+    renderSettingsView3();
     showNotice2(result.clearedGateway ? "当前网关已删除" : "网关档案已删除");
   } catch (error) {
     if (state.currentSessionId !== requestSessionId) return;
@@ -8707,7 +9059,7 @@ async function deleteGatewayProfile6(profileId) {
     showError(error instanceof Error ? error.message : "删除网关失败");
   } finally {
     state.deletingGatewayProfileId = "";
-    renderSettingsView5();
+    renderSettingsView3();
     renderComposerStatus3();
   }
 }
@@ -8719,11 +9071,11 @@ async function deleteModel6(modelId, options = {}) {
   }
   if (state.deleteConfirmModelKey !== modelKey) {
     state.deleteConfirmModelKey = modelKey;
-    renderSettingsView5();
+    renderSettingsView3();
     return;
   }
   state.deletingModelKey = modelKey;
-  renderSettingsView5();
+  renderSettingsView3();
   renderComposerStatus3();
   const requestSessionId = state.currentSessionId;
   const scope = configScope6(options.saveTarget || currentGatewayProfile6()?.saveTarget) || "project";
@@ -8733,7 +9085,7 @@ async function deleteModel6(modelId, options = {}) {
       profileId: providerId,
       providerId,
       saveTarget: scope,
-      ...configMutationMetadata7(scope)
+      ...configMutationMetadata6(scope)
     });
     if (state.currentSessionId !== requestSessionId) return;
     if (!result.ok) {
@@ -8750,7 +9102,7 @@ async function deleteModel6(modelId, options = {}) {
     state.visionAgent = normalizeVisionAgent(result.visionAgent);
     state.deleteConfirmModelKey = "";
     updateSessionStatus(result.sessionStatus);
-    renderSettingsView5();
+    renderSettingsView3();
     showNotice2(result.clearedGateway ? "当前网关配置已清空" : "模型配置已删除");
   } catch (error) {
     if (state.currentSessionId !== requestSessionId) return;
@@ -8761,7 +9113,7 @@ async function deleteModel6(modelId, options = {}) {
     showError(errorMessageOf(error) || "删除模型失败");
   } finally {
     state.deletingModelKey = "";
-    renderSettingsView5();
+    renderSettingsView3();
     renderComposerStatus3();
   }
 }
@@ -8823,7 +9175,7 @@ function normalizeScopedDefaultSelection8(value) {
 function configScope6(value, fallback = "project") {
   return value === "global" ? "global" : value === "project" ? "project" : fallback;
 }
-function configMutationMetadata7(scope) {
+function configMutationMetadata6(scope) {
   return {
     scope,
     expectedRevision: state.configRevisions[scope] || void 0,
@@ -8969,7 +9321,7 @@ function normalizeModels(models) {
       thinking: model.thinking === true,
       modalities: Array.isArray(modalities) ? modalities.map(String) : ["text"],
       contextTokens: Number.isFinite(Number(model.contextTokens ?? model.contextWindow)) ? Number(model.contextTokens ?? model.contextWindow) : null,
-      reasoningEfforts: normalizeReasoningEfforts5(model.reasoningEfforts ?? reasoning.efforts),
+      reasoningEfforts: normalizeReasoningEfforts6(model.reasoningEfforts ?? reasoning.efforts),
       defaultReasoningEffort: normalizedReasoningEffort7(model.defaultReasoningEffort ?? reasoning.default),
       reasoningEffort: normalizedReasoningEffort7(model.reasoningEffort),
       agentModelTiers: normalizeAgentModelTiers(model.agentModelTiers),
@@ -8997,7 +9349,7 @@ function normalizeModelSource8(value) {
     editable: record.editable !== false
   };
 }
-function normalizeReasoningEfforts5(value) {
+function normalizeReasoningEfforts6(value) {
   if (!Array.isArray(value)) return [];
   const seen = /* @__PURE__ */ new Set();
   return value.map((effort) => {
@@ -9030,7 +9382,7 @@ function isDisabledReasoningEffort7(value) {
 function configuredReasoningEffort5(value, efforts) {
   const requested = normalizedReasoningEffort7(value);
   if (!isDisabledReasoningEffort7(requested)) return requested;
-  return normalizeReasoningEfforts5(efforts).find((effort) => isDisabledReasoningEffort7(effort.id))?.id ?? requested;
+  return normalizeReasoningEfforts6(efforts).find((effort) => isDisabledReasoningEffort7(effort.id))?.id ?? requested;
 }
 function reasoningEffortFallbackLabel8(effort) {
   const labels = {
@@ -9065,7 +9417,7 @@ function localizedReasoningEffortLabel8(id, label) {
   return normalizedLabel;
 }
 function reasoningEffortCatalog6(configured = []) {
-  const normalizedConfigured = normalizeReasoningEfforts5(configured);
+  const normalizedConfigured = normalizeReasoningEfforts6(configured);
   const disabledId = normalizedConfigured.find((effort) => isDisabledReasoningEffort7(effort.id))?.id ?? "off";
   const catalog = [disabledId, "low", "medium", "high", "xhigh", "max", "ultra"].map((id) => ({ id, label: reasoningEffortFallbackLabel8(id), description: "" }));
   for (const effort of normalizedConfigured) {
@@ -9077,7 +9429,7 @@ function reasoningEffortCatalog6(configured = []) {
 }
 function reasoningEffortLabel8(value) {
   const id = normalizedReasoningEffort7(value);
-  return normalizeReasoningEfforts5(currentModelInfo5(state.sessionStatus?.model)?.reasoningEfforts).find((effort) => effort.id === id)?.label || reasoningEffortFallbackLabel8(id);
+  return normalizeReasoningEfforts6(currentModelInfo5(state.sessionStatus?.model)?.reasoningEfforts).find((effort) => effort.id === id)?.label || reasoningEffortFallbackLabel8(id);
 }
 function resolveAtomicModelSelection8(options = {}) {
   const profiles = Array.isArray(options.profiles) ? options.profiles : [];
@@ -9181,6 +9533,21 @@ function modelDisplayName8(modelId, fallback = "") {
   const model = currentModelInfo5(id);
   return model?.label || fallbackLabel || id || "当前模型";
 }
+function normalizeAgentRouting(value) {
+  const record = isPlainObject(value) ? value : {};
+  const route = (item) => {
+    if (!isPlainObject(item)) return null;
+    const provider = String(item.provider ?? "").trim();
+    const model = String(item.model ?? "").trim();
+    return provider && model ? { provider, model } : null;
+  };
+  return {
+    cheap: route(record.cheap),
+    default: route(record.default),
+    strong: route(record.strong),
+    vision: route(record.vision)
+  };
+}
 function normalizeAgentModelTiers(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return {};
@@ -9203,7 +9570,7 @@ function firstVisionModelId6() {
 function hasAgentModelTiers8(model) {
   return Object.keys(normalizeAgentModelTiers(model?.agentModelTiers)).length > 0;
 }
-function agentModelTiersSummary6(value) {
+function agentModelTiersSummary8(value) {
   const tiers = normalizeAgentModelTiers(value);
   const ordered = ["cheap", "default", "strong"].filter((tier) => tiers[tier]).map((tier) => `${tier}: ${tiers[tier]}`);
   return ordered.join(" · ");
@@ -11068,7 +11435,7 @@ export {
   addAttachmentFiles,
   adoptGoalRunResult3 as adoptGoalRunResult,
   agentModelPickerHtml6 as agentModelPickerHtml,
-  agentModelTiersSummary6 as agentModelTiersSummary,
+  agentModelTiersSummary8 as agentModelTiersSummary,
   agentSettingsHtml6 as agentSettingsHtml,
   announceStatus,
   apiFileUrl10 as apiFileUrl,
@@ -11143,7 +11510,7 @@ export {
   compactResultLine9 as compactResultLine,
   composerHasOutboundContent,
   composerHeightFor3 as composerHeightFor,
-  configMutationMetadata7 as configMutationMetadata,
+  configMutationMetadata6 as configMutationMetadata,
   configRevisionConflictMessage8 as configRevisionConflictMessage,
   configScope6 as configScope,
   configuredReasoningEffort5 as configuredReasoningEffort,
@@ -11270,6 +11637,7 @@ export {
   imageAttachmentLine2 as imageAttachmentLine,
   imageMimeFromName,
   imagePreviewUrl10 as imagePreviewUrl,
+  importModelSource,
   init3 as init,
   initialSessionId,
   initializeAgentModelPickerSnapshot6 as initializeAgentModelPickerSnapshot,
@@ -11339,6 +11707,7 @@ export {
   newTask,
   nonNegativeInteger5 as nonNegativeInteger,
   normalizeAgentModelTiers,
+  normalizeAgentRouting,
   normalizeAttachmentMetadata2 as normalizeAttachmentMetadata,
   normalizeChangeStats5 as normalizeChangeStats,
   normalizeComparableText4 as normalizeComparableText,
@@ -11352,7 +11721,7 @@ export {
   normalizeModelSource8 as normalizeModelSource,
   normalizeModels,
   normalizeReasoningDiscovery7 as normalizeReasoningDiscovery,
-  normalizeReasoningEfforts5 as normalizeReasoningEfforts,
+  normalizeReasoningEfforts6 as normalizeReasoningEfforts,
   normalizeRelativePath11 as normalizeRelativePath,
   normalizeScopedDefaultSelection8 as normalizeScopedDefaultSelection,
   normalizeTablePreview2 as normalizeTablePreview,
@@ -11435,7 +11804,7 @@ export {
   renderSessionFailure,
   renderSessions,
   renderSettingsFeedbackInPlace6 as renderSettingsFeedbackInPlace,
-  renderSettingsView5 as renderSettingsView,
+  renderSettingsView3 as renderSettingsView,
   renderSheetCellHtml2 as renderSheetCellHtml,
   renderSheetPreviewHtml2 as renderSheetPreviewHtml,
   renderShutdownActivity2 as renderShutdownActivity,
@@ -11474,13 +11843,17 @@ export {
   revealInteractionPanel9 as revealInteractionPanel,
   reviewQuestionConversation9 as reviewQuestionConversation,
   runContextAction9 as runContextAction,
+  saveAgentRoutingForm,
   saveDefaultModelSelection6 as saveDefaultModelSelection,
   saveModelConfig3 as saveModelConfig,
+  saveScheduleForm,
   saveSettingsConfig3 as saveSettingsConfig,
+  saveSourceAgentForm,
   scheduleAnimationFrameOnce2 as scheduleAnimationFrameOnce,
   scheduleDraftRender5 as scheduleDraftRender,
   scheduleEventReconnect4 as scheduleEventReconnect,
   scheduleSessionsRefresh,
+  scheduleSettingsHtml,
   scheduleThinkingCapabilityProbe,
   scheduleUncertainVisionProbe,
   scopedDefaultModelLabel6 as scopedDefaultModelLabel,

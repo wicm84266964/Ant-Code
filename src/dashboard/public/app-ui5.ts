@@ -1,11 +1,12 @@
 import { inferModelSupportsImages } from "../../model-gateway/vision-capabilities.ts";
 import { renderMarkdown } from "./markdown.ts";
-import { modelConnectionGroups } from "./model-groups.ts";
+import { preferPrefixedCatalog } from "../../model-gateway/reasoning-capabilities.ts";
+import { providerRouteGroups, providerRouteLabel } from "./model-groups.ts";
 import { hydrateRichContent } from "./rich-renderers.ts";
 import { visibleTranscriptRole } from "./transcript.ts";
 import { MANUAL_AGENT_MODEL_VALUE, state, els, MODE_DESCRIPTIONS, LOCAL_FILE_EXTENSIONS, FILE_REFERENCE_PATTERN, TRANSCRIPT_DOM_LIMIT, EVENT_STALE_AFTER_MS, EVENT_CONNECT_TIMEOUT_MS, EVENT_RECONNECT_MAX_ATTEMPTS, DASHBOARD_REQUEST_TIMEOUT_MS, DASHBOARD_API_VERSION, DASHBOARD_LIFECYCLE_TIMEOUT_MS, DASHBOARD_SHUTDOWN_TIMEOUT_MS, DASHBOARD_INTERRUPT_TIMEOUT_MS, MAX_IMAGE_ATTACHMENTS, MAX_IMAGE_ATTACHMENT_BYTES, CURRENT_SESSION_STORAGE_KEY, DASHBOARD_CLIENT_STORAGE_KEY, PREVIEW_WIDTH_STORAGE_KEY, PREVIEW_WIDTH_DEFAULT, PREVIEW_WIDTH_MIN, PREVIEW_WIDTH_MAX, PREVIEW_WORKSPACE_MIN , emptySessionStatus, emptyBackgroundSubagent } from "./app-core.ts";
 import type { DashboardConfigSource, DashboardReasoningEffort, DashboardTurnChangeStats, DashboardScopedDefaultSelection, DashboardVisionAgent, DashboardReasoningDiscovery, DashboardReasoningCapabilityCandidate, DashboardGatewayProbeModel, DashboardGatewayProbeResult, DashboardLifecycleActivity, DashboardSettings, DashboardFile, DashboardTableSheet, DashboardTablePreview, DashboardLightboxItem, DashboardQuestionChoice, DashboardPendingQuestion, DashboardApproval, DashboardGatewayTransport, DashboardScopedRequest, DashboardFetchOptions, DashboardModelSource, DashboardSessionStatus, DashboardApiResult, DashboardActivity, DashboardModelOption, DashboardGatewayProfile, DashboardGatewayConfig, DashboardModelSelection, DashboardPendingGuide, DashboardStreamEvent, DashboardUiState , DashboardSessionSummary } from "./app-core.ts";
-import { eventTargetOf, eventElement, isPlainObject, modelSourceOf, errorMessageOf, init, bootstrapDashboard, observeRunStatus, updateRunStatusTone, bindEvents, normalizedResponsiveView, composerHeightFor, previewWidthBounds, clampedPreviewWidth, permissionIndexForKey, focusTrapTarget, shouldFollowTranscript, scheduleAnimationFrameOnce, cancelScheduledAnimationFrame, appendPlainDraftDelta, renderFinalAssistantBody, selectTranscriptNodesToRemove, responsiveLayoutMode, restorePreviewWidth, setPreviewWidth, syncPreviewResizeHandle, beginPreviewResize, updatePreviewResize, finishPreviewResize, handlePreviewResizeKeydown, setResponsiveView, syncResponsiveNavigation, setResponsiveSurfaceInert, handleResponsiveFileNavigation, syncVisualViewport, resizePromptInput, handlePermissionModeKeydown, requestPermissionMode, defaultGoalMaxAutoContinues, emptyGoalSnapshot, applyGoalSnapshot, renderGoalControls, renderGoalStatusBar, requestGoalMode, showGoalConfirm, hideGoalConfirm, showGoalTextPanel, hideGoalTextPanel, enableGoalWithObjective, submitGoalAction, adoptGoalRunResult, showPermissionConfirm, hidePermissionConfirm, updateContextActions, announceStatus, modalFocusableElements, activateModal, collectModalBackground, focusModalInitialTarget, deactivateModal, restoreModalAttribute, handleGlobalKeydown, closeActiveModal, loadTrust, loadSessions, restoreInitialSession, latestBackgroundSessionId, initialSessionId, rememberCurrentSession, renderSessions, sessionMeta, sessionStatusView, toggleSidebar, setSidebarCollapsed, sessionsNeedRefresh, scheduleSessionsRefresh, handleSessionAction, openSession, restoreBackgroundSnapshot, deleteSession, setSessionsRefreshState, copySessionId, newTask, rememberNewTaskModelState, restoreNewTaskModelState, refreshNewTaskModelState, addAttachmentFiles, readImageAttachment, renderAttachmentStrip, attachmentPayload, clearAttachments, sendPrompt, stableTurnRequest, dashboardRequestId, dashboardClientId, statusUrl, interruptTurn, guideTurn, cancelQueuedTurn, cancelBackgroundSubagent, backgroundCancelKey, connectEvents, ensureEventsConnected, disconnectEvents, closeEventSource, markEventConnectionAlive, armEventConnectTimer, armEventStaleTimer, scheduleEventReconnect, reconnectEventsManually, clearEventReconnectTimer, clearEventConnectTimer, clearEventStaleTimer, setConnectionState, resetEventReplayState, rememberEventCursor, handleDashboardEvent, shouldSkipDashboardEvent, beginEventTurn, renderTranscriptMessages, renderSessionFailure, setTranscriptPaging, renderTranscriptHistoryStatus, removeTranscriptHistoryStatus, transcriptFirstContentNode, handleTranscriptScroll, loadOlderTranscript, renderWorkflowPanel, renderWorkflowStrip, currentWorkflowItem, workflowSection, workflowItem, normalizeWorkflowStatus, summarizeWorkflow, appendMessage, createMessageNode, appendTranscriptNode, trimTranscriptWindow, isProtectedTranscriptNode, renderTranscriptWindowMarker, captureTranscriptViewportAnchor, restoreTranscriptViewportAnchor, transcriptNodeTop, restoreTranscriptNodeAnchor, resetTranscriptWindow, appendAssistantDraft, scheduleDraftRender, renderAssistantDraft, appendActivity, appendContextBoundary, contextBoundaryText, handleActivity, isBackgroundSubagentActivity, handleBackgroundSubagentActivity, clearBackgroundSubagentStatus, reconcileBackgroundSubagentSnapshot, backgroundSubagentDisplayStatus, backgroundSubagentVisible, updateLiveActivity, removeLiveActivity, setLiveTitle, toggleLiveStatusDetails, updateLiveStatus, liveStatusTitle, primaryLiveActivity, gatewayRetryChipText, renderBackgroundSubagentStatus, backgroundSubagentCompactLabel, backgroundSubagentTitle, backgroundSubagentMeta, backgroundSubagentCancellable, resetLiveStatus, backgroundSubagentCounts, idleRunStatus, applyIdleRunStatus, updateRunStatusForBackground, updateSessionStatus, updateTurnChangeStats, resetTurnChangeStats, normalizeChangeStats, renderComposerStatus, modelStatusHtml, unresolvedModelStatusHtml, handleModelStatusActivate, handleModelStatusKeydown, toggleModelPanel, hideModelPanel, showSettingsWorkspace, refreshSettingsConfiguration, hideSettingsWorkspace, showModelConfigPanel, hideModelConfigPanel, renderModelPanel, markModelConfigEndpointChanged, handleModelConfigModelIdChanged, markReasoningCapabilityManual, clearReasoningCapabilityControls, syncGatewayUrlHint, gatewayUrlPlaceholder, gatewayUrlHint, syncReasoningDefaultOptions, probeGateway, isCurrentModelConfigRequest, currentGatewayProbeResult, currentGatewayCatalogModels, modelConfigGatewayProfile, modelConfigEndpointChanged, modelConfigAgentModelsSnapshot, initializeAgentModelPickerSnapshot, syncAgentModelPickersForEndpoint, uniqueAgentModelCandidates, appendAgentModelOptions, renderAgentModelPickers, updateAgentModelPickerManualStatus, handleAgentModelSelection, renderGatewayProbeResult, applyProbedModel, applyGatewayDiscoveredModel, applySuggestedGatewayUrl, gatewayCredentialAction, normalizeGatewayProbeModels, normalizeReasoningDiscovery, reasoningCapabilityCandidate, applyReasoningCapabilityCandidate, ensureReasoningEffortOptions, applyPendingReasoningCapabilities, reasoningCapabilityIsActionable, renderReasoningCapabilityStatus, reasoningCapabilityStatusText, reasoningDiscoveryStatusText, probeModelCapabilities, setFormControlsSaving, setModelConfigFormSaving, renderModelConfigFailure, clearModelConfigFailure, manualAgentModelIds, saveModelConfig, saveDefaultModelSelection, switchModel, handleReasoningEffortChange, switchReasoningEffort, deleteGatewayProfile, deleteModel, updateConfigRevisions, normalizeScopedDefaultSelection, configScope, configMutationMetadata, isConfigRevisionConflict, configRevisionConflictMessage, refreshConfigRevisionsAfterConflict, normalizeGatewayConfig, normalizeDashboardSettings, mergeGatewayConfig, normalizeGatewayProfiles, normalizeConfigSource, normalizeModels, normalizeModelSource, normalizeReasoningEfforts, normalizedReasoningEffort, isDisabledReasoningEffort, configuredReasoningEffort, reasoningEffortFallbackLabel, localizedReasoningEffortLabel, reasoningEffortCatalog, reasoningEffortLabel, resolveAtomicModelSelection, currentModelSelection, currentSessionNeedsModelSelection, currentGatewayProfile, gatewayProfileById, settingsInspectedGatewayProfile, modelSourceLabel, markCurrentModel, currentModelInfo, modelDisplayName, normalizeAgentModelTiers, normalizeVisionAgent, firstVisionModelId, hasAgentModelTiers, agentModelTiersSummary, gatewaySummary, modelSaveTargetLabel, gatewaySourceNote, environmentGatewayDefaultNote, sourceBadge, sourceLabel, formatContextUsage, firstFiniteNumber, formatTokenCount, trimNumber, nonNegativeInteger, collapseCompletedActivities, clearAssistantDrafts, collapseAssistantDrafts, isMeaningfulCompletedActivity, isDuplicateDraftText, normalizeComparableText, showApproval, resolveApproval, hideApproval, showQuestion, revealInteractionPanel, renderQuestionPanel, reviewQuestionConversation, returnToQuestion, activateQuestionReviewBackground, deactivateQuestionReviewBackground, questionChoiceButton, toggleQuestionChoice, submitQuestion, cancelQuestion, finishQuestionSubmission, hideQuestion, showTrustPanel, renderTrustPanel, confirmTrust, renderQueuePanel, renderQueueItem, setPendingGuide, clearPendingGuide, syncPendingGuideFromQueue, renderGuideFeedback, guideCopy, guideSource, guideTurnFromQueue, guideButtonText, guideButtonDisabled, guideButtonVisible, syncGuideButton, shouldKeepGuideFeedback, isInterruptError, updateSendButton, showContextConfirm, hideContextConfirm, runContextAction, contextActionRequestOptions, contextSummaryLine, compactResultLine, rememberQuestionDraft, questionResolutionText, showShutdownPanel, hideShutdownPanel, shutdownDashboard, lockClosedDashboard, normalizeLifecycleActivity, shutdownRequestBody, shutdownResultIsClosed, lifecycleActivitySummary, renderShutdownActivity, renderFiles, currentImageFiles, openFile, renderOfficePreview, officePreviewMeta, officePreviewBodyHtml, renderTablePreview, normalizeTablePreview, tablePreviewMeta, renderCompactTableHtml, renderExpandedTableHtml, renderTableHtml, tableTruncationNote, maxVisibleColumns, columnLabel, renderSheetPreviewHtml, renderSheetCellHtml, resetPreview, fencedDataForFile, dataLanguageForExtension, showImageLightbox, showTableLightbox, renderLightboxImage, bindTableLightboxControls, moveLightbox, hideLightbox, setPermissionMode, clearTranscript, cancelTranscriptAnimationFrames, clearAssistantDraftTimers, hideEmptyState, showError, showNotice, renderBootstrapLoading, renderBootstrapFailure, dashboardPayloadError, bootstrapFailurePresentation, clearBootstrapStatus, scrollTranscript, isTranscriptNearBottom, syncTranscriptFollowState, followTranscript, updateTranscriptJump, beginScopedRequest, isCurrentScopedRequest, finishScopedRequest, cancelScopedRequest, isAbortError, getJson, postJson, deleteJson, dashboardFetch, responseJson, dashboardJsonHeaders, dashboardCsrfToken, messageText, messageDisplayText, userMessageDisplayText, normalizeAttachmentMetadata, imageAttachmentLine, renderMessageText, renderLinkedText, bindRichContent, linkifyFileTextNodes, replaceFileReferences, isLikelyLocalFileReference, resolveDisplayFilePath, normalizeFileReferencePath, parentDirectory, filePreviewUrl, rawFileUrl, apiFileUrl, imagePreviewUrl, isSafeInlineBitmapUrl, normalizeRelativePath, isWorkspaceRelativeToBase, copyCodeBlock, previewText, formatNumber, formatBytes, escapeHtml, escapeAttribute, formatTime, formatRelativeTime } from "./app-barrel.ts";
+import { eventTargetOf, eventElement, isPlainObject, modelSourceOf, errorMessageOf, init, bootstrapDashboard, observeRunStatus, updateRunStatusTone, bindEvents, normalizedResponsiveView, composerHeightFor, previewWidthBounds, clampedPreviewWidth, permissionIndexForKey, focusTrapTarget, shouldFollowTranscript, scheduleAnimationFrameOnce, cancelScheduledAnimationFrame, appendPlainDraftDelta, renderFinalAssistantBody, selectTranscriptNodesToRemove, responsiveLayoutMode, restorePreviewWidth, setPreviewWidth, syncPreviewResizeHandle, beginPreviewResize, updatePreviewResize, finishPreviewResize, handlePreviewResizeKeydown, setResponsiveView, syncResponsiveNavigation, setResponsiveSurfaceInert, handleResponsiveFileNavigation, syncVisualViewport, resizePromptInput, handlePermissionModeKeydown, requestPermissionMode, defaultGoalMaxAutoContinues, emptyGoalSnapshot, applyGoalSnapshot, renderGoalControls, renderGoalStatusBar, requestGoalMode, showGoalConfirm, hideGoalConfirm, showGoalTextPanel, hideGoalTextPanel, enableGoalWithObjective, submitGoalAction, adoptGoalRunResult, showPermissionConfirm, hidePermissionConfirm, updateContextActions, announceStatus, modalFocusableElements, activateModal, collectModalBackground, focusModalInitialTarget, deactivateModal, restoreModalAttribute, handleGlobalKeydown, closeActiveModal, loadTrust, loadSessions, restoreInitialSession, latestBackgroundSessionId, initialSessionId, rememberCurrentSession, renderSessions, sessionMeta, sessionStatusView, toggleSidebar, setSidebarCollapsed, sessionsNeedRefresh, scheduleSessionsRefresh, handleSessionAction, openSession, restoreBackgroundSnapshot, deleteSession, setSessionsRefreshState, copySessionId, newTask, rememberNewTaskModelState, restoreNewTaskModelState, refreshNewTaskModelState, addAttachmentFiles, readImageAttachment, renderAttachmentStrip, attachmentPayload, clearAttachments, sendPrompt, stableTurnRequest, dashboardRequestId, dashboardClientId, statusUrl, interruptTurn, guideTurn, cancelQueuedTurn, cancelBackgroundSubagent, backgroundCancelKey, connectEvents, ensureEventsConnected, disconnectEvents, closeEventSource, markEventConnectionAlive, armEventConnectTimer, armEventStaleTimer, scheduleEventReconnect, reconnectEventsManually, clearEventReconnectTimer, clearEventConnectTimer, clearEventStaleTimer, setConnectionState, resetEventReplayState, rememberEventCursor, handleDashboardEvent, shouldSkipDashboardEvent, beginEventTurn, renderTranscriptMessages, renderSessionFailure, setTranscriptPaging, renderTranscriptHistoryStatus, removeTranscriptHistoryStatus, transcriptFirstContentNode, handleTranscriptScroll, loadOlderTranscript, renderWorkflowPanel, renderWorkflowStrip, currentWorkflowItem, workflowSection, workflowItem, normalizeWorkflowStatus, summarizeWorkflow, appendMessage, createMessageNode, appendTranscriptNode, trimTranscriptWindow, isProtectedTranscriptNode, renderTranscriptWindowMarker, captureTranscriptViewportAnchor, restoreTranscriptViewportAnchor, transcriptNodeTop, restoreTranscriptNodeAnchor, resetTranscriptWindow, appendAssistantDraft, scheduleDraftRender, renderAssistantDraft, appendActivity, appendContextBoundary, contextBoundaryText, handleActivity, isBackgroundSubagentActivity, handleBackgroundSubagentActivity, clearBackgroundSubagentStatus, reconcileBackgroundSubagentSnapshot, backgroundSubagentDisplayStatus, backgroundSubagentVisible, updateLiveActivity, removeLiveActivity, setLiveTitle, toggleLiveStatusDetails, updateLiveStatus, liveStatusTitle, primaryLiveActivity, gatewayRetryChipText, renderBackgroundSubagentStatus, backgroundSubagentCompactLabel, backgroundSubagentTitle, backgroundSubagentMeta, backgroundSubagentCancellable, resetLiveStatus, backgroundSubagentCounts, idleRunStatus, applyIdleRunStatus, updateRunStatusForBackground, updateSessionStatus, updateTurnChangeStats, resetTurnChangeStats, normalizeChangeStats, renderComposerStatus, modelStatusHtml, unresolvedModelStatusHtml, handleModelStatusActivate, handleModelStatusKeydown, toggleModelPanel, hideModelPanel, showSettingsWorkspace, refreshSettingsConfiguration, hideSettingsWorkspace, showModelConfigPanel, hideModelConfigPanel, renderModelPanel, markModelConfigEndpointChanged, handleModelConfigModelIdChanged, markReasoningCapabilityManual, clearReasoningCapabilityControls, syncGatewayUrlHint, gatewayUrlPlaceholder, gatewayUrlHint, syncReasoningDefaultOptions, probeGateway, isCurrentModelConfigRequest, currentGatewayProbeResult, currentGatewayCatalogModels, modelConfigGatewayProfile, modelConfigEndpointChanged, modelConfigAgentModelsSnapshot, initializeAgentModelPickerSnapshot, syncAgentModelPickersForEndpoint, uniqueAgentModelCandidates, appendAgentModelOptions, renderAgentModelPickers, updateAgentModelPickerManualStatus, handleAgentModelSelection, renderGatewayProbeResult, applyProbedModel, applyGatewayDiscoveredModel, applySuggestedGatewayUrl, gatewayCredentialAction, normalizeGatewayProbeModels, normalizeReasoningDiscovery, reasoningCapabilityCandidate, applyReasoningCapabilityCandidate, ensureReasoningEffortOptions, applyPendingReasoningCapabilities, reasoningCapabilityIsActionable, renderReasoningCapabilityStatus, reasoningCapabilityStatusText, reasoningDiscoveryStatusText, probeModelCapabilities, setFormControlsSaving, setModelConfigFormSaving, renderModelConfigFailure, clearModelConfigFailure, manualAgentModelIds, saveModelConfig, importModelSource, saveDefaultModelSelection, switchModel, handleReasoningEffortChange, switchReasoningEffort, deleteGatewayProfile, deleteModel, updateConfigRevisions, normalizeScopedDefaultSelection, configScope, configMutationMetadata, isConfigRevisionConflict, configRevisionConflictMessage, refreshConfigRevisionsAfterConflict, normalizeGatewayConfig, normalizeDashboardSettings, mergeGatewayConfig, normalizeGatewayProfiles, normalizeConfigSource, normalizeModels, normalizeModelSource, normalizeReasoningEfforts, normalizedReasoningEffort, isDisabledReasoningEffort, configuredReasoningEffort, reasoningEffortFallbackLabel, localizedReasoningEffortLabel, reasoningEffortCatalog, reasoningEffortLabel, resolveAtomicModelSelection, currentModelSelection, currentSessionNeedsModelSelection, currentGatewayProfile, gatewayProfileById, settingsInspectedGatewayProfile, modelSourceLabel, markCurrentModel, currentModelInfo, modelDisplayName, normalizeAgentModelTiers, normalizeAgentRouting, normalizeVisionAgent, firstVisionModelId, hasAgentModelTiers, agentModelTiersSummary, gatewaySummary, modelSaveTargetLabel, gatewaySourceNote, environmentGatewayDefaultNote, sourceBadge, sourceLabel, formatContextUsage, firstFiniteNumber, formatTokenCount, trimNumber, nonNegativeInteger, collapseCompletedActivities, clearAssistantDrafts, collapseAssistantDrafts, isMeaningfulCompletedActivity, isDuplicateDraftText, normalizeComparableText, showApproval, resolveApproval, hideApproval, showQuestion, revealInteractionPanel, renderQuestionPanel, reviewQuestionConversation, returnToQuestion, activateQuestionReviewBackground, deactivateQuestionReviewBackground, questionChoiceButton, toggleQuestionChoice, submitQuestion, cancelQuestion, finishQuestionSubmission, hideQuestion, showTrustPanel, renderTrustPanel, confirmTrust, renderQueuePanel, renderQueueItem, setPendingGuide, clearPendingGuide, syncPendingGuideFromQueue, renderGuideFeedback, guideCopy, guideSource, guideTurnFromQueue, guideButtonText, guideButtonDisabled, guideButtonVisible, syncGuideButton, shouldKeepGuideFeedback, isInterruptError, updateSendButton, showContextConfirm, hideContextConfirm, runContextAction, contextActionRequestOptions, contextSummaryLine, compactResultLine, rememberQuestionDraft, questionResolutionText, showShutdownPanel, hideShutdownPanel, shutdownDashboard, lockClosedDashboard, normalizeLifecycleActivity, shutdownRequestBody, shutdownResultIsClosed, lifecycleActivitySummary, renderShutdownActivity, renderFiles, currentImageFiles, openFile, renderOfficePreview, officePreviewMeta, officePreviewBodyHtml, renderTablePreview, normalizeTablePreview, tablePreviewMeta, renderCompactTableHtml, renderExpandedTableHtml, renderTableHtml, tableTruncationNote, maxVisibleColumns, columnLabel, renderSheetPreviewHtml, renderSheetCellHtml, resetPreview, fencedDataForFile, dataLanguageForExtension, showImageLightbox, showTableLightbox, renderLightboxImage, bindTableLightboxControls, moveLightbox, hideLightbox, setPermissionMode, clearTranscript, cancelTranscriptAnimationFrames, clearAssistantDraftTimers, hideEmptyState, showError, showNotice, renderBootstrapLoading, renderBootstrapFailure, dashboardPayloadError, bootstrapFailurePresentation, clearBootstrapStatus, scrollTranscript, isTranscriptNearBottom, syncTranscriptFollowState, followTranscript, updateTranscriptJump, beginScopedRequest, isCurrentScopedRequest, finishScopedRequest, cancelScopedRequest, isAbortError, getJson, postJson, loadSchedules, deleteJson, dashboardFetch, responseJson, dashboardJsonHeaders, dashboardCsrfToken, messageText, messageDisplayText, userMessageDisplayText, normalizeAttachmentMetadata, imageAttachmentLine, renderMessageText, renderLinkedText, bindRichContent, linkifyFileTextNodes, replaceFileReferences, isLikelyLocalFileReference, resolveDisplayFilePath, normalizeFileReferencePath, parentDirectory, filePreviewUrl, rawFileUrl, apiFileUrl, imagePreviewUrl, isSafeInlineBitmapUrl, normalizeRelativePath, isWorkspaceRelativeToBase, copyCodeBlock, previewText, formatNumber, formatBytes, escapeHtml, escapeAttribute, formatTime, formatRelativeTime } from "./app-barrel.ts";
 export function modelCapabilityLabels(model: DashboardModelOption | string | null | undefined) {
   if (!model || typeof model !== "object") {
     return [];
@@ -18,8 +19,11 @@ export function modelCapabilityLabels(model: DashboardModelOption | string | nul
   return labels.length > 0 ? labels : ["文本"];
 }
 
-export function handleModelPanelClick(event: Event) {
+export async function handleModelPanelClick(event: Event) {
   event.stopPropagation();
+  const button = eventElement(event)?.closest("button[data-action='pick-model']");
+  if (!(button instanceof HTMLButtonElement) || button.disabled) return;
+  await switchModel(button.dataset.modelId || "", { profileId: button.dataset.profileId || "" });
 }
 
 export async function handleModelPanelChange(event: Event) {
@@ -45,13 +49,20 @@ export function renderSettingsView() {
       ? networkSettingsHtml()
       : state.settingsSection === "agents"
         ? agentSettingsHtml()
-        : state.settingsSection === "reliability"
-          ? reliabilitySettingsHtml()
-          : modelSettingsHtml();
+        : state.settingsSection === "schedules"
+          ? scheduleSettingsHtml()
+          : state.settingsSection === "reliability"
+            ? reliabilitySettingsHtml()
+            : modelSettingsHtml();
   els.settingsContent.innerHTML = `${settingsFeedbackHtml()}${sectionHtml}`;
   els.settingsContent.querySelectorAll("form[data-settings-form]").forEach((form) => {
     initializeSettingsFormTracking(/** @type {HTMLFormElement} */ (form));
   });
+  const scheduleForm = els.settingsContent.querySelector("form[data-settings-form='schedule-create']");
+  if (scheduleForm instanceof HTMLFormElement) {
+    scheduleForm.querySelector("select[name='cadence']")?.addEventListener("change", () => syncScheduleCadenceFields(scheduleForm));
+    syncScheduleCadenceFields(scheduleForm);
+  }
 }
 
 export function syncSettingsRail() {
@@ -66,7 +77,7 @@ export function syncSettingsRail() {
 export function modelSettingsHtml() {
   const profiles = state.gatewayProfiles ?? [];
   const inspectedProfile = settingsInspectedGatewayProfile();
-  const models = inspectedProfile?.models ?? [];
+  const models = preferPrefixedCatalog(inspectedProfile?.models ?? []);
   const scopedDefault = state.modelDefaultSelections[state.modelDefaultScope];
   return `
     <section class="settings-section" aria-labelledby="settings-sources-title">
@@ -93,8 +104,9 @@ export function modelSettingsHtml() {
         <strong>${escapeHtml(inspectedProfile?.label || "未选择来源")}</strong>
         <span>${escapeHtml(inspectedProfile?.gatewayUrl || "未配置网关")}</span>
       </div>
+      ${settingsFeedbackHtml()}
       <div class="settings-profile-list">
-        ${modelConnectionGroups(profiles).map((group) => `<div class="settings-source-group"><h3>${escapeHtml(group.label)}</h3>${group.profiles[0].credentialSelectionRequired ? `<p role="status">请选择生效凭据</p>` : ""}${group.profiles.map((profile) => settingsGatewayProfileHtml(profile)).join("")}</div>`).join("") || `<div class="settings-empty">尚未保存模型来源</div>`}
+        ${providerRouteGroups(profiles).map((group) => `<div class="settings-source-group"><h3>${escapeHtml(group.label)}</h3>${group.profiles.map((profile) => settingsGatewayProfileHtml(profile)).join("")}</div>`).join("") || `<div class="settings-empty">尚未保存模型来源</div>`}
       </div>
     </section>
     <section class="settings-section" aria-labelledby="settings-models-title">
@@ -105,11 +117,11 @@ export function modelSettingsHtml() {
         </div>
         <div class="settings-section-tools">
           <span class="settings-section-count">${models.length} 个</span>
-          <button class="settings-primary-action" id="settings-add-model" type="button" data-action="add-model" data-profile-id="${escapeAttribute(inspectedProfile?.id || "")}"${!inspectedProfile || inspectedProfile.editable === false || state.settingsRefreshing || state.running ? " disabled" : ""}>添加模型</button>
+          <button class="settings-primary-action" type="button" data-action="refresh-source" data-profile-id="${escapeAttribute(inspectedProfile?.id || "")}"${!inspectedProfile || state.settingsRefreshing || state.running ? " disabled" : ""}>刷新目录</button>
         </div>
       </div>
       <div class="settings-model-list">
-        ${models.map((model) => settingsModelHtml(model, inspectedProfile, models.length)).join("") || `<div class="settings-empty">该来源没有已注册模型</div>`}
+        ${models.map((model) => settingsModelHtml(model, inspectedProfile, models.length)).join("") || `<div class="settings-empty">该来源还没有模型。添加来源时会一次读入目录。</div>`}
       </div>
     </section>
   `;
@@ -222,7 +234,6 @@ export function agentSettingsHtml() {
           ${settingsToggleHtml("backgroundWakeupEnabled", "允许后台子智能体", agents.backgroundWakeupEnabled)}
           ${settingsToggleHtml("backgroundByDefault", "模型子任务默认后台运行", agents.backgroundByDefault)}
           ${settingsToggleHtml("reviewGateEnabled", "交付前审查提醒", agents.reviewGateEnabled)}
-          ${settingsToggleHtml("syncModelTiersOnSwitch", "切换主模型时同步子智能体", agents.syncModelTiersOnSwitch, agentModelTiersSummary(state.agentModelTiers))}
         </div>
       </section>
       <section class="settings-section" aria-labelledby="settings-goal-title">
@@ -236,6 +247,67 @@ export function agentSettingsHtml() {
       </section>
       ${settingsFormActions()}
     </form>
+  `;
+}
+
+export function scheduleSettingsHtml() {
+  const schedules = state.schedules ?? [];
+  return `
+    <section class="settings-section" aria-labelledby="settings-schedules-title">
+      ${settingsSectionHeading("定时任务", "查看与管理", "settings-schedules-title")}
+      <p class="settings-source-note">到点由本机 Dashboard 把保存的提示词再发一轮，使用完全访问，不再弹出放权。手动添加即视为确认。</p>
+      <form class="settings-form schedule-settings-form" data-settings-form="schedule-create">
+        <label class="settings-field-row"><span><strong>标题</strong></span><input name="title" maxlength="80" required placeholder="例如：早间检查" /></label>
+        <label class="settings-field-row"><span><strong>提示词</strong></span><textarea name="prompt" required maxlength="4000" rows="4" placeholder="到点要让模型做什么"></textarea></label>
+        <label class="settings-field-row"><span><strong>周期</strong></span>
+          <select name="cadence" data-action="schedule-cadence">
+            <option value="once">只跑一次</option>
+            <option value="daily">每天</option>
+            <option value="weekly">每周</option>
+            <option value="interval">固定间隔</option>
+          </select>
+        </label>
+        <label class="settings-field-row" data-schedule-field="once"><span><strong>几分钟后</strong></span><input name="delayMinutes" inputmode="numeric" value="5" /></label>
+        <label class="settings-field-row" data-schedule-field="daily"><span><strong>每天时间</strong></span><input name="dailyTime" value="09:00" /></label>
+        <label class="settings-field-row" data-schedule-field="weekly"><span><strong>星期</strong></span>
+          <select name="weekday">
+            <option value="1" selected>周一</option>
+            <option value="2">周二</option>
+            <option value="3">周三</option>
+            <option value="4">周四</option>
+            <option value="5">周五</option>
+            <option value="6">周六</option>
+            <option value="0">周日</option>
+          </select>
+        </label>
+        <label class="settings-field-row" data-schedule-field="weekly"><span><strong>时间</strong></span><input name="weeklyTime" value="09:00" /></label>
+        <label class="settings-field-row" data-schedule-field="interval"><span><strong>间隔分钟</strong></span><input name="everyMinutes" inputmode="numeric" value="60" /></label>
+        <footer class="settings-form-actions">
+          <button type="submit"${settingsDisabled(false)}>添加定时任务</button>
+        </footer>
+      </form>
+      <div class="schedule-settings-list">
+        ${schedules.map((schedule) => scheduleSettingsCard(schedule)).join("") || `<div class="settings-empty">还没有定时任务</div>`}
+      </div>
+    </section>
+  `;
+}
+
+function scheduleSettingsCard(schedule: Record<string, unknown>) {
+  const id = escapeAttribute(String(schedule.id ?? ""));
+  const enabled = schedule.enabled !== false;
+  return `
+    <article class="source-card">
+      <div>
+        <strong>${escapeHtml(String(schedule.title ?? "定时任务"))}</strong>
+        <span>${escapeHtml(String(schedule.cadenceLabel ?? ""))} · ${escapeHtml(String(schedule.permissionLabel ?? "完全访问"))}</span>
+        <small>${enabled ? `下次 ${escapeHtml(formatTime(schedule.nextRunAt))}` : "已暂停"} · ${escapeHtml(String(schedule.lastStatus ?? "尚未运行"))}</small>
+      </div>
+      <div class="source-card-actions">
+        <button type="button" data-schedule-action="${enabled ? "pause" : "resume"}" data-schedule-id="${id}">${enabled ? "暂停" : "恢复"}</button>
+        <button type="button" data-schedule-action="delete" data-schedule-id="${id}">删除</button>
+      </div>
+    </article>
   `;
 }
 
@@ -311,14 +383,13 @@ export function settingsGatewayProfileHtml(profile: DashboardGatewayProfile) {
     <div class="settings-profile-row${inspected ? " active" : ""}${confirmingDelete ? " confirming-delete" : ""}">
       <span class="settings-source-indicator" aria-hidden="true"></span>
       <div class="settings-row-main">
-        <strong>${escapeHtml(profile.label || profile.gatewayUrl || profile.id)}</strong>
+        <strong>${escapeHtml(providerRouteLabel(profile))}</strong>
         <span>${escapeHtml(profile.gatewayUrl || profile.id)}</span>
         <small>${escapeHtml(profile.ready === false
           ? `${protocolDisplayName(profile.gatewayProtocol)} · 配置不完整`
           : `${protocolDisplayName(profile.gatewayProtocol)} · ${profile.apiKeyConfigured ? "Key 已配置" : "无 Key"} · ${count} 模型`)}</small>
       </div>
       <div class="settings-row-actions">
-        <label title="使用此配置保存的凭据；保存范围由上方项目/全局选项决定"><input type="radio" name="credential-${escapeAttribute(String(profile.connectionGroupId || profile.id))}" data-action="select-source-credential" data-profile-id="${escapeAttribute(profile.id)}" ${profile.activeCredentialProfileId === profile.id ? "checked" : ""} ${state.running || state.settingsRefreshing ? "disabled" : ""}>生效凭据</label>
         <button type="button" data-action="inspect-profile" data-profile-id="${escapeAttribute(profile.id)}" aria-pressed="${inspected}" ${state.settingsRefreshing ? "disabled" : ""}>${inspected ? "正在查看" : "查看模型"}</button>
         <button type="button" data-action="use-profile" data-profile-id="${escapeAttribute(profile.id)}" ${profile.ready === false || state.settingsRefreshing || state.running || state.modelSwitching ? "disabled" : ""}>设为默认</button>
         <button type="button" data-action="edit-gateway-profile" data-profile-id="${escapeAttribute(profile.id)}"${profile.editable === false ? ` title="${escapeAttribute(gatewayProfileReadonlyLabel(profile))}"` : ""} ${profile.editable === false || state.settingsRefreshing || state.running || Boolean(state.deletingGatewayProfileId) ? "disabled" : ""}>${profile.editable === false ? "只读" : "编辑"}</button>
@@ -355,27 +426,17 @@ export function scopedDefaultModelLabel(selection: DashboardScopedDefaultSelecti
 
 /** @param {any} model @param {any} profile @param {number} modelCount */
 export function settingsModelHtml(model: DashboardModelOption, profile: DashboardGatewayProfile | null | undefined, modelCount: number) {
-  const source = modelSourceOf(model);
-  const modelEditable = source?.editable !== false && profile?.editable !== false;
   const tags = modelCapabilityLabels(model);
   const efforts = normalizeReasoningEfforts(model.reasoningEfforts);
   const context = Number.isFinite(model.contextTokens) ? `${formatTokenCount(model.contextTokens)} 上下文` : "";
-  const modelKey = providerModelKey(profile?.id || source?.profileId || source?.id, model.id);
   const scopedDefault = state.modelDefaultSelections[state.modelDefaultScope];
-  const isScopedDefault = scopedDefault?.provider === (profile?.id || source?.profileId || source?.id)
+  const isScopedDefault = scopedDefault?.provider === (profile?.id || "")
     && scopedDefault?.model === model.id;
-  const confirmingDelete = state.deleteConfirmModelKey === modelKey;
-  const deleting = state.deletingModelKey === modelKey;
-  const isLastModel = modelCount <= 1;
-  const confirmCopy = isLastModel
-    ? "再次点击确认删除；这是当前来源最后一个模型，会清空当前网关配置。"
-    : "再次点击确认删除；删除当前模型后会切换到同一来源的下一个模型。";
   return `
-    <div class="settings-model-row${model.current ? " active" : ""}${isScopedDefault ? " scope-default" : ""}${confirmingDelete ? " confirming-delete" : ""}">
+    <div class="settings-model-row${isScopedDefault ? " scope-default" : ""}">
       <div class="settings-row-main">
         <div class="settings-row-title">
           <strong>${escapeHtml(model.label || model.id)}</strong>
-          ${model.current ? `<span>当前</span>` : ""}
           ${isScopedDefault ? `<span>此范围默认</span>` : ""}
         </div>
         <span>${escapeHtml(model.id)}</span>
@@ -387,10 +448,7 @@ export function settingsModelHtml(model: DashboardModelOption, profile: Dashboar
       </div>
       <div class="settings-row-actions">
         <button type="button" data-action="use-model" data-model-id="${escapeAttribute(model.id)}" data-profile-id="${escapeAttribute(profile?.id || "")}" ${isScopedDefault || state.settingsRefreshing || state.running || state.modelSwitching ? "disabled" : ""}>${isScopedDefault ? "已设为默认" : "设为默认"}</button>
-        <button type="button" data-action="edit-model" data-model-id="${escapeAttribute(model.id)}" data-profile-id="${escapeAttribute(profile?.id || "")}" ${!modelEditable || state.settingsRefreshing || state.running || Boolean(state.deletingModelKey) ? "disabled" : ""}>${modelEditable ? "编辑" : "只读"}</button>
-        <button class="danger" type="button" data-action="delete-model" data-model-id="${escapeAttribute(model.id)}" data-profile-id="${escapeAttribute(profile?.id || "")}" data-save-target="${escapeAttribute(source?.saveTarget || profile?.saveTarget || "")}" ${!modelEditable || state.settingsRefreshing || state.running || Boolean(state.deletingModelKey) ? "disabled" : ""}>${deleting ? "删除中" : confirmingDelete ? "确认删除" : "删除"}</button>
       </div>
-      ${confirmingDelete ? `<div class="settings-delete-confirm">${escapeHtml(confirmCopy)}</div>` : ""}
     </div>
   `;
 }
@@ -400,6 +458,7 @@ export function handleSettingsRailClick(event: Event) {
   const button = eventTargetOf(event).closest("button[data-settings-section]");
   if (!button || state.settingsSaving) return;
   state.settingsSection = button.dataset.settingsSection || "models";
+  if (state.settingsSection === "schedules") void loadSchedules();
   state.settingsFeedback = null;
   renderSettingsView();
 }
@@ -471,11 +530,126 @@ export function renderSettingsFeedbackInPlace() {
 }
 
 /** @param {any} event */
+function routeFromSelect(value: string) {
+  const [provider, model] = value.split("::");
+  return provider && model ? { provider, model } : null;
+}
+
+function syncScheduleCadenceFields(form: HTMLFormElement | null) {
+  if (!(form instanceof HTMLFormElement)) return;
+  const cadence = String(new FormData(form).get("cadence") ?? "once");
+  form.querySelectorAll<HTMLElement>("[data-schedule-field]").forEach((field) => {
+    const active = field.dataset.scheduleField === cadence;
+    field.classList.toggle("is-inactive", !active);
+    field.querySelectorAll("input, select").forEach((input) => {
+      if (input instanceof HTMLInputElement || input instanceof HTMLSelectElement) input.disabled = !active;
+    });
+  });
+}
+
+export async function saveScheduleForm(form: HTMLFormElement) {
+  const data = new FormData(form);
+  const cadence = String(data.get("cadence") ?? "once");
+  const body: Record<string, unknown> = {
+    title: String(data.get("title") ?? ""),
+    prompt: String(data.get("prompt") ?? ""),
+    cadence,
+    sessionId: state.currentSessionId
+  };
+  if (cadence === "once") body.delayMinutes = Number(data.get("delayMinutes"));
+  if (cadence === "daily") body.time = String(data.get("dailyTime") ?? "").trim();
+  if (cadence === "weekly") {
+    body.time = String(data.get("weeklyTime") ?? "").trim();
+    body.weekday = String(data.get("weekday") ?? "");
+  }
+  if (cadence === "interval") body.everyMinutes = Number(data.get("everyMinutes"));
+  state.settingsSaving = true;
+  try {
+    const result = await postJson("/api/schedules", body);
+    if (!result.ok) throw new Error(result.error || "添加定时任务失败");
+    showNotice("定时任务已添加", "到点会用完全访问自动发送");
+    await loadSchedules();
+  } catch (error) {
+    state.settingsFeedback = { tone: "error", message: errorMessageOf(error) || "添加定时任务失败" };
+    renderSettingsView();
+  } finally {
+    state.settingsSaving = false;
+  }
+}
+
+export async function saveSourceAgentForm(form: HTMLFormElement) {
+  const data = new FormData(form);
+  const scope = state.modelDefaultScope === "project" ? "project" : "global";
+  state.settingsSaving = true;
+  try {
+    const result = await postJson("/api/sources/agents", {
+      saveTarget: scope,
+      ...configMutationMetadata(scope),
+      providerId: form.dataset.profileId,
+      cheap: String(data.get("cheap") ?? ""),
+      defaultModel: String(data.get("defaultModel") ?? ""),
+      strong: String(data.get("strong") ?? ""),
+      visionModel: String(data.get("visionModel") ?? "")
+    });
+    if (!result.ok) throw new Error(result.error || "保存子智能体模型失败");
+    updateConfigRevisions({ ...result, scope });
+    state.gatewayProfiles = normalizeGatewayProfiles(result.gatewayProfiles);
+    showNotice("子智能体模型已保存", "只作用于这个渠道");
+  } catch (error) {
+    state.settingsFeedback = { tone: "error", message: errorMessageOf(error) || "保存子智能体模型失败" };
+  } finally {
+    state.settingsSaving = false;
+    renderSettingsView();
+  }
+}
+
+export async function saveAgentRoutingForm(form: HTMLFormElement) {
+  const data = new FormData(form);
+  const scope = state.modelDefaultScope === "project" ? "project" : "global";
+  state.settingsSaving = true;
+  try {
+    const result = await postJson("/api/agent-routing", {
+      saveTarget: scope,
+      ...configMutationMetadata(scope),
+      tiers: {
+        cheap: routeFromSelect(String(data.get("cheap") ?? "")),
+        default: routeFromSelect(String(data.get("default") ?? "")),
+        strong: routeFromSelect(String(data.get("strong") ?? ""))
+      },
+      visionModel: routeFromSelect(String(data.get("vision") ?? ""))
+    });
+    if (!result.ok) throw new Error(result.error || "保存子智能体模型失败");
+    updateConfigRevisions({ ...result, scope });
+    state.agentModelTiers = normalizeAgentModelTiers(result.agentModelTiers);
+    state.agentRouting = normalizeAgentRouting(result.agentRouting ?? {
+      cheap: routeFromSelect(String(data.get("cheap") ?? "")),
+      default: routeFromSelect(String(data.get("default") ?? "")),
+      strong: routeFromSelect(String(data.get("strong") ?? "")),
+      vision: routeFromSelect(String(data.get("vision") ?? ""))
+    });
+    state.visionAgent = normalizeVisionAgent(result.visionAgent);
+    showNotice("子智能体模型已保存", "聊天切换不会改写这些档位");
+  } catch (error) {
+    state.settingsFeedback = { tone: "error", message: errorMessageOf(error) || "保存子智能体模型失败" };
+  } finally {
+    state.settingsSaving = false;
+    renderSettingsView();
+  }
+}
+
 export async function saveSettingsConfig(event: Event) {
   const form = eventTargetOf(event).closest("form[data-settings-form]");
   if (!(form instanceof HTMLFormElement)) return;
   event.preventDefault();
   if (state.settingsSaving || state.running) return;
+  if (form.dataset.settingsForm === "schedule-create") {
+    await saveScheduleForm(form);
+    return;
+  }
+  if (form.dataset.settingsForm === "source-agents") {
+    await saveSourceAgentForm(form);
+    return;
+  }
   const section = form.dataset.settingsForm;
   /** @param {string} name */
   const field = (name: string) => /** @type {HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | null} */ (form.elements.namedItem(name));
@@ -543,6 +717,15 @@ export async function saveSettingsConfig(event: Event) {
 
 /** @param {any} event */
 export async function handleSettingsClick(event: Event) {
+  const scheduleButton = eventTargetOf(event).closest("button[data-schedule-action]");
+  if (scheduleButton instanceof HTMLButtonElement && state.settingsSection === "schedules") {
+    const id = scheduleButton.dataset.scheduleId ?? "";
+    const scheduleAction = scheduleButton.dataset.scheduleAction ?? "";
+    if (scheduleAction === "delete") await deleteJson(`/api/schedules/${encodeURIComponent(id)}`);
+    else await postJson(`/api/schedules/${encodeURIComponent(id)}/${scheduleAction}`, {});
+    await loadSchedules();
+    return;
+  }
   const action = eventTargetOf(event).closest("[data-action]");
   if (!action) return;
   if (action.dataset.action === "select-default-scope") {
@@ -567,6 +750,13 @@ export async function handleSettingsClick(event: Event) {
     state.deleteConfirmModelKey = "";
     state.settingsFeedback = null;
     renderSettingsView();
+  } else if (action.dataset.action === "import-custom-source") {
+    const url = (document.querySelector("#custom-source-url") as HTMLInputElement | null)?.value.trim() ?? "";
+    const protocol = (document.querySelector("#custom-source-protocol") as HTMLSelectElement | null)?.value ?? "openai-chat";
+    const apiKey = (document.querySelector("#custom-source-key") as HTMLInputElement | null)?.value.trim() ?? "";
+    await importModelSource({ kind: "custom", gatewayUrl: url, gatewayProtocol: protocol, gatewayApiKey: apiKey, activateFirst: false });
+  } else if (action.dataset.action === "refresh-source") {
+    await importModelSource({ kind: "refresh", providerId: action.dataset.profileId, profileId: action.dataset.profileId, activateFirst: false });
   } else if (action.dataset.action === "add-source") {
     showModelConfigPanel("", "", "add-source");
   } else if (action.dataset.action === "add-model") {
@@ -638,6 +828,8 @@ export function renderModelConfigPanel() {
     ? editingProfile?.models?.find((model) => model.id === state.editingModelId) ?? currentModelInfo(state.editingModelId)
     : null;
   const addingSource = state.modelConfigIntent === "add-source";
+  const editingChannel = state.modelConfigIntent === "edit-profile";
+  const channelForm = addingSource || editingChannel;
   const addingModel = state.modelConfigIntent === "add-model";
   const current: DashboardModelOption = editing ?? { id: "" };
   const gateway: DashboardGatewayConfig = editingProfile ? {
@@ -716,10 +908,10 @@ export function renderModelConfigPanel() {
       : "模型配置";
   const panelTitle = addingSource
     ? "添加模型来源"
-    : addingModel
-      ? "添加模型"
-      : state.modelConfigIntent === "edit-profile"
-        ? "编辑模型来源"
+    : editingChannel
+      ? "编辑模型来源"
+      : addingModel
+        ? "添加模型"
         : "编辑模型";
   els.modelConfigPanel.innerHTML = `
     <button class="model-config-backdrop" type="button" data-action="close-model-config" aria-label="关闭模型配置"></button>
@@ -750,6 +942,11 @@ export function renderModelConfigPanel() {
         ${lockedSaveTarget ? `<p class="model-config-scope-note">已有档案需保存回所属的${lockedSaveTarget === "global" ? "全局" : "项目"}配置。</p>` : ""}
       </fieldset>
       <div class="model-config-grid">
+        ${channelForm ? `<label>
+          <span>路线名</span>
+          <input name="routeName" required maxlength="64" spellcheck="false" placeholder="例如 work、personal" />
+          <small class="gateway-url-hint">同一地址的不同密钥请用不同路线名，例如 work、personal。聊天里按这个名字切换。</small>
+        </label>` : ""}
         <label>
           <span>网关 URL</span>
           <input name="gatewayUrl" type="url" required spellcheck="false" value="${escapeAttribute(gateway.gatewayUrl || "")}" placeholder="${escapeAttribute(gatewayUrlPlaceholder(gatewayProtocol))}" />
@@ -772,14 +969,14 @@ export function renderModelConfigPanel() {
           <input name="gatewayHealthUrl" type="url" spellcheck="false" value="${escapeAttribute(gateway.gatewayHealthUrl || "")}" placeholder="可选" />
         </label>
         <div class="gateway-probe-row">
-          <button type="button" data-action="probe-gateway" ${state.gatewayProbeRunning ? "disabled" : ""}>${state.gatewayProbeRunning ? "连接中" : "测试连接 / 发现模型"}</button>
+          <button type="button" data-action="probe-gateway" ${state.gatewayProbeRunning ? "disabled" : ""}>${state.gatewayProbeRunning ? "连接中" : channelForm ? "读取全部模型" : "测试连接 / 发现模型"}</button>
           <div class="gateway-probe-result" id="gateway-probe-result" aria-live="polite"></div>
         </div>
-        <label>
+        ${channelForm ? `<p class="model-config-scope-note">保存时会写入这次读到的全部模型。子智能体只从这些模型里选，不需要再指定渠道。</p>` : `<label>
           <span>模型 ID</span>
           <input name="modelId" required spellcheck="false" value="${escapeAttribute(current.id || "")}" placeholder="example-coding-model" />
-        </label>
-        <label>
+        </label>`}
+        ${channelForm ? "" : `<label>
           <span>模型备注</span>
           <input name="label" maxlength="160" spellcheck="false" value="${escapeAttribute(current.label === current.id ? "" : current.label || "")}" placeholder="例如：科研分析、代码开发" />
         </label>
@@ -787,7 +984,7 @@ export function renderModelConfigPanel() {
         <label>
           <span>上下文窗口</span>
           <input name="contextTokens" inputmode="numeric" pattern="[0-9]*" value="${escapeAttribute(current.contextTokens || "")}" placeholder="例如 400000" />
-        </label>
+        </label>`}
       </div>
       <fieldset class="agent-model-config">
         <legend>子智能体模型</legend>
@@ -799,7 +996,7 @@ export function renderModelConfigPanel() {
           ${agentModelPickerHtml("visionAgentModel", "vision", visionAgentModel)}
         </div>
       </fieldset>
-      <fieldset class="model-reasoning-config" data-reasoning-mode="${state.modelConfigReasoningLocked ? "manual" : "auto"}" data-reasoning-source="${escapeAttribute(state.modelConfigReasoningSource)}">
+      ${channelForm ? "" : `<fieldset class="model-reasoning-config" data-reasoning-mode="${state.modelConfigReasoningLocked ? "manual" : "auto"}" data-reasoning-source="${escapeAttribute(state.modelConfigReasoningSource)}">
         <legend>思考强度</legend>
         <div class="model-reasoning-discovery">
           <span class="model-reasoning-status" id="reasoning-capability-status" role="status" aria-live="polite"></span>
@@ -823,14 +1020,14 @@ export function renderModelConfigPanel() {
             ${effortChoices.filter((effort: DashboardReasoningEffort) => selectedEffortIds.has(effort.id)).map((effort: DashboardReasoningEffort) => `<option value="${escapeAttribute(effort.id)}"${defaultReasoningEffort === effort.id ? " selected" : ""}>${escapeHtml(effort.label)}</option>`).join("")}
           </select>
         </label>
-      </fieldset>
+      </fieldset>`}
       <div class="model-config-toggles">
-        <label><input name="text" type="checkbox" checked disabled /> 文本</label>
+        ${channelForm ? "" : `<label><input name="text" type="checkbox" checked disabled /> 文本</label>
         <label class="model-vision-toggle"><input name="vision" type="checkbox"${Array.isArray(current.modalities) && current.modalities.includes("image") || inferModelSupportsImages(current.id) ? " checked" : ""} /> 视觉<span class="model-capability-status" aria-live="polite"></span></label>
-        <label><input name="thinking" type="checkbox"${current.thinking ? " checked" : ""} /> thinking</label>
+        <label><input name="thinking" type="checkbox"${current.thinking ? " checked" : ""} /> thinking</label>`}
         <label><input name="clearGatewayApiKey" type="checkbox"${gateway.apiKeyConfigured ? "" : " disabled"} /> 清除已保存 Key</label>
-        <label><input name="switchToModel" type="checkbox"${editing && !current.default ? "" : " checked"} /> 保存为该范围默认模型</label>
-        <label><input name="applyAgentDefaults" type="checkbox" /> 保存后同步子智能体</label>
+        ${channelForm ? "" : `<label><input name="switchToModel" type="checkbox"${editing && !current.default ? "" : " checked"} /> 保存为该范围默认模型</label>
+        <label><input name="applyAgentDefaults" type="checkbox" /> 保存后同步子智能体</label>`}
       </div>
       <div class="model-config-note">
         <div>${escapeHtml(sourceNote)}</div>
@@ -840,7 +1037,7 @@ export function renderModelConfigPanel() {
       <div class="model-config-feedback hidden" role="alert" aria-live="assertive"></div>
       <div class="model-config-actions">
         <button type="button" data-action="close-model-config">取消</button>
-        <button type="submit" ${state.modelConfigSaving ? "disabled" : ""}>${state.modelConfigSaving ? "保存中" : "保存"}</button>
+        <button type="submit" ${state.modelConfigSaving ? "disabled" : ""}>${state.modelConfigSaving ? "保存中" : channelForm ? "保存来源" : "保存"}</button>
       </div>
     </form>
   `;

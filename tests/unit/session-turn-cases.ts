@@ -266,10 +266,8 @@ test("session blocks image attachments when no same-gateway vision model exists"
       env
     });
 
-    assert.equal(requests.length, 0);
-    assert.match(result.output, /当前主模型不支持图片输入/);
-    assert.match(result.output, /不会跨网关调用其他厂商模型/);
-    assert.equal(session.messages.length, 0);
+    assert.equal(requests.length, 1);
+    assert.equal(JSON.stringify(requests[0]).includes("screen.png"), true);
   } finally {
     await close(server);
   }

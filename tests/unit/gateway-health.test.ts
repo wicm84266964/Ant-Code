@@ -113,7 +113,7 @@ test("gateway image-input 404 reports unsupported vision route", () => {
 
   assert.equal(normalized.providerMessage, "No endpoints found that support image input");
   assert.match(text, /provider: No endpoints found that support image input/);
-  assert.ok(normalized.diagnostics.some((hint) => /rejected image input|vision-capable/i.test(hint)));
+  assert.ok(normalized.diagnostics.some((hint) => /不支持视觉|rejected image input|vision-capable/i.test(hint)));
   assert.equal(normalized.diagnostics.some((hint) => /\/v1\/chat\/completions/.test(hint)), false);
 });
 

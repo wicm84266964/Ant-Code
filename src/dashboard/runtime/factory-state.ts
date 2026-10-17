@@ -85,7 +85,11 @@ export type DashboardRuntimeApi = {
   sweepIdleSessions(): Promise<unknown>;
   shutdown(input?: DashboardRequestInput): Promise<unknown>;
   sessionFiles(sessionId: string): unknown;
+  importModelSource(input?: DashboardRequestInput): Promise<unknown>;
+  saveAgentRouting(input?: DashboardRequestInput): Promise<unknown>;
+  saveProviderAgentModels(input?: DashboardRequestInput): Promise<unknown>;
   listSchedules(): Promise<unknown>;
+  createSchedule(input?: DashboardRequestInput): Promise<unknown>;
   pauseSchedule(id: string): Promise<unknown>;
   resumeSchedule(id: string): Promise<unknown>;
   deleteSchedule(id: string): Promise<unknown>;

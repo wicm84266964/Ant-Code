@@ -96,8 +96,8 @@ export function gatewayTroubleshootingHints(code: string, status: number | null 
   if (code === "GATEWAY_HTTP_ERROR") {
     if (isImageUnsupportedMessage(options.providerMessage)) {
       return [
-        "The configured model route rejected image input; this endpoint does not currently expose a vision-capable backend.",
-        "Remove image attachments for this turn, or switch LAB_AGENT_MODEL/modelAlias and LAB_MODEL_GATEWAY_URL to a route that supports image input."
+        "当前主模型不支持视觉。上游拒绝了图片输入。",
+        "可以在这个渠道里配置视觉子智能体，或换成支持看图的主模型后再发送图片。"
       ];
     }
     if (status === 401 || status === 403) {

@@ -59,7 +59,6 @@ export function handleModelConfigModelIdChanged(form: HTMLElement | null) {
   const discoveredModel = state.gatewayProbeResult?.models?.find((model) => model.id === modelId) ?? null;
   if (discoveredModel && applyGatewayDiscoveredModel(form, discoveredModel)) return;
   syncVisionCheckboxForModel(form, modelId);
-  scheduleUncertainVisionProbe(form, modelId);
   scheduleThinkingCapabilityProbe(form);
   renderReasoningCapabilityStatus();
 }
@@ -466,7 +465,8 @@ export function renderGatewayProbeResult(options: { preserveAgentModels?: boolea
   const button = /** @type {HTMLButtonElement | null} */ (els.modelConfigPanel?.querySelector("button[data-action='probe-gateway']") ?? null);
   if (button) {
     button.disabled = state.gatewayProbeRunning;
-    button.textContent = state.gatewayProbeRunning ? "连接中" : "测试连接 / 发现模型";
+    const readingCatalog = state.modelConfigIntent === "add-source" || state.modelConfigIntent === "edit-profile";
+    button.textContent = state.gatewayProbeRunning ? "连接中" : readingCatalog ? "读取全部模型" : "测试连接 / 发现模型";
   }
   if (state.gatewayProbeRunning) {
     target.className = "gateway-probe-result loading";
@@ -647,7 +647,6 @@ export function applyGatewayDiscoveredModel(form: HTMLElement | null, discovered
     });
   }
   applyReasoningCapabilityCandidate(form, reasoningCapabilityCandidate(discoveredModel));
-  scheduleUncertainVisionProbe(form, discoveredModel.id);
   return true;
 }
 

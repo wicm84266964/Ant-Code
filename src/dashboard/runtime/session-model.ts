@@ -41,6 +41,7 @@ import { clearSessionContext, compactSessionContextWithModel, createContextWindo
 import { createLabModelGateway } from "../../model-gateway/client.ts";
 import { redactGatewayText } from "../../model-gateway/errors.ts";
 import { listConfiguredModels, normalizeAgentModelTiers, normalizeReasoningEfforts, resolveModelSelection, type LabModel } from "../../model-gateway/models.ts";
+import { selectableReasoningEffortIds } from "../../model-gateway/reasoning-capabilities.ts";
 import {
   inferCatalogReasoning,
   normalizeCapabilityEfforts,
@@ -859,7 +860,7 @@ export function defaultReasoningEffortForConfig(config: Record<string, unknown>,
 
 /** @param {Record<string, any> | null | undefined} model @param {unknown} requested @param {unknown} fallback */
 export function resolveReasoningEffortSelection(model: { reasoningEfforts?: unknown; defaultReasoningEffort?: unknown; id?: string } | null | undefined, requested: unknown, fallback: unknown = undefined) {
-  const efforts = normalizeReasoningEfforts(model?.reasoningEfforts);
+  const efforts = normalizeReasoningEfforts(selectableReasoningEffortIds(model?.id, model?.reasoningEfforts));
   if (efforts.length === 0) return "";
   if (requested !== undefined) {
     const requestedId = String(requested ?? "").trim().toLowerCase();
