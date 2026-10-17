@@ -429,7 +429,7 @@ export function pruneTurnRequests(records: Map<string, TurnRequestRecord>) {
 
 /** @param {Record<string, any>} state */
 export function takeNextQueueItem(state: DashboardActiveSessionState) {
-  const hasUserWork = state.queuedPrompts.some((item) => ["guide", "prompt", "wakeup"].includes(item.kind ?? ""));
+  const hasUserWork = state.queuedPrompts.some((item) => ["guide", "prompt", "wakeup", "schedule"].includes(item.kind ?? ""));
   if (hasUserWork) {
     dropGoalContinueItems(state);
   }
@@ -573,7 +573,8 @@ export async function startDashboardTurn(context: DashboardRuntimeContext, input
           queue: queueSnapshot(state)
         };
       }
-      const item = enqueuePrompt(state, prompt, mode, "prompt", attachments);
+      const item = enqueuePrompt(state, prompt, mode, turnSubmissionKind(input), attachments);
+      if (item) decorateScheduleQueueItem(item, input);
       if (!item) {
         return queueFullResult(state);
       }
@@ -599,7 +600,7 @@ export async function startDashboardTurn(context: DashboardRuntimeContext, input
       };
     }
 
-    const item = createQueueItem(prompt, mode, "prompt", "", attachments);
+    const item = decorateScheduleQueueItem(createQueueItem(prompt, mode, turnSubmissionKind(input), "", attachments), input);
     beginPrompt(state, item, configEnv);
     return {
       ok: true,
@@ -884,7 +885,8 @@ export function beginPrompt(state: DashboardActiveSessionState, item: DashboardQ
   ) {
     return false;
   }
-  applyPermissionMode(state.session, item.permissionMode ?? "plan");
+  const scheduled = item.kind === "schedule";
+  applyPermissionMode(state.session, scheduled ? "fullAccess" : (item.permissionMode ?? "plan"));
   state.persisted = false;
   state.running = true;
   state.interrupting = false;
@@ -893,7 +895,8 @@ export function beginPrompt(state: DashboardActiveSessionState, item: DashboardQ
   state.currentTurnId = eventId("turn");
   state.currentAttachmentBytes = imageAttachmentBytes(item.attachments ?? []);
   state.currentTranscriptStart = activeTranscriptMessages(state).length;
-  state.currentPermissionMode = item.permissionMode ?? "plan";
+  state.currentPermissionMode = scheduled ? "fullAccess" : (item.permissionMode ?? "plan");
+  state.unattendedSchedule = scheduled;
   state.turnChangeStats = emptyChangeStats();
   state.controller = new AbortController();
   state.turnEnv = env ?? null;
@@ -1028,6 +1031,7 @@ export function runTurnInBackground(state: DashboardActiveSessionState, item: Da
         at: new Date().toISOString()
       });
       state.status = terminalStatus;
+      await rememberScheduleRun(state, item, terminalStatus);
     } catch (error) {
       if (!isCurrentTurn(state, controller, turnId)) {
         return;
@@ -1039,6 +1043,7 @@ export function runTurnInBackground(state: DashboardActiveSessionState, item: Da
         at: new Date().toISOString()
       });
       state.status = "failed";
+      await rememberScheduleRun(state, item, "failed");
     } finally {
       if (!ownsTurn(state, controller, turnId)) {
         return;
@@ -1047,6 +1052,7 @@ export function runTurnInBackground(state: DashboardActiveSessionState, item: Da
       clearForceSettleTimer(state);
       state.controller = null;
       state.interrupting = false;
+      state.unattendedSchedule = false;
       state.quarantinedTurnId = "";
       if (wasQuarantined) {
         state.status = "interrupted";
@@ -1181,6 +1187,24 @@ export function isBackgroundLifecycleEvent(event: Record<string, unknown>) {
   return type.startsWith("subagent_group_") || type.startsWith("background_terminal_");
 }
 
+
+function turnSubmissionKind(input: DashboardRequestInput) {
+  return input.kind === "schedule" ? "schedule" : "prompt";
+}
+
+function decorateScheduleQueueItem(item: DashboardQueueItem, input: DashboardRequestInput) {
+  if (input.kind !== "schedule") return item;
+  item.scheduleId = String(input.scheduleId ?? "");
+  item.title = `定时任务：${String(input.scheduleTitle ?? "未命名")}`;
+  return item;
+}
+
+async function rememberScheduleRun(state: DashboardActiveSessionState, item: DashboardQueueItem, status: string) {
+  const scheduleId = String(item.scheduleId ?? "").trim();
+  if (!scheduleId) return;
+  const { recordScheduleRunResult } = await import("./schedules.ts");
+  await recordScheduleRunResult(state.session.cwd, scheduleId, status);
+}
 
 export function enqueuePrompt(state: DashboardActiveSessionState, prompt: string, permissionMode: unknown, kind: string, attachments: DashboardTurnAttachment[] | unknown = []) {
   if (!queueHasCapacity(state)) {

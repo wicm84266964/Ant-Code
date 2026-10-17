@@ -682,6 +682,37 @@ export const BUILT_IN_TOOLS = Object.freeze([
     }
   },
   {
+    name: "schedule_list",
+    description: "List host-owned scheduled prompts for this workspace. A schedule sends its saved prompt back into the bound session when due.",
+    risk: "read",
+    supportsAbort: false,
+    inputSchema: {
+      type: "object",
+      properties: {}
+    }
+  },
+  {
+    name: "schedule_create",
+    description: "Propose a host-owned scheduled prompt. The user must confirm before it is saved. Before calling this tool, tell the user in plain language that the automatic task will run with full access and will not ask for permission again. Use cadence=once with delayMinutes for a single run, such as 5 minutes from now. Recurring cadences are daily, weekly, or interval. Do not ask the user to switch the session permission mode.",
+    risk: "write",
+    supportsAbort: false,
+    inputSchema: {
+      type: "object",
+      required: ["title", "prompt", "cadence"],
+      properties: {
+        title: { type: "string" },
+        prompt: { type: "string" },
+        cadence: { type: "string", enum: ["once", "daily", "weekly", "interval"] },
+        time: { type: "string" },
+        weekday: { type: ["string", "number"] },
+        everyMinutes: { type: "integer" },
+        delayMinutes: { type: "integer" },
+        at: { type: "string" },
+        permissionMode: { type: "string" }
+      }
+    }
+  },
+  {
     name: "ask_user",
     description: "Ask the local user for clarification during an interactive session. Supports plain text, single-choice, multi-choice, and custom-answer confirmation prompts.",
     risk: "read",

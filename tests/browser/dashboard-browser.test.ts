@@ -2551,6 +2551,10 @@ function createBrowserRuntime(remoteImageUrl) {
     trustStatus: async () => ({ ok: true, trust: { trusted: true } }),
     trustWorkspace: async () => ({ ok: true, trust: { trusted: true } }),
     listSessionRecords: async () => sessions,
+    listSchedules: async () => ({ ok: true, schedules: [] }),
+    pauseSchedule: async () => ({ ok: true, schedule: null }),
+    resumeSchedule: async () => ({ ok: true, schedule: null }),
+    deleteSchedule: async () => ({ ok: true }),
     async readSession(id) {
       this.readCalls.push(id);
       await delay(id === "session-a" ? 180 : 15);

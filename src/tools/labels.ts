@@ -43,7 +43,9 @@ export const TOOL_LABELS: Readonly<Record<string, string>> = Object.freeze({
   todo_read: "读取任务清单",
   todo_write: "更新任务清单",
   plan_update: "更新计划",
-  ask_user: "询问用户"
+  ask_user: "询问用户",
+  schedule_list: "列出定时任务",
+  schedule_create: "创建定时任务"
 });
 
 export function toolLabel(name: unknown) {

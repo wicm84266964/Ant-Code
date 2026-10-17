@@ -7,6 +7,7 @@ import { listConfiguredModels, normalizeReasoningEfforts, resolveModelSelection 
 import { createSessionStore } from "../storage/session-store.ts";
 import { collectSessionFiles } from "./files.ts";
 import { applyPermissionMode, normalizePermissionMode, permissionModeSummary } from "./permissions.ts";
+import { deleteDashboardSchedule, listDashboardSchedules, pauseDashboardSchedule, resumeDashboardSchedule, SCHEDULE_TICK_MS, tickDashboardSchedules } from "./runtime/schedules.ts";
 import {
   publicV2ConfigState,
   saveV2DefaultModel,
@@ -346,6 +347,22 @@ export function createDashboardRuntime(options: CreateDashboardRuntimeOptions) {
     });
   }, activePolicy.sweepIntervalMs);
   activeSweepTimer.unref?.();
+  let scheduleTickPromise: Promise<unknown> | null = null;
+  let scheduleRuntime: DashboardFactoryState["runtime"] | null = null;
+  const scheduleTickTimer = setInterval(() => {
+    if (!scheduleRuntime || scheduleTickPromise || shuttingDown) return;
+    scheduleTickPromise = tickDashboardSchedules({
+      cwd: options.cwd,
+      active,
+      get shuttingDown() { return shuttingDown; },
+      runtime: scheduleRuntime
+    }).catch(() => {
+      // The next tick retries. A failed fire is recorded on the schedule itself.
+    }).finally(() => {
+      scheduleTickPromise = null;
+    });
+  }, SCHEDULE_TICK_MS);
+  scheduleTickTimer.unref?.();
 
   const rerunWithSessionConfigLock = (input: DashboardRequestInput, rerun: (lockedInput: DashboardRequestInput) => Promise<unknown>) => {
     const sessionId = String(input?.sessionId ?? "").trim();
@@ -382,7 +399,8 @@ export function createDashboardRuntime(options: CreateDashboardRuntimeOptions) {
     maintainSessionRetention,
     rerunWithSessionConfigLock,
     runtime: null as unknown as DashboardRuntimeApi,
-    activeSweepTimer
+    activeSweepTimer,
+    scheduleTickTimer
   };
   const runtime = {
     cwd: ctx.cwd,
@@ -425,9 +443,14 @@ export function createDashboardRuntime(options: CreateDashboardRuntimeOptions) {
     lifecycleStatus: () => runtimeLifecycleStatus(ctx),
     sweepIdleSessions: () => runtimeSweepIdleSessions(ctx),
     shutdown: (input: DashboardRequestInput = {}) => runtimeShutdown(ctx, input),
-    sessionFiles: (sessionId: string) => runtimeSessionFiles(ctx, sessionId)
+    sessionFiles: (sessionId: string) => runtimeSessionFiles(ctx, sessionId),
+    listSchedules: () => listDashboardSchedules(ctx.cwd),
+    pauseSchedule: (id: string) => pauseDashboardSchedule(ctx.cwd, id),
+    resumeSchedule: (id: string) => resumeDashboardSchedule(ctx.cwd, id),
+    deleteSchedule: (id: string) => deleteDashboardSchedule(ctx.cwd, id)
   };
   ctx.runtime = runtime;
+  scheduleRuntime = runtime;
   Object.defineProperty(ctx, "processTrusted", { get() { return processTrusted; }, set(v) { processTrusted = v; } });
   Object.defineProperty(ctx, "selectedModelId", { get() { return selectedModelId; }, set(v) { selectedModelId = v; } });
   Object.defineProperty(ctx, "selectedProviderId", { get() { return selectedProviderId; }, set(v) { selectedProviderId = v; } });

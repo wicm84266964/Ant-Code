@@ -306,6 +306,8 @@ var els = {
   lightboxCanvas: document.querySelector("#lightbox-canvas"),
   lightboxTable: document.querySelector("#lightbox-table"),
   collapsePreview: document.querySelector("#collapse-preview"),
+  scheduleList: document.querySelector("#schedule-list"),
+  refreshSchedules: document.querySelector("#refresh-schedules"),
   shutdownButton: document.querySelector("#shutdown-button"),
   headerShutdownButton: document.querySelector("#header-shutdown-button"),
   shutdownPanel: document.querySelector("#shutdown-panel"),
@@ -3702,6 +3704,62 @@ async function init3() {
   observeRunStatus3();
   await bootstrapDashboard2();
 }
+async function loadSchedules() {
+  const list = els.scheduleList;
+  if (!(list instanceof HTMLElement)) return;
+  const result = await getJson("/api/schedules").catch(() => ({ ok: false }));
+  const schedules = Array.isArray(result.schedules) ? result.schedules : null;
+  if (!result.ok || !schedules) {
+    list.innerHTML = `<div class="schedule-empty">暂时读不到定时任务</div>`;
+    return;
+  }
+  if (schedules.length === 0) {
+    list.innerHTML = `<div class="schedule-empty">还没有定时任务。在对话里说明时间和要做的事，确认后会保存在这里。</div>`;
+    return;
+  }
+  list.innerHTML = schedules.map((schedule) => scheduleCard(schedule)).join("");
+}
+function scheduleCard(schedule) {
+  const id = escapeAttribute(String(schedule.id ?? ""));
+  const enabled = schedule.enabled !== false;
+  const once = isPlainObject(schedule.cadence) && schedule.cadence.type === "once";
+  const next = formatTime(schedule.nextRunAt);
+  const last = schedule.lastStatus ? `${scheduleStatusLabel(schedule.lastStatus)}` : "尚未运行";
+  const stateLabel = enabled ? `下次 ${next}` : once && schedule.lastStatus ? "已运行一次" : "已暂停";
+  return `
+    <article class="schedule-item${enabled ? "" : " paused"}">
+      <div class="schedule-title">${escapeHtml(String(schedule.title ?? "定时任务"))}</div>
+      <div class="schedule-meta">${escapeHtml(String(schedule.cadenceLabel ?? ""))} · ${escapeHtml(String(schedule.permissionLabel ?? ""))}</div>
+      <div class="schedule-meta">${escapeHtml(stateLabel)} · ${escapeHtml(last)}</div>
+      <div class="schedule-actions">
+        <button type="button" data-schedule-action="${enabled ? "pause" : "resume"}" data-schedule-id="${id}">${enabled ? "暂停" : "恢复"}</button>
+        <button type="button" data-schedule-action="delete" data-schedule-id="${id}">删除</button>
+      </div>
+    </article>
+  `;
+}
+function scheduleStatusLabel(status) {
+  const value = String(status ?? "");
+  if (value === "completed") return "上次完成";
+  if (value === "failed") return "上次失败";
+  if (value === "skipped") return "上次跳过";
+  if (value === "queued") return "已入队";
+  if (value === "interrupted") return "上次已中断";
+  return value;
+}
+async function handleScheduleAction(event) {
+  const button = eventElement(event)?.closest("button[data-schedule-action]");
+  if (!(button instanceof HTMLButtonElement)) return;
+  const id = button.dataset.scheduleId ?? "";
+  const action = button.dataset.scheduleAction ?? "";
+  if (!id || !action) return;
+  if (action === "delete") {
+    await deleteJson(`/api/schedules/${encodeURIComponent(id)}`);
+  } else {
+    await postJson(`/api/schedules/${encodeURIComponent(id)}/${action}`, {});
+  }
+  await loadSchedules();
+}
 async function bootstrapDashboard2() {
   const request = beginScopedRequest("bootstrap");
   renderBootstrapLoading2();
@@ -3735,6 +3793,7 @@ async function bootstrapDashboard2() {
     }
     if (!isCurrentScopedRequest(request)) return;
     await loadSessions();
+    void loadSchedules();
     if (!isCurrentScopedRequest(request)) return;
     await restoreInitialSession();
     if (!isCurrentScopedRequest(request)) return;
@@ -3868,6 +3927,8 @@ function bindEvents3() {
   els.previewResizeHandle?.addEventListener("dblclick", () => {
     setPreviewWidth(PREVIEW_WIDTH_DEFAULT, { persist: true, announce: true });
   });
+  els.refreshSchedules?.addEventListener("click", () => void loadSchedules());
+  els.scheduleList?.addEventListener("click", (event) => void handleScheduleAction(event));
   els.shutdownButton.addEventListener("click", showShutdownPanel3);
   els.headerShutdownButton.addEventListener("click", showShutdownPanel3);
   els.shutdownCancel.addEventListener("click", hideShutdownPanel);
@@ -5059,7 +5120,7 @@ function handleDashboardEvent4(event) {
     handleActivity4(event);
     if (event.status === "waiting") els.runStatus.textContent = "等待确认";
     else if (event.status === "running") els.runStatus.textContent = state.pendingGuide ? "引导中" : "运行中";
-    else if (event.status === "failed") els.runStatus.textContent = "失败";
+    else if (event.status === "failed" && !isRecoverableToolFailure(event)) els.runStatus.textContent = "失败";
     else if (event.rawType === "context_compacted") els.runStatus.textContent = state.running ? "运行中" : "完成";
     return;
   }
@@ -5736,12 +5797,47 @@ function contextBoundaryText5(event = {}) {
   }
   return "聊天内容已压缩，以下回复基于压缩后的上下文继续";
 }
+var TURN_ENDING_ACTIVITY_TYPES = /* @__PURE__ */ new Set([
+  "gateway_error",
+  "gateway_not_configured",
+  "turn_complete",
+  "pdf_vision_error",
+  "turn_interrupted"
+]);
+function isRecoverableToolFailure(activity) {
+  if (!activity || activity.status !== "failed") {
+    return false;
+  }
+  const rawType = String(activity.rawType ?? "");
+  if (TURN_ENDING_ACTIVITY_TYPES.has(rawType) || activity.source === "gateway") {
+    return false;
+  }
+  if (activity.source === "tool" || rawType === "tool_finish" || rawType === "tool_start" || activity.toolName || activity.toolUseId) {
+    return true;
+  }
+  return state.running === true && activity.source !== "session";
+}
+function recoverableToolFailureTitle(activity) {
+  const raw = String(activity.title ?? "").trim().replace(/失败$/, "未成功");
+  const title = raw || "工具未成功";
+  return title.includes("本轮继续") ? title : `${title}，本轮继续`;
+}
 function handleActivity4(activity) {
   if (activity.status === "running" || activity.status === "waiting") {
     updateLiveActivity5(activity);
     return;
   }
   removeLiveActivity5(activity);
+  if (isRecoverableToolFailure(activity)) {
+    appendActivity({
+      ...activity,
+      title: recoverableToolFailureTitle(activity),
+      detail: String(activity.detail ?? ""),
+      severity: "notice",
+      collapsed: true
+    });
+    return;
+  }
   if (activity.status === "failed") {
     keepInterruptedAssistantDrafts();
   }
@@ -9205,7 +9301,9 @@ var TOOL_LABELS = Object.freeze({
   todo_read: "读取任务清单",
   todo_write: "更新任务清单",
   plan_update: "更新计划",
-  ask_user: "询问用户"
+  ask_user: "询问用户",
+  schedule_list: "列出定时任务",
+  schedule_create: "创建定时任务"
 });
 function toolLabel(name) {
   const key = String(name ?? "").trim();
@@ -10583,7 +10681,7 @@ async function hydrateData(root) {
       continue;
     }
     const result = renderStructuredData(kind, raw, vendor);
-    output.innerHTML = result.ok ? `<div class="data-summary">${escapeHtml5(result.summary)}</div>${result.html}${result.tsv ? `<button type="button" class="data-copy" data-copy-tsv="${escapeAttribute7(result.tsv)}">复制为 TSV</button>` : ""}` : result.html;
+    output.innerHTML = result.ok ? `<div class="data-summary">${escapeHtml5(result.summary)}</div>${result.html}${result.tsv ? `<button type="button" class="data-copy" data-copy-tsv="${escapeAttribute6(result.tsv)}">复制为 TSV</button>` : ""}` : result.html;
     bindDeferredTree(output, result.ok ? result.expandTreeNode : void 0);
     frame.dataset.rendered = "true";
     output.querySelectorAll(".data-copy").forEach((button) => {
@@ -10683,7 +10781,7 @@ function loadVendor() {
 function escapeHtml5(value) {
   return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
-function escapeAttribute7(value) {
+function escapeAttribute6(value) {
   return escapeHtml5(value).replace(/`/g, "&#96;");
 }
 
@@ -11149,6 +11247,7 @@ export {
   handlePreviewResizeKeydown3 as handlePreviewResizeKeydown,
   handleReasoningEffortChange3 as handleReasoningEffortChange,
   handleResponsiveFileNavigation3 as handleResponsiveFileNavigation,
+  handleScheduleAction,
   handleSessionAction,
   handleSettingsClick3 as handleSettingsClick,
   handleSettingsFormChange3 as handleSettingsFormChange,
@@ -11192,6 +11291,7 @@ export {
   isMeaningfulCompletedActivity5 as isMeaningfulCompletedActivity,
   isPlainObject,
   isProtectedTranscriptNode4 as isProtectedTranscriptNode,
+  isRecoverableToolFailure,
   isSafeInlineBitmapUrl10 as isSafeInlineBitmapUrl,
   isSteerDraftMessage,
   isSteerDraftReason,
@@ -11204,6 +11304,7 @@ export {
   linkifyFileTextNodes2 as linkifyFileTextNodes,
   liveStatusTitle5 as liveStatusTitle,
   loadOlderTranscript,
+  loadSchedules,
   loadSessions,
   loadTrust,
   localOpenButtonHtml,
@@ -11292,6 +11393,7 @@ export {
   reasoningEffortLabel8 as reasoningEffortLabel,
   reconcileBackgroundSubagentSnapshot,
   reconnectEventsManually3 as reconnectEventsManually,
+  recoverableToolFailureTitle,
   refreshConfigRevisionsAfterConflict8 as refreshConfigRevisionsAfterConflict,
   refreshNewTaskModelState,
   refreshSettingsConfiguration5 as refreshSettingsConfiguration,

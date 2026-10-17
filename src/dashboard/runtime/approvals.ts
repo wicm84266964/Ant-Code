@@ -218,6 +218,28 @@ export function cancelPendingInteractions(state: DashboardActiveSessionState, re
 
 
 export function askQuestion(state: DashboardActiveSessionState, request: Record<string, unknown>) {
+  if (state.unattendedSchedule) {
+    const skipped = {
+      answer: "",
+      selectedChoice: null,
+      selectedChoices: [],
+      customAnswer: null,
+      cancelled: false,
+      skipped: true,
+      reason: "schedule_unattended",
+      workflowReminder: null
+    };
+    appendDashboardEvent(state, {
+      type: "schedule_question_skipped",
+      id: eventId("schedule-question-skipped"),
+      reason: skipped.reason,
+      question: {
+        prompt: String(request?.question ?? request?.prompt ?? "").slice(0, 240)
+      },
+      at: new Date().toISOString()
+    });
+    return skipped;
+  }
   if (state.session?.goal?.enabled) {
     const skipped = goalUnattendedQuestionResult();
     appendDashboardEvent(state, {

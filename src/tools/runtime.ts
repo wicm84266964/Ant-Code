@@ -49,6 +49,7 @@ import {
 } from "./web-tools.ts";
 import { collectShellArtifacts } from "./artifacts.ts";
 import { createWorkflowState, planUpdateTool, recordFileChange, recordValidation, todoReadTool, todoWriteTool } from "./workflow-tools.ts";
+import { scheduleCreateTool, scheduleListTool } from "../schedules/tools.ts";
 
 const HANDLERS = Object.freeze({
   read_file: readFileTool,
@@ -298,6 +299,19 @@ export function createToolRuntime(options: ToolRuntimeOptions) {
 
       if (name === "skill_run") {
         return finishTool(options, name, input, definition, await runSkillForTool(options, input));
+      }
+
+      if (name === "schedule_list") {
+        return finishTool(options, name, input, definition, await scheduleListTool(options.cwd));
+      }
+
+      if (name === "schedule_create") {
+        return finishTool(options, name, input, definition, await scheduleCreateTool(input, {
+          cwd: options.cwd,
+          sessionId: options.parentSessionId,
+          policy: options.policy,
+          askUser: options.askUser
+        }));
       }
 
       if (name === "ask_user") {
