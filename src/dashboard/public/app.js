@@ -7399,7 +7399,14 @@ async function handleSettingsClick3(event) {
     const apiKey = document.querySelector("#custom-source-key")?.value.trim() ?? "";
     await importModelSource({ kind: "custom", gatewayUrl: url, gatewayProtocol: protocol, gatewayApiKey: apiKey, activateFirst: false });
   } else if (action.dataset.action === "refresh-source") {
-    await importModelSource({ kind: "refresh", providerId: action.dataset.profileId, profileId: action.dataset.profileId, activateFirst: false });
+    const profile = (state.gatewayProfiles ?? []).find((item) => item.id === action.dataset.profileId);
+    await importModelSource({
+      kind: "refresh",
+      providerId: action.dataset.profileId,
+      profileId: action.dataset.profileId,
+      saveTarget: profile?.saveTarget === "project" ? "project" : profile?.saveTarget === "global" ? "global" : void 0,
+      activateFirst: false
+    });
   } else if (action.dataset.action === "add-source") {
     showModelConfigPanel5("", "", "add-source");
   } else if (action.dataset.action === "add-model") {

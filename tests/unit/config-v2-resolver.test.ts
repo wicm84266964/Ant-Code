@@ -103,6 +103,53 @@ test("resolves project and environment selections as complete atomic values", ()
   });
 });
 
+test("keeps a legacy gateway id owned by global when the project copy is the same channel", () => {
+  const provider = {
+    displayName: "Old gateway",
+    transport: { protocol: "openai-chat", baseURL: "https://old.example/v1/chat/completions" },
+    auth: { mode: "credential", ref: "OLD_GATEWAY_KEY" },
+    models: [{ id: "only-model" }]
+  };
+  const refreshed = {
+    ...provider,
+    transport: { protocol: "openai-chat", baseURL: "https://old.example/v1" },
+    models: [{ id: "catalog-model" }, { id: "only-model" }]
+  };
+  const resolved = resolveSettingsLayers({
+    global: settingsDocument({
+      providers: { "gw-70d91daa185f": refreshed },
+      selection: { provider: "gw-70d91daa185f", model: "catalog-model" }
+    }),
+    project: settingsDocument({
+      providers: { "gw-70d91daa185f": provider },
+      selection: { provider: "gw-70d91daa185f", model: "only-model" }
+    })
+  });
+
+  assert.equal(resolved.provenance.providers["gw-70d91daa185f"], "global");
+  assert.deepEqual(
+    resolved.namespaces["model-providers"].providers["gw-70d91daa185f"].models.map((model: { id: string }) => model.id),
+    ["catalog-model", "only-model"]
+  );
+  assert.equal(resolved.namespaces["default-model"].selection.model, "only-model");
+});
+
+test("keeps one owner when a named route is copied with the same endpoint", () => {
+  const provider = {
+    displayName: "Work",
+    transport: { protocol: "openai-chat", baseURL: "https://work.example/v1/chat/completions/" },
+    auth: { mode: "none" },
+    models: [{ id: "work-model" }]
+  };
+  const resolved = resolveSettingsLayers({
+    global: settingsDocument({ providers: { work: provider } }),
+    project: settingsDocument({ providers: { work: { ...provider, displayName: "Work project" } } })
+  });
+
+  assert.equal(resolved.provenance.providers.work, "global");
+  assert.equal(resolved.namespaces["model-providers"].providers.work.displayName, "Work");
+});
+
 test("rejects project provider shadowing instead of guessing an owner", () => {
   const globalDocument = settingsDocument({ providers: { shared: deepSeekProvider() } });
   const projectDocument = settingsDocument({ providers: { shared: grokProvider() } });

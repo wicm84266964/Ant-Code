@@ -63,7 +63,17 @@ export async function runtimeImportModelSource(ctx: DashboardFactoryState, input
     if (!probed.ok || !Array.isArray(probed.models) || probed.models.length === 0) {
       return probed.ok ? { ok: false, status: 502, error: "没有读到可调用模型" } : probed;
     }
-    return persistImportedSource(ctx, input, {
+    const scope = refreshProviderScope({
+      requested: input.scope ?? input.saveTarget,
+      owner: config.configV2?.provenance?.providers?.[providerId]
+    });
+    const requested = String(input.scope ?? input.saveTarget ?? "global").trim();
+    return persistImportedSource(ctx, {
+      ...input,
+      scope,
+      saveTarget: scope,
+      expectedRevision: scope === requested ? input.expectedRevision : revisionForScope(config, scope)
+    }, {
       providerId,
       displayName: String(input.displayName ?? profile.label ?? providerId),
       protocol: protocolForProbe,
@@ -191,6 +201,19 @@ function routingRef(value: unknown) {
   const provider = String(record.provider ?? "").trim();
   const model = String(record.model ?? "").trim();
   return provider && model ? { provider, model } : null;
+}
+
+export function refreshProviderScope(input: { requested?: unknown; owner?: unknown }) {
+  const owner = String(input.owner ?? "").trim();
+  if (owner === "global" || owner === "project") return owner;
+  return String(input.requested ?? "").trim() === "project" ? "project" : "global";
+}
+
+function revisionForScope(config: { configV2?: { revisions?: unknown } }, scope: "global" | "project") {
+  const revisions = config.configV2?.revisions;
+  if (!revisions || typeof revisions !== "object") return undefined;
+  const value = (revisions as Record<string, unknown>)[scope];
+  return typeof value === "string" && value.trim() ? value : undefined;
 }
 
 function providerRouteId(name: string) {

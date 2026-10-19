@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 2.0.24 - 2026-10-18
+
+Published 2026-10-18: [v2.0.24](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.24).
+
+Refreshing a previously saved single-model channel updates that channel in place. An older project copy of the same gateway id no longer blocks startup or catalog refresh. Restart Dashboard and refresh the browser. Existing configuration and sessions can continue.
+
 ## 2.0.23 - 2026-10-18
 
 Published 2026-10-18: [v2.0.23](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.23).
