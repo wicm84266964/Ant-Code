@@ -239,19 +239,54 @@ function resolveProviders(layers: SettingsLayers) {
       const previousSource = sources[providerId];
       if (previousSource) {
         const replacesBase = previousSource === "base" && layerName === "global";
-        if (!replacesBase) {
+        // Old single-model profiles used one gw- id for an endpoint and could be
+        // copied into both project and global during later catalog refresh.
+        // Keep the earlier owner when it is the same channel. A different
+        // endpoint must still fail instead of silently picking a winner.
+        if (!replacesBase && !sameOwnedChannel(providers[providerId], rawProvider, providerId)) {
           throw new ConfigV2ResolutionError(
             "CONFIG_V2_PROVIDER_SCOPE_CONFLICT",
             `$[${layerName}].namespaces.model-providers.providers.${providerId}`,
             `provider "${providerId}" is already owned by ${previousSource}; define a distinct provider id instead of shadowing it`
           );
         }
+        if (!replacesBase) continue;
       }
       providers[providerId] = materializeProvider(rawProvider);
       sources[providerId] = layerName;
     }
   }
   return { providers, sources };
+}
+
+function sameOwnedChannel(existing: ConfigV2Provider | undefined, incoming: ConfigV2Provider, providerId: string) {
+  if (!existing) return false;
+  if (/^gw-[a-f0-9]{12}$/i.test(providerId)) return true;
+  const left = providerEndpoint(existing);
+  const right = providerEndpoint(incoming);
+  return Boolean(left.endpoint) && left.protocol === right.protocol && left.endpoint === right.endpoint;
+}
+
+function providerEndpoint(provider: ConfigV2Provider) {
+  const transport = provider.transport;
+  const record = transport && typeof transport === "object" && !Array.isArray(transport)
+    ? transport as JsonObject
+    : {};
+  const protocol = String(record.protocol ?? "openai-chat").trim() || "openai-chat";
+  const baseURL = String(record.baseURL ?? "").trim();
+  return { protocol, endpoint: canonicalProviderEndpoint(baseURL) };
+}
+
+function canonicalProviderEndpoint(value: string) {
+  if (!value) return "";
+  try {
+    const url = new URL(value);
+    url.hash = "";
+    url.pathname = url.pathname.replace(/\/+$/, "") || "/";
+    return url.href;
+  } catch {
+    return value.replace(/\/+$/, "");
+  }
 }
 
 /** @param {Record<string, any>} provider */
