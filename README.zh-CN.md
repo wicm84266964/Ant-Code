@@ -101,6 +101,38 @@ ant-code
 `package.json` 保留 `"private": true`，用于避免误发布到 npm registry。源码仓库
 本身按 AGPL-3.0 开源。
 
+## 升级已有安装
+
+在已经克隆的仓库根目录执行：
+
+```sh
+git pull
+npm ci
+npm run verify:install
+npm link
+ant-code --version
+```
+
+`ant-code --version` 应显示你刚拉到的版本。只执行 `git pull` 不够：依赖和全局
+`ant-code` 命令都要更新。以前做过 `npm link` 的，必须再 link 一次，否则命令可能
+仍指向旧目录。
+
+要停在某一个发布标签，而不是最新 `main`：
+
+```sh
+git fetch --tags
+git checkout v2.0.24
+npm ci
+npm link
+ant-code --version
+```
+
+把 `v2.0.24` 换成要安装的标签。标签列表见
+[Releases](https://github.com/wicm84266964/Ant-Code/releases)。
+
+正在运行的 Dashboard 需要先退出，再重新执行 `ant-code dashboard`，然后刷新浏览器。
+已有网关配置、密钥和会话可以继续使用，不必重建。
+
 ## 配置模型网关
 
 创建或复制本地配置：

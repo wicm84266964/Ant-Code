@@ -113,12 +113,45 @@ ant-code doctor
 ant-code
 ```
 
-`ant-code --version` should print `2.0.14`. If you previously linked a
-JavaScript install, run `npm link` again so the global command points at
-`src/cli/index.ts`.
+`ant-code --version` should print the version you just installed. If you
+previously linked a JavaScript install, run `npm link` again so the global
+command points at `src/cli/index.ts`.
 
 The package keeps `"private": true` to prevent accidental npm registry
 publication. The source repository itself is open under AGPL-3.0.
+
+## Upgrade An Existing Install
+
+From the root of an existing clone:
+
+```sh
+git pull
+npm ci
+npm run verify:install
+npm link
+ant-code --version
+```
+
+`git pull` alone is not enough. Dependencies and the global `ant-code` command
+must be refreshed. Run `npm link` again if you linked this checkout before;
+otherwise the command can still point at an old directory.
+
+To stay on a release tag instead of the latest `main`:
+
+```sh
+git fetch --tags
+git checkout v2.0.24
+npm ci
+npm link
+ant-code --version
+```
+
+Replace `v2.0.24` with the tag you want. Tags are listed in
+[Releases](https://github.com/wicm84266964/Ant-Code/releases).
+
+Stop a running Dashboard, start it again with `ant-code dashboard`, and refresh
+the browser. Existing gateway configuration, credentials, and sessions can
+continue. You do not need to recreate them.
 
 ## Configure A Model Gateway
 
