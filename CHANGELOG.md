@@ -4,6 +4,8 @@
 
 ## 2.0.27 - 2026-10-20
 
+Published 2026-10-20: [v2.0.27](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.27).
+
 Completed replies fold tool bars into the thinking summary, in the order they appeared with each thinking round. Tool bars stay narrow: green for success, red for failure, amber when blocked. Models without a detected thinking list default to low, medium, high, and xhigh. Restart Dashboard and refresh the browser. Existing configuration and sessions can continue.
 
 ## 2.0.26 - 2026-10-20
