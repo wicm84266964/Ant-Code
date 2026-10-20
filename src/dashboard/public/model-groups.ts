@@ -1,4 +1,21 @@
+import { preferPrefixedCatalog } from "../../model-gateway/reasoning-capabilities.ts";
 import type { DashboardGatewayProfile } from "./app-core.ts";
+
+/**
+ * Keep prefixed ids when the live catalog or the registered list already covers the bare name.
+ * Coverage is computed across both lists so a registered bare id does not reappear beside a catalog prefix.
+ */
+export function visibleAgentModelCandidates<T extends { id: string }>(catalogModels: T[], registeredModels: T[]) {
+  const visibleIds = new Set(preferPrefixedCatalog([...catalogModels, ...registeredModels]).map((model) => model.id));
+  const catalog = catalogModels.filter((model) => visibleIds.has(model.id));
+  const registered = registeredModels.filter((model) => visibleIds.has(model.id));
+  const catalogIds = new Set(catalog.map((model) => model.id));
+  return {
+    catalog,
+    registered,
+    registeredOnly: registered.filter((model) => !catalogIds.has(model.id))
+  };
+}
 
 export function modelPickerLabel(model: { id: string; label?: string; switchProfileId: string }, models: Array<{ id: string; label?: string; switchProfileId: string }>) {
   const remark = model.label && model.label !== model.id ? model.label : "";

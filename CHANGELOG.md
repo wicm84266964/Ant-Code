@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 2.0.26 - 2026-10-20
+
+Subagent model menus keep the prefixed model when the same bare name is already covered by the catalog or the saved list. Restart Dashboard and refresh the browser. Existing configuration and sessions can continue.
+
 ## 2.0.25 - 2026-10-20
 
 Published 2026-10-20: [v2.0.25](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.25).

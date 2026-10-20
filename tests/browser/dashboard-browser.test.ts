@@ -684,6 +684,72 @@ test("agent model pickers retain catalog-missing saved ids and keep manual input
   }
 });
 
+test("agent model pickers prefer prefixed ids and hide covered bare names", async () => {
+  const originalStatus = runtime.status;
+  runtime.gatewayProbeCalls.length = 0;
+  runtime.gatewayProbeResponses.length = 0;
+  runtime.gatewayProbeSettledCalls.length = 0;
+  runtime.status = async () => {
+    const status = await originalStatus();
+    status.gatewayProfiles[0] = {
+      ...status.gatewayProfiles[0],
+      models: [
+        { id: "hy3", label: "Bare HY3" },
+        { id: "workbuddy/hy3", label: "Prefixed HY3" },
+        { id: "registered-only", label: "Registered Only" }
+      ],
+      agentModelTiers: { cheap: "legacy-cheap-exact" }
+    };
+    return status;
+  };
+  runtime.gatewayProbeResponses.push({
+    result: {
+      ok: true,
+      message: "prefixed catalog",
+      models: [
+        { id: "hy3", displayName: "Bare HY3" },
+        { id: "workbuddy/hy3", displayName: "Prefixed HY3" },
+        { id: "glm-5.3", displayName: "Bare GLM" },
+        { id: "traework/glm-5.3", displayName: "Prefixed GLM" },
+        { id: "unique-bare", displayName: "Unique Bare" }
+      ]
+    }
+  });
+
+  try {
+    await withDashboardPage({ width: 1280, height: 900 }, async (page) => {
+      await page.locator("#settings-button").click();
+      await page.waitForFunction(() => document.querySelector("#settings-content")?.getAttribute("aria-busy") !== "true");
+      await page.locator(".settings-profile-row", { hasText: "Test source" }).locator("button[data-action='edit-gateway-profile']").click();
+      const form = page.locator("#model-config-form");
+      await form.locator("input[name='routeName']").fill("test-source");
+      const cheapSelect = form.locator("select[data-agent-model-select='agentCheapModel']");
+      await cheapSelect.locator("option[value='workbuddy/hy3']").waitFor({ state: "attached" });
+      assert.equal(await cheapSelect.locator("option[value='hy3']").count(), 0);
+      assert.equal(await cheapSelect.locator("option[value='registered-only']").count(), 1);
+      assert.equal(await cheapSelect.inputValue(), "legacy-cheap-exact");
+
+      await form.locator("button[data-action='probe-gateway']").click();
+      await waitUntil(() => runtime.gatewayProbeSettledCalls.length === 1);
+      await cheapSelect.locator("option[value='unique-bare']").waitFor({ state: "attached" });
+      assert.equal(await cheapSelect.locator("option[value='hy3']").count(), 0);
+      assert.equal(await cheapSelect.locator("option[value='glm-5.3']").count(), 0);
+      assert.equal(await cheapSelect.locator("option[value='workbuddy/hy3']").count(), 1);
+      assert.equal(await cheapSelect.locator("option[value='traework/glm-5.3']").count(), 1);
+      assert.equal(await cheapSelect.locator("option[value='unique-bare']").count(), 1);
+      assert.equal(await cheapSelect.locator("option[value='registered-only']").count(), 1);
+      assert.equal(await form.locator("select[data-agent-model-select='agentStrongModel'] option[value='hy3']").count(), 0);
+      assert.match(await form.locator("#agent-model-catalog-status").textContent(), /已发现 3 个/);
+      assert.equal(await cheapSelect.inputValue(), "legacy-cheap-exact");
+    });
+  } finally {
+    runtime.status = originalStatus;
+    runtime.gatewayProbeCalls.length = 0;
+    runtime.gatewayProbeResponses.length = 0;
+    runtime.gatewayProbeSettledCalls.length = 0;
+  }
+});
+
 test("changed endpoints cannot submit a stale discovered model catalog", async () => {
   const originalStatus = runtime.status;
   runtime.gatewayProbeCalls.length = 0;
