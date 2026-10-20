@@ -100,20 +100,24 @@ export function upsertToolActivityCard(activity: DashboardActivity) {
     : "running";
   const title = status === "failed" ? recoverableToolFailureTitle(activity) : String(activity.title ?? "").trim();
   const detail = String(activity.detail ?? "");
-  const severity = status === "blocked" ? "warning" : "notice";
   if (!state.toolActivityCards) state.toolActivityCards = new Map();
   let card = state.toolActivityCards.get(id);
   if (!card) {
     state.draftEpoch = Number(state.draftEpoch ?? 0) + 1;
-    const node = createActivityCardNode({ title, detail, severity, collapsed: true });
-    card = { node };
+    const node = createActivityCardNode({ title, detail, toolStatus: status, collapsed: true });
+    card = { node, order: nextProcessOrder() };
     state.toolActivityCards.set(id, card);
     hideEmptyState();
     appendTranscriptNode(node);
   } else {
-    updateActivityCardNode(card.node, { title, detail, severity, collapsed: true });
+    updateActivityCardNode(card.node, { title, detail, toolStatus: status, collapsed: true });
   }
   scrollTranscript({ onlyIfNearBottom: true });
+}
+
+function nextProcessOrder() {
+  state.processOrder = Number(state.processOrder ?? 0) + 1;
+  return state.processOrder;
 }
 
 function ensureRoundDraft(round: unknown): DashboardAssistantDraft {
@@ -134,6 +138,7 @@ function ensureRoundDraft(round: unknown): DashboardAssistantDraft {
   const draft: DashboardAssistantDraft = {
     kind: "text",
     round: roundNumber,
+    order: nextProcessOrder(),
     text: "",
     node,
     body: node.querySelector(".message-body"),
@@ -168,12 +173,34 @@ export function renderAssistantDraft(draft: DashboardAssistantDraft, options: Re
   scrollTranscript({ onlyIfNearBottom: true, wasAtBottom });
 }
 
-export function createActivityCardNode(activity: { title?: string; detail?: string; severity?: string; collapsed?: boolean }) {
+export function toolBarTone(status: unknown) {
+  const value = String(status ?? "").trim();
+  if (value === "failed") return "tool-failed";
+  if (value === "blocked") return "tool-blocked";
+  if (value === "running") return "tool-running";
+  return "tool-ok";
+}
+
+export function toolBarMark(status: unknown) {
+  const tone = toolBarTone(status);
+  if (tone === "tool-failed") return "×";
+  if (tone === "tool-blocked") return "!";
+  if (tone === "tool-running") return "•";
+  return "✓";
+}
+
+export function createActivityCardNode(activity: { title?: string; detail?: string; severity?: string; collapsed?: boolean; toolStatus?: string }) {
   const node = document.createElement("div");
-  node.className = `activity-card ${activity.severity ?? "info"}${activity.collapsed ? "" : " open"}`;
+  const open = activity.collapsed ? "" : " open";
+  node.className = activity.toolStatus
+    ? `activity-card tool-bar ${toolBarTone(activity.toolStatus)}${open}`
+    : `activity-card ${activity.severity ?? "info"}${open}`;
+  const mark = activity.toolStatus
+    ? `<span class="tool-mark" aria-hidden="true">${toolBarMark(activity.toolStatus)}</span>`
+    : `<span class="status-dot"></span>`;
   node.innerHTML = `
     <button class="activity-head" type="button" aria-expanded="${activity.collapsed ? "false" : "true"}">
-      <span class="status-dot"></span>
+      ${mark}
       <div class="activity-title">${escapeHtml(activity.title ?? "")}</div>
       <span class="chevron">⌄</span>
     </button>
@@ -187,13 +214,18 @@ export function createActivityCardNode(activity: { title?: string; detail?: stri
   return node;
 }
 
-export function updateActivityCardNode(node: HTMLElement, activity: { title?: string; detail?: string; severity?: string; collapsed?: boolean }) {
-  node.className = `activity-card ${activity.severity ?? "info"}${activity.collapsed ? "" : " open"}`;
+export function updateActivityCardNode(node: HTMLElement, activity: { title?: string; detail?: string; severity?: string; collapsed?: boolean; toolStatus?: string }) {
+  const open = activity.collapsed ? "" : " open";
+  node.className = activity.toolStatus
+    ? `activity-card tool-bar ${toolBarTone(activity.toolStatus)}${open}`
+    : `activity-card ${activity.severity ?? "info"}${open}`;
   const title = node.querySelector(".activity-title");
   const detail = node.querySelector(".activity-detail");
   const toggle = node.querySelector(".activity-head");
+  const mark = node.querySelector(".tool-mark");
   if (title) title.textContent = activity.title ?? "";
   if (detail) detail.textContent = activity.detail ?? "";
+  if (mark && activity.toolStatus) mark.textContent = toolBarMark(activity.toolStatus);
   toggle?.setAttribute("aria-expanded", activity.collapsed ? "false" : "true");
 }
 

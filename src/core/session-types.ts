@@ -77,6 +77,7 @@ export type SessionMessage = {
   toolCallId?: string;
   interruptedDraft?: boolean;
   thinkingProcess?: boolean;
+  processItems?: Array<{ kind: "draft" | "tool"; title: string; text: string; status?: string }>;
   toolActivity?: boolean;
   toolStatus?: string;
   toolDetail?: string;

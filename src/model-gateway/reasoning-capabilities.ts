@@ -61,29 +61,29 @@ const KNOWN_PRESETS: readonly ReasoningPreset[] = Object.freeze([
     id: "deepseek.v4-pro",
     modelIds: Object.freeze(["deepseek-v4-pro"]),
     protocols: Object.freeze(["openai-chat"]),
-    efforts: Object.freeze(["off", "high", "max"]),
+    efforts: Object.freeze(["low", "medium", "high", "xhigh"]),
     defaultEffort: "high"
   }),
   Object.freeze({
     id: "gpt-5.6.sol",
     modelIds: Object.freeze(["gpt-5.6-sol"]),
     protocols: Object.freeze(["openai-chat", "openai-responses"]),
-    efforts: Object.freeze(["none", "low", "medium", "high", "xhigh", "max"]),
-    defaultEffort: null
+    efforts: Object.freeze(["low", "medium", "high", "xhigh"]),
+    defaultEffort: "high"
   }),
   Object.freeze({
     id: "gpt-5.6.terra",
     modelIds: Object.freeze(["gpt-5.6-terra"]),
     protocols: Object.freeze(["openai-chat", "openai-responses"]),
-    efforts: Object.freeze(["none", "low", "medium", "high", "xhigh", "max"]),
-    defaultEffort: null
+    efforts: Object.freeze(["low", "medium", "high", "xhigh"]),
+    defaultEffort: "high"
   }),
   Object.freeze({
     id: "gpt-5.6.luna",
     modelIds: Object.freeze(["gpt-5.6-luna"]),
     protocols: Object.freeze(["openai-chat", "openai-responses"]),
-    efforts: Object.freeze(["none", "low", "medium", "high", "xhigh", "max"]),
-    defaultEffort: null
+    efforts: Object.freeze(["low", "medium", "high", "xhigh"]),
+    defaultEffort: "high"
   })
 ]);
 
@@ -95,7 +95,11 @@ const KNOWN_PRESETS: readonly ReasoningPreset[] = Object.freeze([
  * @param {{ protocol?: unknown }} [context]
  */
 const STANDARD_THINKING_EFFORTS = Object.freeze(["low", "medium", "high", "xhigh"]);
-const MAX_FAMILY_EFFORTS = Object.freeze(["low", "medium", "high", "xhigh", "max"]);
+const AUTOMATIC_MAX_GUESSES = Object.freeze([
+  Object.freeze(["low", "medium", "high", "xhigh", "max"]),
+  Object.freeze(["off", "high", "max"]),
+  Object.freeze(["none", "low", "medium", "high", "xhigh", "max"])
+]);
 
 export function modelFamilyId(modelId: unknown) {
   const id = String(modelId ?? "").trim();
@@ -130,21 +134,23 @@ export function selectableReasoningEffortIds(modelId: unknown, stored: unknown =
 export function standardThinkingEffortIds(modelId: unknown) {
   const id = modelFamilyId(modelId);
   if (!id || isNonThinkingModel(id)) return [];
-  if (isMaxEffortFamily(id)) return [...MAX_FAMILY_EFFORTS];
   if (isThinkingModel(id)) return [...STANDARD_THINKING_EFFORTS];
   return [];
+}
+
+export function isAutomaticMaxGuess(efforts: unknown) {
+  const ids = normalizeEffortInput(efforts).map((effort) => effort.id);
+  return AUTOMATIC_MAX_GUESSES.some((guess) =>
+    guess.length === ids.length && guess.every((id) => ids.includes(id))
+  );
 }
 
 function isNonThinkingModel(id: string) {
   return /embed|embedding|tts|whisper|audio|image|vision-only|moderation|rerank/.test(id);
 }
 
-function isMaxEffortFamily(id: string) {
-  return /deepseek|\bgpt[-_.]|openai|^o[134](?:[-_.]|$)/.test(id);
-}
-
 function isThinkingModel(id: string) {
-  return /grok|claude|qwen|glm|gemini|thinking|reason|\br1\b/.test(id);
+  return /grok|claude|qwen|glm|gemini|thinking|reason|\br1\b|deepseek|\bgpt[-_.]|openai|^o[134](?:[-_.]|$)/.test(id);
 }
 
 export function inferCatalogReasoning(rawModel: unknown, context: { protocol?: unknown } = {}) {

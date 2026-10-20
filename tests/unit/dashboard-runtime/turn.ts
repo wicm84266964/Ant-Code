@@ -1873,7 +1873,7 @@ test("dashboard catalog inference combines declared metadata with exact Grok and
 
     assert.equal(deepSeekCatalog.ok, true);
     const deepSeek = deepSeekCatalog.models.find((model) => model.id === "deepseek-v4-pro");
-    assert.deepEqual(deepSeek.reasoningEfforts.map((effort) => effort.id), ["off", "high", "max"]);
+    assert.deepEqual(deepSeek.reasoningEfforts.map((effort) => effort.id), ["low", "medium", "high", "xhigh"]);
     assert.equal(deepSeek.defaultReasoningEffort, "high");
     assert.equal(deepSeek.reasoningDiscovery.presetId, "deepseek.v4-pro");
     assert.equal(deepSeekCatalog.models.find((model) => model.id === "deepseek-v4-pro-plus").reasoningDiscovery.source, "standard-thinking");

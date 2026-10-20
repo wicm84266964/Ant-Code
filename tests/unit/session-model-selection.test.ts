@@ -40,7 +40,7 @@ test("Config V2 session commits and resumes an exact atomic model selection", as
     const selected = applyRuntimeModelSelection(session.config, {
       provider: "deepseek",
       model: "deepseek-v4-pro",
-      reasoningEffort: "max"
+      reasoningEffort: "high"
     });
     assert.equal(selected.status, "resolved");
     session.config = selected.config;
@@ -52,11 +52,11 @@ test("Config V2 session commits and resumes an exact atomic model selection", as
     let metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
     assert.equal(metadata.metadataVersion, 2);
     assert.equal(metadata.model, "deepseek-v4-pro");
-    assert.equal(metadata.reasoningEffort, "max");
+    assert.equal(metadata.reasoningEffort, "high");
     assert.deepEqual(metadata.modelSelection, {
       provider: "deepseek",
       model: "deepseek-v4-pro",
-      reasoningEffort: "max"
+      reasoningEffort: "high"
     });
     assert.equal(JSON.stringify(metadata).includes("secret"), false);
 
@@ -344,7 +344,7 @@ test("runtime provider switches replace gateway agent routes without dropping ag
   const deepseek = applyRuntimeModelSelection(config, {
     provider: "deepseek",
     model: "deepseek-v4-pro",
-    reasoningEffort: "max"
+    reasoningEffort: "high"
   });
   assert.equal(deepseek.status, "resolved");
   assert.deepEqual(deepseek.config.agents.modelTiers, { strong: "deepseek-route" });
@@ -502,7 +502,7 @@ test("Config V2 resume reports deleted and ambiguous selections instead of using
     modelSelection: {
       provider: "deepseek",
       model: "deepseek-v4-pro",
-      reasoningEffort: "max"
+      reasoningEffort: "high"
     }
   });
   delete initial.namespaces["model-providers"].providers.deepseek;
@@ -554,7 +554,7 @@ test("session selection helpers are pure and preserve unrelated archived metadat
   const patched = patchSessionModelSelectionMetadata(original, {
     provider: "deepseek",
     model: "deepseek-v4-pro",
-    reasoningEffort: "max"
+    reasoningEffort: "high"
   });
 
   assert.deepEqual(original, before);
@@ -562,11 +562,11 @@ test("session selection helpers are pure and preserve unrelated archived metadat
   assert.equal(patched.status, "completed");
   assert.equal(patched.metadataVersion, 2);
   assert.equal(patched.model, "deepseek-v4-pro");
-  assert.equal(patched.reasoningEffort, "max");
+  assert.equal(patched.reasoningEffort, "high");
   assert.deepEqual(patched.modelSelection, {
     provider: "deepseek",
     model: "deepseek-v4-pro",
-    reasoningEffort: "max"
+    reasoningEffort: "high"
   });
 
   const unresolved = resolveSessionModelSelection(config, { model: "not-configured" });
@@ -604,7 +604,7 @@ function settingsDocument(baseURL) {
           }]),
           deepseek: provider("DeepSeek", `${baseURL}?provider=deepseek`, [{
             id: "deepseek-v4-pro",
-            reasoning: reasoning(["off", "high", "max"], "high")
+            reasoning: reasoning(["low", "medium", "high", "xhigh"], "high")
           }])
         }
       },

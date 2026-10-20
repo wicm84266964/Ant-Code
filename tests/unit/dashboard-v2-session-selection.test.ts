@@ -41,7 +41,7 @@ test("Config V2 bottom selection stays isolated per browser tab and never writes
       url: "https://deepseek.example/v1/chat/completions",
       protocol: "openai-chat",
       modelId: "deepseek-v4-pro",
-      efforts: ["off", "high", "max"],
+      efforts: ["low", "medium", "high", "xhigh"],
       defaultEffort: "high",
       secret: "deepseek-tab-secret"
     })
@@ -58,11 +58,11 @@ test("Config V2 bottom selection stays isolated per browser tab and never writes
     clientId: "tab-a",
     providerId: deepseek.providerId,
     modelId: "deepseek-v4-pro",
-    reasoningEffort: "max"
+    reasoningEffort: "high"
   });
   assert.equal(switched.ok, true);
   assert.equal(switched.sessionStatus.model, "deepseek-v4-pro");
-  assert.equal(switched.sessionStatus.reasoningEffort, "max");
+  assert.equal(switched.sessionStatus.reasoningEffort, "high");
 
   const reset = await runtime.switchReasoningEffort({
     clientId: "tab-a",
@@ -93,7 +93,7 @@ test("Config V2 provider switches replace subagent and vision routes atomically"
       clientId: "route-switch",
       providerId: "deepseek",
       modelId: "deepseek-v4-pro",
-      reasoningEffort: "max"
+      reasoningEffort: "high"
     });
     assert.equal(deepseek.ok, true);
     assert.deepEqual(deepseek.agentModelTiers, {
@@ -126,11 +126,11 @@ test("archived Config V2 sessions can clear max effort without changing defaults
   const sessionId = "archived-deepseek-max";
   await store.writeMetadata(sessionMetadata(sessionId, {
     model: "deepseek-v4-pro",
-    reasoningEffort: "max",
+    reasoningEffort: "high",
     modelSelection: {
       provider: "deepseek",
       model: "deepseek-v4-pro",
-      reasoningEffort: "max"
+      reasoningEffort: "high"
     }
   }));
 
@@ -143,7 +143,7 @@ test("archived Config V2 sessions can clear max effort without changing defaults
     assert.deepEqual(selectionStatus(opened.session.sessionStatus), {
       providerId: "deepseek",
       model: "deepseek-v4-pro",
-      reasoningEffort: "max",
+      reasoningEffort: "high",
       selectionResolved: true
     });
 
@@ -151,13 +151,13 @@ test("archived Config V2 sessions can clear max effort without changing defaults
       sessionId,
       providerId: "deepseek",
       modelId: "deepseek-v4-pro",
-      reasoningEffort: "max"
+      reasoningEffort: "high"
     });
     assert.equal(switched.ok, true);
     assert.deepEqual(selectionStatus(switched.sessionStatus), {
       providerId: "deepseek",
       model: "deepseek-v4-pro",
-      reasoningEffort: "max",
+      reasoningEffort: "high",
       selectionResolved: true
     });
 
@@ -165,11 +165,11 @@ test("archived Config V2 sessions can clear max effort without changing defaults
     assert.equal(persisted.ok, true);
     assert.equal(persisted.metadata.metadataVersion, 2);
     assert.equal(persisted.metadata.model, "deepseek-v4-pro");
-    assert.equal(persisted.metadata.reasoningEffort, "max");
+    assert.equal(persisted.metadata.reasoningEffort, "high");
     assert.deepEqual(persisted.metadata.modelSelection, {
       provider: "deepseek",
       model: "deepseek-v4-pro",
-      reasoningEffort: "max"
+      reasoningEffort: "high"
     });
 
     const reset = await runtime.switchReasoningEffort({
@@ -322,13 +322,13 @@ test("active idle session switches survive restart and do not contaminate the ne
       sessionId,
       providerId: "deepseek",
       modelId: "deepseek-v4-pro",
-      reasoningEffort: "max"
+      reasoningEffort: "high"
     });
     assert.equal(switched.ok, true);
     assert.deepEqual(selectionStatus(switched.sessionStatus), {
       providerId: "deepseek",
       model: "deepseek-v4-pro",
-      reasoningEffort: "max",
+      reasoningEffort: "high",
       selectionResolved: true
     });
 
@@ -337,7 +337,7 @@ test("active idle session switches survive restart and do not contaminate the ne
     assert.deepEqual(persisted.metadata.modelSelection, {
       provider: "deepseek",
       model: "deepseek-v4-pro",
-      reasoningEffort: "max"
+      reasoningEffort: "high"
     });
 
     const reset = await runtime.switchReasoningEffort({
@@ -555,7 +555,7 @@ test("deleting an active idle session model preserves its exact unresolved selec
   const originalSelection = {
     provider: "deepseek",
     model: "deepseek-v4-pro",
-    reasoningEffort: "max"
+    reasoningEffort: "high"
   };
   await store.writeMetadata(sessionMetadata(sessionId, {
     metadataVersion: 2,
@@ -640,7 +640,7 @@ test("deleting an archived session provider preserves its exact unresolved selec
   const originalSelection = {
     provider: "deepseek",
     model: "deepseek-v4-pro",
-    reasoningEffort: "max"
+    reasoningEffort: "high"
   };
   await store.writeMetadata(sessionMetadata(sessionId, {
     metadataVersion: 2,
@@ -708,11 +708,11 @@ test("cross-runtime provider deletion cancels queued turns without affecting oth
     store.writeMetadata(sessionMetadata(deepseekSessionId, {
       metadataVersion: 2,
       model: "deepseek-v4-pro",
-      reasoningEffort: "max",
+      reasoningEffort: "high",
       modelSelection: {
         provider: "deepseek",
         model: "deepseek-v4-pro",
-        reasoningEffort: "max"
+        reasoningEffort: "high"
       }
     })),
     store.writeMetadata(sessionMetadata(grokSessionId, {
@@ -828,17 +828,17 @@ test("an in-memory session can save a model switch before its first snapshot exi
       sessionId,
       providerId: "deepseek",
       modelId: "deepseek-v4-pro",
-      reasoningEffort: "max"
+      reasoningEffort: "high"
     });
     assert.equal(switched.ok, true, switched.error);
     assert.equal(switched.sessionStatus.model, "deepseek-v4-pro");
-    assert.equal(switched.sessionStatus.reasoningEffort, "max");
+    assert.equal(switched.sessionStatus.reasoningEffort, "high");
 
     const store = createSessionStore({ cwd: fixture.cwd, env: fixture.env });
     const persisted = await store.readMetadataExact(sessionId);
     assert.equal(persisted.ok, true);
     assert.equal(persisted.metadata.model, "deepseek-v4-pro");
-    assert.equal(persisted.metadata.reasoningEffort, "max");
+    assert.equal(persisted.metadata.reasoningEffort, "high");
 
     const next = await runtime.switchModel({
       sessionId,
@@ -858,7 +858,7 @@ async function activateDeepseekMaxSession(fixture, sessionId) {
   const selection = {
     provider: "deepseek",
     model: "deepseek-v4-pro",
-    reasoningEffort: "max"
+    reasoningEffort: "high"
   };
   await store.writeMetadata(sessionMetadata(sessionId, {
     metadataVersion: 2,

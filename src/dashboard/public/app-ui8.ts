@@ -114,15 +114,19 @@ export function clearAssistantDrafts() {
 
 export function collapseAssistantDrafts(finalText: unknown = "") {
   const capturedDrafts = Array.from(state.assistantDrafts.values()).map(snapshotDraft).filter((draft) => draft.text.trim().length > 0);
+  const capturedTools = Array.from(state.toolActivityCards?.values() ?? []).map(snapshotToolCard);
   clearAssistantDrafts();
-  if (capturedDrafts.length === 0) {
+  state.toolActivityCards?.clear();
+  if (capturedDrafts.length === 0 && capturedTools.length === 0) {
     return;
   }
-  const visibleDrafts = capturedDrafts.filter((draft) => draft.kind === "tool" || !isDuplicateDraftText(draft.text, finalText));
+  const visibleItems = [...capturedDrafts, ...capturedTools]
+    .filter((item) => item.kind === "tool" || !isDuplicateDraftText(item.text, finalText))
+    .sort((left, right) => left.order - right.order);
   const node = document.createElement("details");
-  node.className = `draft-summary${visibleDrafts.length === 0 ? " compact" : ""}`;
+  node.className = `draft-summary${visibleItems.length === 0 ? " compact" : ""}`;
   node.setAttribute("aria-live", "off");
-  const meta = visibleDrafts.length > 0 ? `已收起 · ${visibleDrafts.length} 轮` : "已收起 · 已汇入最终回复";
+  const meta = visibleItems.length > 0 ? `已收起 · ${visibleItems.length} 项` : "已收起 · 已汇入最终回复";
   node.innerHTML = `
     <summary>
       <span class="status-dot"></span>
@@ -130,34 +134,52 @@ export function collapseAssistantDrafts(finalText: unknown = "") {
       <span class="draft-summary-meta">${meta}</span>
     </summary>
     <div class="draft-summary-list">
-      ${visibleDrafts.length === 0 ? `<div class="draft-summary-note">本轮流式草稿已合并到最终回复，没有额外过程内容。</div>` : ""}
+      ${visibleItems.length === 0 ? `<div class="draft-summary-note">本轮流式草稿已合并到最终回复，没有额外过程内容。</div>` : ""}
     </div>
   `;
   const list = node.querySelector(".draft-summary-list");
-  for (const draft of visibleDrafts) {
-    const item = document.createElement("section");
-    item.className = "draft-summary-item";
+  for (const item of visibleItems) {
+    if (item.kind === "tool" && item.node) {
+      item.node.classList.add("folded-process-card");
+      list?.append(item.node);
+      continue;
+    }
+    const section = document.createElement("section");
+    section.className = "draft-summary-item";
     const title = document.createElement("div");
     title.className = "draft-summary-title";
-    title.textContent = draft.kind === "tool" ? "工具" : Number.isFinite(draft.round) ? `思考 · 第 ${draft.round} 轮` : "思考";
-    item.append(title);
-    if (draft.text.trim() && (draft.kind === "tool" || !isDuplicateDraftText(draft.text, finalText))) {
+    title.textContent = item.title;
+    section.append(title);
+    if (item.text.trim()) {
       const body = document.createElement("div");
       body.className = "message-body draft-plain-text";
-      body.textContent = draft.text;
-      item.append(body);
+      body.textContent = item.text;
+      section.append(body);
     }
-    list?.append(item);
+    list?.append(section);
   }
   appendTranscriptNode(node);
   scrollTranscript({ onlyIfNearBottom: true });
 }
 
-function snapshotDraft(draft: { kind?: unknown; round?: unknown; text?: unknown }) {
+function snapshotDraft(draft: { kind?: unknown; round?: unknown; text?: unknown; order?: unknown }) {
+  const round = Number(draft.round);
   return {
-    kind: draft.kind === "tool" ? "tool" : "text",
-    round: draft.round,
-    text: String(draft.text ?? "")
+    kind: "draft" as const,
+    order: Number(draft.order ?? 0),
+    title: Number.isFinite(round) ? `思考 · 第 ${round} 轮` : "思考",
+    text: String(draft.text ?? ""),
+    node: undefined as HTMLElement | undefined
+  };
+}
+
+function snapshotToolCard(card: { node?: HTMLElement; order?: number }) {
+  return {
+    kind: "tool" as const,
+    order: Number(card.order ?? 0),
+    title: card.node?.querySelector(".activity-title")?.textContent ?? "工具",
+    text: card.node?.querySelector(".activity-detail")?.textContent ?? "",
+    node: card.node
   };
 }
 
@@ -200,38 +222,167 @@ export function isThinkingProcessMessage(message: unknown) {
   return isPlainObject(message) && message.thinkingProcess === true && visibleTranscriptRole(String(message.role ?? "")) === "assistant";
 }
 
-export function createThinkingProcessNode(message: unknown) {
+export function createThinkingProcessNode(message: unknown, options: { precedingTools?: unknown[]; finalText?: unknown } = {}) {
   const record = isPlainObject(message) ? message : {};
-  const body = String(messageDisplayText(record.content) ?? "").trim();
+  const finalText = options.finalText ?? "";
+  const stored = thinkingProcessItems(record.processItems, finalText);
+  const items = stored.length > 0
+    ? stored
+    : fallbackThinkingProcessItems(record, options.precedingTools ?? [], finalText);
   const node = document.createElement("details");
-  node.className = "draft-summary";
+  node.className = `draft-summary${items.length === 0 ? " compact" : ""}`;
   node.setAttribute("aria-live", "off");
+  const meta = items.length > 0 ? `已收起 · ${items.length} 项` : "已收起 · 已汇入最终回复";
   node.innerHTML = `
     <summary>
       <span class="status-dot"></span>
       <span>思考过程</span>
-      <span class="draft-summary-meta">${body ? "已收起" : "已收起 · 已汇入最终回复"}</span>
+      <span class="draft-summary-meta">${meta}</span>
     </summary>
-    <div class="draft-summary-list"></div>
+    <div class="draft-summary-list">
+      ${items.length === 0 ? `<div class="draft-summary-note">本轮流式草稿已合并到最终回复，没有额外过程内容。</div>` : ""}
+    </div>
   `;
   const list = node.querySelector(".draft-summary-list");
-  if (body && list) {
-    const item = document.createElement("section");
-    item.className = "draft-summary-item";
+  for (const item of items) {
+    if (item.kind === "tool") {
+      list?.append(createFoldedToolCard(item.title, item.text, item.status));
+      continue;
+    }
+    const section = document.createElement("section");
+    section.className = "draft-summary-item";
     const title = document.createElement("div");
     title.className = "draft-summary-title";
-    title.textContent = "思考";
-    const bodyNode = document.createElement("div");
-    bodyNode.className = "message-body draft-plain-text";
-    bodyNode.textContent = body;
-    item.append(title, bodyNode);
-    list.append(item);
-  } else if (list) {
-    const note = document.createElement("div");
-    note.className = "draft-summary-note";
-    note.textContent = "本轮流式草稿已合并到最终回复，没有额外过程内容。";
-    list.append(note);
+    title.textContent = item.title;
+    section.append(title);
+    if (item.text.trim()) {
+      const body = document.createElement("div");
+      body.className = "message-body draft-plain-text";
+      body.textContent = item.text;
+      section.append(body);
+    }
+    list?.append(section);
   }
+  return node;
+}
+
+export function toolActivityCoveredByProcess(messages: unknown[], index: number) {
+  const list = Array.isArray(messages) ? messages : [];
+  const message = list[index];
+  if (!isPlainObject(message) || message.toolActivity !== true) return false;
+  for (let cursor = index + 1; cursor < list.length; cursor += 1) {
+    const next = list[cursor];
+    if (!isPlainObject(next)) continue;
+    if (next.toolActivity === true || next.role === "tool") continue;
+    return next.thinkingProcess === true;
+  }
+  return false;
+}
+
+export function followingAssistantText(messages: unknown[], index: number) {
+  const list = Array.isArray(messages) ? messages : [];
+  for (let cursor = index + 1; cursor < list.length; cursor += 1) {
+    const message = list[cursor];
+    if (!isPlainObject(message)) continue;
+    if (message.toolActivity === true || message.thinkingProcess === true || message.role === "tool") continue;
+    if (visibleTranscriptRole(String(message.role ?? "")) === "assistant") {
+      return messageDisplayText(message.content);
+    }
+    return "";
+  }
+  return "";
+}
+
+export function precedingToolActivities(messages: unknown[], index: number) {
+  const list = Array.isArray(messages) ? messages : [];
+  const tools = [];
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+    const message = list[cursor];
+    if (!isPlainObject(message)) continue;
+    if (message.toolActivity === true) {
+      tools.unshift(message);
+      continue;
+    }
+    if (message.role === "tool") continue;
+    break;
+  }
+  return tools;
+}
+
+function thinkingProcessItems(value: unknown, finalText: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!isPlainObject(entry)) return [];
+    const kind = entry.kind === "tool" ? "tool" : entry.kind === "draft" ? "draft" : "";
+    if (!kind) return [];
+    const text = String(entry.text ?? "");
+    if (kind === "draft" && (!text.trim() || isDuplicateDraftText(text, finalText))) return [];
+    return [{
+      kind,
+      title: String(entry.title ?? (kind === "tool" ? "工具" : "思考")),
+      text,
+      status: kind === "tool" ? String(entry.status ?? "") : ""
+    }];
+  });
+}
+
+function fallbackThinkingProcessItems(record: Record<string, unknown>, precedingTools: unknown[], finalText: unknown) {
+  const items: Array<{ kind: "draft" | "tool"; title: string; text: string; status: string }> = precedingTools.flatMap((message) => {
+    if (!isPlainObject(message)) return [];
+    return [{
+      kind: "tool" as const,
+      title: String(messageDisplayText(message.content) ?? "工具"),
+      text: String(message.toolDetail ?? ""),
+      status: String(message.toolStatus ?? "")
+    }];
+  });
+  const body = String(messageDisplayText(record.content) ?? "").trim();
+  if (body && !isDuplicateDraftText(body, finalText)) {
+    items.push({ kind: "draft", title: "思考", text: body, status: "" });
+  }
+  return items;
+}
+
+function foldedToolStatus(status: unknown, title: string) {
+  const value = String(status ?? "").trim();
+  if (value === "failed" || value === "blocked" || value === "running" || value === "completed") return value;
+  if (/未成功|失败/.test(title)) return "failed";
+  if (/被阻止/.test(title)) return "blocked";
+  if (title.startsWith("正在")) return "running";
+  return "completed";
+}
+
+function foldedToolTone(status: string) {
+  if (status === "failed") return "tool-failed";
+  if (status === "blocked") return "tool-blocked";
+  if (status === "running") return "tool-running";
+  return "tool-ok";
+}
+
+function foldedToolMark(status: string) {
+  if (status === "failed") return "×";
+  if (status === "blocked") return "!";
+  if (status === "running") return "•";
+  return "✓";
+}
+
+function createFoldedToolCard(title: string, detail: string, status: unknown) {
+  const resolved = foldedToolStatus(status, title);
+  const node = document.createElement("div");
+  node.className = `activity-card tool-bar ${foldedToolTone(resolved)} folded-process-card`;
+  node.innerHTML = `
+    <button class="activity-head" type="button" aria-expanded="false">
+      <span class="tool-mark" aria-hidden="true">${foldedToolMark(resolved)}</span>
+      <div class="activity-title">${escapeHtml(title)}</div>
+      <span class="chevron">⌄</span>
+    </button>
+    <div class="activity-detail">${escapeHtml(detail)}</div>
+  `;
+  const toggle = node.querySelector(".activity-head");
+  toggle?.addEventListener("click", () => {
+    node.classList.toggle("open");
+    toggle.setAttribute("aria-expanded", String(node.classList.contains("open")));
+  });
   return node;
 }
 

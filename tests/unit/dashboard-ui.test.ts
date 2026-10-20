@@ -273,14 +273,16 @@ test("dashboard app folds assistant drafts after the final answer", async () => 
   assert.match(source, /if \(event\.type === "assistant_final"\) \{/);
   assert.match(source, /collapseAssistantDrafts\(event\.text\)/);
   assert.match(source, /<span>思考过程<\/span>/);
-  assert.match(source, /已收起 · \$\{visibleDrafts\.length\} 轮/);
+  assert.match(source, /已收起 · \$\{visibleItems\.length\} 项/);
+  assert.match(collapseSource, /folded-process-card/);
+  assert.match(collapseSource, /item\.kind === "tool"/);
   assert.match(source, /已收起 · 已汇入最终回复/);
   assert.match(source, /draft-summary-note/);
   assert.match(source, /本轮流式草稿已合并到最终回复，没有额外过程内容。/);
   assert.match(collapseSource, /body\.className = "message-body draft-plain-text"/);
-  assert.match(collapseSource, /body\.textContent = draft\.text/);
+  assert.match(collapseSource, /body\.textContent = item\.text/);
   assert.doesNotMatch(collapseSource, /renderMessageText\(/);
-  assert.match(source, /isDuplicateDraftText\(draft\.text, finalText\)/);
+  assert.match(source, /isDuplicateDraftText\(item\.text, finalText\)/);
   assert.doesNotMatch(source, /draft-summary\.js/);
 });
 
@@ -383,7 +385,7 @@ test("dashboard app exposes session actions and reconnects active sessions", asy
   assert.match(source, /keepInterruptedAssistantDrafts\(\{/);
   assert.match(source, /createInterruptedDraftNode\(message\)/);
   assert.match(source, /isThinkingProcessMessage\(message\)/);
-  assert.match(source, /createThinkingProcessNode\(message\)/);
+  assert.match(source, /createThinkingProcessNode\(message, \{/);
   assert.match(source, /function isInterruptedDraftMessage\(/);
   assert.match(source, /message\.interruptedDraft === true/);
   assert.match(source, /已中断 · 非最终回复/);
@@ -528,6 +530,8 @@ test("dashboard message surfaces constrain long draft and final content", async 
   assert.match(css, /\.md-table-wrap\s*\{[^}]*max-width: 100%;[^}]*min-width: 0;[^}]*overflow: auto;/s);
   assert.match(css, /\.draft-summary\s*\{[^}]*width: min\(100%, 860px\);/s);
   assert.match(css, /\.draft-summary-item\s*\{[^}]*min-width: 0;[^}]*overflow: hidden;/s);
+  assert.match(css, /\.activity-card\.tool-bar\.tool-ok\s*\{[^}]*border-left-color: var\(--success\);/s);
+  assert.match(css, /\.activity-card\.tool-bar\.tool-failed\s*\{[^}]*border-left-color: var\(--danger\);/s);
 });
 
 test("dashboard renders context compaction as a transcript divider", async () => {
