@@ -113,12 +113,12 @@ export function clearAssistantDrafts() {
 }
 
 export function collapseAssistantDrafts(finalText: unknown = "") {
-  const capturedDrafts = Array.from(state.assistantDrafts.values()).filter((draft) => String(draft.text ?? "").trim().length > 0);
+  const capturedDrafts = Array.from(state.assistantDrafts.values()).map(snapshotDraft).filter((draft) => draft.text.trim().length > 0);
   clearAssistantDrafts();
   if (capturedDrafts.length === 0) {
     return;
   }
-  const visibleDrafts = capturedDrafts.filter((draft) => !isDuplicateDraftText(draft.text, finalText));
+  const visibleDrafts = capturedDrafts.filter((draft) => draft.kind === "tool" || !isDuplicateDraftText(draft.text, finalText));
   const node = document.createElement("details");
   node.className = `draft-summary${visibleDrafts.length === 0 ? " compact" : ""}`;
   node.setAttribute("aria-live", "off");
@@ -139,15 +139,26 @@ export function collapseAssistantDrafts(finalText: unknown = "") {
     item.className = "draft-summary-item";
     const title = document.createElement("div");
     title.className = "draft-summary-title";
-    title.textContent = Number.isFinite(draft.round) ? `第 ${draft.round} 轮` : "思考";
-    const body = document.createElement("div");
-    body.className = "message-body draft-plain-text";
-    body.textContent = draft.text ?? "";
-    item.append(title, body);
+    title.textContent = draft.kind === "tool" ? "工具" : Number.isFinite(draft.round) ? `思考 · 第 ${draft.round} 轮` : "思考";
+    item.append(title);
+    if (draft.text.trim() && (draft.kind === "tool" || !isDuplicateDraftText(draft.text, finalText))) {
+      const body = document.createElement("div");
+      body.className = "message-body draft-plain-text";
+      body.textContent = draft.text;
+      item.append(body);
+    }
     list?.append(item);
   }
   appendTranscriptNode(node);
   scrollTranscript({ onlyIfNearBottom: true });
+}
+
+function snapshotDraft(draft: { kind?: unknown; round?: unknown; text?: unknown }) {
+  return {
+    kind: draft.kind === "tool" ? "tool" : "text",
+    round: draft.round,
+    text: String(draft.text ?? "")
+  };
 }
 
 const GUIDED_DRAFT_MARKER = "[引导接管前的草稿，非最终回复]";
@@ -209,7 +220,7 @@ export function createThinkingProcessNode(message: unknown) {
     item.className = "draft-summary-item";
     const title = document.createElement("div");
     title.className = "draft-summary-title";
-    title.textContent = "草稿";
+    title.textContent = "思考";
     const bodyNode = document.createElement("div");
     bodyNode.className = "message-body draft-plain-text";
     bodyNode.textContent = body;

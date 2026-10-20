@@ -312,9 +312,14 @@ export async function persistDashboardSessionModelConfig(options: {
       state.session.modelSelection = selection;
       state.persisted = false;
       try {
-        await persistSessionSnapshot(state.session, { env: options.env });
+        // A new Dashboard session can be live before its first snapshot exists.
+        // Model and effort changes must create that snapshot instead of failing closed.
+        await persistSessionSnapshot(state.session, {
+          env: options.env,
+          requireExisting: previous.persisted === true
+        });
         state.persisted = true;
-      } catch {
+      } catch (error) {
         state.session.model = previous.model;
         state.session.modelSelection = previous.modelSelection;
         state.session.config = previous.config;
@@ -324,7 +329,7 @@ export async function persistDashboardSessionModelConfig(options: {
           ok: false,
           status: 500,
           code: "SESSION_MODEL_SELECTION_PERSIST_FAILED",
-          error: "模型选择未能安全保存，操作已回退，请重试"
+          error: sessionModelPersistError(error)
         };
       }
       return { ok: true, state, sessionStatus: sessionStatusSummary(state.session) };
@@ -424,6 +429,14 @@ export function sameRuntimeModelSelection(
 
 
 /** @param {string} sessionId */
+function sessionModelPersistError(error: unknown) {
+  const message = error instanceof Error ? error.message.trim() : "";
+  if (message && message.length <= 180 && !/key|token|secret|authorization|bearer/i.test(message)) {
+    return `模型选择未能安全保存：${message}`;
+  }
+  return "模型选择未能安全保存，操作已回退，请重试";
+}
+
 export function sessionModelSelectionChangedResult(sessionId: string) {
   return {
     ok: false,

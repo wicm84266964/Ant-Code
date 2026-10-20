@@ -43,6 +43,7 @@ import {
   consumeGatewayDiscovery,
   mergeReasoningProbeIntoCatalog,
   probeGatewayConnection,
+  probeCatalogReasoningLevels,
   probeGatewayCredential,
   probeModelReasoningCapabilities,
   rememberGatewayDiscovery,
@@ -1068,4 +1069,116 @@ export async function runtimeProbeVisionCapability(
     reason: probe.reason,
     error: probe.error
   };
+}
+
+export async function runtimeTestCatalogModel(
+  ctx: DashboardFactoryState,
+  input: DashboardRequestInput = {},
+  request: { signal?: AbortSignal } = {}
+) {
+  const config = await loadConfig({ cwd: ctx.cwd, env: await ctx.resolveConfigEnv() });
+  const providerId = String(input.providerId ?? input.profileId ?? "").trim();
+  const modelId = String(input.modelId ?? input.model ?? "").trim();
+  if (!providerId || !modelId) {
+    return { ok: false, status: 400, error: "请选择要测试的模型" };
+  }
+  const profile = gatewayProfilesFromConfig(config).find((item) => item.id === providerId);
+  if (!profile) {
+    return { ok: false, status: 404, error: "找不到这个来源" };
+  }
+  if (!(profile.models ?? []).some((model) => model.id === modelId)) {
+    return { ok: false, status: 400, error: "这个来源里没有这个模型" };
+  }
+  const selected = configForGatewayProfileSelection(config, providerId);
+  const modelConfig = configWithModelSelection(selected, modelId, null, { explicitReasoningEffort: true });
+  const catalogModel = (profile.models ?? []).find((model) => model.id === modelId);
+  const [vision, reasoning] = await Promise.all([
+    probeVisionCapability({
+      config: modelConfig,
+      modelId,
+      catalogModalities: catalogModel?.modalities,
+      signal: request.signal,
+      force: true
+    }),
+    probeCatalogReasoningLevels({
+      providerId,
+      profileId: providerId,
+      modelId,
+      gatewayUrl: profile.gatewayUrl,
+      gatewayProtocol: profile.gatewayProtocol
+    }, modelConfig, request.signal)
+  ]);
+  if (!reasoning.ok && vision.reason === "inconclusive" && vision.supported == null) {
+    return {
+      ok: false,
+      status: reasoning.status ?? 502,
+      error: reasoning.error || vision.error || "模型测试失败"
+    };
+  }
+  const efforts = Array.isArray(reasoning.reasoningEfforts) ? reasoning.reasoningEfforts : [];
+  const warnings = reasoningDiscoveryWarnings(reasoning.reasoningDiscovery);
+  return {
+    ok: true,
+    providerId,
+    modelId,
+    vision: {
+      supported: vision.supported,
+      reason: vision.reason,
+      ...(vision.error ? { error: vision.error } : {})
+    },
+    reasoningEfforts: efforts,
+    reasoningError: reasoning.ok ? undefined : reasoning.error,
+    warnings,
+    summary: catalogTestSummary(vision, efforts, warnings, reasoning.ok ? "" : reasoning.error)
+  };
+}
+
+function reasoningDiscoveryWarnings(discovery: unknown) {
+  if (!discovery || typeof discovery !== "object") return [];
+  const warnings = (discovery as { warnings?: unknown }).warnings;
+  return Array.isArray(warnings) ? warnings.map((item) => String(item ?? "").trim()).filter(Boolean) : [];
+}
+
+function catalogEffortLabel(id: string) {
+  const labels: Record<string, string> = {
+    none: "关闭",
+    off: "关闭",
+    minimal: "最低",
+    low: "低",
+    medium: "中",
+    high: "高",
+    xhigh: "极高",
+    max: "最高",
+    ultra: "极致"
+  };
+  return labels[id] || id;
+}
+
+function catalogTestSummary(
+  vision: { supported: boolean | null; reason: string; error?: string },
+  efforts: unknown[],
+  warnings: string[],
+  reasoningError: string | undefined
+) {
+  const visionText = vision.supported === true
+    ? "视觉：已确认支持"
+    : vision.supported === false
+      ? "视觉：未确认支持"
+      : vision.reason === "skipped"
+        ? "视觉：未发送图片"
+        : `视觉：${vision.error || "没有明确结论"}`;
+  const ids = efforts
+    .map((effort) => {
+      if (typeof effort === "string") return effort;
+      if (effort && typeof effort === "object") return String((effort as { id?: unknown }).id ?? "");
+      return "";
+    })
+    .map((id) => id.trim())
+    .filter(Boolean);
+  const reasoningText = ids.length > 0
+    ? `思考档位：${ids.map(catalogEffortLabel).join("、")}`
+    : reasoningError
+      ? `思考档位：${reasoningError}`
+      : warnings[0] || "没有确认到思考档位";
+  return `${visionText}。${reasoningText}`;
 }

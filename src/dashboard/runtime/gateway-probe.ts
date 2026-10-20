@@ -43,7 +43,8 @@ import {
   inferCatalogReasoning,
   normalizeCapabilityEfforts,
   reasoningProbeEffortIds,
-  standardThinkingEffortIds
+  standardThinkingEffortIds,
+  supportedEffortIdsFromRejection as supportedEffortIdsFromProvider
 } from "../../model-gateway/reasoning-capabilities.ts";
 import { resolveWorkspaceTrust, trustWorkspace as saveWorkspaceTrust } from "../../permissions/workspace-trust.ts";
 import { createSessionStore } from "../../storage/session-store.ts";
@@ -675,6 +676,184 @@ export async function probeModelReasoningCapabilities(input: DashboardRequestInp
   });
 }
 
+const CATALOG_REASONING_PROBE_TIMEOUT_MS = 30_000;
+
+/**
+ * Confirm which thinking levels a saved route actually accepts.
+ * An invalid level is sent first. If the route accepts that too, specific
+ * levels are not claimed. Generated text is discarded.
+ */
+export async function probeCatalogReasoningLevels(
+  input: DashboardRequestInput,
+  config: LabAgentConfig | Record<string, unknown>,
+  signal: AbortSignal | undefined
+): Promise<ReasoningProbeResult> {
+  const lab = isPlainObject(config.lab) ? config.lab : null;
+  const protocol = String(input.gatewayProtocol ?? lab?.gatewayProtocol ?? "openai-chat").trim();
+  if (!["openai-chat", "openai-responses", "lab-agent-gateway"].includes(protocol)) {
+    return {
+      ok: true,
+      outcome: "complete",
+      protocol,
+      modelId: String(input.modelId ?? input.model ?? "").trim(),
+      acceptedEfforts: [],
+      reasoningEfforts: [],
+      reasoningDiscovery: {
+        source: "active-probe",
+        confidence: "probed",
+        path: null,
+        presetId: null,
+        supportsReasoning: null,
+        probeAvailable: false,
+        warnings: [`${protocol} 暂不能探测思考档位`]
+      }
+    };
+  }
+  const modelId = String(input.modelId ?? input.model ?? "").trim();
+  if (!modelId || modelId.length > 160 || /[\r\n\t\0]/.test(modelId)) {
+    return { ok: false, status: 400, error: "请输入有效的模型 ID" };
+  }
+  const rawUrl = String(input.gatewayUrl ?? lab?.gatewayUrl ?? "").trim();
+  const parsed = parseConfigUrl(rawUrl);
+  if (!parsed) {
+    return { ok: false, status: 400, error: "请输入有效的 API 地址" };
+  }
+  const inferenceUrl = gatewayInferenceUrl(parsed, protocol);
+  const gatewayApiKey = probeGatewayCredential(input, config, protocol, parsed.href);
+  const headers: Record<string, string> = {
+    accept: "application/json",
+    "content-type": "application/json"
+  };
+  if (gatewayApiKey) headers.authorization = `Bearer ${gatewayApiKey}`;
+  const requestOptions = {
+    protocol,
+    modelId,
+    inferenceUrl,
+    headers,
+    signal,
+    deadlineAt: Date.now() + CATALOG_REASONING_PROBE_TIMEOUT_MS,
+    maxResponseBytes: MODEL_CAPABILITY_PROBE_MAX_RESPONSE_BYTES
+  };
+  const attempts = [];
+  const control = await sendReasoningCapabilityProbe(
+    requestOptions,
+    reasoningCapabilityProbeBody(protocol, modelId, INVALID_REASONING_EFFORT_PROBE)
+  );
+  attempts.push(publicReasoningProbeAttempt(INVALID_REASONING_EFFORT_PROBE, control));
+  if (control.failure) {
+    return failedReasoningCapabilityProbe({
+      protocol,
+      modelId,
+      inferenceUrl: publicGatewayUrl(inferenceUrl),
+      apiKeyUsed: Boolean(gatewayApiKey),
+      efforts: attempts,
+      failure: control.failure
+    });
+  }
+  const declared = control.supportedEfforts ?? [];
+  if (declared.length > 0) {
+    return completedReasoningCapabilityProbe({
+      protocol,
+      modelId,
+      inferenceUrl: publicGatewayUrl(inferenceUrl),
+      apiKeyUsed: Boolean(gatewayApiKey),
+      outcome: "complete",
+      efforts: attempts,
+      acceptedEfforts: declared,
+      supportsReasoning: declared.some((effort) => !["none", "off"].includes(effort)),
+      warnings: ["路线返回了它接受的思考档位。"]
+    });
+  }
+  if (control.ok) {
+    const thinking = await probeThinkingPresence(requestOptions);
+    attempts.push(...thinking.attempts);
+    return completedReasoningCapabilityProbe({
+      protocol,
+      modelId,
+      inferenceUrl: publicGatewayUrl(inferenceUrl),
+      apiKeyUsed: Boolean(gatewayApiKey),
+      outcome: "complete",
+      efforts: attempts,
+      acceptedEfforts: [],
+      reasoningField: thinking.thinkingField,
+      supportsReasoning: thinking.supportsReasoning,
+      warnings: [
+        "路线接受了无效思考档位，不能确认具体档位。",
+        ...(thinking.supportsReasoning ? ["返回中包含思考内容。"] : ["返回中没有思考内容。"])
+      ]
+    });
+  }
+  const accepted: string[] = [];
+  let supportsReasoning = false;
+  let thinkingField: string | null = null;
+  for (const effort of reasoningProbeEffortIds()) {
+    if (requestOptions.deadlineAt - Date.now() < 1_000) {
+      attempts.push({ effort, status: "indeterminate", httpStatus: null, reasoningField: null, failure: "timeout" });
+      break;
+    }
+    const attempt = await sendReasoningCapabilityProbe(
+      requestOptions,
+      reasoningCapabilityProbeBody(protocol, modelId, effort)
+    );
+    attempts.push(publicReasoningProbeAttempt(effort, attempt));
+    if (attempt.failure) {
+      return failedReasoningCapabilityProbe({
+        protocol,
+        modelId,
+        inferenceUrl: publicGatewayUrl(inferenceUrl),
+        apiKeyUsed: Boolean(gatewayApiKey),
+        efforts: attempts,
+        failure: attempt.failure
+      });
+    }
+    if (attempt.ok) {
+      accepted.push(effort);
+      if (attempt.thinkingPresent) {
+        supportsReasoning = true;
+        thinkingField = effort;
+      }
+    }
+  }
+  return completedReasoningCapabilityProbe({
+    protocol,
+    modelId,
+    inferenceUrl: publicGatewayUrl(inferenceUrl),
+    apiKeyUsed: Boolean(gatewayApiKey),
+    outcome: "complete",
+    efforts: attempts,
+    acceptedEfforts: accepted,
+    reasoningField: thinkingField,
+    supportsReasoning,
+    warnings: accepted.length > 0
+      ? [`已确认 ${accepted.length} 个思考档位。`]
+      : ["路线拒绝了探测过的思考档位。"]
+  });
+}
+
+async function probeThinkingPresence(options: ReasoningProbeRequestOptions) {
+  const attempts = [];
+  let supportsReasoning = false;
+  let thinkingField: string | null = null;
+  for (const encoding of reasoningThinkingProbeRequests(options.protocol, options.modelId)) {
+    if (options.deadlineAt - Date.now() < 1_000) break;
+    const attempt = await sendReasoningCapabilityProbe(options, encoding.body);
+    attempts.push({
+      encoding: encoding.id,
+      status: attempt.failure ? "failed" : attempt.ok ? (attempt.thinkingPresent ? "thinking" : "empty") : "rejected",
+      httpStatus: attempt.httpStatus ?? null,
+      thinkingPresent: attempt.thinkingPresent === true,
+      failure: isPlainObject(attempt.failure) ? attempt.failure.kind : null
+    });
+    if (attempt.failure) break;
+    if (attempt.ok && attempt.thinkingPresent) {
+      supportsReasoning = true;
+      thinkingField = encoding.id;
+      break;
+    }
+  }
+  return { attempts, supportsReasoning, thinkingField };
+}
+
 
 export function reasoningThinkingProbeRequests(protocol: string, modelId: string) {
   if (protocol === "openai-responses") {
@@ -900,6 +1079,7 @@ export async function sendReasoningCapabilityProbe(options: ReasoningProbeReques
       ok: false,
       httpStatus: response.status,
       reasoningField: structuredReasoningErrorField(json),
+      supportedEfforts: supportedEffortIdsFromRejection(json),
       thinkingPresent: false,
       failure: null
     };
@@ -994,6 +1174,10 @@ export function normalizedStructuredReasoningField(value: unknown) {
 
 
 /** @param {string} effort @param {Record<string, any>} attempt */
+export function supportedEffortIdsFromRejection(value: unknown) {
+  return supportedEffortIdsFromProvider(value);
+}
+
 export function publicReasoningProbeAttempt(effort: string, attempt: { ok?: unknown; httpStatus?: unknown; reasoningField?: unknown; failure?: { kind?: unknown } | unknown }) {
   const failure = isPlainObject(attempt.failure) ? attempt.failure : null;
   return {

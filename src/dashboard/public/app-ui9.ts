@@ -656,6 +656,8 @@ export function clearTranscript() {
   state.workflowExpanded = false;
   renderWorkflowStrip();
   state.assistantDrafts.clear();
+  state.toolActivityCards?.clear();
+  state.draftEpoch = 0;
   state.transcriptPaging = {
     cursor: null,
     hasMore: false,

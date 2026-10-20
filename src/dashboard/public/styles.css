@@ -1473,6 +1473,12 @@ button {
   color: var(--accent-2);
 }
 
+.message.draft-message.tool-draft {
+  background: rgba(255, 255, 255, 0.03);
+  border-style: solid;
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
 .message.draft-message.interrupted {
   border-color: rgba(232, 90, 90, 0.35);
   background: rgba(232, 90, 90, 0.06);
@@ -2294,6 +2300,25 @@ button {
   font-size: var(--fs-caption);
   font-weight: 700;
   margin-bottom: 6px;
+}
+
+.draft-tool-lines {
+  color: var(--text-muted);
+  display: grid;
+  font-size: var(--fs-ui);
+  gap: 4px;
+  line-height: 1.45;
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+}
+
+.draft-tool-lines li.done {
+  color: var(--text);
+}
+
+.draft-tool-lines li.failed {
+  color: var(--danger);
 }
 
 .draft-summary-note {
@@ -5885,6 +5910,18 @@ textarea:focus {
 
 .settings-model-row {
   grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.settings-model-test {
+  display: block;
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.settings-model-test.error {
+  color: var(--danger);
 }
 
 .settings-profile-row:last-child,

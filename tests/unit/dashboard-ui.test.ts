@@ -303,7 +303,7 @@ test("dashboard app keeps event streams and drafts scoped to the active turn", a
   assert.match(source, /params\.set\("after", String\(state\.lastEventSequence\)\)/);
   assert.match(source, /function beginEventTurn\(/);
   assert.match(source, /collapseAssistantDrafts\(\)/);
-  assert.match(source, /const roundKey = `\$\{turnKey\}:\$\{Number\.isFinite\(event\.round\)/);
+  assert.match(source, /const roundKey = `\$\{turnKey\}:\$\{roundNumber \?\? "current"\}:\$\{Number\(state\.draftEpoch \?\? 0\)\}`/);
 });
 
 test("dashboard app exposes session actions and reconnects active sessions", async () => {
@@ -686,6 +686,8 @@ test("dashboard composer controls keep confirmations reviewable and critical sta
   assert.match(settingsRender, /data-action="add-source"/);
   assert.match(settingsRender, /data-action="refresh-source"/);
   assert.match(settingsRender, /data-action="use-model"/);
+  assert.match(settingsRender, /data-action="test-model"/);
+  assert.match(app, /savedRouteName/);
   assert.match(settingsRender, /此范围默认/);
   assert.match(settingsRender, /showModelConfigPanel\("", action\.dataset\.profileId \|\| settingsInspectedGatewayProfile\(\)\?\.id \|\| "", "add-model"\)/);
   assert.doesNotMatch(settingsRender, /data-action="add-model"|data-action="edit-model"|data-action="delete-model"/);

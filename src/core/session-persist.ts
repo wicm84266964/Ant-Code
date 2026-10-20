@@ -789,6 +789,22 @@ export function persistableMessage(message: unknown, options: Record<string, unk
   if (message.thinkingProcess === true) {
     persisted.thinkingProcess = true;
   }
+  if (message.toolActivity === true) {
+    persisted.toolActivity = true;
+    if (typeof message.toolStatus === "string" && message.toolStatus) {
+      persisted.toolStatus = message.toolStatus;
+    }
+    if (typeof message.toolName === "string" && message.toolName) {
+      persisted.name = message.toolName;
+    }
+    if (typeof message.toolCallId === "string" && message.toolCallId) {
+      persisted.toolCallId = message.toolCallId;
+    }
+    const detail = typeof message.toolDetail === "string" ? message.toolDetail.trim() : "";
+    if (detail) {
+      persisted.toolDetail = detail;
+    }
+  }
   const thinking = options.includeThinking === false ? null : role === "assistant" ? persistableThinking(message.thinking) : null;
   if (thinking) {
     persisted.thinking = thinking;

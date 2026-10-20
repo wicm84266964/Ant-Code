@@ -77,6 +77,9 @@ export type SessionMessage = {
   toolCallId?: string;
   interruptedDraft?: boolean;
   thinkingProcess?: boolean;
+  toolActivity?: boolean;
+  toolStatus?: string;
+  toolDetail?: string;
   attachments?: SessionAttachmentChip[];
 };
 

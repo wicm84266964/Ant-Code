@@ -53,7 +53,7 @@ export function collectContentSearchHits(messages: unknown, query: string, optio
   const list = Array.isArray(messages) ? messages : [];
   for (let index = 0; index < list.length && hits.length < limit; index += 1) {
     const message = list[index];
-    if (!isPlainObject(message) || message.thinkingProcess === true || message.interruptedDraft === true) {
+    if (!isPlainObject(message) || message.thinkingProcess === true || message.interruptedDraft === true || message.toolActivity === true) {
       continue;
     }
     const role = message.role === "assistant" ? "assistant" : message.role === "user" ? "user" : null;

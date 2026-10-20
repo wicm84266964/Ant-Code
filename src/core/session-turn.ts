@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { readToolEvidence } from "./tool-summary.ts";
+import { toolActivityTranscriptMessage } from "./session-tools.ts";
 import { buildInitialContext } from "../context/builder.ts";
 import { loadConfig, type LabAgentConfig } from "../config/load-config.ts";
 import {
@@ -9,6 +10,7 @@ import {
   resolveSessionModelSelection
 } from "../config-v2/runtime-selection.ts";
 import { formatGatewayError, normalizeGatewayError } from "../model-gateway/errors.ts";
+import { highestListedReasoningEffort, supportedEffortIdsFromRejection } from "../model-gateway/reasoning-capabilities.ts";
 import { createLabModelGateway } from "../model-gateway/client.ts";
 import { listConfiguredModels, listRoutingModels } from "../model-gateway/models.ts";
 import { runHooks } from "../hooks/runner.ts";
@@ -228,6 +230,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
   sessionStore.assertReady();
   let finalOutput = "";
   let outputHealthRetries = 0;
+  let reasoningEffortRetried = false;
 
   try {
   if (options.signal?.aborted) {
@@ -412,6 +415,22 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
     }
 
     if (!response.ok) {
+      const requestedEffort = String(session.config.reasoningEffort ?? "").trim().toLowerCase();
+      const supportedEfforts = supportedEffortIdsFromRejection(response.error);
+      const fallbackEffort = !reasoningEffortRetried
+        ? highestListedReasoningEffort(supportedEfforts, requestedEffort)
+        : "";
+      if (fallbackEffort && requestedEffort && !supportedEfforts.includes(requestedEffort)) {
+        reasoningEffortRetried = true;
+        session.config.reasoningEffort = fallbackEffort;
+        await emitEvent(eventOptions, {
+          type: "gateway_retry",
+          round: round + 1,
+          stage: "reasoning_effort",
+          message: `思考档位 ${requestedEffort} 不被这条路线接受，已改用 ${fallbackEffort}`
+        });
+        continue;
+      }
       metadata.gatewayErrors.push(response.error?.code ?? "GATEWAY_ERROR");
       recordGatewayRoundError(metadata, {
         round: round + 1,
@@ -716,6 +735,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
       messages.push(toolMessage);
       turnMessages.push(toolMessage);
       transcriptTurnMessages.push(toolMessage);
+      transcriptTurnMessages.push(toolActivityTranscriptMessage(result));
     }
   }
 

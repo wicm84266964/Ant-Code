@@ -84,35 +84,67 @@ export function resetTranscriptWindow() {
 
 export function appendAssistantDraft(event: DashboardStreamEvent) {
   const wasAtBottom = isTranscriptNearBottom();
-  hideEmptyState();
-  const turnKey = typeof event.turnId === "string" && event.turnId ? event.turnId : state.activeTurnId || "turn";
-  const roundKey = `${turnKey}:${Number.isFinite(event.round) ? String(event.round) : "current"}`;
-  let draft = state.assistantDrafts.get(roundKey);
-  if (!draft) {
-    const node = document.createElement("article");
-    node.className = "message assistant draft-message";
-    node.setAttribute("aria-live", "off");
-    const label = Number.isFinite(event.round) ? `思考 · 第 ${event.round} 轮` : "思考";
-    node.innerHTML = `
-      <div class="message-label">${escapeHtml(label)}</div>
-      <div class="message-body draft-plain-text"></div>
-    `;
-    draft = {
-      round: Number.isFinite(event.round) ? event.round : null,
-      text: "",
-      node,
-      body: node.querySelector(".message-body"),
-      renderFrame: null,
-      renderedLength: 0
-    };
-    state.assistantDrafts.set(roundKey, draft);
-    appendTranscriptNode(node);
-  }
+  const draft = ensureRoundDraft(event.round);
   draft.text += String(event.text ?? "");
   scheduleDraftRender(draft);
   scrollTranscript({ onlyIfNearBottom: true, wasAtBottom });
   setLiveTitle("正在生成回复");
 }
+
+export function upsertToolActivityCard(activity: DashboardActivity) {
+  if (activity.toolDraft !== true) return;
+  const id = String(activity.toolUseId ?? activity.coalesceKey ?? "").trim();
+  if (!id) return;
+  const status = activity.toolDraftStatus === "completed" || activity.toolDraftStatus === "failed" || activity.toolDraftStatus === "blocked"
+    ? activity.toolDraftStatus
+    : "running";
+  const title = status === "failed" ? recoverableToolFailureTitle(activity) : String(activity.title ?? "").trim();
+  const detail = String(activity.detail ?? "");
+  const severity = status === "blocked" ? "warning" : "notice";
+  if (!state.toolActivityCards) state.toolActivityCards = new Map();
+  let card = state.toolActivityCards.get(id);
+  if (!card) {
+    state.draftEpoch = Number(state.draftEpoch ?? 0) + 1;
+    const node = createActivityCardNode({ title, detail, severity, collapsed: true });
+    card = { node };
+    state.toolActivityCards.set(id, card);
+    hideEmptyState();
+    appendTranscriptNode(node);
+  } else {
+    updateActivityCardNode(card.node, { title, detail, severity, collapsed: true });
+  }
+  scrollTranscript({ onlyIfNearBottom: true });
+}
+
+function ensureRoundDraft(round: unknown): DashboardAssistantDraft {
+  hideEmptyState();
+  const roundNumber = typeof round === "number" && Number.isFinite(round) ? round : null;
+  const turnKey = state.activeTurnId || "turn";
+  const roundKey = `${turnKey}:${roundNumber ?? "current"}:${Number(state.draftEpoch ?? 0)}`;
+  const existing = state.assistantDrafts.get(roundKey);
+  if (existing) return existing;
+  const node = document.createElement("article");
+  node.className = "message assistant draft-message";
+  node.setAttribute("aria-live", "off");
+  const label = roundNumber != null ? `思考 · 第 ${roundNumber} 轮` : "思考";
+  node.innerHTML = `
+    <div class="message-label">${escapeHtml(label)}</div>
+    <div class="message-body draft-plain-text"></div>
+  `;
+  const draft: DashboardAssistantDraft = {
+    kind: "text",
+    round: roundNumber,
+    text: "",
+    node,
+    body: node.querySelector(".message-body"),
+    renderedLength: 0
+  };
+  state.assistantDrafts.set(roundKey, draft);
+  appendTranscriptNode(node);
+  return draft;
+}
+
+
 
 export type DashboardAssistantDraft = {
   text?: string;
@@ -136,23 +168,38 @@ export function renderAssistantDraft(draft: DashboardAssistantDraft, options: Re
   scrollTranscript({ onlyIfNearBottom: true, wasAtBottom });
 }
 
-export function appendActivity(activity: DashboardActivity) {
-  const wasAtBottom = isTranscriptNearBottom();
+export function createActivityCardNode(activity: { title?: string; detail?: string; severity?: string; collapsed?: boolean }) {
   const node = document.createElement("div");
   node.className = `activity-card ${activity.severity ?? "info"}${activity.collapsed ? "" : " open"}`;
   node.innerHTML = `
     <button class="activity-head" type="button" aria-expanded="${activity.collapsed ? "false" : "true"}">
       <span class="status-dot"></span>
-      <div class="activity-title">${escapeHtml(activity.title)}</div>
+      <div class="activity-title">${escapeHtml(activity.title ?? "")}</div>
       <span class="chevron">⌄</span>
     </button>
     <div class="activity-detail">${escapeHtml(activity.detail ?? "")}</div>
   `;
   const toggle = node.querySelector(".activity-head");
-  toggle.addEventListener("click", () => {
+  toggle?.addEventListener("click", () => {
     node.classList.toggle("open");
     toggle.setAttribute("aria-expanded", String(node.classList.contains("open")));
   });
+  return node;
+}
+
+export function updateActivityCardNode(node: HTMLElement, activity: { title?: string; detail?: string; severity?: string; collapsed?: boolean }) {
+  node.className = `activity-card ${activity.severity ?? "info"}${activity.collapsed ? "" : " open"}`;
+  const title = node.querySelector(".activity-title");
+  const detail = node.querySelector(".activity-detail");
+  const toggle = node.querySelector(".activity-head");
+  if (title) title.textContent = activity.title ?? "";
+  if (detail) detail.textContent = activity.detail ?? "";
+  toggle?.setAttribute("aria-expanded", activity.collapsed ? "false" : "true");
+}
+
+export function appendActivity(activity: DashboardActivity) {
+  const wasAtBottom = isTranscriptNearBottom();
+  const node = createActivityCardNode(activity);
   appendTranscriptNode(node);
   scrollTranscript({ onlyIfNearBottom: true, wasAtBottom });
   if (activity.severity === "danger" || activity.severity === "warning") announceStatus(activity.title);
@@ -216,11 +263,17 @@ export function recoverableToolFailureTitle(activity: DashboardActivity) {
 }
 
 export function handleActivity(activity: DashboardActivity) {
+  if (activity.toolDraft === true) {
+    upsertToolActivityCard(activity);
+  }
   if (activity.status === "running" || activity.status === "waiting") {
     updateLiveActivity(activity);
     return;
   }
   removeLiveActivity(activity);
+  if (activity.toolDraft === true && activity.rawType === "tool_finish") {
+    return;
+  }
   if (isRecoverableToolFailure(activity)) {
     appendActivity({
       ...activity,

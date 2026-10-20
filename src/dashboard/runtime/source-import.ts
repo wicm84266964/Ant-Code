@@ -75,7 +75,7 @@ export async function runtimeImportModelSource(ctx: DashboardFactoryState, input
       expectedRevision: scope === requested ? input.expectedRevision : revisionForScope(config, scope)
     }, {
       providerId,
-      displayName: String(input.displayName ?? profile.label ?? providerId),
+      displayName: savedRouteDisplayName(input.displayName ?? input.routeName, profile.label, providerId),
       protocol: protocolForProbe,
       baseURL: String(probed.suggestedGatewayUrl ?? gatewayUrlForProbe),
       authMode: official ? "ambient" : "credential",
@@ -214,6 +214,14 @@ function revisionForScope(config: { configV2?: { revisions?: unknown } }, scope:
   if (!revisions || typeof revisions !== "object") return undefined;
   const value = (revisions as Record<string, unknown>)[scope];
   return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+export function savedRouteDisplayName(requested: unknown, current: unknown, fallback: unknown) {
+  const name = String(requested ?? "").trim();
+  if (name) return name;
+  const existing = String(current ?? "").trim();
+  if (existing) return existing;
+  return String(fallback ?? "").trim();
 }
 
 function providerRouteId(name: string) {

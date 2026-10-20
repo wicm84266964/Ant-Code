@@ -19,6 +19,7 @@ import { formatToolResultForModel } from "../tools/result-view.ts";
 import { extractImagePayloads, registerVisualEvidence } from "./visual-evidence.ts";
 import { countLineChanges, previewUnifiedDiff } from "../tools/diff.ts";
 import { createToolRuntime } from "../tools/runtime.ts";
+import { toolLabel } from "../tools/labels.ts";
 import { createWorkflowState, formatWorkflowContext, summarizeWorkflow, syncWorkflowCompletionOnFinal, type WorkflowState } from "../tools/workflow-tools.ts";
 import { getAgentProfile } from "../agents/profiles.ts";
 import { resolveMaxParallelReadonlyAgentRuns } from "../agents/orchestration-config.ts";
@@ -264,14 +265,65 @@ export async function executeOneToolCall(call: import("../model-gateway/protocol
       ? previewUnifiedDiff((execution.result as { diff?: unknown }).diff, 40)
       : null,
     resultBytes: serialized.bytes,
-    truncated: serialized.truncated
+    truncated: serialized.truncated,
+    resultPreview: toolResultPreview(serialized.content)
   });
   return {
     toolCallId: call.id,
     name: call.name,
     content: serialized.content,
     truncated: serialized.truncated,
-    interrupted: execution.interrupted === true
+    interrupted: execution.interrupted === true,
+    display: {
+      ok: execution.ok === true,
+      blocked: execution.blocked === true,
+      errorCode: typeof execution.error === "object" && execution.error ? String(execution.error.code ?? "") : "",
+      resultBytes: serialized.bytes,
+      truncated: serialized.truncated === true,
+      preview: toolResultPreview(serialized.content)
+    }
+  };
+}
+
+const TOOL_ACTIVITY_PREVIEW_CHARS = 1000;
+
+export function toolResultPreview(text: string) {
+  const normalized = redactPersistedText(text).replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  if (!normalized) return "";
+  if (normalized.length <= TOOL_ACTIVITY_PREVIEW_CHARS) return normalized;
+  return `${normalized.slice(0, TOOL_ACTIVITY_PREVIEW_CHARS).trimEnd()}\n…展开内容已截断，完整结果只留给模型`;
+}
+
+export function toolActivityTranscriptMessage(result: {
+  toolCallId?: string;
+  name?: string;
+  display?: { ok?: boolean; blocked?: boolean; errorCode?: string; resultBytes?: number; truncated?: boolean; preview?: string };
+}) {
+  const display = result.display ?? {};
+  const status = display.blocked ? "blocked" : display.ok ? "completed" : "failed";
+  const label = toolLabel(result.name);
+  const title = status === "completed"
+    ? `${label}已完成`
+    : status === "blocked"
+      ? `${label}被阻止`
+      : `${label}未成功，本轮继续`;
+  const detail = [
+    status === "blocked" ? "已被权限策略阻止" : null,
+    status === "completed" ? "执行成功" : null,
+    status === "failed" ? display.errorCode || "执行失败" : null,
+    Number.isFinite(display.resultBytes) ? `${display.resultBytes} 字节结果` : null,
+    display.truncated ? "结果已截断" : null
+  ].filter(Boolean).join(" · ");
+  const preview = String(display.preview ?? "").trim();
+  const shown = preview ? `${detail}\n\n${preview}` : detail;
+  return {
+    role: "assistant",
+    toolActivity: true,
+    toolCallId: result.toolCallId ?? "",
+    toolName: result.name ?? "",
+    toolStatus: status,
+    toolDetail: shown,
+    content: [{ type: "text", text: title }]
   };
 }
 

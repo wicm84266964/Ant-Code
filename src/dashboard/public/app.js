@@ -186,12 +186,16 @@ var state = {
   modelCapabilityProbeRunning: false,
   modelCapabilityProbeError: "",
   modelCapabilityDiscoveryToken: "",
+  modelCatalogTestKey: "",
+  modelCatalogTestResults: {},
   modelSwitching: false,
   reasoningEffortSwitching: false,
   deletingModelKey: "",
   deleteConfirmModelKey: "",
   deletingGatewayProfileId: "",
   deleteConfirmGatewayProfileId: "",
+  draftEpoch: 0,
+  toolActivityCards: /* @__PURE__ */ new Map(),
   assistantDrafts: /* @__PURE__ */ new Map(),
   transcriptPaging: {
     cursor: null,
@@ -3246,6 +3250,8 @@ function clearTranscript() {
   state.workflowExpanded = false;
   renderWorkflowStrip2();
   state.assistantDrafts.clear();
+  state.toolActivityCards?.clear();
+  state.draftEpoch = 0;
   state.transcriptPaging = {
     cursor: null,
     hasMore: false,
@@ -5284,6 +5290,17 @@ function renderTranscriptMessages(messages, options = {}) {
   const railEntries = [];
   const list = Array.isArray(messages) ? messages : [];
   for (const message of list) {
+    if (isPlainObject(message) && message.toolActivity === true) {
+      const node2 = createActivityCardNode({
+        title: messageDisplayText2(message.content),
+        detail: String(message.toolDetail ?? ""),
+        severity: message.toolStatus === "blocked" ? "warning" : "notice",
+        collapsed: true
+      });
+      node2.setAttribute("aria-live", "off");
+      nodes.push(node2);
+      continue;
+    }
     if (isThinkingProcessMessage(message)) {
       const node2 = createThinkingProcessNode(message);
       node2.setAttribute("aria-live", "off");
@@ -5870,34 +5887,60 @@ function resetTranscriptWindow2() {
 }
 function appendAssistantDraft4(event) {
   const wasAtBottom = isTranscriptNearBottom2();
-  hideEmptyState2();
-  const turnKey = typeof event.turnId === "string" && event.turnId ? event.turnId : state.activeTurnId || "turn";
-  const roundKey = `${turnKey}:${Number.isFinite(event.round) ? String(event.round) : "current"}`;
-  let draft = state.assistantDrafts.get(roundKey);
-  if (!draft) {
-    const node = document.createElement("article");
-    node.className = "message assistant draft-message";
-    node.setAttribute("aria-live", "off");
-    const label = Number.isFinite(event.round) ? `思考 · 第 ${event.round} 轮` : "思考";
-    node.innerHTML = `
-      <div class="message-label">${escapeHtml(label)}</div>
-      <div class="message-body draft-plain-text"></div>
-    `;
-    draft = {
-      round: Number.isFinite(event.round) ? event.round : null,
-      text: "",
-      node,
-      body: node.querySelector(".message-body"),
-      renderFrame: null,
-      renderedLength: 0
-    };
-    state.assistantDrafts.set(roundKey, draft);
-    appendTranscriptNode4(node);
-  }
+  const draft = ensureRoundDraft(event.round);
   draft.text += String(event.text ?? "");
   scheduleDraftRender5(draft);
   scrollTranscript({ onlyIfNearBottom: true, wasAtBottom });
   setLiveTitle("正在生成回复");
+}
+function upsertToolActivityCard(activity) {
+  if (activity.toolDraft !== true) return;
+  const id = String(activity.toolUseId ?? activity.coalesceKey ?? "").trim();
+  if (!id) return;
+  const status = activity.toolDraftStatus === "completed" || activity.toolDraftStatus === "failed" || activity.toolDraftStatus === "blocked" ? activity.toolDraftStatus : "running";
+  const title = status === "failed" ? recoverableToolFailureTitle(activity) : String(activity.title ?? "").trim();
+  const detail = String(activity.detail ?? "");
+  const severity = status === "blocked" ? "warning" : "notice";
+  if (!state.toolActivityCards) state.toolActivityCards = /* @__PURE__ */ new Map();
+  let card = state.toolActivityCards.get(id);
+  if (!card) {
+    state.draftEpoch = Number(state.draftEpoch ?? 0) + 1;
+    const node = createActivityCardNode({ title, detail, severity, collapsed: true });
+    card = { node };
+    state.toolActivityCards.set(id, card);
+    hideEmptyState2();
+    appendTranscriptNode4(node);
+  } else {
+    updateActivityCardNode(card.node, { title, detail, severity, collapsed: true });
+  }
+  scrollTranscript({ onlyIfNearBottom: true });
+}
+function ensureRoundDraft(round) {
+  hideEmptyState2();
+  const roundNumber = typeof round === "number" && Number.isFinite(round) ? round : null;
+  const turnKey = state.activeTurnId || "turn";
+  const roundKey = `${turnKey}:${roundNumber ?? "current"}:${Number(state.draftEpoch ?? 0)}`;
+  const existing = state.assistantDrafts.get(roundKey);
+  if (existing) return existing;
+  const node = document.createElement("article");
+  node.className = "message assistant draft-message";
+  node.setAttribute("aria-live", "off");
+  const label = roundNumber != null ? `思考 · 第 ${roundNumber} 轮` : "思考";
+  node.innerHTML = `
+    <div class="message-label">${escapeHtml(label)}</div>
+    <div class="message-body draft-plain-text"></div>
+  `;
+  const draft = {
+    kind: "text",
+    round: roundNumber,
+    text: "",
+    node,
+    body: node.querySelector(".message-body"),
+    renderedLength: 0
+  };
+  state.assistantDrafts.set(roundKey, draft);
+  appendTranscriptNode4(node);
+  return draft;
 }
 function scheduleDraftRender5(draft) {
   scheduleAnimationFrameOnce2(draft, "renderFrame", () => renderAssistantDraft5(draft));
@@ -5911,23 +5954,36 @@ function renderAssistantDraft5(draft, options = {}) {
   draft.renderedLength = appendPlainDraftDelta3(draft.body, draft.text, draft.renderedLength);
   scrollTranscript({ onlyIfNearBottom: true, wasAtBottom });
 }
-function appendActivity(activity) {
-  const wasAtBottom = isTranscriptNearBottom2();
+function createActivityCardNode(activity) {
   const node = document.createElement("div");
   node.className = `activity-card ${activity.severity ?? "info"}${activity.collapsed ? "" : " open"}`;
   node.innerHTML = `
     <button class="activity-head" type="button" aria-expanded="${activity.collapsed ? "false" : "true"}">
       <span class="status-dot"></span>
-      <div class="activity-title">${escapeHtml(activity.title)}</div>
+      <div class="activity-title">${escapeHtml(activity.title ?? "")}</div>
       <span class="chevron">⌄</span>
     </button>
     <div class="activity-detail">${escapeHtml(activity.detail ?? "")}</div>
   `;
   const toggle = node.querySelector(".activity-head");
-  toggle.addEventListener("click", () => {
+  toggle?.addEventListener("click", () => {
     node.classList.toggle("open");
     toggle.setAttribute("aria-expanded", String(node.classList.contains("open")));
   });
+  return node;
+}
+function updateActivityCardNode(node, activity) {
+  node.className = `activity-card ${activity.severity ?? "info"}${activity.collapsed ? "" : " open"}`;
+  const title = node.querySelector(".activity-title");
+  const detail = node.querySelector(".activity-detail");
+  const toggle = node.querySelector(".activity-head");
+  if (title) title.textContent = activity.title ?? "";
+  if (detail) detail.textContent = activity.detail ?? "";
+  toggle?.setAttribute("aria-expanded", activity.collapsed ? "false" : "true");
+}
+function appendActivity(activity) {
+  const wasAtBottom = isTranscriptNearBottom2();
+  const node = createActivityCardNode(activity);
   appendTranscriptNode4(node);
   scrollTranscript({ onlyIfNearBottom: true, wasAtBottom });
   if (activity.severity === "danger" || activity.severity === "warning") announceStatus(activity.title);
@@ -5979,11 +6035,17 @@ function recoverableToolFailureTitle(activity) {
   return title.includes("本轮继续") ? title : `${title}，本轮继续`;
 }
 function handleActivity4(activity) {
+  if (activity.toolDraft === true) {
+    upsertToolActivityCard(activity);
+  }
   if (activity.status === "running" || activity.status === "waiting") {
     updateLiveActivity5(activity);
     return;
   }
   removeLiveActivity5(activity);
+  if (activity.toolDraft === true && activity.rawType === "tool_finish") {
+    return;
+  }
   if (isRecoverableToolFailure(activity)) {
     appendActivity({
       ...activity,
@@ -7105,6 +7167,10 @@ function settingsModelHtml6(model, profile, modelCount) {
   const context = Number.isFinite(model.contextTokens) ? `${formatTokenCount6(model.contextTokens)} 上下文` : "";
   const scopedDefault = state.modelDefaultSelections[state.modelDefaultScope];
   const isScopedDefault = scopedDefault?.provider === (profile?.id || "") && scopedDefault?.model === model.id;
+  const testKey = providerModelKey6(profile?.id || "", model.id);
+  const testResult = state.modelCatalogTestResults[testKey];
+  const testing = state.modelCatalogTestKey === testKey;
+  const testBusy = Boolean(state.modelCatalogTestKey);
   return `
     <div class="settings-model-row${isScopedDefault ? " scope-default" : ""}">
       <div class="settings-row-main">
@@ -7118,8 +7184,10 @@ function settingsModelHtml6(model, profile, modelCount) {
           ${context ? `<span>${escapeHtml(context)}</span>` : ""}
           ${efforts.length > 0 ? `<span>思考 ${escapeHtml(efforts.map((effort) => effort.label).join(" / "))}</span>` : ""}
         </div>
+        ${testResult?.message ? `<small class="settings-model-test ${escapeAttribute(testResult.tone)}">${escapeHtml(testResult.message)}</small>` : ""}
       </div>
       <div class="settings-row-actions">
+        <button type="button" data-action="test-model" data-model-id="${escapeAttribute(model.id)}" data-profile-id="${escapeAttribute(profile?.id || "")}" title="发送一张程序内小图，并探测这条路线接受的思考档位。可能产生少量用量。" ${testBusy || state.settingsRefreshing || state.running ? "disabled" : ""}>${testing ? "测试中" : "测试"}</button>
         <button type="button" data-action="use-model" data-model-id="${escapeAttribute(model.id)}" data-profile-id="${escapeAttribute(profile?.id || "")}" ${isScopedDefault || state.settingsRefreshing || state.running || state.modelSwitching ? "disabled" : ""}>${isScopedDefault ? "已设为默认" : "设为默认"}</button>
       </div>
     </div>
@@ -7359,6 +7427,36 @@ async function saveSettingsConfig3(event) {
     announceStatus(state.settingsFeedback.message);
   }
 }
+async function testCatalogModel(modelId, providerId) {
+  const key = providerModelKey6(providerId || "", modelId || "");
+  if (!modelId || !providerId || state.modelCatalogTestKey) return;
+  state.modelCatalogTestKey = key;
+  state.modelCatalogTestResults = {
+    ...state.modelCatalogTestResults,
+    [key]: { tone: "", message: "正在测试视觉和思考档位…" }
+  };
+  renderSettingsView3();
+  try {
+    const result = await postJson("/api/model-catalog/test", {
+      providerId,
+      profileId: providerId,
+      modelId
+    }, { timeoutMs: 4e4 });
+    if (!result.ok) throw new Error(result.error || "模型测试失败");
+    state.modelCatalogTestResults = {
+      ...state.modelCatalogTestResults,
+      [key]: { tone: "success", message: String(result.summary || "测试完成") }
+    };
+  } catch (error) {
+    state.modelCatalogTestResults = {
+      ...state.modelCatalogTestResults,
+      [key]: { tone: "error", message: errorMessageOf(error) || "模型测试失败" }
+    };
+  } finally {
+    if (state.modelCatalogTestKey === key) state.modelCatalogTestKey = "";
+    renderSettingsView3();
+  }
+}
 async function handleSettingsClick3(event) {
   const scheduleButton = eventTargetOf(event).closest("button[data-schedule-action]");
   if (scheduleButton instanceof HTMLButtonElement && state.settingsSection === "schedules") {
@@ -7415,6 +7513,8 @@ async function handleSettingsClick3(event) {
     showModelConfigPanel5(action.dataset.modelId, action.dataset.profileId, "edit-model");
   } else if (action.dataset.action === "edit-gateway-profile") {
     showModelConfigPanel5("", action.dataset.profileId, "edit-profile");
+  } else if (action.dataset.action === "test-model") {
+    await testCatalogModel(action.dataset.modelId, action.dataset.profileId);
   } else if (action.dataset.action === "use-model") {
     await saveDefaultModelSelection6(
       action.dataset.modelId,
@@ -7472,6 +7572,7 @@ function renderModelConfigPanel5() {
   const editing = state.editingModelId ? editingProfile?.models?.find((model) => model.id === state.editingModelId) ?? currentModelInfo5(state.editingModelId) : null;
   const addingSource = state.modelConfigIntent === "add-source";
   const editingChannel = state.modelConfigIntent === "edit-profile";
+  const savedRouteName = editingChannel && editingProfile ? providerRouteLabel(editingProfile) : "";
   const channelForm = addingSource || editingChannel;
   const addingModel = state.modelConfigIntent === "add-model";
   const current = editing ?? { id: "" };
@@ -7565,8 +7666,8 @@ function renderModelConfigPanel5() {
       <div class="model-config-grid">
         ${channelForm ? `<label>
           <span>路线名</span>
-          <input name="routeName" required maxlength="64" spellcheck="false" placeholder="例如 work、personal" />
-          <small class="gateway-url-hint">同一地址的不同密钥请用不同路线名，例如 work、personal。聊天里按这个名字切换。</small>
+          <input name="routeName" required maxlength="64" spellcheck="false" value="${escapeAttribute(savedRouteName)}" placeholder="例如 work、personal" />
+          <small class="gateway-url-hint">${editingChannel ? "已保存的路线名会显示在这里。改名只改聊天里看到的名字，不会新建路线。" : "同一地址的不同密钥请用不同路线名，例如 work、personal。聊天里按这个名字切换。"}</small>
         </label>` : ""}
         <label>
           <span>网关 URL</span>
@@ -9784,12 +9885,12 @@ function clearAssistantDrafts4() {
   state.assistantDrafts.clear();
 }
 function collapseAssistantDrafts4(finalText = "") {
-  const capturedDrafts = Array.from(state.assistantDrafts.values()).filter((draft) => String(draft.text ?? "").trim().length > 0);
+  const capturedDrafts = Array.from(state.assistantDrafts.values()).map(snapshotDraft).filter((draft) => draft.text.trim().length > 0);
   clearAssistantDrafts4();
   if (capturedDrafts.length === 0) {
     return;
   }
-  const visibleDrafts = capturedDrafts.filter((draft) => !isDuplicateDraftText9(draft.text, finalText));
+  const visibleDrafts = capturedDrafts.filter((draft) => draft.kind === "tool" || !isDuplicateDraftText9(draft.text, finalText));
   const node = document.createElement("details");
   node.className = `draft-summary${visibleDrafts.length === 0 ? " compact" : ""}`;
   node.setAttribute("aria-live", "off");
@@ -9810,15 +9911,25 @@ function collapseAssistantDrafts4(finalText = "") {
     item.className = "draft-summary-item";
     const title = document.createElement("div");
     title.className = "draft-summary-title";
-    title.textContent = Number.isFinite(draft.round) ? `第 ${draft.round} 轮` : "思考";
-    const body = document.createElement("div");
-    body.className = "message-body draft-plain-text";
-    body.textContent = draft.text ?? "";
-    item.append(title, body);
+    title.textContent = draft.kind === "tool" ? "工具" : Number.isFinite(draft.round) ? `思考 · 第 ${draft.round} 轮` : "思考";
+    item.append(title);
+    if (draft.text.trim() && (draft.kind === "tool" || !isDuplicateDraftText9(draft.text, finalText))) {
+      const body = document.createElement("div");
+      body.className = "message-body draft-plain-text";
+      body.textContent = draft.text;
+      item.append(body);
+    }
     list?.append(item);
   }
   appendTranscriptNode4(node);
   scrollTranscript({ onlyIfNearBottom: true });
+}
+function snapshotDraft(draft) {
+  return {
+    kind: draft.kind === "tool" ? "tool" : "text",
+    round: draft.round,
+    text: String(draft.text ?? "")
+  };
 }
 var GUIDED_DRAFT_MARKER = "[引导接管前的草稿，非最终回复]";
 var INTERRUPTED_DRAFT_MARKER = "[中断草稿，非最终回复]";
@@ -9873,7 +9984,7 @@ function createThinkingProcessNode(message) {
     item.className = "draft-summary-item";
     const title = document.createElement("div");
     title.className = "draft-summary-title";
-    title.textContent = "草稿";
+    title.textContent = "思考";
     const bodyNode = document.createElement("div");
     bodyNode.className = "message-body draft-plain-text";
     bodyNode.textContent = body;
@@ -11529,6 +11640,7 @@ export {
   copyCodeBlock10 as copyCodeBlock,
   copyProjectPath,
   copySessionId,
+  createActivityCardNode,
   createInterruptedDraftNode,
   createMessageNode4 as createMessageNode,
   createThinkingProcessNode,
@@ -11942,6 +12054,7 @@ export {
   syncVisualViewport3 as syncVisualViewport,
   tablePreviewMeta2 as tablePreviewMeta,
   tableTruncationNote2 as tableTruncationNote,
+  testCatalogModel,
   toggleLiveStatusDetails3 as toggleLiveStatusDetails,
   toggleModelPanel5 as toggleModelPanel,
   toggleQuestionChoice9 as toggleQuestionChoice,
@@ -11955,6 +12068,7 @@ export {
   trimTranscriptWindow4 as trimTranscriptWindow,
   uniqueAgentModelCandidates7 as uniqueAgentModelCandidates,
   unresolvedModelStatusHtml5 as unresolvedModelStatusHtml,
+  updateActivityCardNode,
   updateAgentModelPickerManualStatus6 as updateAgentModelPickerManualStatus,
   updateConfigRevisions,
   updateContextActions2 as updateContextActions,
@@ -11967,6 +12081,7 @@ export {
   updateSessionStatus,
   updateTranscriptJump,
   updateTurnChangeStats,
+  upsertToolActivityCard,
   userMessageDisplayText2 as userMessageDisplayText,
   userTranscriptDisplayText,
   workflowItem4 as workflowItem,

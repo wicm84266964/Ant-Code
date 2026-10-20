@@ -803,6 +803,56 @@ test("cross-runtime provider deletion cancels queued turns without affecting oth
   }
 });
 
+test("an in-memory session can save a model switch before its first snapshot exists", async () => {
+  const fixture = await createRuntimeFixture();
+  const runtime = createDashboardRuntime({
+    cwd: fixture.cwd,
+    env: fixture.env,
+    runTurn: async (_session, options) => {
+      await options.onEvent({ type: "turn_complete", status: "completed" });
+      return { output: "completed" };
+    }
+  });
+  try {
+    await runtime.trustWorkspace();
+    const started = await runtime.startTurn({
+      prompt: "new chat before any snapshot",
+      permissionMode: "plan"
+    });
+    assert.equal(started.ok, true);
+    const sessionId = started.sessionId;
+    await waitUntil(() => runtime.active.peek(sessionId)?.running === false);
+    assert.equal(runtime.active.peek(sessionId)?.persisted, false);
+
+    const switched = await runtime.switchModel({
+      sessionId,
+      providerId: "deepseek",
+      modelId: "deepseek-v4-pro",
+      reasoningEffort: "max"
+    });
+    assert.equal(switched.ok, true, switched.error);
+    assert.equal(switched.sessionStatus.model, "deepseek-v4-pro");
+    assert.equal(switched.sessionStatus.reasoningEffort, "max");
+
+    const store = createSessionStore({ cwd: fixture.cwd, env: fixture.env });
+    const persisted = await store.readMetadataExact(sessionId);
+    assert.equal(persisted.ok, true);
+    assert.equal(persisted.metadata.model, "deepseek-v4-pro");
+    assert.equal(persisted.metadata.reasoningEffort, "max");
+
+    const next = await runtime.switchModel({
+      sessionId,
+      providerId: "deepseek",
+      modelId: "deepseek-v4-pro",
+      reasoningEffort: "high"
+    });
+    assert.equal(next.ok, true, next.error);
+    assert.equal(next.sessionStatus.reasoningEffort, "high");
+  } finally {
+    await runtime.shutdown({ force: true, timeoutMs: 50 });
+  }
+});
+
 async function activateDeepseekMaxSession(fixture, sessionId) {
   const store = createSessionStore({ cwd: fixture.cwd, env: fixture.env });
   const selection = {
