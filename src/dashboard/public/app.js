@@ -5795,6 +5795,17 @@ function preferPrefixedCatalog(models) {
 }
 
 // src/dashboard/public/model-groups.ts
+function visibleAgentModelCandidates(catalogModels, registeredModels) {
+  const visibleIds = new Set(preferPrefixedCatalog([...catalogModels, ...registeredModels]).map((model) => model.id));
+  const catalog = catalogModels.filter((model) => visibleIds.has(model.id));
+  const registered = registeredModels.filter((model) => visibleIds.has(model.id));
+  const catalogIds = new Set(catalog.map((model) => model.id));
+  return {
+    catalog,
+    registered,
+    registeredOnly: registered.filter((model) => !catalogIds.has(model.id))
+  };
+}
 function modelPickerLabel(model, models) {
   const remark = model.label && model.label !== model.id ? model.label : "";
   const label = remark ? `${model.id} (${remark})` : model.id;
@@ -8137,12 +8148,15 @@ function renderAgentModelPickers6(form) {
   if (!form) return;
   initializeAgentModelPickerSnapshot6(form);
   const snapshot = modelConfigAgentModelsSnapshot6(form);
-  const catalogModels = uniqueAgentModelCandidates7(currentGatewayCatalogModels7(form));
+  const rawCatalogModels = uniqueAgentModelCandidates7(currentGatewayCatalogModels7(form));
+  const rawRegisteredModels = form.dataset.agentModelsEndpointChanged === "true" ? [] : uniqueAgentModelCandidates7(modelConfigGatewayProfile7()?.models ?? []);
+  const visibleModels = visibleAgentModelCandidates(rawCatalogModels, rawRegisteredModels);
+  const catalogModels = visibleModels.catalog;
   const catalogIds = new Set(catalogModels.map((model) => model.id));
-  const registeredModels = form.dataset.agentModelsEndpointChanged === "true" ? [] : uniqueAgentModelCandidates7(modelConfigGatewayProfile7()?.models ?? []);
-  const registeredOnly = registeredModels.filter((model) => !catalogIds.has(model.id));
+  const registeredModels = visibleModels.registered;
+  const registeredOnly = visibleModels.registeredOnly;
   const registeredIds = new Set(registeredModels.map((model) => model.id));
-  const catalogAvailable = catalogModels.length > 0;
+  const catalogAvailable = rawCatalogModels.length > 0;
   for (const pickerElement of form.querySelectorAll("[data-agent-model-picker]")) {
     const picker = (
       /** @type {HTMLElement} */

@@ -1,4 +1,5 @@
 import { inferModelSupportsImages, needsVisionCapabilityProbe } from "../../model-gateway/vision-capabilities.ts";
+import { visibleAgentModelCandidates } from "./model-groups.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { hydrateRichContent } from "./rich-renderers.ts";
 import { visibleTranscriptRole } from "./transcript.ts";
@@ -334,14 +335,17 @@ export function renderAgentModelPickers(form: HTMLElement | null) {
   if (!form) return;
   initializeAgentModelPickerSnapshot(form);
   const snapshot = modelConfigAgentModelsSnapshot(form);
-  const catalogModels = uniqueAgentModelCandidates(currentGatewayCatalogModels(form));
-  const catalogIds = new Set(catalogModels.map((model) => model.id));
-  const registeredModels = form.dataset.agentModelsEndpointChanged === "true"
+  const rawCatalogModels = uniqueAgentModelCandidates(currentGatewayCatalogModels(form));
+  const rawRegisteredModels = form.dataset.agentModelsEndpointChanged === "true"
     ? []
     : uniqueAgentModelCandidates(modelConfigGatewayProfile()?.models ?? []);
-  const registeredOnly = registeredModels.filter((model) => !catalogIds.has(model.id));
+  const visibleModels = visibleAgentModelCandidates(rawCatalogModels, rawRegisteredModels);
+  const catalogModels = visibleModels.catalog;
+  const catalogIds = new Set(catalogModels.map((model) => model.id));
+  const registeredModels = visibleModels.registered;
+  const registeredOnly = visibleModels.registeredOnly;
   const registeredIds = new Set(registeredModels.map((model) => model.id));
-  const catalogAvailable = catalogModels.length > 0;
+  const catalogAvailable = rawCatalogModels.length > 0;
 
   for (const pickerElement of form.querySelectorAll("[data-agent-model-picker]")) {
     const picker = /** @type {HTMLElement} */ (pickerElement);

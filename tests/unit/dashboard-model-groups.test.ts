@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { publicGatewayProfiles } from "../../src/dashboard/runtime/public-config.ts";
-import { modelConnectionGroups, modelPickerLabel } from "../../src/dashboard/public/model-groups.ts";
+import { modelConnectionGroups, modelPickerLabel, visibleAgentModelCandidates } from "../../src/dashboard/public/model-groups.ts";
 import { normalizeModelConfigInput } from "../../src/dashboard/runtime/settings.ts";
 
 test("model remarks distinguish routes without showing internal IDs", () => {
@@ -51,6 +51,22 @@ test("model picker groups URLs regardless of key or protocol without exposing cr
   assert.equal(groups.length, 1);
   assert.equal(groups[0].label, "http://127.0.0.1:9000/v1");
   assert.deepEqual(groups[0].profiles.map((item) => item.id), ["a", "b", "c", "d"]);
+});
+
+test("agent model choices keep prefixed ids and drop covered bare names from both lists", () => {
+  const visible = visibleAgentModelCandidates([
+    { id: "hy3", label: "bare catalog" },
+    { id: "workbuddy/hy3", label: "prefixed catalog" },
+    { id: "unique-bare", label: "unique" }
+  ], [
+    { id: "glm-5.3", label: "bare registered" },
+    { id: "traework/glm-5.3", label: "prefixed registered" },
+    { id: "registered-only", label: "registered only" },
+    { id: "workbuddy/hy3", label: "also registered" }
+  ]);
+  assert.deepEqual(visible.catalog.map((model) => model.id), ["workbuddy/hy3", "unique-bare"]);
+  assert.deepEqual(visible.registered.map((model) => model.id), ["traework/glm-5.3", "registered-only", "workbuddy/hy3"]);
+  assert.deepEqual(visible.registeredOnly.map((model) => model.id), ["traework/glm-5.3", "registered-only"]);
 });
 
 test("older servers do not group profiles solely by a matching public URL", () => {
