@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 2.0.25 - 2026-10-20
+
+Tool calls appear in the Dashboard conversation as activity cards, in order with each thinking round. Expanding a card shows up to 1000 characters of the readable result. Reopening a session keeps those cards. Full tool output stays with the model and is not shown in full. Restart Dashboard and refresh the browser. Existing configuration and sessions can continue.
+
 ## 2.0.24 - 2026-10-18
 
 Published 2026-10-18: [v2.0.24](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.24).

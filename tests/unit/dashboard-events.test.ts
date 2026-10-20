@@ -25,6 +25,32 @@ test("dashboard maps thinking to folded activity without text", () => {
   assert.doesNotMatch(JSON.stringify(events[0]), /secret reasoning/);
 });
 
+test("dashboard records a tool call as a one-line draft without its input", () => {
+  const started = mapSessionEventToDashboard({
+    type: "tool_start",
+    name: "read_file",
+    toolCallId: "call-1",
+    round: 2,
+    input: { path: "secret/path.txt" }
+  });
+  assert.equal(started[0].toolDraft, true);
+  assert.equal(started[0].toolDraftLabel, "读取文件");
+  assert.equal(started[0].toolDraftStatus, "running");
+  assert.equal(started[0].round, 2);
+  assert.doesNotMatch(JSON.stringify(started[0]), /secret\/path/);
+
+  const finished = mapSessionEventToDashboard({
+    type: "tool_finish",
+    name: "powershell",
+    toolCallId: "call-2",
+    ok: false,
+    output: "command output that must stay hidden"
+  });
+  assert.equal(finished[0].toolDraftLabel, "运行 PowerShell");
+  assert.equal(finished[0].toolDraftStatus, "failed");
+  assert.doesNotMatch(JSON.stringify(finished[0]), /command output/);
+});
+
 test("dashboard maps visible assistant deltas to draft events", () => {
   const events = mapSessionEventToDashboard({
     type: "assistant_delta",

@@ -88,6 +88,10 @@ export function mapSessionEventToDashboard(event: Record<string, unknown>) {
       toolUseId: event.toolCallId ?? null,
       toolName: event.name ?? null,
       profile: event.profile ?? null,
+      round: Number.isFinite(event.round) ? event.round : null,
+      toolDraft: true,
+      toolDraftLabel: toolLabel(event.name),
+      toolDraftStatus: "running",
       coalesceKey: event.toolCallId ? `tool:${event.toolCallId}` : `tool:${event.name ?? "unknown"}`
     })];
   }
@@ -97,6 +101,10 @@ export function mapSessionEventToDashboard(event: Record<string, unknown>) {
       toolUseId: event.toolCallId ?? null,
       toolName: event.name ?? null,
       profile: event.profile ?? null,
+      round: Number.isFinite(event.round) ? event.round : null,
+      toolDraft: true,
+      toolDraftLabel: toolLabel(event.name),
+      toolDraftStatus: status,
       taskStatus: event.taskStatus ?? null,
       outputSummary: event.outputSummary ?? null,
       changeStats: normalizeChangeStats(event.changeStats),
@@ -348,6 +356,7 @@ function gatewayRetryDetail(event: Record<string, unknown>) {
     Number.isFinite(event.round) ? `第 ${event.round} 轮` : null,
     Number.isFinite(event.attempt) && Number.isFinite(event.maxAttempts) ? `第 ${event.attempt}/${event.maxAttempts} 次` : null,
     asRecord(event.error).code ? String(asRecord(event.error).code) : null,
+    typeof event.message === "string" && event.message.trim() ? event.message.trim() : null,
     event.stage ? `阶段 ${event.stage}` : null,
     Number.isFinite(event.delayMs) ? `${event.delayMs}ms 后重试` : null
   ].filter(Boolean);
@@ -441,7 +450,9 @@ function toolResultDetail(event: Record<string, unknown>) {
     Number.isFinite(event.resultBytes) ? `${event.resultBytes} 字节结果` : null,
     event.truncated ? "结果已截断" : null
   ].filter(Boolean);
-  return parts.join(" · ");
+  const preview = String(event.resultPreview ?? "").trim();
+  const status = parts.join(" · ");
+  return preview ? `${status}\n\n${preview}` : status;
 }
 
 function statusLabel(status: string) {

@@ -40,9 +40,10 @@ export async function probeVisionCapability(options: {
   modelId: string;
   catalogModalities?: unknown;
   signal?: AbortSignal;
+  force?: boolean;
 }): Promise<VisionProbeResult> {
   const modelId = String(options.modelId ?? "").trim();
-  if (!modelId || !needsVisionCapabilityProbe(modelId, options.catalogModalities)) {
+  if (!modelId || (options.force !== true && !needsVisionCapabilityProbe(modelId, options.catalogModalities))) {
     return { supported: null, reason: "skipped" };
   }
   const cached = cachedVisionProbeResult(options.config, modelId);

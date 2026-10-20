@@ -432,6 +432,10 @@ export function settingsModelHtml(model: DashboardModelOption, profile: Dashboar
   const scopedDefault = state.modelDefaultSelections[state.modelDefaultScope];
   const isScopedDefault = scopedDefault?.provider === (profile?.id || "")
     && scopedDefault?.model === model.id;
+  const testKey = providerModelKey(profile?.id || "", model.id);
+  const testResult = state.modelCatalogTestResults[testKey];
+  const testing = state.modelCatalogTestKey === testKey;
+  const testBusy = Boolean(state.modelCatalogTestKey);
   return `
     <div class="settings-model-row${isScopedDefault ? " scope-default" : ""}">
       <div class="settings-row-main">
@@ -445,8 +449,10 @@ export function settingsModelHtml(model: DashboardModelOption, profile: Dashboar
           ${context ? `<span>${escapeHtml(context)}</span>` : ""}
           ${efforts.length > 0 ? `<span>思考 ${escapeHtml(efforts.map((effort) => effort.label).join(" / "))}</span>` : ""}
         </div>
+        ${testResult?.message ? `<small class="settings-model-test ${escapeAttribute(testResult.tone)}">${escapeHtml(testResult.message)}</small>` : ""}
       </div>
       <div class="settings-row-actions">
+        <button type="button" data-action="test-model" data-model-id="${escapeAttribute(model.id)}" data-profile-id="${escapeAttribute(profile?.id || "")}" title="发送一张程序内小图，并探测这条路线接受的思考档位。可能产生少量用量。" ${testBusy || state.settingsRefreshing || state.running ? "disabled" : ""}>${testing ? "测试中" : "测试"}</button>
         <button type="button" data-action="use-model" data-model-id="${escapeAttribute(model.id)}" data-profile-id="${escapeAttribute(profile?.id || "")}" ${isScopedDefault || state.settingsRefreshing || state.running || state.modelSwitching ? "disabled" : ""}>${isScopedDefault ? "已设为默认" : "设为默认"}</button>
       </div>
     </div>
@@ -716,6 +722,37 @@ export async function saveSettingsConfig(event: Event) {
 }
 
 /** @param {any} event */
+export async function testCatalogModel(modelId: string | null | undefined, providerId: string | null | undefined) {
+  const key = providerModelKey(providerId || "", modelId || "");
+  if (!modelId || !providerId || state.modelCatalogTestKey) return;
+  state.modelCatalogTestKey = key;
+  state.modelCatalogTestResults = {
+    ...state.modelCatalogTestResults,
+    [key]: { tone: "", message: "正在测试视觉和思考档位…" }
+  };
+  renderSettingsView();
+  try {
+    const result = await postJson("/api/model-catalog/test", {
+      providerId,
+      profileId: providerId,
+      modelId
+    }, { timeoutMs: 40_000 });
+    if (!result.ok) throw new Error(result.error || "模型测试失败");
+    state.modelCatalogTestResults = {
+      ...state.modelCatalogTestResults,
+      [key]: { tone: "success", message: String(result.summary || "测试完成") }
+    };
+  } catch (error) {
+    state.modelCatalogTestResults = {
+      ...state.modelCatalogTestResults,
+      [key]: { tone: "error", message: errorMessageOf(error) || "模型测试失败" }
+    };
+  } finally {
+    if (state.modelCatalogTestKey === key) state.modelCatalogTestKey = "";
+    renderSettingsView();
+  }
+}
+
 export async function handleSettingsClick(event: Event) {
   const scheduleButton = eventTargetOf(event).closest("button[data-schedule-action]");
   if (scheduleButton instanceof HTMLButtonElement && state.settingsSection === "schedules") {
@@ -772,6 +809,8 @@ export async function handleSettingsClick(event: Event) {
     showModelConfigPanel(action.dataset.modelId, action.dataset.profileId, "edit-model");
   } else if (action.dataset.action === "edit-gateway-profile") {
     showModelConfigPanel("", action.dataset.profileId, "edit-profile");
+  } else if (action.dataset.action === "test-model") {
+    await testCatalogModel(action.dataset.modelId, action.dataset.profileId);
   } else if (action.dataset.action === "use-model") {
     await saveDefaultModelSelection(
       action.dataset.modelId,
@@ -836,6 +875,7 @@ export function renderModelConfigPanel() {
     : null;
   const addingSource = state.modelConfigIntent === "add-source";
   const editingChannel = state.modelConfigIntent === "edit-profile";
+  const savedRouteName = editingChannel && editingProfile ? providerRouteLabel(editingProfile) : "";
   const channelForm = addingSource || editingChannel;
   const addingModel = state.modelConfigIntent === "add-model";
   const current: DashboardModelOption = editing ?? { id: "" };
@@ -951,8 +991,8 @@ export function renderModelConfigPanel() {
       <div class="model-config-grid">
         ${channelForm ? `<label>
           <span>路线名</span>
-          <input name="routeName" required maxlength="64" spellcheck="false" placeholder="例如 work、personal" />
-          <small class="gateway-url-hint">同一地址的不同密钥请用不同路线名，例如 work、personal。聊天里按这个名字切换。</small>
+          <input name="routeName" required maxlength="64" spellcheck="false" value="${escapeAttribute(savedRouteName)}" placeholder="例如 work、personal" />
+          <small class="gateway-url-hint">${editingChannel ? "已保存的路线名会显示在这里。改名只改聊天里看到的名字，不会新建路线。" : "同一地址的不同密钥请用不同路线名，例如 work、personal。聊天里按这个名字切换。"}</small>
         </label>` : ""}
         <label>
           <span>网关 URL</span>

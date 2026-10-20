@@ -480,6 +480,9 @@ export function messagesForModelContext(messages: unknown = []): SessionMessage[
     if ("thinkingProcess" in message && message.thinkingProcess === true) {
       return [];
     }
+    if ("toolActivity" in message && message.toolActivity === true) {
+      return [];
+    }
     const { interruptedDraft: _interruptedDraft, attachments: _attachments, ...rest } = message;
     return [rest];
   });

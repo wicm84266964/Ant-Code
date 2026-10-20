@@ -387,6 +387,10 @@ export type DashboardActivity = {
   kind?: string;
   summary?: string;
   toolName?: string;
+  toolDraft?: boolean;
+  toolDraftLabel?: string;
+  toolDraftStatus?: string;
+  round?: number;
   waitFor?: unknown;
   wakeParent?: boolean | null;
   wakePromptQueued?: boolean;
@@ -685,12 +689,16 @@ export type DashboardUiState = {
   modelCapabilityProbeRunning: boolean;
   modelCapabilityProbeError: string;
   modelCapabilityDiscoveryToken: string;
+  modelCatalogTestKey: string;
+  modelCatalogTestResults: Record<string, { tone: string; message: string }>;
   modelSwitching: boolean;
   reasoningEffortSwitching: boolean;
   deletingModelKey: string;
   deleteConfirmModelKey: string;
   deletingGatewayProfileId: string;
   deleteConfirmGatewayProfileId: string;
+  draftEpoch: number;
+  toolActivityCards: Map<string, { node: HTMLElement }>;
   assistantDrafts: Map<string, {
     round?: number | null;
     text?: string;
@@ -867,12 +875,16 @@ export const state: DashboardUiState = {
   modelCapabilityProbeRunning: false,
   modelCapabilityProbeError: "",
   modelCapabilityDiscoveryToken: "",
+  modelCatalogTestKey: "",
+  modelCatalogTestResults: {},
   modelSwitching: false,
   reasoningEffortSwitching: false,
   deletingModelKey: "",
   deleteConfirmModelKey: "",
   deletingGatewayProfileId: "",
   deleteConfirmGatewayProfileId: "",
+  draftEpoch: 0,
+  toolActivityCards: new Map(),
   assistantDrafts: new Map(),
   transcriptPaging: {
     cursor: null,

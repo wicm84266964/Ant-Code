@@ -229,6 +229,30 @@ export function reasoningProbeEffortIds() {
   return [...PROBE_EFFORT_IDS];
 }
 
+const EFFORT_RANK = ["none", "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+
+export function supportedEffortIdsFromRejection(value: unknown) {
+  const text = typeof value === "string" ? value : JSON.stringify(value ?? "");
+  const match = text.match(/supported values are:\s*([^"]+)/i);
+  if (!match) return [];
+  const ids = [...match[1].matchAll(/'([a-z0-9_-]{1,32})'/gi)].map((item) => item[1].toLowerCase());
+  return [...new Set(ids)];
+}
+
+export function highestListedReasoningEffort(ids: readonly string[], rejected = "") {
+  const rejectedId = rejected.trim().toLowerCase();
+  const ranked = ids
+    .map((id) => id.trim().toLowerCase())
+    .filter((id) => id && id !== rejectedId);
+  ranked.sort((left, right) => effortRank(left) - effortRank(right));
+  return ranked.at(-1) ?? "";
+}
+
+function effortRank(id: string) {
+  const index = EFFORT_RANK.indexOf(id);
+  return index < 0 ? EFFORT_RANK.length : index;
+}
+
 /**
  * Identify the exact capability fingerprint emitted by the short-lived GPT
  * 5.6 preset that incorrectly included ultra. Any differing declaration is

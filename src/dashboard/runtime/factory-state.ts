@@ -56,6 +56,7 @@ export type DashboardRuntimeApi = {
   probeGateway(input?: DashboardRequestInput): Promise<unknown>;
   probeModelCapabilities(input?: DashboardRequestInput, request?: { signal?: AbortSignal }): Promise<unknown>;
   probeVisionCapability(input?: DashboardRequestInput, request?: { signal?: AbortSignal }): Promise<unknown>;
+  testCatalogModel(input?: DashboardRequestInput, request?: { signal?: AbortSignal }): Promise<unknown>;
   deleteModelConfig(input?: DashboardRequestInput): Promise<unknown>;
   deleteGatewayProfile(input?: DashboardRequestInput): Promise<unknown>;
   switchGatewayProfile(input?: DashboardRequestInput): Promise<unknown>;
