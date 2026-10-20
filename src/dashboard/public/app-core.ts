@@ -698,7 +698,8 @@ export type DashboardUiState = {
   deletingGatewayProfileId: string;
   deleteConfirmGatewayProfileId: string;
   draftEpoch: number;
-  toolActivityCards: Map<string, { node: HTMLElement }>;
+  processOrder: number;
+  toolActivityCards: Map<string, { node: HTMLElement; order: number }>;
   assistantDrafts: Map<string, {
     round?: number | null;
     text?: string;
@@ -884,6 +885,7 @@ export const state: DashboardUiState = {
   deletingGatewayProfileId: "",
   deleteConfirmGatewayProfileId: "",
   draftEpoch: 0,
+  processOrder: 0,
   toolActivityCards: new Map(),
   assistantDrafts: new Map(),
   transcriptPaging: {

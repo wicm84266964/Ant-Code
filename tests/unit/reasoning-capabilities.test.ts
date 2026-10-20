@@ -102,7 +102,7 @@ test("keeps prefixed catalog ids and recognizes reasoning from the unprefixed na
   ]);
   assert.deepEqual(models.map((model) => model.id), ["workbuddy/hy3", "traework/glm-5.3"]);
   const reasoning = inferCatalogReasoning({ id: "workbuddy/deepseek-v4-pro" }, { protocol: "openai-chat" });
-  assert.equal(reasoning.reasoningEfforts.some((effort) => effort.id === "max"), true);
+  assert.deepEqual(reasoning.reasoningEfforts.map((effort) => effort.id), ["low", "medium", "high", "xhigh"]);
 });
 
 test("assigns the common thinking tiers when a model is known to think", () => {
@@ -110,7 +110,7 @@ test("assigns the common thinking tiers when a model is known to think", () => {
   assert.deepEqual(grok.reasoningEfforts.map((effort) => effort.id), ["low", "medium", "high", "xhigh"]);
 
   const gpt = inferCatalogReasoning({ id: "gpt-4.1" }, { protocol: "openai-chat" });
-  assert.deepEqual(gpt.reasoningEfforts.map((effort) => effort.id), ["low", "medium", "high", "xhigh", "max"]);
+  assert.deepEqual(gpt.reasoningEfforts.map((effort) => effort.id), ["low", "medium", "high", "xhigh"]);
 
   const plain = inferCatalogReasoning({ id: "embed-small" }, { protocol: "openai-chat" });
   assert.deepEqual(plain.reasoningEfforts, []);
@@ -131,7 +131,7 @@ test("uses exact Grok presets when upstream metadata is absent", () => {
 test("uses the exact DeepSeek preset when upstream metadata is absent", () => {
   const result = inferCatalogReasoning({ id: "deepseek-v4-pro" }, { protocol: "openai-chat" });
 
-  assert.deepEqual(result.reasoningEfforts.map((effort) => effort.id), ["off", "high", "max"]);
+  assert.deepEqual(result.reasoningEfforts.map((effort) => effort.id), ["low", "medium", "high", "xhigh"]);
   assert.equal(result.defaultReasoningEffort, "high");
   assert.equal(result.reasoningDiscovery.source, "known-preset");
   assert.equal(result.reasoningDiscovery.confidence, "preset");
@@ -140,9 +140,9 @@ test("uses the exact DeepSeek preset when upstream metadata is absent", () => {
 
 test("uses exact GPT 5.6 presets across supported OpenAI protocols", () => {
   const expected = {
-    "gpt-5.6-sol": ["none", "low", "medium", "high", "xhigh", "max"],
-    "gpt-5.6-terra": ["none", "low", "medium", "high", "xhigh", "max"],
-    "gpt-5.6-luna": ["none", "low", "medium", "high", "xhigh", "max"]
+    "gpt-5.6-sol": ["low", "medium", "high", "xhigh"],
+    "gpt-5.6-terra": ["low", "medium", "high", "xhigh"],
+    "gpt-5.6-luna": ["low", "medium", "high", "xhigh"]
   };
 
   for (const protocol of ["openai-chat", "openai-responses"]) {
@@ -150,7 +150,7 @@ test("uses exact GPT 5.6 presets across supported OpenAI protocols", () => {
       const result = inferCatalogReasoning({ id: modelId }, { protocol });
 
       assert.deepEqual(result.reasoningEfforts.map((effort) => effort.id), efforts);
-      assert.equal(result.defaultReasoningEffort, null);
+      assert.equal(result.defaultReasoningEffort, "high");
       assert.equal(result.reasoningDiscovery.source, "known-preset");
       assert.equal(result.reasoningDiscovery.presetId, `gpt-5.6.${modelId.split("-").at(-1)}`);
     }
@@ -162,7 +162,7 @@ test("active probes cover both disabled aliases and third-party ultra without ad
   for (const modelId of ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]) {
     assert.deepEqual(
       inferCatalogReasoning({ id: modelId }, { protocol: "openai-responses" }).reasoningEfforts.map((effort) => effort.id),
-      ["none", "low", "medium", "high", "xhigh", "max"]
+      ["low", "medium", "high", "xhigh"]
     );
   }
 });
@@ -185,7 +185,7 @@ test("uses the common thinking tiers when an exact preset does not match the pro
   assert.deepEqual(grokChat.reasoningEfforts.map((effort) => effort.id), ["low", "medium", "high", "xhigh"]);
 
   const deepseekResponses = inferCatalogReasoning({ id: "deepseek-v4-pro" }, { protocol: "openai-responses" });
-  assert.deepEqual(deepseekResponses.reasoningEfforts.map((effort) => effort.id), ["low", "medium", "high", "xhigh", "max"]);
+  assert.deepEqual(deepseekResponses.reasoningEfforts.map((effort) => effort.id), ["low", "medium", "high", "xhigh"]);
 });
 
 test("uses family tiers for nearby thinking model ids and skips non-thinking models", () => {
@@ -195,7 +195,7 @@ test("uses family tiers for nearby thinking model ids and skips non-thinking mod
   }
   for (const modelId of ["deepseek-v4-pro-plus", "gpt-5.6-sol-preview"]) {
     const result = inferCatalogReasoning({ id: modelId });
-    assert.deepEqual(result.reasoningEfforts.map((effort) => effort.id), ["low", "medium", "high", "xhigh", "max"], modelId);
+    assert.deepEqual(result.reasoningEfforts.map((effort) => effort.id), ["low", "medium", "high", "xhigh"], modelId);
   }
   for (const modelId of ["embed-small", "whisper-1", "image-gen"]) {
     const result = inferCatalogReasoning({ id: modelId });

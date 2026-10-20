@@ -2278,6 +2278,12 @@ button {
   white-space: nowrap;
 }
 
+.draft-summary .folded-process-card {
+  margin: 0;
+  max-width: none;
+  width: 100%;
+}
+
 .draft-summary-list {
   border-top: 1px solid rgba(255, 255, 255, 0.05);
   display: grid;
@@ -2407,6 +2413,79 @@ button {
 .activity-card.notice .activity-title {
   color: var(--text-soft);
   font-weight: 500;
+}
+
+.activity-card.tool-bar {
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-left: 2px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+  margin-bottom: 8px;
+}
+
+.activity-card.tool-bar .activity-head {
+  gap: 8px;
+  min-height: 28px;
+  padding: 3px 10px;
+}
+
+.activity-card.tool-bar .activity-title {
+  color: var(--text-soft);
+  font-size: var(--fs-ui);
+  font-weight: 500;
+}
+
+.activity-card.tool-bar .tool-mark {
+  font-size: 12px;
+  line-height: 1;
+  text-align: center;
+  width: 12px;
+}
+
+.activity-card.tool-bar.tool-ok {
+  border-left-color: var(--success);
+}
+
+.activity-card.tool-bar.tool-ok .tool-mark {
+  color: var(--success);
+}
+
+.activity-card.tool-bar.tool-failed {
+  background: rgba(255, 133, 133, 0.06);
+  border-color: rgba(255, 133, 133, 0.16);
+  border-left-color: var(--danger);
+}
+
+.activity-card.tool-bar.tool-failed .tool-mark,
+.activity-card.tool-bar.tool-failed .activity-title {
+  color: var(--danger);
+}
+
+.activity-card.tool-bar.tool-blocked {
+  background: rgba(246, 200, 111, 0.05);
+  border-left-color: var(--warning);
+}
+
+.activity-card.tool-bar.tool-blocked .tool-mark {
+  color: var(--warning);
+}
+
+.activity-card.tool-bar.tool-running {
+  border-left-color: var(--accent-2);
+}
+
+.activity-card.tool-bar.tool-running .tool-mark {
+  animation: pulse 1.15s ease-in-out infinite;
+  color: var(--accent);
+}
+
+.activity-card.tool-bar .activity-detail {
+  background: rgba(0, 0, 0, 0.18);
+  padding: 8px 10px 9px 30px;
+}
+
+.draft-summary .activity-card.tool-bar {
+  margin: 0;
 }
 
 .settings-official-sources,

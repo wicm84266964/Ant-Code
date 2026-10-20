@@ -52,7 +52,7 @@ test("Config V2 activation separates settings and credentials, preserves scopes,
   );
   assert.deepEqual(
     loaded.lab.gatewayProfiles.find((profile) => profile.id === "deepseek").models[0].reasoningEfforts.map((effort) => effort.id),
-    ["off", "high", "max"]
+    ["low", "medium", "high", "xhigh"]
   );
   assert.equal(JSON.stringify(loaded.configV2.resolved).includes(fixture.grokSecret), false);
 

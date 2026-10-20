@@ -195,6 +195,7 @@ var state = {
   deletingGatewayProfileId: "",
   deleteConfirmGatewayProfileId: "",
   draftEpoch: 0,
+  processOrder: 0,
   toolActivityCards: /* @__PURE__ */ new Map(),
   assistantDrafts: /* @__PURE__ */ new Map(),
   transcriptPaging: {
@@ -5285,16 +5286,29 @@ function beginEventTurn4(event) {
   }
   state.activeTurnId = turnId;
 }
+function persistedToolStatus(message) {
+  const status = String(message.toolStatus ?? "").trim();
+  if (status === "failed" || status === "blocked" || status === "running" || status === "completed") return status;
+  const title = messageDisplayText2(message.content);
+  if (/未成功|失败/.test(title)) return "failed";
+  if (/被阻止/.test(title)) return "blocked";
+  if (title.startsWith("正在")) return "running";
+  return "completed";
+}
 function renderTranscriptMessages(messages, options = {}) {
   const nodes = [];
   const railEntries = [];
   const list = Array.isArray(messages) ? messages : [];
-  for (const message of list) {
+  for (let index = 0; index < list.length; index += 1) {
+    const message = list[index];
     if (isPlainObject(message) && message.toolActivity === true) {
+      if (toolActivityCoveredByProcess(list, index)) {
+        continue;
+      }
       const node2 = createActivityCardNode({
         title: messageDisplayText2(message.content),
         detail: String(message.toolDetail ?? ""),
-        severity: message.toolStatus === "blocked" ? "warning" : "notice",
+        toolStatus: persistedToolStatus(message),
         collapsed: true
       });
       node2.setAttribute("aria-live", "off");
@@ -5302,7 +5316,10 @@ function renderTranscriptMessages(messages, options = {}) {
       continue;
     }
     if (isThinkingProcessMessage(message)) {
-      const node2 = createThinkingProcessNode(message);
+      const node2 = createThinkingProcessNode(message, {
+        precedingTools: precedingToolActivities(list, index),
+        finalText: followingAssistantText(list, index)
+      });
       node2.setAttribute("aria-live", "off");
       nodes.push(node2);
       continue;
@@ -5753,33 +5770,37 @@ var KNOWN_PRESETS = Object.freeze([
     id: "deepseek.v4-pro",
     modelIds: Object.freeze(["deepseek-v4-pro"]),
     protocols: Object.freeze(["openai-chat"]),
-    efforts: Object.freeze(["off", "high", "max"]),
+    efforts: Object.freeze(["low", "medium", "high", "xhigh"]),
     defaultEffort: "high"
   }),
   Object.freeze({
     id: "gpt-5.6.sol",
     modelIds: Object.freeze(["gpt-5.6-sol"]),
     protocols: Object.freeze(["openai-chat", "openai-responses"]),
-    efforts: Object.freeze(["none", "low", "medium", "high", "xhigh", "max"]),
-    defaultEffort: null
+    efforts: Object.freeze(["low", "medium", "high", "xhigh"]),
+    defaultEffort: "high"
   }),
   Object.freeze({
     id: "gpt-5.6.terra",
     modelIds: Object.freeze(["gpt-5.6-terra"]),
     protocols: Object.freeze(["openai-chat", "openai-responses"]),
-    efforts: Object.freeze(["none", "low", "medium", "high", "xhigh", "max"]),
-    defaultEffort: null
+    efforts: Object.freeze(["low", "medium", "high", "xhigh"]),
+    defaultEffort: "high"
   }),
   Object.freeze({
     id: "gpt-5.6.luna",
     modelIds: Object.freeze(["gpt-5.6-luna"]),
     protocols: Object.freeze(["openai-chat", "openai-responses"]),
-    efforts: Object.freeze(["none", "low", "medium", "high", "xhigh", "max"]),
-    defaultEffort: null
+    efforts: Object.freeze(["low", "medium", "high", "xhigh"]),
+    defaultEffort: "high"
   })
 ]);
 var STANDARD_THINKING_EFFORTS = Object.freeze(["low", "medium", "high", "xhigh"]);
-var MAX_FAMILY_EFFORTS = Object.freeze(["low", "medium", "high", "xhigh", "max"]);
+var AUTOMATIC_MAX_GUESSES = Object.freeze([
+  Object.freeze(["low", "medium", "high", "xhigh", "max"]),
+  Object.freeze(["off", "high", "max"]),
+  Object.freeze(["none", "low", "medium", "high", "xhigh", "max"])
+]);
 function preferPrefixedCatalog(models) {
   const coveredBare = /* @__PURE__ */ new Set();
   for (const model of models) {
@@ -5911,20 +5932,23 @@ function upsertToolActivityCard(activity) {
   const status = activity.toolDraftStatus === "completed" || activity.toolDraftStatus === "failed" || activity.toolDraftStatus === "blocked" ? activity.toolDraftStatus : "running";
   const title = status === "failed" ? recoverableToolFailureTitle(activity) : String(activity.title ?? "").trim();
   const detail = String(activity.detail ?? "");
-  const severity = status === "blocked" ? "warning" : "notice";
   if (!state.toolActivityCards) state.toolActivityCards = /* @__PURE__ */ new Map();
   let card = state.toolActivityCards.get(id);
   if (!card) {
     state.draftEpoch = Number(state.draftEpoch ?? 0) + 1;
-    const node = createActivityCardNode({ title, detail, severity, collapsed: true });
-    card = { node };
+    const node = createActivityCardNode({ title, detail, toolStatus: status, collapsed: true });
+    card = { node, order: nextProcessOrder() };
     state.toolActivityCards.set(id, card);
     hideEmptyState2();
     appendTranscriptNode4(node);
   } else {
-    updateActivityCardNode(card.node, { title, detail, severity, collapsed: true });
+    updateActivityCardNode(card.node, { title, detail, toolStatus: status, collapsed: true });
   }
   scrollTranscript({ onlyIfNearBottom: true });
+}
+function nextProcessOrder() {
+  state.processOrder = Number(state.processOrder ?? 0) + 1;
+  return state.processOrder;
 }
 function ensureRoundDraft(round) {
   hideEmptyState2();
@@ -5944,6 +5968,7 @@ function ensureRoundDraft(round) {
   const draft = {
     kind: "text",
     round: roundNumber,
+    order: nextProcessOrder(),
     text: "",
     node,
     body: node.querySelector(".message-body"),
@@ -5965,12 +5990,28 @@ function renderAssistantDraft5(draft, options = {}) {
   draft.renderedLength = appendPlainDraftDelta3(draft.body, draft.text, draft.renderedLength);
   scrollTranscript({ onlyIfNearBottom: true, wasAtBottom });
 }
+function toolBarTone(status) {
+  const value = String(status ?? "").trim();
+  if (value === "failed") return "tool-failed";
+  if (value === "blocked") return "tool-blocked";
+  if (value === "running") return "tool-running";
+  return "tool-ok";
+}
+function toolBarMark(status) {
+  const tone = toolBarTone(status);
+  if (tone === "tool-failed") return "×";
+  if (tone === "tool-blocked") return "!";
+  if (tone === "tool-running") return "•";
+  return "✓";
+}
 function createActivityCardNode(activity) {
   const node = document.createElement("div");
-  node.className = `activity-card ${activity.severity ?? "info"}${activity.collapsed ? "" : " open"}`;
+  const open = activity.collapsed ? "" : " open";
+  node.className = activity.toolStatus ? `activity-card tool-bar ${toolBarTone(activity.toolStatus)}${open}` : `activity-card ${activity.severity ?? "info"}${open}`;
+  const mark = activity.toolStatus ? `<span class="tool-mark" aria-hidden="true">${toolBarMark(activity.toolStatus)}</span>` : `<span class="status-dot"></span>`;
   node.innerHTML = `
     <button class="activity-head" type="button" aria-expanded="${activity.collapsed ? "false" : "true"}">
-      <span class="status-dot"></span>
+      ${mark}
       <div class="activity-title">${escapeHtml(activity.title ?? "")}</div>
       <span class="chevron">⌄</span>
     </button>
@@ -5984,12 +6025,15 @@ function createActivityCardNode(activity) {
   return node;
 }
 function updateActivityCardNode(node, activity) {
-  node.className = `activity-card ${activity.severity ?? "info"}${activity.collapsed ? "" : " open"}`;
+  const open = activity.collapsed ? "" : " open";
+  node.className = activity.toolStatus ? `activity-card tool-bar ${toolBarTone(activity.toolStatus)}${open}` : `activity-card ${activity.severity ?? "info"}${open}`;
   const title = node.querySelector(".activity-title");
   const detail = node.querySelector(".activity-detail");
   const toggle = node.querySelector(".activity-head");
+  const mark = node.querySelector(".tool-mark");
   if (title) title.textContent = activity.title ?? "";
   if (detail) detail.textContent = activity.detail ?? "";
+  if (mark && activity.toolStatus) mark.textContent = toolBarMark(activity.toolStatus);
   toggle?.setAttribute("aria-expanded", activity.collapsed ? "false" : "true");
 }
 function appendActivity(activity) {
@@ -9900,15 +9944,17 @@ function clearAssistantDrafts4() {
 }
 function collapseAssistantDrafts4(finalText = "") {
   const capturedDrafts = Array.from(state.assistantDrafts.values()).map(snapshotDraft).filter((draft) => draft.text.trim().length > 0);
+  const capturedTools = Array.from(state.toolActivityCards?.values() ?? []).map(snapshotToolCard);
   clearAssistantDrafts4();
-  if (capturedDrafts.length === 0) {
+  state.toolActivityCards?.clear();
+  if (capturedDrafts.length === 0 && capturedTools.length === 0) {
     return;
   }
-  const visibleDrafts = capturedDrafts.filter((draft) => draft.kind === "tool" || !isDuplicateDraftText9(draft.text, finalText));
+  const visibleItems = [...capturedDrafts, ...capturedTools].filter((item) => item.kind === "tool" || !isDuplicateDraftText9(item.text, finalText)).sort((left, right) => left.order - right.order);
   const node = document.createElement("details");
-  node.className = `draft-summary${visibleDrafts.length === 0 ? " compact" : ""}`;
+  node.className = `draft-summary${visibleItems.length === 0 ? " compact" : ""}`;
   node.setAttribute("aria-live", "off");
-  const meta = visibleDrafts.length > 0 ? `已收起 · ${visibleDrafts.length} 轮` : "已收起 · 已汇入最终回复";
+  const meta = visibleItems.length > 0 ? `已收起 · ${visibleItems.length} 项` : "已收起 · 已汇入最终回复";
   node.innerHTML = `
     <summary>
       <span class="status-dot"></span>
@@ -9916,33 +9962,50 @@ function collapseAssistantDrafts4(finalText = "") {
       <span class="draft-summary-meta">${meta}</span>
     </summary>
     <div class="draft-summary-list">
-      ${visibleDrafts.length === 0 ? `<div class="draft-summary-note">本轮流式草稿已合并到最终回复，没有额外过程内容。</div>` : ""}
+      ${visibleItems.length === 0 ? `<div class="draft-summary-note">本轮流式草稿已合并到最终回复，没有额外过程内容。</div>` : ""}
     </div>
   `;
   const list = node.querySelector(".draft-summary-list");
-  for (const draft of visibleDrafts) {
-    const item = document.createElement("section");
-    item.className = "draft-summary-item";
+  for (const item of visibleItems) {
+    if (item.kind === "tool" && item.node) {
+      item.node.classList.add("folded-process-card");
+      list?.append(item.node);
+      continue;
+    }
+    const section = document.createElement("section");
+    section.className = "draft-summary-item";
     const title = document.createElement("div");
     title.className = "draft-summary-title";
-    title.textContent = draft.kind === "tool" ? "工具" : Number.isFinite(draft.round) ? `思考 · 第 ${draft.round} 轮` : "思考";
-    item.append(title);
-    if (draft.text.trim() && (draft.kind === "tool" || !isDuplicateDraftText9(draft.text, finalText))) {
+    title.textContent = item.title;
+    section.append(title);
+    if (item.text.trim()) {
       const body = document.createElement("div");
       body.className = "message-body draft-plain-text";
-      body.textContent = draft.text;
-      item.append(body);
+      body.textContent = item.text;
+      section.append(body);
     }
-    list?.append(item);
+    list?.append(section);
   }
   appendTranscriptNode4(node);
   scrollTranscript({ onlyIfNearBottom: true });
 }
 function snapshotDraft(draft) {
+  const round = Number(draft.round);
   return {
-    kind: draft.kind === "tool" ? "tool" : "text",
-    round: draft.round,
-    text: String(draft.text ?? "")
+    kind: "draft",
+    order: Number(draft.order ?? 0),
+    title: Number.isFinite(round) ? `思考 · 第 ${round} 轮` : "思考",
+    text: String(draft.text ?? ""),
+    node: void 0
+  };
+}
+function snapshotToolCard(card) {
+  return {
+    kind: "tool",
+    order: Number(card.order ?? 0),
+    title: card.node?.querySelector(".activity-title")?.textContent ?? "工具",
+    text: card.node?.querySelector(".activity-detail")?.textContent ?? "",
+    node: card.node
   };
 }
 var GUIDED_DRAFT_MARKER = "[引导接管前的草稿，非最终回复]";
@@ -9978,38 +10041,156 @@ function interruptedDraftLabel(round, steered) {
 function isThinkingProcessMessage(message) {
   return isPlainObject(message) && message.thinkingProcess === true && visibleTranscriptRole(String(message.role ?? "")) === "assistant";
 }
-function createThinkingProcessNode(message) {
+function createThinkingProcessNode(message, options = {}) {
   const record = isPlainObject(message) ? message : {};
-  const body = String(messageDisplayText2(record.content) ?? "").trim();
+  const finalText = options.finalText ?? "";
+  const stored = thinkingProcessItems(record.processItems, finalText);
+  const items = stored.length > 0 ? stored : fallbackThinkingProcessItems(record, options.precedingTools ?? [], finalText);
   const node = document.createElement("details");
-  node.className = "draft-summary";
+  node.className = `draft-summary${items.length === 0 ? " compact" : ""}`;
   node.setAttribute("aria-live", "off");
+  const meta = items.length > 0 ? `已收起 · ${items.length} 项` : "已收起 · 已汇入最终回复";
   node.innerHTML = `
     <summary>
       <span class="status-dot"></span>
       <span>思考过程</span>
-      <span class="draft-summary-meta">${body ? "已收起" : "已收起 · 已汇入最终回复"}</span>
+      <span class="draft-summary-meta">${meta}</span>
     </summary>
-    <div class="draft-summary-list"></div>
+    <div class="draft-summary-list">
+      ${items.length === 0 ? `<div class="draft-summary-note">本轮流式草稿已合并到最终回复，没有额外过程内容。</div>` : ""}
+    </div>
   `;
   const list = node.querySelector(".draft-summary-list");
-  if (body && list) {
-    const item = document.createElement("section");
-    item.className = "draft-summary-item";
+  for (const item of items) {
+    if (item.kind === "tool") {
+      list?.append(createFoldedToolCard(item.title, item.text, item.status));
+      continue;
+    }
+    const section = document.createElement("section");
+    section.className = "draft-summary-item";
     const title = document.createElement("div");
     title.className = "draft-summary-title";
-    title.textContent = "思考";
-    const bodyNode = document.createElement("div");
-    bodyNode.className = "message-body draft-plain-text";
-    bodyNode.textContent = body;
-    item.append(title, bodyNode);
-    list.append(item);
-  } else if (list) {
-    const note = document.createElement("div");
-    note.className = "draft-summary-note";
-    note.textContent = "本轮流式草稿已合并到最终回复，没有额外过程内容。";
-    list.append(note);
+    title.textContent = item.title;
+    section.append(title);
+    if (item.text.trim()) {
+      const body = document.createElement("div");
+      body.className = "message-body draft-plain-text";
+      body.textContent = item.text;
+      section.append(body);
+    }
+    list?.append(section);
   }
+  return node;
+}
+function toolActivityCoveredByProcess(messages, index) {
+  const list = Array.isArray(messages) ? messages : [];
+  const message = list[index];
+  if (!isPlainObject(message) || message.toolActivity !== true) return false;
+  for (let cursor = index + 1; cursor < list.length; cursor += 1) {
+    const next = list[cursor];
+    if (!isPlainObject(next)) continue;
+    if (next.toolActivity === true || next.role === "tool") continue;
+    return next.thinkingProcess === true;
+  }
+  return false;
+}
+function followingAssistantText(messages, index) {
+  const list = Array.isArray(messages) ? messages : [];
+  for (let cursor = index + 1; cursor < list.length; cursor += 1) {
+    const message = list[cursor];
+    if (!isPlainObject(message)) continue;
+    if (message.toolActivity === true || message.thinkingProcess === true || message.role === "tool") continue;
+    if (visibleTranscriptRole(String(message.role ?? "")) === "assistant") {
+      return messageDisplayText2(message.content);
+    }
+    return "";
+  }
+  return "";
+}
+function precedingToolActivities(messages, index) {
+  const list = Array.isArray(messages) ? messages : [];
+  const tools = [];
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+    const message = list[cursor];
+    if (!isPlainObject(message)) continue;
+    if (message.toolActivity === true) {
+      tools.unshift(message);
+      continue;
+    }
+    if (message.role === "tool") continue;
+    break;
+  }
+  return tools;
+}
+function thinkingProcessItems(value, finalText) {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!isPlainObject(entry)) return [];
+    const kind = entry.kind === "tool" ? "tool" : entry.kind === "draft" ? "draft" : "";
+    if (!kind) return [];
+    const text = String(entry.text ?? "");
+    if (kind === "draft" && (!text.trim() || isDuplicateDraftText9(text, finalText))) return [];
+    return [{
+      kind,
+      title: String(entry.title ?? (kind === "tool" ? "工具" : "思考")),
+      text,
+      status: kind === "tool" ? String(entry.status ?? "") : ""
+    }];
+  });
+}
+function fallbackThinkingProcessItems(record, precedingTools, finalText) {
+  const items = precedingTools.flatMap((message) => {
+    if (!isPlainObject(message)) return [];
+    return [{
+      kind: "tool",
+      title: String(messageDisplayText2(message.content) ?? "工具"),
+      text: String(message.toolDetail ?? ""),
+      status: String(message.toolStatus ?? "")
+    }];
+  });
+  const body = String(messageDisplayText2(record.content) ?? "").trim();
+  if (body && !isDuplicateDraftText9(body, finalText)) {
+    items.push({ kind: "draft", title: "思考", text: body, status: "" });
+  }
+  return items;
+}
+function foldedToolStatus(status, title) {
+  const value = String(status ?? "").trim();
+  if (value === "failed" || value === "blocked" || value === "running" || value === "completed") return value;
+  if (/未成功|失败/.test(title)) return "failed";
+  if (/被阻止/.test(title)) return "blocked";
+  if (title.startsWith("正在")) return "running";
+  return "completed";
+}
+function foldedToolTone(status) {
+  if (status === "failed") return "tool-failed";
+  if (status === "blocked") return "tool-blocked";
+  if (status === "running") return "tool-running";
+  return "tool-ok";
+}
+function foldedToolMark(status) {
+  if (status === "failed") return "×";
+  if (status === "blocked") return "!";
+  if (status === "running") return "•";
+  return "✓";
+}
+function createFoldedToolCard(title, detail, status) {
+  const resolved = foldedToolStatus(status, title);
+  const node = document.createElement("div");
+  node.className = `activity-card tool-bar ${foldedToolTone(resolved)} folded-process-card`;
+  node.innerHTML = `
+    <button class="activity-head" type="button" aria-expanded="false">
+      <span class="tool-mark" aria-hidden="true">${foldedToolMark(resolved)}</span>
+      <div class="activity-title">${escapeHtml(title)}</div>
+      <span class="chevron">⌄</span>
+    </button>
+    <div class="activity-detail">${escapeHtml(detail)}</div>
+  `;
+  const toggle = node.querySelector(".activity-head");
+  toggle?.addEventListener("click", () => {
+    node.classList.toggle("open");
+    toggle.setAttribute("aria-expanded", String(node.classList.contains("open")));
+  });
   return node;
 }
 function isInterruptedDraftMessage(message) {
@@ -11707,6 +11888,7 @@ export {
   focusModalInitialTarget,
   focusTrapTarget,
   followTranscript2 as followTranscript,
+  followingAssistantText,
   formatBytes2 as formatBytes,
   formatContextUsage5 as formatContextUsage,
   formatNumber2 as formatNumber,
@@ -11873,6 +12055,7 @@ export {
   permissionIndexForKey3 as permissionIndexForKey,
   pickExhibitFile,
   postJson,
+  precedingToolActivities,
   previewText9 as previewText,
   previewWidthBounds3 as previewWidthBounds,
   primaryLiveActivity5 as primaryLiveActivity,
@@ -12073,6 +12256,9 @@ export {
   toggleModelPanel5 as toggleModelPanel,
   toggleQuestionChoice9 as toggleQuestionChoice,
   toggleSidebar,
+  toolActivityCoveredByProcess,
+  toolBarMark,
+  toolBarTone,
   transcriptFirstContentNode4 as transcriptFirstContentNode,
   transcriptMessageAttachments,
   transcriptNodeTop4 as transcriptNodeTop,

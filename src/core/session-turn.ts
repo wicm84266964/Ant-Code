@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { readToolEvidence } from "./tool-summary.ts";
 import { toolActivityTranscriptMessage } from "./session-tools.ts";
+import { toolLabel } from "../tools/labels.ts";
 import { buildInitialContext } from "../context/builder.ts";
 import { loadConfig, type LabAgentConfig } from "../config/load-config.ts";
 import {
@@ -130,11 +131,13 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
   ].slice(0, 6);
   const thinkingCapture = createThinkingCapture();
   const interruptedDraft = createInterruptedDraftCapture();
+  const visibleProcess = createVisibleProcessCapture();
   const eventOptions = withAntEventOptions(session, {
     ...options,
     onEvent: async (event: SessionEvent) => {
       captureThinkingEvent(thinkingCapture, event);
       captureInterruptedDraftEvent(interruptedDraft, event);
+      captureVisibleProcessEvent(visibleProcess, event);
       if (options.onEvent) {
         await options.onEvent(event);
       }
@@ -634,6 +637,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
         eventOptions,
         thinking,
         thinkingProcess: interruptedDraft.text,
+        processItems: visibleProcessItemsForTranscript(visibleProcess),
         turnMessages,
         transcriptMessages: transcriptTurnMessages,
         modelContextMessages: liveModelMessages(messages)
@@ -758,6 +762,84 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
 
 function rotateGatewaySessionAffinity(session: AgentSession) {
   session.gatewaySessionAffinity = `retry-${Date.now().toString(36)}-${crypto.randomBytes(4).toString("hex")}`;
+}
+
+export type VisibleProcessItem = {
+  kind: "draft" | "tool";
+  title: string;
+  text: string;
+  status?: string;
+  toolCallId?: string;
+};
+
+export function createVisibleProcessCapture() {
+  return { items: [] as VisibleProcessItem[] };
+}
+
+export function captureVisibleProcessEvent(capture: { items: VisibleProcessItem[] } | null | undefined, event: Record<string, unknown>) {
+  if (!capture || !event || typeof event !== "object") return;
+  if (event.type === "assistant_delta" || event.type === "assistant_text_delta") {
+    const text = String(event.text ?? "");
+    if (!text) return;
+    const round = Number(event.round);
+    const title = Number.isFinite(round) ? `思考 · 第 ${round} 轮` : "思考";
+    const last = capture.items.at(-1);
+    if (last?.kind === "draft" && last.title === title) {
+      last.text += text;
+      return;
+    }
+    capture.items.push({ kind: "draft", title, text });
+    return;
+  }
+  if (event.type === "tool_start") {
+    const toolCallId = String(event.toolCallId ?? "").trim();
+    capture.items.push({
+      kind: "tool",
+      title: `正在${toolLabel(event.name)}`,
+      text: "",
+      status: "running",
+      toolCallId
+    });
+    return;
+  }
+  if (event.type !== "tool_finish") return;
+  const built = toolActivityTranscriptMessage({
+    toolCallId: String(event.toolCallId ?? ""),
+    name: String(event.name ?? ""),
+    display: {
+      ok: event.ok === true,
+      blocked: event.blocked === true,
+      errorCode: typeof event.errorCode === "string" ? event.errorCode : "",
+      resultBytes: Number(event.resultBytes),
+      truncated: event.truncated === true,
+      preview: typeof event.resultPreview === "string" ? event.resultPreview : ""
+    }
+  });
+  const title = String(built.content?.[0]?.text ?? "").trim() || "工具";
+  const text = String(built.toolDetail ?? "");
+  const toolCallId = String(event.toolCallId ?? "").trim();
+  const existing = toolCallId
+    ? [...capture.items].reverse().find((item) => item.kind === "tool" && item.toolCallId === toolCallId)
+    : undefined;
+  const status = event.blocked === true ? "blocked" : event.ok === true ? "completed" : "failed";
+  if (existing) {
+    existing.title = title;
+    existing.text = text;
+    existing.status = status;
+    return;
+  }
+  capture.items.push({ kind: "tool", title, text, status, toolCallId });
+}
+
+export function visibleProcessItemsForTranscript(capture: { items: VisibleProcessItem[] } | null | undefined) {
+  return (capture?.items ?? [])
+    .map((item) => ({
+      kind: item.kind,
+      title: item.title.trim(),
+      text: item.text.trim(),
+      ...(item.kind === "tool" && item.status ? { status: item.status } : {})
+    }))
+    .filter((item) => item.title || item.text);
 }
 
 /**

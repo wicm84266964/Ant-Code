@@ -177,6 +177,7 @@ export function normalizeClientSurfaceValue(value: unknown) {
 export async function appendSessionMessages(session: AgentSession, data: import("../model-gateway/protocol.ts").NormalizedGatewayResponse, fallbackText: string, options: {
   thinking?: unknown;
   thinkingProcess?: unknown;
+  processItems?: unknown;
   turnMessages?: SessionMessage[];
   transcriptMessages?: SessionMessage[];
   modelContextMessages?: SessionMessage[];
@@ -210,10 +211,12 @@ export async function appendSessionMessages(session: AgentSession, data: import(
   const turnMessages = Array.isArray(options.turnMessages) ? options.turnMessages : [];
   const transcriptMessages = Array.isArray(options.transcriptMessages) ? options.transcriptMessages : turnMessages;
   const thinkingProcessText = String(options.thinkingProcess ?? "").trim();
-  const thinkingProcessMessage: SessionMessage[] = thinkingProcessText
+  const processItems = visibleProcessItems(options.processItems);
+  const thinkingProcessMessage: SessionMessage[] = thinkingProcessText || processItems.length > 0
     ? [{
         role: "assistant",
         thinkingProcess: true,
+        ...(processItems.length > 0 ? { processItems } : {}),
         content: [{ type: "text", text: thinkingProcessText }]
       }]
     : [];
@@ -768,6 +771,29 @@ export function cloneTranscriptContent(content: unknown) {
 }
 
 
+export function visibleProcessItems(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  const items: Array<{ kind: "draft" | "tool"; title: string; text: string; status?: string }> = [];
+  for (const entry of value) {
+    if (!isPlainObject(entry)) continue;
+    const kind = entry.kind === "tool" ? "tool" : entry.kind === "draft" ? "draft" : "";
+    if (kind !== "draft" && kind !== "tool") continue;
+    const title = redactPersistedText(String(entry.title ?? "")).trim();
+    const text = redactPersistedText(String(entry.text ?? "")).trim();
+    if (!title && !text) continue;
+    const status = kind === "tool" ? String(entry.status ?? "").trim() : "";
+    items.push({
+      kind,
+      title: title || (kind === "tool" ? "工具" : "思考"),
+      text,
+      ...(status === "completed" || status === "failed" || status === "blocked" || status === "running"
+        ? { status }
+        : {})
+    });
+  }
+  return items;
+}
+
 export function persistableMessage(message: unknown, options: Record<string, unknown> = {}) {
   if (!isPlainObject(message)) {
     return null;
@@ -788,6 +814,10 @@ export function persistableMessage(message: unknown, options: Record<string, unk
   }
   if (message.thinkingProcess === true) {
     persisted.thinkingProcess = true;
+    const processItems = visibleProcessItems(message.processItems);
+    if (processItems.length > 0) {
+      persisted.processItems = processItems;
+    }
   }
   if (message.toolActivity === true) {
     persisted.toolActivity = true;

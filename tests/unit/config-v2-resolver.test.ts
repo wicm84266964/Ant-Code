@@ -265,7 +265,7 @@ test("projects all legacy model runtime fields without exposing credentials or m
   const model = legacy.models[0];
 
   assert.equal(legacy.modelAlias, "deepseek-v4-pro");
-  assert.equal(legacy.reasoningEffort, "max");
+  assert.equal(legacy.reasoningEffort, null);
   assert.equal(legacy.lab.gatewayUrl, "https://api.deepseek.example/v1/responses?tenant=alpha");
   assert.equal(legacy.lab.gatewayCredentialRef, "DEEPSEEK_API_KEY");
   assert.equal(legacy.lab.gatewayApiKey, null);
@@ -281,8 +281,8 @@ test("projects all legacy model runtime fields without exposing credentials or m
     default: "deepseek-v4-pro",
     strong: "deepseek-v4-pro"
   });
-  assert.deepEqual(model.reasoningEfforts.map((effort) => effort.id), ["off", "high", "max"]);
-  assert.equal(model.defaultReasoningEffort, "max");
+  assert.deepEqual(model.reasoningEfforts.map((effort) => effort.id), ["low", "medium", "high", "xhigh"]);
+  assert.equal(model.defaultReasoningEffort, "high");
   assert.equal(legacy.agents.modelTiers.strong, "deepseek-v4-pro");
   assert.equal(Object.isFrozen(legacy.lab.gatewayProfiles[0].models[0]), true);
 
@@ -363,7 +363,7 @@ test("supplements incomplete historical reasoning declarations from exact protoc
 
   assert.deepEqual(
     sol.reasoningEfforts.map((effort) => effort.id),
-    ["none", "low", "medium", "high", "xhigh", "max"]
+    ["low", "medium", "high", "xhigh", "max"]
   );
   assert.equal(sol.reasoningEfforts.find((effort) => effort.id === "max").label, "Historical max");
   assert.equal(sol.defaultReasoningEffort, "max");
@@ -443,10 +443,10 @@ test("removes only the exact obsolete GPT ultra preset and clears its runtime ov
   const luna = legacy.lab.gatewayProfiles[0].models.find((model) => model.id === "gpt-5.6-luna");
   const probed = legacy.lab.gatewayProfiles[0].models.find((model) => model.id === "gpt-5.6-sol");
 
-  assert.deepEqual(terra.reasoningEfforts.map((effort) => effort.id), ["none", "low", "medium", "high", "xhigh", "max"]);
-  assert.equal(terra.defaultReasoningEffort, null);
+  assert.deepEqual(terra.reasoningEfforts.map((effort) => effort.id), ["low", "medium", "high", "xhigh"]);
+  assert.equal(terra.defaultReasoningEffort, "high");
   assert.equal(legacy.reasoningEffort, null);
-  assert.deepEqual(luna.reasoningEfforts.map((effort) => effort.id), ["none", "low", "medium", "high", "xhigh", "max", "ultra"]);
+  assert.deepEqual(luna.reasoningEfforts.map((effort) => effort.id), ["low", "medium", "high", "xhigh", "max", "ultra"]);
   assert.equal(luna.defaultReasoningEffort, "ultra");
   assert.deepEqual(probed.reasoningEfforts.map((effort) => effort.id), ["low", "medium", "high", "xhigh", "max", "ultra"]);
   assert.equal(probed.defaultReasoningEffort, "ultra");

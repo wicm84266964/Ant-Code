@@ -409,12 +409,12 @@ test("session model archive preserves tool-call context for resume after compact
 
     assert.ok(session.contextWindow.compactionCount > 0);
     assert.equal(session.messages.some((message) => message.role === "tool"), false);
-    assert.equal(session.transcriptArchive.totalMessages, 3);
+    assert.equal(session.transcriptArchive.totalMessages, 4);
     assert.equal(session.modelContextArchive.totalMessages, 4);
 
     const metadataPath = path.join(cwd, ".lab-agent", "sessions", `${session.id}.json`);
     const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
-    assert.equal(metadata.transcript.archive.totalMessages, 3);
+    assert.equal(metadata.transcript.archive.totalMessages, 4);
     assert.equal(metadata.transcript.modelArchive.totalMessages, 4);
     assert.equal(metadata.transcript.contextMessages.some((message) => message.role === "tool"), false);
 

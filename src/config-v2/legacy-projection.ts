@@ -1,6 +1,7 @@
 import { deepFreeze } from "./schema.ts";
 import {
   inferCatalogReasoning,
+  isAutomaticMaxGuess,
   isLegacyGpt56UltraPreset
 } from "../model-gateway/reasoning-capabilities.ts";
 
@@ -275,6 +276,9 @@ function runtimeReasoningCapability(model: ConfigV2Model, protocol: string) {
     && isLegacyGpt56UltraPreset(model.id, protocol, storedEfforts)) {
     storedEfforts = storedEfforts.filter((effort) => String(effort.id ?? "").toLowerCase() !== "ultra");
   }
+  if (!confirmedDiscovery && isAutomaticMaxGuess(storedEfforts)) {
+    storedEfforts = [];
+  }
   if (confirmedDiscovery) {
     if (storedEfforts.length === 0) return null;
     const requestedDefault = String(model.reasoning?.default ?? "").toLowerCase();
@@ -287,9 +291,16 @@ function runtimeReasoningCapability(model: ConfigV2Model, protocol: string) {
   }
   const preset = inferCatalogReasoning({ id: model.id }, { protocol });
   if (preset.reasoningDiscovery.source !== "known-preset") {
-    return storedEfforts.length > 0
-      ? { efforts: storedEfforts, default: model.reasoning?.default ?? null }
-      : null;
+    if (storedEfforts.length > 0) {
+      return { efforts: storedEfforts, default: model.reasoning?.default ?? null };
+    }
+    if (preset.reasoningDiscovery.source === "standard-thinking" && preset.reasoningEfforts.length > 0) {
+      return {
+        efforts: preset.reasoningEfforts,
+        default: preset.defaultReasoningEffort
+      };
+    }
+    return null;
   }
 
   const storedById = new Map(storedEfforts.map((effort) => [String(effort.id ?? "").toLowerCase(), effort]));
