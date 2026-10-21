@@ -4,6 +4,8 @@
 
 ## 2.0.28 - 2026-10-21
 
+Published 2026-10-21: [v2.0.28](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.28).
+
 Model rows can save a context window. A running turn keeps its current window, and the next turn uses the saved limit. The junior subagent now resolves to code-worker. The readonly research subagent now resolves to web-researcher. Restart Dashboard and refresh the browser. Existing configuration and sessions can continue.
 
 ## 2.0.27 - 2026-10-20
@@ -912,4 +914,3 @@ sessions do not need to be recreated.
 - `node --test --test-name-pattern "createSession keeps compacted context when restored full archive would exceed prompt budget" tests/unit/session.test.js`
 - `npm test -- tests/unit/tools.test.js`
 - `npm test -- tests/unit/agent-profiles-config.test.js tests/unit/context.test.js`
-
