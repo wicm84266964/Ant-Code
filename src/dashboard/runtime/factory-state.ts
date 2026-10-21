@@ -87,6 +87,7 @@ export type DashboardRuntimeApi = {
   shutdown(input?: DashboardRequestInput): Promise<unknown>;
   sessionFiles(sessionId: string): unknown;
   importModelSource(input?: DashboardRequestInput): Promise<unknown>;
+  saveModelContext(input?: DashboardRequestInput): Promise<unknown>;
   saveAgentRouting(input?: DashboardRequestInput): Promise<unknown>;
   saveProviderAgentModels(input?: DashboardRequestInput): Promise<unknown>;
   listSchedules(): Promise<unknown>;

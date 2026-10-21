@@ -5,6 +5,87 @@ import { visibleTranscriptRole } from "./transcript.ts";
 import { MANUAL_AGENT_MODEL_VALUE, state, els, MODE_DESCRIPTIONS, LOCAL_FILE_EXTENSIONS, FILE_REFERENCE_PATTERN, TRANSCRIPT_DOM_LIMIT, EVENT_STALE_AFTER_MS, EVENT_CONNECT_TIMEOUT_MS, EVENT_RECONNECT_MAX_ATTEMPTS, DASHBOARD_REQUEST_TIMEOUT_MS, DASHBOARD_API_VERSION, DASHBOARD_LIFECYCLE_TIMEOUT_MS, DASHBOARD_SHUTDOWN_TIMEOUT_MS, DASHBOARD_INTERRUPT_TIMEOUT_MS, MAX_IMAGE_ATTACHMENTS, MAX_IMAGE_ATTACHMENT_BYTES, CURRENT_SESSION_STORAGE_KEY, DASHBOARD_CLIENT_STORAGE_KEY, PREVIEW_WIDTH_STORAGE_KEY, PREVIEW_WIDTH_DEFAULT, PREVIEW_WIDTH_MIN, PREVIEW_WIDTH_MAX, PREVIEW_WORKSPACE_MIN , emptySessionStatus, emptyBackgroundSubagent } from "./app-core.ts";
 import type { DashboardConfigSource, DashboardReasoningEffort, DashboardTurnChangeStats, DashboardScopedDefaultSelection, DashboardVisionAgent, DashboardReasoningDiscovery, DashboardReasoningCapabilityCandidate, DashboardGatewayProbeModel, DashboardGatewayProbeResult, DashboardLifecycleActivity, DashboardSettings, DashboardFile, DashboardTableSheet, DashboardTablePreview, DashboardLightboxItem, DashboardQuestionChoice, DashboardPendingQuestion, DashboardApproval, DashboardGatewayTransport, DashboardScopedRequest, DashboardFetchOptions, DashboardModelSource, DashboardSessionStatus, DashboardApiResult, DashboardActivity, DashboardModelOption, DashboardGatewayProfile, DashboardGatewayConfig, DashboardModelSelection, DashboardPendingGuide, DashboardStreamEvent, DashboardUiState , DashboardSessionSummary } from "./app-core.ts";
 import { eventTargetOf, eventElement, isPlainObject, modelSourceOf, errorMessageOf, init, bootstrapDashboard, observeRunStatus, updateRunStatusTone, bindEvents, normalizedResponsiveView, composerHeightFor, previewWidthBounds, clampedPreviewWidth, permissionIndexForKey, focusTrapTarget, shouldFollowTranscript, scheduleAnimationFrameOnce, cancelScheduledAnimationFrame, appendPlainDraftDelta, renderFinalAssistantBody, selectTranscriptNodesToRemove, responsiveLayoutMode, restorePreviewWidth, setPreviewWidth, syncPreviewResizeHandle, beginPreviewResize, updatePreviewResize, finishPreviewResize, handlePreviewResizeKeydown, setResponsiveView, syncResponsiveNavigation, setResponsiveSurfaceInert, handleResponsiveFileNavigation, syncVisualViewport, resizePromptInput, handlePermissionModeKeydown, requestPermissionMode, defaultGoalMaxAutoContinues, emptyGoalSnapshot, applyGoalSnapshot, renderGoalControls, renderGoalStatusBar, requestGoalMode, showGoalConfirm, hideGoalConfirm, showGoalTextPanel, hideGoalTextPanel, enableGoalWithObjective, submitGoalAction, adoptGoalRunResult, showPermissionConfirm, hidePermissionConfirm, updateContextActions, announceStatus, modalFocusableElements, activateModal, collectModalBackground, focusModalInitialTarget, deactivateModal, restoreModalAttribute, handleGlobalKeydown, closeActiveModal, loadTrust, loadSessions, restoreInitialSession, latestBackgroundSessionId, initialSessionId, rememberCurrentSession, renderSessions, sessionMeta, sessionStatusView, toggleSidebar, setSidebarCollapsed, sessionsNeedRefresh, scheduleSessionsRefresh, handleSessionAction, openSession, restoreBackgroundSnapshot, deleteSession, setSessionsRefreshState, copySessionId, newTask, rememberNewTaskModelState, restoreNewTaskModelState, refreshNewTaskModelState, addAttachmentFiles, readImageAttachment, renderAttachmentStrip, attachmentPayload, clearAttachments, sendPrompt, stableTurnRequest, dashboardRequestId, dashboardClientId, statusUrl, interruptTurn, guideTurn, cancelQueuedTurn, cancelBackgroundSubagent, backgroundCancelKey, connectEvents, ensureEventsConnected, disconnectEvents, closeEventSource, markEventConnectionAlive, armEventConnectTimer, armEventStaleTimer, scheduleEventReconnect, reconnectEventsManually, clearEventReconnectTimer, clearEventConnectTimer, clearEventStaleTimer, setConnectionState, resetEventReplayState, rememberEventCursor, handleDashboardEvent, shouldSkipDashboardEvent, beginEventTurn, renderTranscriptMessages, renderSessionFailure, setTranscriptPaging, renderTranscriptHistoryStatus, removeTranscriptHistoryStatus, transcriptFirstContentNode, handleTranscriptScroll, loadOlderTranscript, renderWorkflowPanel, renderWorkflowStrip, currentWorkflowItem, workflowSection, workflowItem, normalizeWorkflowStatus, summarizeWorkflow, appendMessage, createMessageNode, appendTranscriptNode, trimTranscriptWindow, isProtectedTranscriptNode, renderTranscriptWindowMarker, captureTranscriptViewportAnchor, restoreTranscriptViewportAnchor, transcriptNodeTop, restoreTranscriptNodeAnchor, resetTranscriptWindow, appendAssistantDraft, scheduleDraftRender, renderAssistantDraft, appendActivity, appendContextBoundary, contextBoundaryText, handleActivity, isBackgroundSubagentActivity, handleBackgroundSubagentActivity, clearBackgroundSubagentStatus, reconcileBackgroundSubagentSnapshot, backgroundSubagentDisplayStatus, backgroundSubagentVisible, updateLiveActivity, removeLiveActivity, setLiveTitle, toggleLiveStatusDetails, updateLiveStatus, liveStatusTitle, primaryLiveActivity, gatewayRetryChipText, renderBackgroundSubagentStatus, backgroundSubagentCompactLabel, backgroundSubagentTitle, backgroundSubagentMeta, backgroundSubagentCancellable, resetLiveStatus, backgroundSubagentCounts, idleRunStatus, applyIdleRunStatus, updateRunStatusForBackground, updateSessionStatus, updateTurnChangeStats, resetTurnChangeStats, normalizeChangeStats, renderComposerStatus, modelStatusHtml, unresolvedModelStatusHtml, handleModelStatusActivate, handleModelStatusKeydown, toggleModelPanel, hideModelPanel, showSettingsWorkspace, refreshSettingsConfiguration, hideSettingsWorkspace, showModelConfigPanel, hideModelConfigPanel, renderModelPanel, modelCapabilityLabels, handleModelPanelClick, handleModelPanelChange, renderSettingsView, syncSettingsRail, modelSettingsHtml, transcriptSettingsHtml, transcriptRetentionOptionsHtml, networkSettingsHtml, networkModeOptionHtml, agentSettingsHtml, reliabilitySettingsHtml, settingsSectionHeading, settingsToggleHtml, managedFieldHtml, settingsDisabled, settingsFormActions, settingsFeedbackHtml, settingsGatewayProfileHtml, gatewayProfileReadonlyLabel, providerModelKey, scopedDefaultModelLabel, settingsModelHtml, handleSettingsRailClick, initializeSettingsFormTracking, handleSettingsFormChange, settingsControlValue, changedSettingsFields, canonicalSettingsField, setSettingsFormSaving, renderSettingsFeedbackInPlace, saveSettingsConfig, handleSettingsClick, protocolDisplayName, agentModelPickerHtml, renderModelConfigPanel, handleModelConfigPanelClick, handleModelConfigInput, handleModelConfigChange, markModelConfigCredentialChanged, markModelConfigEndpointChanged, handleModelConfigModelIdChanged, markReasoningCapabilityManual, clearReasoningCapabilityControls, syncGatewayUrlHint, gatewayUrlPlaceholder, gatewayUrlHint, syncReasoningDefaultOptions, probeGateway, isCurrentModelConfigRequest, currentGatewayProbeResult, currentGatewayCatalogModels, modelConfigGatewayProfile, modelConfigEndpointChanged, modelConfigAgentModelsSnapshot, initializeAgentModelPickerSnapshot, syncAgentModelPickersForEndpoint, uniqueAgentModelCandidates, appendAgentModelOptions, renderAgentModelPickers, updateAgentModelPickerManualStatus, handleAgentModelSelection, renderGatewayProbeResult, applyProbedModel, applyGatewayDiscoveredModel, applySuggestedGatewayUrl, gatewayCredentialAction, normalizeGatewayProbeModels, normalizeReasoningDiscovery, reasoningCapabilityCandidate, applyReasoningCapabilityCandidate, ensureReasoningEffortOptions, applyPendingReasoningCapabilities, reasoningCapabilityIsActionable, renderReasoningCapabilityStatus, reasoningCapabilityStatusText, reasoningDiscoveryStatusText, probeModelCapabilities, setFormControlsSaving, setModelConfigFormSaving, renderModelConfigFailure, clearModelConfigFailure, manualAgentModelIds, sourceLabel, formatContextUsage, firstFiniteNumber, formatTokenCount, trimNumber, nonNegativeInteger, collapseCompletedActivities, clearAssistantDrafts, collapseAssistantDrafts, isMeaningfulCompletedActivity, isDuplicateDraftText, normalizeComparableText, showApproval, resolveApproval, hideApproval, showQuestion, revealInteractionPanel, renderQuestionPanel, reviewQuestionConversation, returnToQuestion, activateQuestionReviewBackground, deactivateQuestionReviewBackground, questionChoiceButton, toggleQuestionChoice, submitQuestion, cancelQuestion, finishQuestionSubmission, hideQuestion, showTrustPanel, renderTrustPanel, confirmTrust, renderQueuePanel, renderQueueItem, setPendingGuide, clearPendingGuide, syncPendingGuideFromQueue, renderGuideFeedback, guideCopy, guideSource, guideTurnFromQueue, guideButtonText, guideButtonDisabled, guideButtonVisible, syncGuideButton, shouldKeepGuideFeedback, isInterruptError, updateSendButton, showContextConfirm, hideContextConfirm, runContextAction, contextActionRequestOptions, contextSummaryLine, compactResultLine, rememberQuestionDraft, questionResolutionText, showShutdownPanel, hideShutdownPanel, shutdownDashboard, lockClosedDashboard, normalizeLifecycleActivity, shutdownRequestBody, shutdownResultIsClosed, lifecycleActivitySummary, renderShutdownActivity, renderFiles, currentImageFiles, openFile, renderOfficePreview, officePreviewMeta, officePreviewBodyHtml, renderTablePreview, normalizeTablePreview, tablePreviewMeta, renderCompactTableHtml, renderExpandedTableHtml, renderTableHtml, tableTruncationNote, maxVisibleColumns, columnLabel, renderSheetPreviewHtml, renderSheetCellHtml, resetPreview, fencedDataForFile, dataLanguageForExtension, showImageLightbox, showTableLightbox, renderLightboxImage, bindTableLightboxControls, moveLightbox, hideLightbox, setPermissionMode, clearTranscript, cancelTranscriptAnimationFrames, clearAssistantDraftTimers, hideEmptyState, showError, showNotice, renderBootstrapLoading, renderBootstrapFailure, dashboardPayloadError, bootstrapFailurePresentation, clearBootstrapStatus, scrollTranscript, isTranscriptNearBottom, syncTranscriptFollowState, followTranscript, updateTranscriptJump, beginScopedRequest, isCurrentScopedRequest, finishScopedRequest, cancelScopedRequest, isAbortError, getJson, postJson, deleteJson, dashboardFetch, responseJson, dashboardJsonHeaders, dashboardCsrfToken, messageText, messageDisplayText, userMessageDisplayText, normalizeAttachmentMetadata, imageAttachmentLine, renderMessageText, renderLinkedText, bindRichContent, linkifyFileTextNodes, replaceFileReferences, isLikelyLocalFileReference, resolveDisplayFilePath, normalizeFileReferencePath, parentDirectory, filePreviewUrl, rawFileUrl, apiFileUrl, imagePreviewUrl, isSafeInlineBitmapUrl, normalizeRelativePath, isWorkspaceRelativeToBase, copyCodeBlock, previewText, formatNumber, formatBytes, escapeHtml, escapeAttribute, formatTime, formatRelativeTime } from "./app-barrel.ts";
+export function handleModelContextKeydown(event: KeyboardEvent) {
+  const input = eventTargetOf(event);
+  if (!(input instanceof HTMLInputElement) || input.dataset.action !== "save-model-context" || event.key !== "Enter") return;
+  event.preventDefault();
+  input.blur();
+}
+
+export async function commitModelContextInput(input: HTMLInputElement) {
+  if (input.dataset.action !== "save-model-context" || input.dataset.saving === "true") return;
+  const nextValue = input.value.trim();
+  const savedValue = String(input.dataset.savedValue ?? "");
+  if (nextValue === savedValue.trim()) return;
+  if (nextValue && !/^[0-9]+$/.test(nextValue)) {
+    state.settingsFeedback = { tone: "error", message: "上下文请填写正整数，例如 400000" };
+    renderSettingsFeedbackInPlace();
+    return;
+  }
+  const profileId = input.dataset.profileId || "";
+  const modelId = input.dataset.modelId || "";
+  const scope = input.dataset.saveTarget === "global" || input.dataset.saveTarget === "project"
+    ? input.dataset.saveTarget
+    : configScope(state.modelDefaultScope, "project");
+  input.dataset.saving = "true";
+  input.disabled = true;
+  try {
+    const result = await postJson("/api/model-context", {
+      providerId: profileId,
+      profileId,
+      modelId,
+      contextTokens: nextValue,
+      saveTarget: scope,
+      sessionId: state.currentSessionId || undefined,
+      ...configMutationMetadata(scope)
+    });
+    if (!result.ok) {
+      updateConfigRevisions({ ...result, scope });
+      throw Object.assign(new Error(isConfigRevisionConflict(result) ? configRevisionConflictMessage() : result.error ?? "保存上下文失败"), {
+        configConflict: isConfigRevisionConflict(result)
+      });
+    }
+    const savedScope = configScope(result.scope ?? scope, scope);
+    updateConfigRevisions({ ...result, scope: savedScope });
+    if (Array.isArray(result.models)) state.models = normalizeModels(result.models);
+    if (Array.isArray(result.gatewayProfiles)) state.gatewayProfiles = normalizeGatewayProfiles(result.gatewayProfiles);
+    else rememberModelContext(profileId, modelId, positiveContextTokens(result.contextTokens));
+    const savedTokens = positiveContextTokens(result.contextTokens);
+    const appliesNextTurn = result.contextApplies === "next-turn";
+    const savedLabel = savedTokens ? `已保存 ${modelId} 的上下文上限 ${savedTokens}` : `已取消 ${modelId} 的单独上下文上限`;
+    state.settingsFeedback = {
+      tone: "success",
+      message: appliesNextTurn ? `${savedLabel}，当前这轮不变，下一轮生效` : savedLabel
+    };
+    updateSessionStatus(result.sessionStatus);
+    renderSettingsView();
+  } catch (error) {
+    if (isPlainObject(error) && error.configConflict) await refreshConfigRevisionsAfterConflict();
+    if (input.isConnected) {
+      input.value = savedValue;
+      input.disabled = state.settingsRefreshing || state.settingsSaving;
+    }
+    state.settingsFeedback = { tone: "error", message: error instanceof Error ? error.message : "保存上下文失败" };
+    renderSettingsFeedbackInPlace();
+  } finally {
+    delete input.dataset.saving;
+  }
+}
+
+function rememberModelContext(profileId: string, modelId: string, tokens: number | null) {
+  for (const profile of state.gatewayProfiles ?? []) {
+    if (profile.id !== profileId) continue;
+    for (const model of profile.models ?? []) {
+      if (model.id === modelId) model.contextTokens = tokens;
+    }
+  }
+  for (const model of state.models ?? []) {
+    const source = modelSourceOf(model);
+    const sourceId = typeof source === "string" ? source : source?.profileId || source?.id || "";
+    if (model.id === modelId && (!sourceId || sourceId === profileId)) model.contextTokens = tokens;
+  }
+}
+
 export async function importModelSource(input: Record<string, unknown>) {
   const scope = input.saveTarget === "project" ? "project" : "global";
   state.settingsRefreshing = true;
@@ -627,6 +708,12 @@ export function normalizeConfigSource(value: unknown): DashboardConfigSource {
   };
 }
 
+function positiveContextTokens(value: unknown) {
+  if (value === undefined || value === null || value === "") return null;
+  const tokens = Number(value);
+  return Number.isInteger(tokens) && tokens > 0 ? tokens : null;
+}
+
 export function normalizeModels(models: unknown): DashboardModelOption[] {
   return Array.isArray(models) ? models.map((modelValue) => {
     const model = isPlainObject(modelValue) ? modelValue : {};
@@ -639,7 +726,7 @@ export function normalizeModels(models: unknown): DashboardModelOption[] {
     description: String(model.description ?? ""),
     thinking: model.thinking === true,
     modalities: Array.isArray(modalities) ? modalities.map(String) : ["text"],
-    contextTokens: Number.isFinite(Number(model.contextTokens ?? model.contextWindow)) ? Number(model.contextTokens ?? model.contextWindow) : null,
+    contextTokens: positiveContextTokens(model.contextTokens ?? model.contextWindow),
     reasoningEfforts: normalizeReasoningEfforts(model.reasoningEfforts ?? reasoning.efforts),
     defaultReasoningEffort: normalizedReasoningEffort(model.defaultReasoningEffort ?? reasoning.default),
     reasoningEffort: normalizedReasoningEffort(model.reasoningEffort),

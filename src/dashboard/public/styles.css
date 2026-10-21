@@ -6128,6 +6128,39 @@ textarea:focus {
   padding: 2px 6px;
 }
 
+.settings-model-context {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+  min-width: 0;
+}
+
+.settings-model-context span {
+  color: var(--text-muted);
+  flex: 0 0 auto;
+  font-size: var(--fs-caption);
+}
+
+.settings-model-context input {
+  background-color: #232323;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-ui);
+  height: 34px;
+  min-width: 0;
+  padding: 0 10px;
+  width: 9.5rem;
+}
+
+.settings-model-context input:disabled {
+  cursor: default;
+  opacity: 0.58;
+}
+
 .settings-delete-confirm {
   color: var(--danger);
   font-size: var(--fs-caption);
@@ -7055,6 +7088,11 @@ textarea:focus {
   .settings-model-row .settings-row-actions,
   .settings-model-row .settings-delete-confirm {
     grid-column: 1;
+  }
+
+  .settings-model-context input {
+    height: 44px;
+    width: 100%;
   }
 
   .settings-row-actions {

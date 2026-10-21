@@ -1030,8 +1030,11 @@ test("dashboard qualifies model deletion state by provider and classifies only r
   const deepseekHtml = module.settingsModelHtml(sharedModel, deepseek, 2);
   assert.match(grokHtml, /此范围默认/);
   assert.match(grokHtml, /data-action="use-model"/);
+  assert.match(grokHtml, /data-action="save-model-context"/);
+  assert.match(grokHtml, /name="contextTokens"/);
   assert.doesNotMatch(deepseekHtml, /此范围默认/);
   assert.doesNotMatch(grokHtml, /data-action="delete-model"/);
+  assert.doesNotMatch(grokHtml, /data-action="edit-model"/);
 });
 
 test("dashboard exposes responsive navigation and accessible interaction semantics", async () => {

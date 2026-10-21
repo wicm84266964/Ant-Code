@@ -1350,7 +1350,7 @@ function shouldRequestFinalReportAfterBudgetHit(profile: AgentProfile, budgetHit
 }
 
 function isWebResearchProfile(profileName: unknown) {
-  return profileName === "web-researcher" || profileName === "readonly-researcher";
+  return profileName === "web-researcher";
 }
 
 type BudgetReason = {

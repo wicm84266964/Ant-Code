@@ -9,7 +9,7 @@ references:
   - lab_policy: docs/provenance/source-provenance-policy.md
 design_notes:
   - Defines lab-owned local subagent profile metadata and optional config-provided profile overlays.
-  - Provides explorer, readonly-researcher, planner, verifier, and code-worker profiles with explicit tool allowlists.
+  - Provides explorer, web-researcher, planner, verifier, and code-worker profiles with explicit tool allowlists. Old research names resolve to web-researcher.
   - Supports build/default and hidden internal profiles for compaction, title, and summary-style internal tasks.
   - Includes a `visual-verifier` profile for screenshots, image attachments, OCR extraction, UI layout/readability checks, visual regression evidence, and screenshot-heavy frontend review.
   - Routes visual/image/screenshot/layout prompts to the visual profile and resolves it through the configured `vision` model tier or `agents.vision.model`.
@@ -20,7 +20,7 @@ design_notes:
   - Supports explicit local background tasks and optional git worktree isolation under .lab-agent/worktrees.
   - Persists background task group wake lifecycle markers including queued and consumed wake prompt timestamps so clients can distinguish generated-but-unconsumed continuations.
   - Emits Hooks v1 lifecycle events for subagent start, completion, failure, and partial pause.
-  - Keeps readonly fallback scanning for readonly-researcher/explorer when no gateway is configured.
+  - Keeps readonly fallback scanning for web-researcher/explorer when no gateway is configured.
   - Requires a configured gateway for verifier and code-worker profiles.
   - Requires a same-gateway vision-capable model for visual image fallback; cross-provider or multi-key visual routing is intentionally not implemented.
   - Does not implement cloud scheduling, remote agent behavior, or provider-owned backend agents.

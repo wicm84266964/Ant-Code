@@ -8,7 +8,7 @@ import { createSessionStore } from "../storage/session-store.ts";
 import { collectSessionFiles } from "./files.ts";
 import { applyPermissionMode, normalizePermissionMode, permissionModeSummary } from "./permissions.ts";
 import { createDashboardSchedule, deleteDashboardSchedule, listDashboardSchedules, pauseDashboardSchedule, resumeDashboardSchedule, SCHEDULE_TICK_MS, tickDashboardSchedules } from "./runtime/schedules.ts";
-import { runtimeImportModelSource, runtimeSaveAgentRouting, runtimeSaveProviderAgentModels } from "./runtime/source-import.ts";
+import { runtimeImportModelSource, runtimeSaveAgentRouting, runtimeSaveModelContext, runtimeSaveProviderAgentModels } from "./runtime/source-import.ts";
 import {
   publicV2ConfigState,
   saveV2DefaultModel,
@@ -448,6 +448,7 @@ export function createDashboardRuntime(options: CreateDashboardRuntimeOptions) {
     shutdown: (input: DashboardRequestInput = {}) => runtimeShutdown(ctx, input),
     sessionFiles: (sessionId: string) => runtimeSessionFiles(ctx, sessionId),
     importModelSource: (input: DashboardRequestInput = {}) => runtimeImportModelSource(ctx, input),
+    saveModelContext: (input: DashboardRequestInput = {}) => runtimeSaveModelContext(ctx, input),
     saveAgentRouting: (input: DashboardRequestInput = {}) => runtimeSaveAgentRouting(ctx, input),
     saveProviderAgentModels: (input: DashboardRequestInput = {}) => runtimeSaveProviderAgentModels(ctx, input),
     listSchedules: () => listDashboardSchedules(ctx.cwd),

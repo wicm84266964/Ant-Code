@@ -690,6 +690,11 @@ async function routeRequest(req: http.IncomingMessage, res: http.ServerResponse,
     const result = await options.runtime.saveAgentRouting(body);
     return sendJson(res, responseStatus(result, 200, 400), result);
   }
+  if (req.method === "POST" && url.pathname === "/api/model-context") {
+    const body = isJsonObject(requestBody) ? requestBody : EMPTY_JSON;
+    const result = await options.runtime.saveModelContext(body);
+    return sendJson(res, responseStatus(result, 200, 400), result);
+  }
   if (req.method === "POST" && url.pathname === "/api/sources/import") {
     const body = isJsonObject(requestBody) ? requestBody : EMPTY_JSON;
     const result = await options.runtime.importModelSource(body);

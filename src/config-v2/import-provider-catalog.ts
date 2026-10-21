@@ -7,6 +7,7 @@ type JsonObject = Record<string, unknown>;
 export type ImportedCatalogModel = {
   id: string;
   displayName?: string;
+  contextWindow?: number | null;
 };
 
 export type ImportProviderCatalogInput = {
@@ -54,7 +55,11 @@ export function importProviderCatalog(document: unknown, input: ImportProviderCa
       baseURL: input.baseURL
     },
     auth,
-    models: models.map((model) => catalogModelRecord(model, input.protocol))
+    models: models.map((model) => catalogModelRecord(
+      model,
+      input.protocol,
+      existingModelById(existing.models).get(model.id.toLowerCase())
+    ))
   };
   if (isRecord(existing.agents)) provider.agents = existing.agents;
   if (isRecord(existing.reliability)) provider.reliability = existing.reliability;
@@ -176,7 +181,7 @@ function applyImportedAgentModels(provider: JsonObject, agentModels: ImportProvi
   provider.agents = agents;
 }
 
-function catalogModelRecord(model: ImportedCatalogModel, protocol: string) {
+function catalogModelRecord(model: ImportedCatalogModel, protocol: string, previous?: JsonObject) {
   const inferred = inferCatalogReasoning({ id: model.id }, { protocol });
   const record: JsonObject = {
     id: model.id,
@@ -190,7 +195,80 @@ function catalogModelRecord(model: ImportedCatalogModel, protocol: string) {
       ...(inferred.defaultReasoningEffort ? { default: inferred.defaultReasoningEffort } : {})
     };
   }
+  // A saved window stays until the user clears it. A directory length only fills an empty field.
+  const contextWindow = positiveContextWindow(previous?.contextWindow) ?? positiveContextWindow(model.contextWindow);
+  if (contextWindow) record.contextWindow = contextWindow;
   return record;
+}
+
+export function catalogModelFromProbe(model: {
+  id?: unknown;
+  label?: unknown;
+  displayName?: unknown;
+  contextTokens?: unknown;
+  contextWindow?: unknown;
+}): ImportedCatalogModel {
+  const id = String(model.id ?? "").trim();
+  const contextWindow = positiveContextWindow(model.contextTokens ?? model.contextWindow);
+  return {
+    id,
+    displayName: String(model.displayName ?? model.label ?? id).trim() || id,
+    ...(contextWindow ? { contextWindow } : {})
+  };
+}
+
+export function parseContextWindowInput(value: unknown): { ok: true; value: number | null } | { ok: false; status: 400; error: string } {
+  if (value === undefined || value === null) return { ok: true, value: null };
+  const text = String(value).trim();
+  if (!text) return { ok: true, value: null };
+  const contextWindow = positiveContextWindow(text);
+  if (!contextWindow) return { ok: false, status: 400, error: "上下文请填写正整数，例如 400000" };
+  return { ok: true, value: contextWindow };
+}
+
+export function positiveContextWindow(value: unknown) {
+  const text = typeof value === "string" ? value.trim() : value;
+  if (typeof text === "string" && !/^[0-9]+$/.test(text)) return null;
+  const number = typeof text === "number" ? text : typeof text === "string" ? Number(text) : Number.NaN;
+  return Number.isSafeInteger(number) && number > 0 ? number : null;
+}
+
+export function saveModelContextWindow(document: unknown, input: {
+  providerId: string;
+  modelId: string;
+  contextWindow: number | null;
+}) {
+  const current = cloneDocument(document);
+  const providers = providerMap(current);
+  const provider = providers[input.providerId];
+  if (!isRecord(provider)) return { ok: false as const, status: 404, error: "找不到这个来源" };
+  const models = Array.isArray(provider.models) ? provider.models.map((model) => isRecord(model) ? { ...model } : model) : [];
+  const index = models.findIndex((model) => isRecord(model) && String(model.id ?? "") === input.modelId);
+  if (index < 0) return { ok: false as const, status: 404, error: "找不到这个模型" };
+  const model = { ...(models[index] as JsonObject) };
+  if (input.contextWindow == null) delete model.contextWindow;
+  else model.contextWindow = input.contextWindow;
+  models[index] = model;
+  provider.models = models;
+  providers[input.providerId] = provider;
+  current.namespaces[CONFIG_V2_NAMESPACES.providers] = { providers };
+  return {
+    ok: true as const,
+    document: validateSettingsDocument(current),
+    providerId: input.providerId,
+    modelId: input.modelId,
+    contextWindow: input.contextWindow
+  };
+}
+
+function existingModelById(models: unknown) {
+  const byId = new Map<string, JsonObject>();
+  for (const model of Array.isArray(models) ? models : []) {
+    if (!isRecord(model)) continue;
+    const id = String(model.id ?? "").trim().toLowerCase();
+    if (id) byId.set(id, model);
+  }
+  return byId;
 }
 
 function uniqueModels(models: ImportedCatalogModel[]) {
@@ -200,7 +278,12 @@ function uniqueModels(models: ImportedCatalogModel[]) {
     const id = String(model.id ?? "").trim();
     if (!id || seen.has(id.toLowerCase())) continue;
     seen.add(id.toLowerCase());
-    result.push({ id, displayName: String(model.displayName ?? id).trim() || id });
+    const contextWindow = positiveContextWindow(model.contextWindow);
+    result.push({
+      id,
+      displayName: String(model.displayName ?? id).trim() || id,
+      ...(contextWindow ? { contextWindow } : {})
+    });
   }
   return result;
 }

@@ -19,7 +19,7 @@ test("readonly researcher returns workspace summary and grep matches without gat
   });
 
   assert.equal(result.ok, true);
-  assert.equal(result.profile, "readonly-researcher");
+  assert.equal(result.profile, "web-researcher");
   assert.equal(result.mode, "readonly");
   assert.equal(result.modelDriven, false);
   assert.ok(result.summary.files.length > 0);
@@ -453,7 +453,7 @@ test("readonly researcher writes final report after repeated blocked github fetc
         agents: {
           modelTiers: {},
           budgets: {
-            "readonly-researcher": {
+            "web-researcher": {
               maxPermissionDenials: 2,
               maxConsecutiveFailures: 2
             }
@@ -516,7 +516,7 @@ test("readonly researcher reports from successful evidence when github denials a
         agents: {
           modelTiers: {},
           budgets: {
-            "readonly-researcher": {
+            "web-researcher": {
               maxPermissionDenials: 3,
               maxConsecutiveFailures: 10
             }

@@ -5,14 +5,19 @@ import path from "node:path";
 import test from "node:test";
 import { getAgentProfile, listAgentProfileLabels, listAgentProfiles } from "../../src/agents/profiles.ts";
 
-test("builtin agent profile aliases include research compatibility names", () => {
-  const research = getAgentProfile("research", { agents: { profiles: [] } }, { cwd: process.cwd() });
-  const researcher = getAgentProfile("researcher", { agents: { profiles: [] } }, { cwd: process.cwd() });
-  const labels = listAgentProfileLabels({ agents: { profiles: [] } }, { cwd: process.cwd() });
+test("retired research names resolve to web-researcher and stay off the visible roster", () => {
+  const config = { agents: { profiles: [] } };
+  const research = getAgentProfile("research", config, { cwd: process.cwd() });
+  const researcher = getAgentProfile("researcher", config, { cwd: process.cwd() });
+  const legacy = getAgentProfile("readonly-researcher", config, { cwd: process.cwd() });
+  const labels = listAgentProfileLabels(config, { cwd: process.cwd() });
+  const visible = listAgentProfiles(config, { cwd: process.cwd(), includeHidden: false });
 
-  assert.equal(research?.name, "readonly-researcher");
-  assert.equal(researcher?.name, "readonly-researcher");
-  assert.ok(labels.some((label) => label.includes("readonly-researcher") && label.includes("research")));
+  assert.equal(research?.name, "web-researcher");
+  assert.equal(researcher?.name, "web-researcher");
+  assert.equal(legacy?.name, "web-researcher");
+  assert.equal(visible.some((profile) => profile.name === "readonly-researcher"), false);
+  assert.equal(labels.some((label) => label.startsWith("readonly-researcher")), false);
 });
 
 test("builtin agent profiles expose v2 routing metadata and specialized agents", () => {
@@ -48,6 +53,7 @@ test("builtin agent prompts include complex-task operating contracts", () => {
   const explorer = getAgentProfile("explorer", config, { cwd: process.cwd() });
   const planner = getAgentProfile("planner", config, { cwd: process.cwd() });
   const junior = getAgentProfile("junior", config, { cwd: process.cwd() });
+  const visible = listAgentProfiles(config, { cwd: process.cwd(), includeHidden: false });
   const reviewer = getAgentProfile("reviewer", config, { cwd: process.cwd() });
   const web = getAgentProfile("web-researcher", config, { cwd: process.cwd() });
   const browser = getAgentProfile("browser-verifier", config, { cwd: process.cwd() });
@@ -64,11 +70,13 @@ test("builtin agent prompts include complex-task operating contracts", () => {
   assert.match(explorer.system, /compact evidence map/);
   assert.match(planner.system, /requirementsDoc/);
   assert.match(planner.system, /Do not edit files, do not ask the user directly/);
-  assert.match(junior.system, /checkpointed slice/);
+  assert.equal(junior?.name, "code-worker");
+  assert.equal(visible.some((profile) => profile.name === "junior"), false);
+  assert.match(junior.system, /writeScope/);
   assert.match(reviewer.system, /findings first, ordered by severity/);
-  assert.match(getAgentProfile("readonly-researcher", config, { cwd: process.cwd() }).system, /github MCP/);
-  assert.match(getAgentProfile("readonly-researcher", config, { cwd: process.cwd() }).system, /raw\.githubusercontent\.com/);
-  assert.match(getAgentProfile("readonly-researcher", config, { cwd: process.cwd() }).system, /blocked URLs under caveats/);
+  assert.match(getAgentProfile("research", config, { cwd: process.cwd() }).system, /github MCP/);
+  assert.match(getAgentProfile("research", config, { cwd: process.cwd() }).system, /raw\.githubusercontent\.com/);
+  assert.match(getAgentProfile("research", config, { cwd: process.cwd() }).system, /blocked source under caveats/);
   assert.match(web.system, /sourceQuality/);
   assert.match(web.system, /api\.github\.com contents endpoints/);
   assert.match(web.system, /produce the final report from already successful evidence/);

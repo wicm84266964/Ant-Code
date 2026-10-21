@@ -30,10 +30,10 @@ test("agent router plans parallel readonly tasks for broad codebase implementati
   assert.ok(parallel.length >= 2);
   assert.ok(parallel.some((task) => task.profile === "explorer"));
   assert.ok(parallel.some((task) => task.profile === "planner" && task.modelTier === "strong"));
-  assert.ok(route.suggestedTasks.some((task) => task.profile === "junior" && task.parallelSafe === false));
+  assert.ok(route.suggestedTasks.some((task) => task.profile === "code-worker" && task.parallelSafe === false));
   assert.equal(route.decision.difficulty, "deep");
   assert.equal(route.decision.modelTier, "strong");
-  assert.ok(route.suggestedTasks.some((task) => task.profile === "junior" && task.budget.maxRounds === null));
+  assert.ok(route.suggestedTasks.some((task) => task.profile === "code-worker" && task.budget.maxRounds === null));
 });
 
 test("agent router does not auto-suggest planner for lightweight planning prompts", () => {

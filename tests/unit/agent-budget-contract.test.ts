@@ -10,11 +10,11 @@ test("agent budget defaults to no model-tool round limit and resolves overrides"
       agents: {
         budgets: {
           defaults: { maxRounds: null },
-          "junior.deep": { maxDurationMs: 2_700_000 }
+          "code-worker.deep": { maxDurationMs: 2_700_000 }
         }
       }
     },
-    profile: { name: "junior" },
+    profile: { name: "code-worker" },
     routeDecision: { difficulty: "deep", risk: "medium" }
   });
 
