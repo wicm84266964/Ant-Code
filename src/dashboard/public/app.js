@@ -3969,6 +3969,13 @@ function bindEvents3() {
   els.settingsBack?.addEventListener("click", () => hideSettingsWorkspace());
   els.settingsRail?.addEventListener("click", handleSettingsRailClick3);
   els.settingsContent?.addEventListener("click", handleSettingsClick3);
+  els.settingsContent?.addEventListener("focusout", (event) => {
+    const input = eventTargetOf(event);
+    if (input instanceof HTMLInputElement && input.dataset.action === "save-model-context") {
+      void commitModelContextInput(input);
+    }
+  });
+  els.settingsContent?.addEventListener("keydown", handleModelContextKeydown);
   els.settingsContent?.addEventListener("input", handleSettingsFormChange3);
   els.settingsContent?.addEventListener("change", handleSettingsFormChange3);
   els.settingsContent?.addEventListener("submit", saveSettingsConfig3);
@@ -6947,6 +6954,7 @@ function modelSettingsHtml6() {
           <button class="settings-primary-action" type="button" data-action="refresh-source" data-profile-id="${escapeAttribute(inspectedProfile?.id || "")}"${!inspectedProfile || state.settingsRefreshing || state.running ? " disabled" : ""}>刷新目录</button>
         </div>
       </div>
+      <p class="settings-source-note">每一行可以改这个模型的上下文上限。留空则不单独限制，压缩仍按本地预算，默认 20 万。任务进行中也可以保存，当前这轮仍用原来的上限，下一轮再生效。刷新目录会保留已经保存的数字。</p>
       <div class="settings-model-list">
         ${models.map((model) => settingsModelHtml6(model, inspectedProfile, models.length)).join("") || `<div class="settings-empty">该来源还没有模型。添加来源时会一次读入目录。</div>`}
       </div>
@@ -7219,7 +7227,10 @@ function scopedDefaultModelLabel6(selection) {
 function settingsModelHtml6(model, profile, modelCount) {
   const tags = modelCapabilityLabels6(model);
   const efforts = normalizeReasoningEfforts6(model.reasoningEfforts);
-  const context = Number.isFinite(model.contextTokens) ? `${formatTokenCount6(model.contextTokens)} 上下文` : "";
+  const contextValue = Number.isInteger(model.contextTokens) && Number(model.contextTokens) > 0 ? String(model.contextTokens) : "";
+  const contextLocked = profile?.editable === false || state.settingsRefreshing || state.settingsSaving;
+  const contextScope = profile?.saveTarget === "global" || profile?.saveTarget === "project" ? profile.saveTarget : "";
+  const contextTitle = profile && profile.editable === false ? gatewayProfileReadonlyLabel6(profile) : state.running ? "正整数。离开输入框或按回车保存。当前这轮仍用原来的上限，下一轮再生效。" : "正整数。离开输入框或按回车保存。留空则不单独限制这个模型。";
   const scopedDefault = state.modelDefaultSelections[state.modelDefaultScope];
   const isScopedDefault = scopedDefault?.provider === (profile?.id || "") && scopedDefault?.model === model.id;
   const testKey = providerModelKey6(profile?.id || "", model.id);
@@ -7236,9 +7247,12 @@ function settingsModelHtml6(model, profile, modelCount) {
         <span>${escapeHtml(model.id)}</span>
         <div class="settings-model-tags">
           ${tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}
-          ${context ? `<span>${escapeHtml(context)}</span>` : ""}
           ${efforts.length > 0 ? `<span>思考 ${escapeHtml(efforts.map((effort) => effort.label).join(" / "))}</span>` : ""}
         </div>
+        <label class="settings-model-context">
+          <span>上下文</span>
+          <input name="contextTokens" inputmode="numeric" pattern="[0-9]*" data-action="save-model-context" data-model-id="${escapeAttribute(model.id)}" data-profile-id="${escapeAttribute(profile?.id || "")}" data-save-target="${escapeAttribute(contextScope)}" data-saved-value="${escapeAttribute(contextValue)}" value="${escapeAttribute(contextValue)}" placeholder="例如 400000" aria-label="${escapeAttribute(`${model.label || model.id} 的上下文窗口`)}" title="${escapeAttribute(contextTitle)}"${contextLocked ? " disabled" : ""} />
+        </label>
         ${testResult?.message ? `<small class="settings-model-test ${escapeAttribute(testResult.tone)}">${escapeHtml(testResult.message)}</small>` : ""}
       </div>
       <div class="settings-row-actions">
@@ -8907,6 +8921,82 @@ function manualAgentModelIds7(form) {
 }
 
 // src/dashboard/public/app-ui7.ts
+function handleModelContextKeydown(event) {
+  const input = eventTargetOf(event);
+  if (!(input instanceof HTMLInputElement) || input.dataset.action !== "save-model-context" || event.key !== "Enter") return;
+  event.preventDefault();
+  input.blur();
+}
+async function commitModelContextInput(input) {
+  if (input.dataset.action !== "save-model-context" || input.dataset.saving === "true") return;
+  const nextValue = input.value.trim();
+  const savedValue = String(input.dataset.savedValue ?? "");
+  if (nextValue === savedValue.trim()) return;
+  if (nextValue && !/^[0-9]+$/.test(nextValue)) {
+    state.settingsFeedback = { tone: "error", message: "上下文请填写正整数，例如 400000" };
+    renderSettingsFeedbackInPlace6();
+    return;
+  }
+  const profileId = input.dataset.profileId || "";
+  const modelId = input.dataset.modelId || "";
+  const scope = input.dataset.saveTarget === "global" || input.dataset.saveTarget === "project" ? input.dataset.saveTarget : configScope6(state.modelDefaultScope, "project");
+  input.dataset.saving = "true";
+  input.disabled = true;
+  try {
+    const result = await postJson("/api/model-context", {
+      providerId: profileId,
+      profileId,
+      modelId,
+      contextTokens: nextValue,
+      saveTarget: scope,
+      sessionId: state.currentSessionId || void 0,
+      ...configMutationMetadata6(scope)
+    });
+    if (!result.ok) {
+      updateConfigRevisions({ ...result, scope });
+      throw Object.assign(new Error(isConfigRevisionConflict8(result) ? configRevisionConflictMessage8() : result.error ?? "保存上下文失败"), {
+        configConflict: isConfigRevisionConflict8(result)
+      });
+    }
+    const savedScope = configScope6(result.scope ?? scope, scope);
+    updateConfigRevisions({ ...result, scope: savedScope });
+    if (Array.isArray(result.models)) state.models = normalizeModels(result.models);
+    if (Array.isArray(result.gatewayProfiles)) state.gatewayProfiles = normalizeGatewayProfiles(result.gatewayProfiles);
+    else rememberModelContext(profileId, modelId, positiveContextTokens(result.contextTokens));
+    const savedTokens = positiveContextTokens(result.contextTokens);
+    const appliesNextTurn = result.contextApplies === "next-turn";
+    const savedLabel = savedTokens ? `已保存 ${modelId} 的上下文上限 ${savedTokens}` : `已取消 ${modelId} 的单独上下文上限`;
+    state.settingsFeedback = {
+      tone: "success",
+      message: appliesNextTurn ? `${savedLabel}，当前这轮不变，下一轮生效` : savedLabel
+    };
+    updateSessionStatus(result.sessionStatus);
+    renderSettingsView3();
+  } catch (error) {
+    if (isPlainObject(error) && error.configConflict) await refreshConfigRevisionsAfterConflict8();
+    if (input.isConnected) {
+      input.value = savedValue;
+      input.disabled = state.settingsRefreshing || state.settingsSaving;
+    }
+    state.settingsFeedback = { tone: "error", message: error instanceof Error ? error.message : "保存上下文失败" };
+    renderSettingsFeedbackInPlace6();
+  } finally {
+    delete input.dataset.saving;
+  }
+}
+function rememberModelContext(profileId, modelId, tokens) {
+  for (const profile of state.gatewayProfiles ?? []) {
+    if (profile.id !== profileId) continue;
+    for (const model of profile.models ?? []) {
+      if (model.id === modelId) model.contextTokens = tokens;
+    }
+  }
+  for (const model of state.models ?? []) {
+    const source = modelSourceOf(model);
+    const sourceId = typeof source === "string" ? source : source?.profileId || source?.id || "";
+    if (model.id === modelId && (!sourceId || sourceId === profileId)) model.contextTokens = tokens;
+  }
+}
 async function importModelSource(input) {
   const scope = input.saveTarget === "project" ? "project" : "global";
   state.settingsRefreshing = true;
@@ -9474,6 +9564,11 @@ function normalizeConfigSource8(value) {
     label: String(record.label ?? record.type ?? "default")
   };
 }
+function positiveContextTokens(value) {
+  if (value === void 0 || value === null || value === "") return null;
+  const tokens = Number(value);
+  return Number.isInteger(tokens) && tokens > 0 ? tokens : null;
+}
 function normalizeModels(models) {
   return Array.isArray(models) ? models.map((modelValue) => {
     const model = isPlainObject(modelValue) ? modelValue : {};
@@ -9486,7 +9581,7 @@ function normalizeModels(models) {
       description: String(model.description ?? ""),
       thinking: model.thinking === true,
       modalities: Array.isArray(modalities) ? modalities.map(String) : ["text"],
-      contextTokens: Number.isFinite(Number(model.contextTokens ?? model.contextWindow)) ? Number(model.contextTokens ?? model.contextWindow) : null,
+      contextTokens: positiveContextTokens(model.contextTokens ?? model.contextWindow),
       reasoningEfforts: normalizeReasoningEfforts6(model.reasoningEfforts ?? reasoning.efforts),
       defaultReasoningEffort: normalizedReasoningEffort7(model.defaultReasoningEffort ?? reasoning.default),
       reasoningEffort: normalizedReasoningEffort7(model.reasoningEffort),
@@ -9877,7 +9972,7 @@ function formatContextUsage5(context) {
     context.promptTokens
   );
   const cacheHit = typeof cached === "number" && typeof promptForCache === "number" && promptForCache > 0 ? ` · 缓存命中 ${Math.min(100, Math.max(0, Math.round(cached / promptForCache * 100)))}%` : " · 缓存命中 --";
-  return `${formatTokenCount6(used)} / ${formatTokenCount6(limit)}${percent}${cacheHit}`;
+  return `${formatTokenCount9(used)} / ${formatTokenCount9(limit)}${percent}${cacheHit}`;
 }
 function firstFiniteNumber9(...values) {
   for (const value of values) {
@@ -9888,7 +9983,7 @@ function firstFiniteNumber9(...values) {
   }
   return null;
 }
-function formatTokenCount6(value) {
+function formatTokenCount9(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) {
     return "--";
@@ -11820,6 +11915,7 @@ export {
   collapseCompletedActivities4 as collapseCompletedActivities,
   collectModalBackground,
   columnLabel2 as columnLabel,
+  commitModelContextInput,
   compactResultLine9 as compactResultLine,
   composerHasOutboundContent,
   composerHeightFor3 as composerHeightFor,
@@ -11894,7 +11990,7 @@ export {
   formatNumber2 as formatNumber,
   formatRelativeTime5 as formatRelativeTime,
   formatTime,
-  formatTokenCount6 as formatTokenCount,
+  formatTokenCount9 as formatTokenCount,
   gatewayCredentialAction7 as gatewayCredentialAction,
   gatewayProfileById5 as gatewayProfileById,
   gatewayProfileReadonlyLabel6 as gatewayProfileReadonlyLabel,
@@ -11921,6 +12017,7 @@ export {
   handleModelConfigInput3 as handleModelConfigInput,
   handleModelConfigModelIdChanged6 as handleModelConfigModelIdChanged,
   handleModelConfigPanelClick3 as handleModelConfigPanelClick,
+  handleModelContextKeydown,
   handleModelPanelChange3 as handleModelPanelChange,
   handleModelPanelClick3 as handleModelPanelClick,
   handleModelStatusActivate3 as handleModelStatusActivate,

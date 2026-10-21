@@ -120,6 +120,7 @@ export function modelSettingsHtml() {
           <button class="settings-primary-action" type="button" data-action="refresh-source" data-profile-id="${escapeAttribute(inspectedProfile?.id || "")}"${!inspectedProfile || state.settingsRefreshing || state.running ? " disabled" : ""}>刷新目录</button>
         </div>
       </div>
+      <p class="settings-source-note">每一行可以改这个模型的上下文上限。留空则不单独限制，压缩仍按本地预算，默认 20 万。任务进行中也可以保存，当前这轮仍用原来的上限，下一轮再生效。刷新目录会保留已经保存的数字。</p>
       <div class="settings-model-list">
         ${models.map((model) => settingsModelHtml(model, inspectedProfile, models.length)).join("") || `<div class="settings-empty">该来源还没有模型。添加来源时会一次读入目录。</div>`}
       </div>
@@ -428,7 +429,14 @@ export function scopedDefaultModelLabel(selection: DashboardScopedDefaultSelecti
 export function settingsModelHtml(model: DashboardModelOption, profile: DashboardGatewayProfile | null | undefined, modelCount: number) {
   const tags = modelCapabilityLabels(model);
   const efforts = normalizeReasoningEfforts(model.reasoningEfforts);
-  const context = Number.isFinite(model.contextTokens) ? `${formatTokenCount(model.contextTokens)} 上下文` : "";
+  const contextValue = Number.isInteger(model.contextTokens) && Number(model.contextTokens) > 0 ? String(model.contextTokens) : "";
+  const contextLocked = profile?.editable === false || state.settingsRefreshing || state.settingsSaving;
+  const contextScope = profile?.saveTarget === "global" || profile?.saveTarget === "project" ? profile.saveTarget : "";
+  const contextTitle = profile && profile.editable === false
+    ? gatewayProfileReadonlyLabel(profile)
+    : state.running
+      ? "正整数。离开输入框或按回车保存。当前这轮仍用原来的上限，下一轮再生效。"
+      : "正整数。离开输入框或按回车保存。留空则不单独限制这个模型。";
   const scopedDefault = state.modelDefaultSelections[state.modelDefaultScope];
   const isScopedDefault = scopedDefault?.provider === (profile?.id || "")
     && scopedDefault?.model === model.id;
@@ -446,9 +454,12 @@ export function settingsModelHtml(model: DashboardModelOption, profile: Dashboar
         <span>${escapeHtml(model.id)}</span>
         <div class="settings-model-tags">
           ${tags.map((tag: unknown) => `<span>${escapeHtml(tag)}</span>`).join("")}
-          ${context ? `<span>${escapeHtml(context)}</span>` : ""}
           ${efforts.length > 0 ? `<span>思考 ${escapeHtml(efforts.map((effort) => effort.label).join(" / "))}</span>` : ""}
         </div>
+        <label class="settings-model-context">
+          <span>上下文</span>
+          <input name="contextTokens" inputmode="numeric" pattern="[0-9]*" data-action="save-model-context" data-model-id="${escapeAttribute(model.id)}" data-profile-id="${escapeAttribute(profile?.id || "")}" data-save-target="${escapeAttribute(contextScope)}" data-saved-value="${escapeAttribute(contextValue)}" value="${escapeAttribute(contextValue)}" placeholder="例如 400000" aria-label="${escapeAttribute(`${model.label || model.id} 的上下文窗口`)}" title="${escapeAttribute(contextTitle)}"${contextLocked ? " disabled" : ""} />
+        </label>
         ${testResult?.message ? `<small class="settings-model-test ${escapeAttribute(testResult.tone)}">${escapeHtml(testResult.message)}</small>` : ""}
       </div>
       <div class="settings-row-actions">

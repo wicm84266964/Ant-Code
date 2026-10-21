@@ -381,6 +381,25 @@ test("reasoning controls render only the configured disabled effort alias", asyn
   }
 });
 
+test("model list saves a context window without reopening model edit", async () => {
+  runtime.modelContextCalls.length = 0;
+  await withDashboardPage({ width: 1280, height: 900 }, async (page) => {
+    await page.locator("#settings-button").click();
+    await page.waitForFunction(() => document.querySelector("#settings-content")?.getAttribute("aria-busy") !== "true");
+    assert.equal(await page.locator("[data-action='edit-model']").count(), 0);
+    const input = page.locator(".settings-model-row input[name='contextTokens']");
+    assert.equal(await input.inputValue(), "200000");
+    await input.fill("400000");
+    await input.blur();
+    await waitUntil(() => runtime.modelContextCalls.length === 1);
+    assert.equal(runtime.modelContextCalls[0].modelId, "test-model");
+    assert.equal(runtime.modelContextCalls[0].providerId, "test-source");
+    assert.equal(runtime.modelContextCalls[0].contextTokens, "400000");
+    await page.waitForFunction(() => document.querySelector(".settings-feedback")?.textContent?.includes("400000"));
+    assert.equal(await page.locator(".settings-model-row input[name='contextTokens']").inputValue(), "400000");
+  });
+});
+
 test("settings adds a named source and reads its catalog instead of registering one model", async () => {
   await withDashboardPage({ width: 1280, height: 900 }, async (page) => {
     await page.locator("#settings-button").click();
@@ -2336,6 +2355,7 @@ function createBrowserRuntime(remoteImageUrl) {
     modelConfigResponses: [],
     sourceImportCalls: [],
     sourceImportResponses: [],
+    modelContextCalls: [],
     gatewayProbeCalls: [],
     gatewayProbeResponses: [],
     gatewayProbeSettledCalls: [],
@@ -2552,6 +2572,17 @@ function createBrowserRuntime(remoteImageUrl) {
       const queued = this.sourceImportResponses.shift();
       if (queued?.delayMs) await delay(queued.delayMs);
       return queued?.result ?? { ok: false, status: 422, error: "mock source import failure" };
+    },
+    async saveModelContext(body) {
+      this.modelContextCalls.push(body);
+      const tokens = String(body.contextTokens ?? "").trim();
+      const model = { ...browserModel(), contextTokens: tokens ? Number(tokens) : null };
+      return {
+        ...browserModelRuntimeResponse({ model }),
+        scope: body.saveTarget || "project",
+        contextTokens: model.contextTokens,
+        revisions: { project: "project-r-context", global: "global-r1", credentials: "credentials-r1" }
+      };
     },
     deleteSession: async () => ({ ok: false }),
     deleteGatewayProfile: async () => ({ ok: false }),

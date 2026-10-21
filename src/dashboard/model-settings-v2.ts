@@ -1,6 +1,6 @@
 import path from "node:path";
 import { createFileRepository, ConfigRevisionConflictError } from "../config-v2/file-repository.ts";
-import { importProviderCatalog, saveAgentRouting, saveProviderAgentModels, type ImportProviderCatalogInput } from "../config-v2/import-provider-catalog.ts";
+import { importProviderCatalog, saveAgentRouting, saveModelContextWindow, saveProviderAgentModels, type ImportProviderCatalogInput } from "../config-v2/import-provider-catalog.ts";
 import {
   defaultSelection,
   deleteProvider,
@@ -67,6 +67,39 @@ export async function saveV2ImportedSource(options: { cwd: string; env?: NodeJS.
       providerId: mutation.providerId,
       modelId: mutation.modelId,
       modelCount: options.input.models.length,
+      configRevision: written.settings.revision,
+      revisions: revisionResult(context.scope, written.settings.revision, written.credentials.revision)
+    };
+  });
+}
+
+export async function saveV2ModelContext(options: {
+  cwd: string;
+  env?: NodeJS.ProcessEnv;
+  scope: unknown;
+  expectedRevision: unknown;
+  expectedCredentialsRevision: unknown;
+  providerId: string;
+  modelId: string;
+  contextWindow: number | null;
+}) {
+  return withModelSettingsMutationLock(options, async () => {
+    const context = await mutationContext(options);
+    const mutation = saveModelContextWindow(context.snapshot.data, options);
+    if (!mutation.ok) throw Object.assign(new Error(mutation.error), { dashboardResult: mutation });
+    const document = validateSettingsDocument(mutation.document);
+    const written = await writeSettingsWithCredential({
+      ...context,
+      document,
+      credentialMutation: null,
+      expectedCredentialsRevision: options.expectedCredentialsRevision
+    });
+    return {
+      ok: true,
+      scope: context.scope,
+      providerId: mutation.providerId,
+      modelId: mutation.modelId,
+      contextTokens: mutation.contextWindow,
       configRevision: written.settings.revision,
       revisions: revisionResult(context.scope, written.settings.revision, written.credentials.revision)
     };

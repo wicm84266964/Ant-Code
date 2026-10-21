@@ -613,7 +613,7 @@ export const BUILT_IN_TOOLS = Object.freeze([
   },
   {
     name: "agent_run",
-    description: "Run a configured one-shot local subagent with a focused task through the same lab gateway and local permission engine. Built-in profiles include explorer, readonly-researcher, planner, verifier, junior, reviewer, browser-verifier, visual-verifier, and code-worker. For broad work, split the job into bounded slices, set difficulty/modelTier deliberately, and provide writeScope plus acceptance for junior/write tasks.",
+    description: "Run a configured one-shot local subagent with a focused task through the same lab gateway and local permission engine. Built-in profiles include explorer, web-researcher, planner, verifier, reviewer, browser-verifier, visual-verifier, and code-worker. Old research names resolve to web-researcher. Old junior, worker, and executor names resolve to code-worker. For broad work, split the job into bounded slices, set difficulty/modelTier deliberately, and provide writeScope plus acceptance for write tasks.",
     risk: "read",
     supportsAbort: true,
     inputSchema: {

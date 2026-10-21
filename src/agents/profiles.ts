@@ -25,6 +25,15 @@ export type AgentProfile = {
   [key: string]: unknown;
 };
 
+export const LEGACY_PROFILE_ALIASES: Readonly<Record<string, string>> = Object.freeze({
+  "readonly-researcher": "web-researcher",
+  researcher: "web-researcher",
+  research: "web-researcher",
+  junior: "code-worker",
+  worker: "code-worker",
+  executor: "code-worker"
+});
+
 export const AGENT_PROFILES = Object.freeze([
   {
     name: "build",
@@ -48,8 +57,8 @@ export const AGENT_PROFILES = Object.freeze([
       "Hard trigger guidance: broad repository investigation/audit/refactor/security/performance work should launch explorer and usually planner before broad parent reads; external/current/GitHub research should launch web-researcher before repeated web_search/web_fetch; UI/browser behavior should launch browser-verifier once the scenario is clear; screenshot/image-heavy visual review should launch visual-verifier.",
       "Before broad implementation, usually call planner and one or more explorer/web-researcher subagents. Dispatch independent readonly agent_run calls in the same batch when their scopes are independent.",
       "For slow or broad delegated work, use agent_run with background=true, a shared groupId, waitForGroup=all, wakeParent=true, and a clear wakeReason. After starting a background group, give a brief progress note and wait for the group completion prompt instead of writing a premature final answer.",
-      "Use explorer for code shape, planner for dependency graph and write scopes, web-researcher for current/external sources, browser-verifier for UI behavior, visual-verifier for screenshot/image and visual regression evidence, verifier for command validation, reviewer for strict risk review, and junior/code-worker only with clear writeScope, doNotTouch boundaries, and acceptance criteria.",
-      "Choose difficulty and modelTier deliberately: cheap for routine read/search/research slices, default for normal implementation and verification, strong for deep architecture, long-running junior tasks, security/release risk, and strict review. Prefer cheap for early exploration so lower-cost models handle bulk context.",
+      "Use explorer for code shape, planner for dependency graph and write scopes, web-researcher for current/external sources, browser-verifier for UI behavior, visual-verifier for screenshot/image and visual regression evidence, verifier for command validation, reviewer for strict risk review, and code-worker only with clear writeScope, doNotTouch boundaries, and acceptance criteria. Old junior/worker/executor names resolve to code-worker.",
+      "Choose difficulty and modelTier deliberately: cheap for routine read/search/research slices, default for normal implementation and verification, strong for deep architecture, long-running code-worker slices, security/release risk, and strict review. Prefer cheap for early exploration so lower-cost models handle bulk context.",
       "For complex/deep/high-risk work, use the three-document planning protocol: confirm requirements in the parent session first, delegate planner with those requirements, and use the persisted .lab-agent/plans/<plan-id>/ requirementsDoc, taskPlanDoc, and executionChecklist as the durable execution baseline.",
       "If a tool result contains an Ant Code delegation guard reminder, stop expanding broad parent exploration and call agent_run next unless the remaining step is a single precise file/URL verification.",
       "If a tool or system result contains an Ant Code review gate reminder, run reviewer or verifier before final delivery unless you have a concrete reason to skip review.",
@@ -79,33 +88,6 @@ export const AGENT_PROFILES = Object.freeze([
       "For large repositories, divide exploration by module, layer, feature, or failure mode. Return a compact evidence map instead of exhaustive file dumps.",
       "Identify likely owners, data flow, call paths, conventions, risky edges, and missing information. Do not propose broad rewrites unless the evidence requires it.",
       "Return: summary, evidence with file/path references, confidence, open questions, and the next useful local action or follow-up slice."
-    ].join("\n")
-  },
-  {
-    name: "readonly-researcher",
-    mode: "readonly",
-    aliases: ["researcher", "research"],
-    tools: ["read_file", "list_files", "glob", "grep", "git_status", "git_diff", "web_fetch", "web_search", "document_intake", "mcp_list", "mcp_call", "skill_list", "skill_read"],
-    description: "只读研究代理：兼容旧命令名，用于调查仓库和问题线索。",
-    triggerHints: ["研究", "资料", "联网", "搜索", "抓取", "最新", "网页", "文档", "research", "search", "fetch", "web"],
-    skills: ["web-research", "document-intake", "project-intake"],
-    mcpServers: ["github", "fetch", "duckduckgo-search", "searxng"],
-    outputContract: {
-      type: "research",
-      required: ["answer", "sources", "confidence", "followUps"]
-    },
-    source: "builtin",
-    system: [
-      "You are a read-only research subagent.",
-      "Combine local repository evidence with external/document evidence when the delegated question needs it, but never edit files or run mutating commands.",
-      "Start from the question, list the evidence needed, then gather only enough representative material to answer it.",
-      "For local code, use grep/glob/list_files first, then read the needed content without implicit truncation. For external material, prefer primary or official sources and cite URLs.",
-      "For GitHub repositories, prefer the configured github MCP tools when available. Otherwise use raw.githubusercontent.com for known files and api.github.com contents endpoints for directory discovery. Avoid repeatedly fetching blocked HTML pages when MCP/raw/API/search snippets already answer the question.",
-      "When normal HTML fetching is blocked or anti-bot heavy, try a reader mirror such as https://r.jina.ai/http://r.jina.ai/http://<target-url> if it is allowed, then list the mirror under caveats.",
-      "If several sources are blocked or permission-denied, stop retrying that source family and write a useful report from successful evidence, listing blocked URLs under caveats.",
-      "Separate facts, inferences, uncertainty, and follow-up work. If a source is unavailable, continue with available evidence and list the failure as a caveat.",
-      "For broad research, stop at a useful checkpoint and propose narrower follow-up slices instead of spending the whole budget on raw collection.",
-      "Return: answer, sources/evidence, confidence, caveats, and followUps for the coordinator."
     ].join("\n")
   },
   {
@@ -165,7 +147,7 @@ export const AGENT_PROFILES = Object.freeze([
     canSpawnAgents: false,
     tools: ["read_file", "list_files", "glob", "grep", "git_status", "git_diff", "web_fetch", "document_intake", "write_file", "edit_file", "powershell", "bash", "background_shell", "background_terminal_list", "background_terminal_cancel", "mcp_list", "mcp_call", "skill_list", "skill_read", "skill_run", "todo_read", "todo_write", "plan_update"],
     description: "代码工作代理：在父会话权限和审批下执行局部代码修改。",
-    triggerHints: ["局部修改", "实现", "修复", "补测试", "改文件", "patch", "edit", "worker"],
+    triggerHints: ["局部修改", "局部实现", "实现", "修复", "补测试", "改文件", "小改动", "执行", "patch", "edit", "worker"],
     skills: ["bug-repro", "test-failure-triage"],
     outputContract: {
       type: "patch",
@@ -181,33 +163,6 @@ export const AGENT_PROFILES = Object.freeze([
       "Use shell and write tools only through the parent permission policy. If a command or edit is blocked, preserve progress and report the exact blocker.",
       "Run or recommend focused validation. If the task is too large, finish a self-contained slice and return a continuation prompt.",
       "Return: summary, changedFiles, validation, remainingRisks, and needsParentAction."
-    ].join("\n")
-  },
-  {
-    name: "junior",
-    mode: "write-capable",
-    aliases: ["worker", "executor"],
-    role: "executor",
-    purpose: "execute",
-    modelTier: "default",
-    canSpawnAgents: false,
-    tools: ["read_file", "list_files", "glob", "grep", "git_status", "git_diff", "web_fetch", "document_intake", "write_file", "edit_file", "powershell", "bash", "background_shell", "background_terminal_list", "background_terminal_cancel", "mcp_list", "mcp_call", "skill_list", "skill_read", "skill_run", "todo_read", "todo_write", "plan_update"],
-    description: "执行型子任务代理：按主智能体给定范围完成局部实现、补测试和机械改动。",
-    triggerHints: ["执行", "局部实现", "补测试", "小改动", "worker", "executor", "junior"],
-    skills: ["bug-repro", "test-failure-triage"],
-    outputContract: {
-      type: "patch",
-      required: ["summary", "changedFiles", "validation", "remainingRisks", "needsParentAction"]
-    },
-    source: "builtin",
-    system: [
-      "You are Ant Code junior executor.",
-      "You are the coordinator's practical implementation helper for bounded code work, mechanical edits, tests, and cleanup slices.",
-      "You must honor the provided writeScope and doNotTouch lists. If no writeScope is supplied, do not write files; explain the needed scope to the coordinator.",
-      "For simple tasks, move quickly and make the smallest useful change. For deep tasks, work in a checkpointed slice: inspect, edit, validate, summarize, then hand back a continuation prompt.",
-      "Do not expand the assignment into architecture redesign unless the coordinator explicitly asked for that. Do not call another subagent.",
-      "When validation is unavailable or blocked, report the exact command you would run and the local reason it was not run.",
-      "Return changed files, what was done, validation, remaining risks, and whether the parent must continue."
     ].join("\n")
   },
   {
@@ -249,7 +204,7 @@ export const AGENT_PROFILES = Object.freeze([
     modelTier: "cheap",
     canSpawnAgents: false,
     description: "联网研究代理：优先使用 no-key MCP 抓取网页，并用内置 web 工具兜底做资料搜索、网页抓取和来源整理。",
-    triggerHints: ["联网", "网上", "搜索", "资料", "网页", "最新", "抓取", "source", "web", "search", "fetch"],
+    triggerHints: ["研究", "联网", "网上", "搜索", "资料", "网页", "最新", "抓取", "source", "web", "search", "fetch"],
     skills: ["web-research", "document-intake"],
     mcpServers: ["github", "fetch", "duckduckgo-search", "searxng"],
     outputContract: {
@@ -410,7 +365,8 @@ export function listAgentProfileLabels(config: Record<string, unknown> = {}, opt
  * @param {Record<string, any>} [config]
  */
 export function getAgentProfile(name: string, config: Record<string, unknown> = {}, options: { cwd?: string; includeHidden?: boolean } = {}): AgentProfile | null {
-  const requested = String(name ?? "").trim().toLowerCase();
+  const requestedName = String(name ?? "").trim().toLowerCase();
+  const requested = LEGACY_PROFILE_ALIASES[requestedName] ?? requestedName;
   if (!requested) {
     return null;
   }

@@ -21,8 +21,8 @@ This repository is released under the GNU Affero General Public License v3.0.
 - Local-first execution: file, shell, git, network, MCP, and workflow tools are
   mediated by a local permission engine.
 - Subagent orchestration: Ant Code can delegate bounded work to explorer,
-  planner, verifier, reviewer, visual-verifier, browser-verifier, junior, and
-  code-worker style subagents.
+  planner, verifier, reviewer, visual-verifier, browser-verifier, and
+  code-worker style subagents. Old junior, worker, and executor names resolve to code-worker. Old research names resolve to web-researcher.
 - Background task flow: long-running subagent work can be tracked through task
   records, groups, budgets, wakeups, and parent-session summaries.
 - Planner packages: planning agents can persist structured implementation

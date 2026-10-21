@@ -107,9 +107,6 @@
         "maxPermissionDenials": 6,
         "maxConsecutiveFailures": 6
       },
-      "junior.deep": {
-        "maxDurationMs": 2700000
-      },
       "code-worker.deep": {
         "maxDurationMs": 2700000
       }

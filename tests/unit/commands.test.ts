@@ -680,7 +680,8 @@ test("capabilities slash command reports tools, MCP, skills, and agents", async 
   assert.match(output, /web_fetch/);
   assert.match(output, /duckduckgo-search/);
   assert.match(output, /web-research/);
-  assert.match(output, /readonly-researcher/);
+  assert.match(output, /web-researcher/);
+  assert.doesNotMatch(output, /readonly-researcher/);
 });
 
 test("mcp doctor reports configured recommended servers without launching them", async () => {
@@ -890,9 +891,9 @@ test("agents run slash command invokes readonly subagent", async () => {
   });
 
   assert.equal(result.ok, true);
-  assert.equal(result.profile, "readonly-researcher");
+  assert.equal(result.profile, "web-researcher");
   assert.match(result.taskId, /^task-/);
-  assert.match(tasks, /readonly-researcher/);
+  assert.match(tasks, /web-researcher/);
   assert.match(tasks, /Ant Code 子任务树/);
   assert.match(tasks, /find LabAgent/);
 });

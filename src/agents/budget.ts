@@ -57,11 +57,8 @@ const BUDGET_KEYS = [
 const BUILTIN_BUDGETS: Record<string, BudgetFields> = Object.freeze({
   "explorer.quick": { maxDurationMs: 600_000, maxOutputBytes: 192_000, maxToolResultBytes: 12_000, maxReadFileBytes: 8_192 },
   "explorer.deep": { maxDurationMs: 1_800_000, maxOutputBytes: 360_000, maxToolResultBytes: 16_000, maxReadFileBytes: 12_288 },
-  "readonly-researcher.standard": { maxDurationMs: 1_200_000, maxOutputBytes: 320_000, maxToolResultBytes: 16_000, maxReadFileBytes: 12_288 },
   "web-researcher.standard": { maxDurationMs: 1_200_000, maxOutputBytes: 256_000, maxToolResultBytes: 12_000, maxWebFetchBytes: 80_000, maxPermissionDenials: 6, maxConsecutiveFailures: 6 },
   "planner.standard": { maxDurationMs: 900_000 },
-  "junior.quick": { maxDurationMs: 1_200_000 },
-  "junior.deep": { maxDurationMs: 2_700_000 },
   "code-worker.quick": { maxDurationMs: 1_200_000 },
   "code-worker.deep": { maxDurationMs: 2_700_000 },
   "verifier.standard": { maxDurationMs: 1_800_000 },

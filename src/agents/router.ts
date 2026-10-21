@@ -41,14 +41,12 @@ const ROUTE_PATTERNS = Object.freeze({
 
 const PROFILE_KIND_HINTS: Readonly<Record<string, string>> = Object.freeze({
   "web-researcher": "web",
-  "readonly-researcher": "web",
   "browser-verifier": "browser",
   "visual-verifier": "visual",
   explorer: "repository",
   planner: "planning",
   verifier: "verification",
   reviewer: "review",
-  junior: "implementation",
   "code-worker": "implementation",
   build: "implementation"
 });
@@ -274,7 +272,7 @@ function scoreProfile(profile: AgentProfile, signals: RouteSignals, prompt: stri
     score += 8;
     reasons.push("专用严格复核 profile");
   }
-  if (profile.name === "junior" && signals.implementation) {
+  if (profile.name === "code-worker" && signals.implementation) {
     score += 6;
     reasons.push("专用执行型 profile");
   }
@@ -300,7 +298,6 @@ function fallbackProfile(profiles: AgentProfile[], signals: RouteSignals) {
     signals.planning ? "planner" : null,
     signals.verification ? "verifier" : null,
     signals.review ? "reviewer" : null,
-    signals.implementation ? "junior" : null,
     signals.implementation ? "code-worker" : null,
     "explorer"
   ].filter((name): name is string => Boolean(name));
@@ -379,7 +376,7 @@ function buildSuggestedTasks({ prompt, signals, primary, secondary, profiles, co
     add("reviewer", "严格复核计划或改动", `只读严格复核用户任务涉及的计划、改动、风险和测试缺口：\n${prompt}`, true, { purpose: "review", risk: "high", modelTier: "strong" });
   }
   if (signals.implementation) {
-    add("junior", "执行局部代码修改", `在父会话权限允许后执行局部实现或修复，并报告改动文件。若未提供 writeScope，不要写文件并向主智能体说明需要范围：\n${prompt}`, false, { purpose: "execute" });
+    add("code-worker", "执行局部代码修改", `在父会话权限允许后执行局部实现或修复，并报告改动文件。若未提供 writeScope，不要写文件并向主智能体说明需要范围：\n${prompt}`, false, { purpose: "execute" });
   }
   if (shouldRecommendReviewer({ prompt, signals, risk: routeRisk, suggestedTasks: tasks }) && tasks.length < taskCount) {
     add("reviewer", "高风险任务严格复核", `只读复核该任务的风险、遗漏和验收缺口：\n${prompt}`, true, { purpose: "review", risk: "high", modelTier: "strong" });

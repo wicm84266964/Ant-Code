@@ -1,12 +1,12 @@
-import { importProviderCatalog } from "../../config-v2/import-provider-catalog.ts";
-import { saveV2AgentRouting, saveV2ImportedSource, saveV2ProviderAgentModels } from "../model-settings-v2.ts";
+import { catalogModelFromProbe, parseContextWindowInput, type ImportProviderCatalogInput } from "../../config-v2/import-provider-catalog.ts";
+import { dashboardV2ErrorResult, saveV2AgentRouting, saveV2ImportedSource, saveV2ModelContext, saveV2ProviderAgentModels } from "../model-settings-v2.ts";
 import { officialModelSource, officialSourceApiKey, officialSourceStatus } from "../../model-gateway/official-sources.ts";
 import { probeGatewayConnection } from "./gateway-probe.ts";
 import type { DashboardFactoryState } from "./factory-state.ts";
 import type { DashboardRequestInput } from "./types.ts";
 import { loadConfig } from "../../config/load-config.ts";
-import { modelOptions, publicAgentModelTiers, publicGatewayConfig, publicGatewayProfiles, publicVisionAgent } from "./public-config.ts";
-import { sessionStatusFromConfig } from "./session-model.ts";
+import { gatewayProfileOwner, modelOptions, publicAgentModelTiers, publicGatewayConfig, publicGatewayProfiles, publicVisionAgent } from "./public-config.ts";
+import { isConfigV2Enabled, reconcileActiveDashboardSessionsAfterV2Mutation, refreshDashboardSessionAfterV2Mutation, sessionStatusFromConfig } from "./session-model.ts";
 
 export function publicOfficialSources(env: NodeJS.ProcessEnv) {
   return officialSourceStatus(env);
@@ -27,8 +27,8 @@ export async function runtimeImportModelSource(ctx: DashboardFactoryState, input
     }, {});
     const probedModels = probed.ok && Array.isArray(probed.models) ? probed.models : [];
     const models = probedModels.length > 0
-      ? probedModels.map((model) => ({ id: String(model.id ?? ""), displayName: String(model.label ?? model.id ?? "") }))
-      : source.models;
+      ? probedModels.map((model) => catalogModelFromProbe(model))
+      : source.models.map((model) => catalogModelFromProbe(model));
     return persistImportedSource(ctx, input, {
       providerId: source.id,
       displayName: source.label,
@@ -80,7 +80,7 @@ export async function runtimeImportModelSource(ctx: DashboardFactoryState, input
       baseURL: String(probed.suggestedGatewayUrl ?? gatewayUrlForProbe),
       authMode: official ? "ambient" : "credential",
       apiKey: official ? undefined : String(input.gatewayApiKey ?? "").trim() || undefined,
-      models: probed.models.map((model) => ({ id: String(model.id ?? ""), displayName: String(model.label ?? model.id ?? "") })),
+      models: probed.models.map((model) => catalogModelFromProbe(model)),
       activateFirst: false,
       agentModels: agentModelsFromInput(input)
     });
@@ -108,13 +108,13 @@ export async function runtimeImportModelSource(ctx: DashboardFactoryState, input
     baseURL: String(probed.suggestedGatewayUrl ?? gatewayUrl),
     authMode: "credential",
     apiKey: gatewayApiKey,
-    models: probed.models.map((model) => ({ id: String(model.id ?? ""), displayName: String(model.label ?? model.id ?? "") })),
+    models: probed.models.map((model) => catalogModelFromProbe(model)),
     activateFirst: input.activateFirst === true,
     agentModels: agentModelsFromInput(input)
   });
 }
 
-async function persistImportedSource(ctx: DashboardFactoryState, input: DashboardRequestInput, imported: Parameters<typeof importProviderCatalog>[1]) {
+async function persistImportedSource(ctx: DashboardFactoryState, input: DashboardRequestInput, imported: ImportProviderCatalogInput) {
   const saved = await saveV2ImportedSource({
     cwd: ctx.cwd,
     env: await ctx.resolveConfigEnv(),
@@ -133,6 +133,93 @@ async function persistImportedSource(ctx: DashboardFactoryState, input: Dashboar
     visionAgent: publicVisionAgent(refreshed),
     sessionStatus: sessionStatusFromConfig(refreshed),
     officialSources: officialSourceStatus(await ctx.resolveConfigEnv())
+  };
+}
+
+export function contextChangeAppliesNextTurn(state: {
+  running?: boolean;
+  session?: {
+    model?: unknown;
+    modelSelection?: unknown;
+    config?: { lab?: { activeGatewayProfile?: unknown } | null } | null;
+  } | null;
+} | null | undefined, providerId: string, modelId: string) {
+  if (!state?.running || !state.session) return false;
+  if (String(state.session.model ?? "").trim() !== modelId) return false;
+  const selection = state.session.modelSelection;
+  const selectionProvider = selection && typeof selection === "object"
+    ? String((selection as { provider?: unknown }).provider ?? "").trim()
+    : "";
+  const provider = selectionProvider || String(state.session.config?.lab?.activeGatewayProfile ?? "").trim();
+  return !provider || provider === providerId;
+}
+
+export async function runtimeSaveModelContext(ctx: DashboardFactoryState, input: DashboardRequestInput = {}) {
+  const providerId = String(input.providerId ?? input.profileId ?? "").trim();
+  const modelId = String(input.modelId ?? "").trim();
+  if (!providerId || !modelId || /[\r\n\t]/.test(modelId) || modelId.length > 160) {
+    return { ok: false, status: 400, error: "请选择要设置上下文的模型" };
+  }
+  const parsed = parseContextWindowInput(input.contextTokens ?? input.contextWindow);
+  if (!parsed.ok) return parsed;
+  const sessionId = String(input.sessionId ?? "").trim();
+  const configEnv = await ctx.resolveConfigEnv();
+  const config = await loadConfig({ cwd: ctx.cwd, env: configEnv });
+  if (!isConfigV2Enabled(config)) {
+    return { ok: false, status: 400, error: "当前配置还不能按模型保存上下文" };
+  }
+  const owner = gatewayProfileOwner(config, providerId);
+  const ownerType = owner && typeof owner === "object" ? String(owner.type ?? "").trim() : "";
+  if (ownerType && ownerType !== "global" && ownerType !== "project") {
+    return { ok: false, status: 400, error: "这个来源不能在这里修改上下文" };
+  }
+  const requested = String(input.scope ?? input.saveTarget ?? "").trim();
+  const scope = ownerType === "global" || ownerType === "project"
+    ? ownerType
+    : refreshProviderScope({ requested, owner: ownerType });
+  const clientRevision = String(input.expectedRevision ?? "").trim();
+  const expectedRevision = scope === requested && clientRevision
+    ? clientRevision
+    : revisionForScope(config, scope);
+  if (!expectedRevision) {
+    return { ok: false, status: 409, error: "配置版本还没读到，请刷新设置后再保存" };
+  }
+  let saved;
+  try {
+    saved = await saveV2ModelContext({
+      cwd: ctx.cwd,
+      env: configEnv,
+      scope,
+      expectedRevision,
+      expectedCredentialsRevision: input.expectedCredentialsRevision ?? input.credentialsRevision,
+      providerId,
+      modelId,
+      contextWindow: parsed.value
+    });
+  } catch (error) {
+    return dashboardV2ErrorResult(error);
+  }
+  const refreshed = await loadConfig({ cwd: ctx.cwd, env: await ctx.resolveConfigEnv() });
+  const appliesNextTurn = contextChangeAppliesNextTurn(sessionId ? ctx.active.get(sessionId) : null, providerId, modelId);
+  const activeViews = reconcileActiveDashboardSessionsAfterV2Mutation(ctx.active, refreshed);
+  const sessionView = sessionId
+    ? activeViews.get(sessionId) ?? await refreshDashboardSessionAfterV2Mutation({
+      active: ctx.active,
+      cwd: ctx.cwd,
+      env: ctx.runtimeEnv,
+      sessionId,
+      config: refreshed
+    })
+    : null;
+  return {
+    ...saved,
+    scope,
+    contextTokens: parsed.value,
+    contextApplies: appliesNextTurn ? "next-turn" : "now",
+    models: modelOptions(refreshed),
+    gatewayConfig: publicGatewayConfig(refreshed),
+    gatewayProfiles: publicGatewayProfiles(refreshed),
+    sessionStatus: sessionView?.sessionStatus ?? sessionStatusFromConfig(refreshed)
   };
 }
 
