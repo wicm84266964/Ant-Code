@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 2.0.28 - 2026-10-21
+
+Model rows can save a context window. A running turn keeps its current window, and the next turn uses the saved limit. The junior subagent now resolves to code-worker. The readonly research subagent now resolves to web-researcher. Restart Dashboard and refresh the browser. Existing configuration and sessions can continue.
+
 ## 2.0.27 - 2026-10-20
 
 Published 2026-10-20: [v2.0.27](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.27).

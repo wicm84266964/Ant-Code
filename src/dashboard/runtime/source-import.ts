@@ -140,15 +140,15 @@ export function contextChangeAppliesNextTurn(state: {
   running?: boolean;
   session?: {
     model?: unknown;
-    modelSelection?: { provider?: unknown } | null;
-    config?: { lab?: { activeGatewayProfile?: unknown } };
-  };
+    modelSelection?: unknown;
+    config?: { lab?: { activeGatewayProfile?: unknown } | null } | null;
+  } | null;
 } | null | undefined, providerId: string, modelId: string) {
   if (!state?.running || !state.session) return false;
   if (String(state.session.model ?? "").trim() !== modelId) return false;
   const selection = state.session.modelSelection;
   const selectionProvider = selection && typeof selection === "object"
-    ? String(selection.provider ?? "").trim()
+    ? String((selection as { provider?: unknown }).provider ?? "").trim()
     : "";
   const provider = selectionProvider || String(state.session.config?.lab?.activeGatewayProfile ?? "").trim();
   return !provider || provider === providerId;

@@ -4,7 +4,7 @@ Ant Code 是一个本地运行的编码智能体。工具调用在本机执行�
 
 ## 版本
 
-- 产品版本：`2.0.27`。运行 `ant-code --version` 应显示这个数字，与开源正式仓同一条语义版本线。
+- 产品版本：`2.0.28`。运行 `ant-code --version` 应显示这个数字，与开源正式仓同一条语义版本线。
 - 源码形态：本仓库从 JavaScript 改成 TypeScript，并把过大的模块拆开。1.4.1 的 TUI `/goal` 等产品能力仍在。
 - 运行要求：Node.js **22.18 或更高**。CLI 入口是 `src/cli/index.ts`，由 Node 直接做类型擦除，**不必**先编译到 `dist`。
 - 旧 JavaScript 源码（`src/cli/index.js`、Node 20）不能直接当这份代码跑。
@@ -57,13 +57,13 @@ ant-code --version
 
 ```powershell
 git fetch --tags
-git checkout v2.0.27
+git checkout v2.0.28
 npm ci
 npm link
 ant-code --version
 ```
 
-把 `v2.0.27` 换成要安装的标签。
+把 `v2.0.28` 换成要安装的标签。
 
 正在运行的 Dashboard 需要先退出，再重新执行 `ant-code dashboard`，然后刷新浏览器。已有网关配置、密钥和会话可以继续使用，不必重建。
 
