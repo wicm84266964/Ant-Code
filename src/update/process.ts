@@ -14,7 +14,7 @@ export const runProcess: Runner = (file, args, options) => new Promise((resolve,
     detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
   let stdout = "", stderr = "", size = 0, stopped = false, settled = false;
   let grace: ReturnType<typeof setTimeout> | undefined, deadline: ReturnType<typeof setTimeout> | undefined;
-  let drain: ReturnType<typeof setTimeout> | undefined, killerTimer: ReturnType<typeof setTimeout> | undefined;
+  let drain: ReturnType<typeof setTimeout> | undefined;
   let killer: ReturnType<typeof spawn> | undefined;
   const limit = options.maxOutput ?? 8 * 1024 * 1024;
   const live = () => child.pid !== undefined && child.exitCode === null && child.signalCode === null;
@@ -27,7 +27,7 @@ export const runProcess: Runner = (file, args, options) => new Promise((resolve,
   const finish = (code = -1, error?: string) => {
     if (settled) return;
     settled = true;
-    clearTimeout(timer); clearTimeout(grace); clearTimeout(deadline); clearTimeout(drain); clearTimeout(killerTimer);
+    clearTimeout(timer); clearTimeout(grace); clearTimeout(deadline); clearTimeout(drain);
     // Never wait for close: a grandchild can hold these handles after the child exits.
     child.stdout.destroy(); child.stderr.destroy();
     if (killer && killer.exitCode === null && killer.signalCode === null) killer.kill("SIGKILL");
@@ -46,10 +46,14 @@ export const runProcess: Runner = (file, args, options) => new Promise((resolve,
       killer = spawn(path.join(system, "System32", "taskkill.exe"), ["/PID", String(child.pid), "/T", "/F"], {
         env: cleanEnvironment(process.env), shell: false, windowsHide: true, stdio: "ignore"
       });
-      killer.once("error", () => { signal("SIGKILL"); });
-      // Do not kill the root before taskkill has enumerated its descendants.
-      // Under load taskkill startup itself can take more than the POSIX grace.
-      killerTimer = setTimeout(() => { killer?.kill("SIGKILL"); signal("SIGKILL"); }, 2000);
+      killer.once("error", () => { if (!settled) signal("SIGKILL"); });
+      // A failed helper cannot clean the tree; fall back only while we still own
+      // the live root. Successful helpers may exit before root exit is delivered.
+      killer.once("exit", (code) => { if (!settled && code !== 0) signal("SIGKILL"); });
+      // Keep taskkill alive for the entire existing 2.5-second cleanup budget.
+      // Cutting it off at 2 seconds can interrupt tree enumeration under load,
+      // then orphan descendants by killing only the root. The final deadline
+      // still bounds both helper and root; do not retry an exited root PID.
       killer.unref();
     } else {
       signal("SIGTERM");

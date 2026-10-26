@@ -51,6 +51,7 @@ test("trusted restart diagnostics observe exit before ACK without changing manua
   const { store, journal } = await makeJob(f, target, old.pid!);
   await atomicJson(path.join(store.jobDirectory(journal.jobId), "handoff.json"), { nonce: journal.nonce });
   let diagnostic = () => "", restarted: ReturnType<typeof spawn> | undefined;
+  let restartExit: Promise<number | null> | undefined;
   await runUpdateWorker(store, journal, { mode: "direct", source: "explicit" }, f.env, {
     runner: async (file, args, options) => {
       if (file === journal.restart.node && args[1] === "ci") return { code: 0, stdout: "", stderr: "" };
@@ -61,11 +62,22 @@ test("trusted restart diagnostics observe exit before ACK without changing manua
       restarted = spawn(file, args, { ...options, stdio: ["ignore", "ignore", "pipe"] });
       diagnostic = captureStderr(restarted, [journal.nonce]);
       const owned = ownChild(restarted); f.own(owned.stop);
+      restartExit = owned.exited;
       return restarted;
     }
   });
   const result = await store.journal(journal.jobId);
   assert.equal(result?.phase, "manualRecovery"); assert.equal(result?.step, "spawned"); assert.equal(result?.error, "RESTART_EXITED");
+  // The OS liveness probe may observe exit before Node delivers ChildProcess.exit.
+  // Await this owned child's event, not a sleep or a relaxed exit-code assertion.
+  assert.ok(restartExit);
+  restarted!.ref(); // The worker deliberately unrefs it; this test still awaits its exit.
+  let exitDeadline: ReturnType<typeof setTimeout> | undefined;
+  try {
+    assert.equal(await Promise.race([restartExit, new Promise<never>((_, reject) => {
+      exitDeadline = setTimeout(() => reject(new Error("Owned restart exit event did not settle")), 5000);
+    })]), 23);
+  } finally { clearTimeout(exitDeadline); }
   assert.equal(restarted?.exitCode, 23); assert.equal(restarted?.signalCode, null);
   assert.match(diagnostic(), /fixture startup failed/);
   assert.equal(await fs.stat(path.join(store.jobDirectory(journal.jobId), "ack.json")).then(() => true, () => false), false);

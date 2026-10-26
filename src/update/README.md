@@ -139,8 +139,10 @@ await acknowledgeSourceUpdate({ sourceRoot, boot, host, actualPort, strictPort: 
 - Process timeout/output caps initiate bounded termination rather than waiting for
   inherited-pipe close. POSIX uses private groups with TERM, escalation after 500 ms
   and a final 1-second deadline. Windows allows a live, still-owned child's fixed
-  `System32/taskkill.exe /PID <child.pid> /T /F` 2 seconds to enumerate descendants
-  before root-only fallback, within a final 2.5-second deadline. Never kill by image
+  `System32/taskkill.exe /PID <child.pid> /T /F` the full existing 2.5-second cleanup
+  budget to enumerate/terminate descendants, without an earlier helper cutoff.
+  Helper failure falls back to the still-owned root; the unchanged final deadline
+  bounds the helper, root and local pipes. Never kill by image
   name, scanned/journal PID or an already-exited root. Helpers are bounded. Exited
   children get a 500-ms output-drain window; once Windows root ownership is lost,
   close owned pipes and report `PROCESS_LIMIT` rather than risk PID reuse. Escaped

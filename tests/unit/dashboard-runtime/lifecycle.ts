@@ -371,7 +371,7 @@ test("dashboard runtime consumes background subagent wake prompts", async () => 
     const group = JSON.parse(await fs.readFile(groupPath, "utf8"));
 
     assert.equal(events.some((event) => event.rawType === "subagent_group_wakeup"), true);
-    assert.equal(events.some((event) => event.type === "wakeup_queued"), true);
+    assert.equal(events.some((event) => event.type === "wakeup_queued" || event.type === "wakeup_attached" || event.rawType === "subagent_handoff_injected"), true);
     assert.equal(events.some((event) => event.type === "background_subagent_snapshot"), true);
     assert.match(parentRequests.at(-1)?.messages?.at(-1)?.content ?? "", /Ant Code subagent group completed/);
     assert.match(events.filter((event) => event.type === "assistant_final").map((event) => event.text).join("\n"), /parent consumed wake prompt/);
@@ -384,7 +384,7 @@ test("dashboard runtime consumes background subagent wake prompts", async () => 
   }
 });
 
-test("dashboard runtime keeps a background wake prompt unconsumed when the queue is full", async () => {
+test("dashboard runtime holds a background handoff out of a full queue and delivers it in the running turn", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
   const firstParentGate = deferred();
   const finishParentGate = deferred();
@@ -416,9 +416,11 @@ test("dashboard runtime keeps a background wake prompt unconsumed when the queue
     }
 
     firstParentGate.resolve();
-    const events = await waitForEvent(runtime, started.sessionId, (event) => event.type === "wakeup_queue_full");
+    const events = await waitForEvent(runtime, started.sessionId, (event) => event.type === "wakeup_attached");
     assert.equal(events.some((event) => event.type === "wakeup_queued"), false);
+    assert.equal(events.some((event) => event.type === "wakeup_queue_full"), false);
     assert.equal(runtime.active.get(started.sessionId).queuedPrompts.length, 20);
+    assert.equal(runtime.active.get(started.sessionId).queuedPrompts.some((item) => item.kind === "wakeup"), false);
 
     const groupPath = path.join(cwd, ".lab-agent", "task-groups", "group-dashboard-queue-full.json");
     const group = JSON.parse(await fs.readFile(groupPath, "utf8"));
@@ -429,6 +431,12 @@ test("dashboard runtime keeps a background wake prompt unconsumed when the queue
       runtime.cancelQueuedTurn({ sessionId: started.sessionId, queueItemId: item.id });
     }
     finishParentGate.resolve();
+    await waitForCondition(async () => {
+      const current = JSON.parse(await fs.readFile(groupPath, "utf8"));
+      return Boolean(current.wakePromptConsumedAt);
+    });
+    assert.match(JSON.stringify(requests), /Ant Code subagent group completed/);
+    assert.equal(runtime.active.get(started.sessionId).queuedPrompts.some((item) => item.kind === "wakeup"), false);
     await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
   } finally {
     firstParentGate.resolve();

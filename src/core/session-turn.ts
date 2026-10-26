@@ -26,6 +26,13 @@ import { getAgentProfile } from "../agents/profiles.ts";
 import { resolveMaxParallelReadonlyAgentRuns } from "../agents/orchestration-config.ts";
 import { appendDelegationReminderToExecution, createDelegationGuard } from "../agents/delegation-guard.ts";
 import { createReviewGate } from "../agents/review-policy.ts";
+import {
+  buildBatchedWakePrompt,
+  hasPendingWakeHandoffs,
+  markWakeHandoffsConsumed,
+  takeWakeHandoffs,
+  wakeHandoffDisplay
+} from "../agents/wake-batch.ts";
 import { buildCompactedContextMessage, compactSessionContextWithModel, createContextWindow, estimatePromptPayload, summarizeContextWindow } from "./context-window.ts";
 import { buildGoalSystemPromptAppendix, normalizeSessionGoal, serializeSessionGoal, stripGoalStatusFromContent, stripGoalStatusMarkers } from "./goal.ts";
 import { createAntEventNormalizer } from "./events.ts";
@@ -327,6 +334,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
         reason: abortSignalReason(options.signal)
       });
     }
+    await injectPendingWakeHandoffs(session, messages, turnMessages, transcriptTurnMessages, eventOptions);
     if (round > 0) {
       messages = distillLiveImageBlocks(messages, session.visualEvidence);
     }
@@ -516,6 +524,9 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
     }
 
     if (response.data.toolCalls.length === 0) {
+      if (hasPendingWakeHandoffs(session.id)) {
+        continue;
+      }
       const reviewReminder = reviewGate.beforeFinal();
       if (reviewReminder) {
         const reminderMessage = {
@@ -758,6 +769,36 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
   } finally {
     mcpRuntime.close();
   }
+}
+
+async function injectPendingWakeHandoffs(
+  session: AgentSession,
+  messages: SessionMessage[],
+  turnMessages: SessionMessage[],
+  transcriptTurnMessages: SessionMessage[],
+  eventOptions: Parameters<typeof emitEvent>[0]
+) {
+  if (!hasPendingWakeHandoffs(session.id)) {
+    return false;
+  }
+  const handoffs = takeWakeHandoffs(session.id);
+  const prompt = buildBatchedWakePrompt(handoffs, session.config.agents?.backgroundWakeup?.maxWakeSummaryBytes);
+  if (!prompt) {
+    return false;
+  }
+  const modelMessage: SessionMessage = { role: "user", content: prompt };
+  messages.push(modelMessage);
+  turnMessages.push(modelMessage);
+  transcriptTurnMessages.push(persistableUserTurnMessage(wakeHandoffDisplay(handoffs)));
+  session.messages = [...session.messages, modelMessage];
+  await emitEvent(eventOptions, {
+    type: "subagent_handoff_injected",
+    groupIds: handoffs.map((item) => item.groupId),
+    handoffCount: handoffs.length,
+    promptBytes: Buffer.byteLength(prompt, "utf8")
+  });
+  await markWakeHandoffsConsumed(session.cwd, handoffs.map((item) => item.groupId));
+  return true;
 }
 
 function rotateGatewaySessionAffinity(session: AgentSession) {

@@ -4,7 +4,7 @@ Ant Code 是一个本地运行的编码智能体。工具调用在本机执行�
 
 ## 版本
 
-- 产品版本：`2.0.29`（候选）。运行 `ant-code --version` 应显示这个数字，与开源正式仓同一条语义版本线。最新改动见 [2.0.29 中文说明](docs/releases/2.0.29-source-update-and-goal-stop_zh.md)；正式发布以同一提交的 CI 和 Release 门禁为准。
+- 产品版本：`2.0.30`。运行 `ant-code --version` 应显示这个数字，与开源正式仓同一条语义版本线。最新改动见 [2.0.30 中文说明](docs/releases/2.0.30-subagent-handoff-batch_zh.md)；正式发布以同一提交的 CI 和 Release 门禁为准。
 - 源码形态：本仓库从 JavaScript 改成 TypeScript，并把过大的模块拆开。1.4.1 的 TUI `/goal` 等产品能力仍在。
 - 运行要求：Node.js **22.18 或更高**。CLI 入口是 `src/cli/index.ts`，由 Node 直接做类型擦除，**不必**先编译到 `dist`。
 - 旧 JavaScript 源码（`src/cli/index.js`、Node 20）不能直接当这份代码跑。
@@ -41,7 +41,7 @@ ant-code doctor
 
 ## 升级已有安装
 
-从尚无更新按钮的旧版首次升级到 2.0.29，仍须手动拉取源码、`npm ci`、`npm link`，退出旧进程再重启；旧进程不会因磁盘代码更新而自动出现按钮。完成这次升级后，符合条件的独立源码版可使用 Dashboard 左上角版本旁的“更新”：先检测真实代理配置（不猜端口），检查当前分支上游，确认后准备依赖、更新代码并原端口重启。无代理时须手填 HTTP/HTTPS 代理或主动允许仅本次直连；Git 与 npm 使用同一路由，失败不静默切直连。本地有修改、无安全上游或有活动工作会阻止更新，不强制覆盖。Windows 成品包和 TaxaMask 内嵌副本不走此流程，本次也不更新这些产物；npm 包保持私有，不执行 publish。支持边界和失败恢复见 [Dashboard 源码更新说明](docs/deployment/source-self-update.md)。
+从尚无更新按钮的旧版首次升级，仍须手动拉取源码、`npm ci`、`npm link`，退出旧进程再重启；旧进程不会因磁盘代码更新而自动出现按钮。已经在 2.0.29 或带按钮的版本上时，符合条件的独立源码版可使用 Dashboard 左上角版本旁的“更新”升到 2.0.30：先检测真实代理配置（不猜端口），检查当前分支上游，确认后准备依赖、更新代码并原端口重启。无代理时须手填 HTTP/HTTPS 代理或主动允许仅本次直连；Git 与 npm 使用同一路由，失败不静默切直连。本地有修改、无安全上游或有活动工作会阻止更新，不强制覆盖。Windows 成品包和 TaxaMask 内嵌副本不走此流程，本次也不更新这些产物；npm 包保持私有，不执行 publish。支持边界和失败恢复见 [Dashboard 源码更新说明](docs/deployment/source-self-update.md)。
 
 也可以手动升级。在已经克隆的仓库根目录执行：
 
@@ -87,7 +87,7 @@ ant-code --version
 node .\src\cli\index.ts --version
 ```
 
-两次 `--version` 都应是 `2.0.29`。只 `git pull` 不够：依赖、bin 入口和全局链接都要跟上。
+两次 `--version` 都应是 `2.0.30`。只 `git pull` 不够：依赖、bin 入口和全局链接都要跟上。
 
 会话、网关配置、`.lab-agent` 本地状态不用为这次语言改动重做。权限、TUI、Dashboard 交互与 2.0 产品语义一致（含 1.4.1 已有的 `/goal`）。
 
