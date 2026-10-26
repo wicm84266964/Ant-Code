@@ -4,6 +4,8 @@
 
 ## 2.0.30 - 2026-10-26
 
+已于 2026-10-26 14:01:52 UTC（北京时间 22:01:52）发布稳定版：[v2.0.30](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.30)。标签指向 `dfd0eb34ccd1cfe78f5bebb518db7ebd6eb9459f`；功能经 [PR #89](https://github.com/wicm84266964/Ant-Code/pull/89) 合并。PR 首次浏览器检查失败后重跑通过，合并提交的 [CI](https://github.com/wicm84266964/Ant-Code/actions/runs/40335270896) 成功，[官方发布工作流](https://github.com/wicm84266964/Ant-Code/actions/runs/40335827420) 已通过。仅源码发布，无额外二进制附件，未更新 Windows 成品包或 TaxaMask 内嵌版。
+
 后台子任务完成后，结果并入当前会话，不再每个组各排成一条接续。已经在 2.0.29 且符合条件的源码安装可用 Dashboard 左上角“更新”；从尚无更新按钮的旧版首次升级仍须手动拉取。本次不更新 Windows 成品包或 TaxaMask 内嵌版，不发布 npm 包。完整变化与限制见 [2.0.30 中文说明](docs/releases/2.0.30-subagent-handoff-batch_zh.md)。候选阶段不表示 CI、tag 或 GitHub Release 已经完成。
 
 ### 用户可见变化
