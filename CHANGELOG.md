@@ -4,6 +4,8 @@
 
 ## 2.0.31 - 2026-10-27
 
+已于 2026-10-26 16:53:55 UTC（北京时间 2026-10-27 00:53:55）发布稳定版：[v2.0.31](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.31)。标签指向 `9c1e8a1d01384b60778c07e9d18fb9310ee809ce`；功能经 [PR #91](https://github.com/wicm84266964/Ant-Code/pull/91) 合并。合并提交的 [CI](https://github.com/wicm84266964/Ant-Code/actions/runs/40363055435) 成功，[官方发布工作流](https://github.com/wicm84266964/Ant-Code/actions/runs/40363483946) 已通过。仅源码发布，无额外二进制附件，未更新 Windows 成品包或 TaxaMask 内嵌版。
+
 空闲的 Dashboard 可以继续使用源码更新。当前窗口确认后自动重启；同一安装里另一个没有任务的 Dashboard 会在更新时关闭。有任务或无法确认空闲的窗口、源码修改、不能安全快进的上游，以及其他 CLI/TUI，仍然阻止更新。正在运行的 2.0.29 或 2.0.30 如果被旧的空闲误判拦住，这一次仍须手动拉取。本次不更新 Windows 成品包或 TaxaMask 内嵌版，不发布 npm 包。完整变化与限制见 [2.0.31 中文说明](docs/releases/2.0.31-idle-dashboard-source-update_zh.md)。候选阶段不表示 CI、tag 或 GitHub Release 已经完成。
 
 ### 用户可见变化
