@@ -7,7 +7,7 @@ import type { Route, UpdateJournal } from "./contracts.ts";
 import { Repository } from "./repository.ts";
 import { cleanEnvironment, findNpmCli, routedEnvironment, runProcess } from "./process.ts";
 import type { Runner } from "./process.ts";
-import { StateStore, isAlive, readJson } from "./state-store.ts";
+import { StateStore, isAlive, readJson, releaseIdlePeerDashboards } from "./state-store.ts";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 export async function waitFor(test: () => Promise<boolean>, timeout: number, interval = 100) {
@@ -104,7 +104,7 @@ export async function runUpdateWorker(store: StateStore, journal: UpdateJournal,
     await waitFor(async () => !isAlive(journal.oldPid), dependencies.exitTimeoutMs ?? 120_000);
     crossingHandoff = true;
     await write("oldExited", "applying");
-    await store.assertOnlyLease(journal.boot.instanceId);
+    await releaseIdlePeerDashboards(journal.sourceRoot, journal.boot.instanceId);
     await repo.revalidate(journal.plan);
     const modules = path.join(journal.sourceRoot, "node_modules");
     journal.hadDependencies = await fs.lstat(modules).then(() => true, () => false);

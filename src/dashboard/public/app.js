@@ -805,9 +805,11 @@ var REASONS = {
   UNSUPPORTED_PROXY: "不支持此代理协议；仅支持 HTTP(S)，不执行 SOCKS 或 PAC。",
   PAC_UNSUPPORTED: "检测到 PAC，无法安全执行。请手填 HTTP(S) 代理或明确选择仅本次直连。",
   AMBIGUOUS_ROUTE: "手填代理与仅本次直连不能同时选择。",
-  ACTIVE_WORK: "仍有运行、排队、待确认或状态不确定的工作。请先处理，不会自动取消任务。",
-  OTHER_INSTANCE: "检测到其他 Dashboard 实例，请先关闭其他实例。",
-  OTHER_INSTANCES: "检测到其他 Dashboard 实例，请先关闭其他实例。",
+  ACTIVE_WORK: "仍有运行、排队、待确认或状态不确定的任务。当前这个窗口可以留着。请先处理那些任务，更新不会自动取消它们。",
+  OTHER_DASHBOARD_RUNNING: "另一个 Dashboard 窗口仍在运行，而且还不能确认它是空闲的。你正在用的这个窗口可以留着，它会在更新时自动重启。请关掉另一个窗口后再试。",
+  OTHER_DASHBOARD_BUSY: "另一个 Dashboard 里还有活动任务。请先处理那个窗口里的任务。当前窗口可以留着。",
+  OTHER_INSTANCE: "另一个 Dashboard 窗口仍在运行。当前这个窗口可以留着，它会在更新时自动重启。",
+  OTHER_INSTANCES: "还有其他 Dashboard 窗口在运行。当前这个窗口可以留着，它会在更新时自动重启。",
   UPDATE_BUSY: "更新任务正在进行，请勿重复操作。",
   UPDATE_LOCKED: "更新锁尚未解除，请检查之前的更新记录，不要盲目删除锁重试。",
   PLAN_STALE: "检查结果已过期或源码状态发生变化，请重新检查版本。",
@@ -969,7 +971,7 @@ function createSourceUpdateController(deps, render) {
       const snapshot = view.snapshot, plan = snapshot?.plan;
       if (view.busy || view.verified || view.recovery || snapshot?.phase !== "ready" || !plan) return;
       if (!confirmed) {
-        view.message = "请确认分支与目标提交，并确认已关闭其他 CLI/TUI。";
+        view.message = "请确认分支与目标提交。当前窗口会自动重启；其他 CLI/TUI 仍须自行关闭。";
         paint();
         return;
       }

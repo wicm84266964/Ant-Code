@@ -29,7 +29,7 @@ import { createAgentTaskGroupStore, summarizeGroupStatus } from "../agents/task-
 export { DASHBOARD_ACTIVE_SESSION_DEFAULTS } from "./runtime/types.ts";
 
 import type { DashboardFactoryState, DashboardRuntimeApi } from "./runtime/factory-state.ts";
-import { createSourceUpdateMaintenance, sourceUpdateLocalActivity, sourceUpdateProbeBusy } from "./runtime/source-update-maintenance.ts";
+import { createSourceUpdateMaintenance, sourceUpdateLocalActivity, sourceUpdateProbeSupplementsLocalScan } from "./runtime/source-update-maintenance.ts";
 import { runtimeStatus, runtimeSaveSettingsConfig } from "./runtime/api-settings.ts";
 import { runtimeSwitchModel, runtimeSwitchReasoningEffort } from "./runtime/api-model.ts";
 import {
@@ -450,9 +450,9 @@ export function createDashboardRuntime(options: CreateDashboardRuntimeOptions) {
     sourceUpdateActivity: async () => {
       try {
         const reasons = await sourceUpdateLocalActivity(active, ctx.cwd);
-        if (sourceUpdateProbeBusy(await runtimeLifecycleStatus(ctx))) reasons.push("activityUnknownOrBusy");
+        const probe = await runtimeLifecycleStatus(ctx);
+        if (probe.ok === true && sourceUpdateProbeSupplementsLocalScan(probe)) reasons.push("activityUnknownOrBusy");
         if (updateMaintenance.pending || sessionMutationLocks.size || activeCapacityLocks.size
-            || activeSweepPromise || scheduleTickPromise || pendingRetentionMaintenance
             || [...turnRequests.values()].some((record) => !record.settled)) reasons.push("pendingMutationOrMaintenance");
         return { busy: reasons.length > 0, reasons };
       } catch {
