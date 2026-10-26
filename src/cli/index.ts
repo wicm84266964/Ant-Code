@@ -8,7 +8,7 @@ import { runTui } from "./tui.ts";
 import { parseSlashCommand } from "../commands/parser.ts";
 import { runSlashCommand } from "../commands/runtime.ts";
 import { runPrintTurn } from "../core/session.ts";
-import { startDashboard } from "../dashboard/server.ts";
+import { startDashboard, installDashboardSourceUpdateSignalHandlers } from "../dashboard/server.ts";
 import { ANT_EVENT_SCHEMA_VERSION, createAntJsonOutput, redactText } from "../core/events.ts";
 import { runDoctor, formatDoctorReport } from "../diagnostics/doctor.ts";
 import { runGatewayHealth, formatGatewayHealthReport } from "../model-gateway/health.ts";
@@ -84,9 +84,11 @@ async function main() {
       packageRoot: ROOT_DIR,
       host: args.dashboard.host,
       port: args.dashboard.port,
+      strictPort: args.dashboard.strictPort || process.env.ANT_SOURCE_UPDATE_STRICT_PORT === "1",
       open: args.dashboard.open,
       project: args.dashboard.project
     });
+    installDashboardSourceUpdateSignalHandlers(result.server);
     console.log(`Ant Code Dashboard running at ${result.url}`);
     console.log(`Project: ${result.cwd}`);
     console.log("Close it from the Dashboard sidebar, or press Ctrl+C in this terminal.");

@@ -1,3 +1,4 @@
+import { sourceUpdateMaintenanceResult } from "./source-update-maintenance.ts";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash, createHmac, randomBytes, type Hash } from "node:crypto";
@@ -24,6 +25,8 @@ import {
   evaluateGoalCompletion,
   goalUnattendedQuestionResult,
   publicGoalSnapshot,
+  normalizeSessionGoal,
+  serializeSessionGoal,
   shouldSkipGoalContinue,
   stripGoalStatusMarkers
 } from "../../core/goal.ts";
@@ -82,6 +85,9 @@ import {
 } from "./approvals.ts";
 import {
   configForDashboardSelection,
+  isConfigV2Enabled,
+  sessionStatusFromMetadata,
+  unresolvedSessionModelSelectionResult,
   sessionStatusSummary
 } from "./session-model.ts";
 import {
@@ -91,10 +97,12 @@ import {
   beginPrompt,
   createQueueItem,
   ensureTurnState,
+  elevateQueueItemForGoal,
   normalizeMutationSessionId,
   prepareDashboardSessionForQueuedTurn,
   queueSnapshot,
   requireExactSessionId,
+  revokeGoalQueueElevation,
   takeNextQueueItem,
   withKeyedMutation
 } from "./turn-queue.ts";
@@ -120,7 +128,18 @@ export function sessionRecordGoalStatus(record: unknown) {
 
 /** @param {Record<string, any>} state */
 export function publicStateGoal(state: DashboardActiveSessionState) {
-  return publicGoalSnapshot(state?.session?.goal, state?.session?.config, state?.session?.usage);
+  return publicDashboardGoal(state?.session?.goal, state?.session?.config, state?.session?.usage, state.running);
+}
+
+// A stored running marker is not evidence that a turn is alive in this runtime.
+export function publicDashboardGoal(
+  goal: Parameters<typeof publicGoalSnapshot>[0],
+  config?: Parameters<typeof publicGoalSnapshot>[1],
+  usage?: unknown,
+  running = false
+) {
+  const snapshot = publicGoalSnapshot(goal, config, usage);
+  return !running && snapshot.status === "running" ? { ...snapshot, status: "paused" } : snapshot;
 }
 
 /** @param {unknown} value */
@@ -151,6 +170,10 @@ export async function applyDashboardGoal(context: DashboardRuntimeContext, input
   if (!normalized.ok) {
     return normalized;
   }
+  if (["disable", "clear", "pause"].includes(action)) {
+    return withKeyedMutation(context.sessionMutationLocks, normalized.sessionId, () =>
+      stopDashboardGoal(context, normalized.sessionId, action));
+  }
   const trustEnv = await context.resolveConfigEnv();
   const trust = await resolveDashboardTrust({ cwd: context.cwd, env: trustEnv, processTrusted: context.processTrusted });
   if (!trust.trusted) {
@@ -171,11 +194,22 @@ export async function applyDashboardGoal(context: DashboardRuntimeContext, input
     }
     let state: DashboardActiveSessionState;
     try {
+      const existing = context.active.get(normalized.sessionId);
+      if (existing && isConfigV2Enabled(loadedConfig)) {
+        const resolution = resolveSessionModelSelection(loadedConfig, {
+          model: existing.session.model,
+          modelSelection: existing.session.modelSelection
+        });
+        if (resolution.status !== "resolved") {
+          return unresolvedSessionModelSelectionResult(resolution, normalized.sessionId);
+        }
+      }
       state = await ensureTurnState(context.active, {
         cwd: context.cwd,
         env: configEnv,
         sessionId: normalized.sessionId,
-        mode: optionalDashboardPermissionMode(input.permissionMode),
+        // Goal controls stage their permission change until the disk commit.
+        preservePermission: true,
         config: currentConfig,
         runTurn: context.runTurn,
         sessionMutationLocks: context.sessionMutationLocks,
@@ -183,15 +217,22 @@ export async function applyDashboardGoal(context: DashboardRuntimeContext, input
         activePolicy: context.activePolicy
       });
     } catch (error) {
+      if (error instanceof SessionModelSelectionUnresolvedError) {
+        return unresolvedSessionModelSelectionResult(error, normalized.sessionId);
+      }
       if (error instanceof ActiveSessionCapacityError) {
         return activeSessionCapacityResult(context.active, context.activePolicy);
       }
       throw error;
     }
+    if (state.workAdmissionBlocked?.()) return sourceUpdateMaintenanceResult();
     if (state.session.permissionReadonlyLocked) {
       return { ok: false, status: 400, error: "只读锁定会话不能启用 Goal" };
     }
     const eventCursor = state.eventSequence;
+    // Stage controls separately: no live elevation, events, queue insertion or
+    // execution can escape a failed commit, even while an old turn settles.
+    const controls: Pick<AgentSession, "goal"> & Record<string, unknown> = { ...goalPermissionMetadata(state.session), goal: state.session.goal };
     if (action === "enable") {
       const previous = resolveGoalPreviousPermissionMode({
         alreadyEnabled: state.session.goal?.enabled === true,
@@ -207,52 +248,35 @@ export async function applyDashboardGoal(context: DashboardRuntimeContext, input
         usage: state.session.usage
       });
       if (enabledGoal) {
-        state.session.goal = enabledGoal;
+        controls.goal = enabledGoal;
       }
       if (!state.running) {
-        applyPermissionMode(state.session, "fullAccess");
+        applyPermissionMode(controls, "fullAccess");
       }
-      emitGoalState(state, "enabled");
-      startIdleGoalTurn(state, configEnv ?? process.env, objective);
-    } else if (action === "disable" || action === "clear") {
-      const previous = state.session.goal?.previousPermissionMode ?? "plan";
-      if (state.running) {
-        requestTurnInterrupt(state, "goal-disable");
-      }
-      dropGoalContinueItems(state);
-      state.session.goal = action === "clear"
-        ? disableGoalState({ ...state.session.goal, text: "" }, { clearedBy: "user" })
-        : disableGoalState(state.session.goal, { clearedBy: "user" });
-      if (action === "clear") {
-        state.session.goal.text = "";
-      }
-      applyPermissionMode(state.session, previous);
-      emitGoalState(state, action);
-    } else if (action === "pause") {
-      if (!state.session.goal?.enabled) {
-        return { ok: false, status: 409, error: "当前没有启用 Goal" };
-      }
-      if (state.running) {
-        requestTurnInterrupt(state, "goal-pause");
-      }
-      dropGoalContinueItems(state);
-      state.session.goal.status = "paused";
-      state.session.goal.lastBlockReason = "user_pause";
-      emitGoalState(state, "paused");
     } else if (action === "resume") {
-      const goal = state.session.goal;
+      const goal = { ...state.session.goal };
       if (!goal?.enabled || !String(goal.text ?? "").trim()) {
         return { ok: false, status: 409, error: "没有可继续的 Goal" };
       }
       if (goal.status !== "paused" && goal.status !== "failed") {
         return { ok: false, status: 409, error: "Goal 当前不可继续" };
       }
-      applyPermissionMode(state.session, "fullAccess");
+      applyPermissionMode(controls, "fullAccess");
       goal.status = "active";
       goal.lastBlockReason = "";
       goal.consecutiveFailures = 0;
       clearGoalEndedAt(goal);
-      emitGoalState(state, "resumed");
+      controls.goal = goal;
+    }
+    try {
+      await persistGoalControlSnapshot(state, context.runtimeEnv, controls);
+    } catch {
+      return { ok: false, status: 500, code: "GOAL_PERSIST_FAILED", error: "Goal 状态未能保存，请刷新后重试" };
+    }
+    emitGoalState(state, action === "enable" ? "enabled" : "resumed");
+    if (action === "enable") {
+      startIdleGoalTurn(state, configEnv ?? process.env, objective);
+    } else {
       if (!state.running && !state.disposed && !state.quarantinedTurnId) {
         const item = createGoalContinueItem(state);
         if (item) {
@@ -261,16 +285,13 @@ export async function applyDashboardGoal(context: DashboardRuntimeContext, input
           if (prepared) {
             const next = takeNextQueueItem(state);
             if (next) {
-              if (state.session.goal?.enabled) {
-                next.permissionMode = "fullAccess";
-              }
+              elevateQueueItemForGoal(state, next);
               beginPrompt(state, next, configEnv);
             }
           }
         }
       }
     }
-    await persistGoalSnapshot(state);
     return {
       ok: true,
       sessionId: state.session.id,
@@ -282,6 +303,117 @@ export async function applyDashboardGoal(context: DashboardRuntimeContext, input
       queue: queueSnapshot(state)
     };
   });
+}
+
+// Stop controls must not hydrate a session, resolve a model, run hooks, or rewrite
+// transcript/model metadata. The runtime lock is already held by the caller.
+async function stopDashboardGoal(context: DashboardRuntimeContext, sessionId: string, action: string) {
+  const state = context.active.get(sessionId);
+  const config = state?.session.config ?? await loadConfig({ cwd: context.cwd, env: await context.resolveConfigEnv() });
+  const store = createSessionStore({ cwd: context.cwd, transcript: config.transcript, env: context.runtimeEnv });
+  if (!state) {
+    const exact = await requireExactSessionId(context.active, {
+      cwd: context.cwd, env: context.runtimeEnv, config, sessionId
+    });
+    if (!exact.ok) return exact;
+  }
+  const eventCursor = state?.eventSequence;
+  try {
+    const committed = await store.withSessionMutation(sessionId, async () => {
+      const current = await store.readMetadataExact(sessionId, { lockHeld: true });
+      if (!current.ok && !(state && !state.persisted && current.error?.code === "SESSION_NOT_FOUND")) {
+        return {
+          ok: false as const,
+          status: current.error?.code === "SESSION_NOT_FOUND" ? 404 : 500,
+          code: current.error?.code ?? "GOAL_PERSIST_FAILED",
+          error: current.error?.message ?? "无法保存 Goal"
+        };
+      }
+      const metadata = current.ok ? current.metadata : newGoalSessionMetadata(state!.session);
+      const target: Record<string, unknown> = state?.session ?? { ...metadata };
+      const goal = normalizeSessionGoal(target.goal, { hydrateRunningAsPaused: false });
+      if (action === "pause" && !goal.enabled) {
+        return { ok: false as const, status: 409, error: "当前没有启用 Goal" };
+      }
+      const nextGoal = action === "pause"
+        ? { ...goal, status: "paused", lastBlockReason: "user_pause" }
+        : disableGoalState(goal, { clearedBy: "user" });
+      if (action === "clear") nextGoal.text = "";
+      target.goal = nextGoal;
+      applyPermissionMode(target, goal.previousPermissionMode);
+      if (state) {
+        dropGoalContinueItems(state);
+        if (goal.enabled) revokeGoalQueueElevation(state, goal.previousPermissionMode);
+        if (state.running) requestTurnInterrupt(state, action === "pause" ? "goal-pause" : "goal-disable");
+        emitGoalState(state, action === "pause" ? "paused" : action);
+      }
+      const patch: Record<string, unknown> = { ...metadata, goal: serializeSessionGoal(nextGoal) };
+      Object.assign(patch, goalPermissionMetadata(target));
+      const metadataPath = await store.writeMetadata(patch, { lockHeld: true });
+      if (!metadataPath) throw new Error("Goal metadata persistence is disabled");
+      return { ok: true as const, metadata: patch };
+    });
+    if (!committed.ok) return committed;
+    if (state) state.persisted = true;
+    return {
+      ok: true,
+      sessionId,
+      permission: permissionModeSummary(state?.session ?? committed.metadata),
+      goal: state ? publicStateGoal(state) : publicDashboardGoal(committed.metadata.goal as Record<string, unknown>, undefined, committed.metadata.usage),
+      sessionStatus: state ? sessionStatusSummary(state.session) : sessionStatusFromMetadata(committed.metadata, config),
+      active: Boolean(state),
+      running: state?.running === true,
+      interrupting: state?.interrupting === true || Boolean(state?.quarantinedTurnId),
+      eventCursor,
+      queue: state ? queueSnapshot(state) : undefined
+    };
+  } catch {
+    // An interrupt may already have been requested; never claim the disk commit
+    // succeeded or that the underlying turn has stopped when it has not.
+    return { ok: false, status: 500, code: "GOAL_PERSIST_FAILED", error: "Goal 状态未能保存，请刷新后重试" };
+  }
+}
+
+// User-facing Goal commits are narrow and fail closed, unlike best-effort
+// end-of-turn snapshots. Do not refresh model identity or transcript here.
+async function persistGoalControlSnapshot(state: DashboardActiveSessionState, env: NodeJS.ProcessEnv, controls: Pick<AgentSession, "goal"> & Record<string, unknown>) {
+  const store = createSessionStore({ cwd: state.session.cwd, transcript: state.session.config.transcript, env });
+  await store.withSessionMutation(state.session.id, async () => {
+    const current = await store.readMetadataExact(state.session.id, { lockHeld: true });
+    if (!current.ok && (state.persisted || current.error?.code !== "SESSION_NOT_FOUND")) {
+      throw new Error("Goal metadata is unavailable");
+    }
+    const metadata = current.ok ? current.metadata : newGoalSessionMetadata(state.session);
+    const metadataPath = await store.writeMetadata({
+      ...metadata,
+      goal: serializeSessionGoal(controls.goal),
+      ...goalPermissionMetadata(controls)
+    }, { lockHeld: true });
+    if (!metadataPath) throw new Error("Goal metadata persistence is disabled");
+    // Publish live controls before releasing the shared file lock, so queued
+    // turn snapshots refresh the committed controls instead of old values.
+    Object.assign(state.session, controls);
+  });
+  state.persisted = true;
+}
+
+function goalPermissionMetadata(target: Record<string, unknown>) {
+  return Object.fromEntries(["permissionMode", "fullAccess", "readonly", "allowWrite", "allowCommand"]
+    .map((key) => [key, target[key]]));
+}
+
+// A live, brand-new session may not have its first metadata file yet. Capture
+// its identity verbatim instead of invoking model selection or snapshot hooks.
+function newGoalSessionMetadata(session: AgentSession): Record<string, unknown> {
+  return {
+    id: session.id, cwd: session.cwd, startedAt: session.startedAt,
+    title: session.title, mode: session.mode, clientSurface: session.clientSurface,
+    model: session.model, modelSelection: session.modelSelection,
+    metadataVersion: isConfigV2Enabled(session.config) ? 2 : 1,
+    reasoningEffort: session.config.reasoningEffort ?? null,
+    usage: session.usage,
+    transcript: { messages: session.transcriptMessages, contextMessages: session.messages }
+  };
 }
 
 /** @param {Record<string, any>} state @param {string} reason */
@@ -379,7 +511,7 @@ export function createGoalContinueItem(state: DashboardActiveSessionState) {
 /** @param {Record<string, any>} state @param {{ wasQuarantined?: boolean }} [options] */
 export function maybeEnqueueGoalContinue(state: DashboardActiveSessionState, options: { wasQuarantined?: boolean } = {}) {
   const wasQuarantined = options.wasQuarantined;
-  if (wasQuarantined || state.disposed) {
+  if (wasQuarantined || state.disposed || state.workAdmissionBlocked?.()) {
     return false;
   }
   if (shouldSkipGoalContinue(state)) {

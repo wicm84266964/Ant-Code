@@ -13,6 +13,7 @@ export type CliArgs = {
     host: string;
     port: number;
     open: boolean;
+    strictPort: boolean;
     project: string | null;
   };
   outputFormat: CliOutputFormat;
@@ -39,6 +40,7 @@ export function parseArgs(argv: string[]): CliArgs {
       host: "127.0.0.1",
       port: 7410,
       open: true,
+      strictPort: false,
       project: null
     },
     outputFormat: "text",
@@ -81,6 +83,8 @@ export function parseArgs(argv: string[]): CliArgs {
       index += 1;
     } else if (item.startsWith("--host=")) {
       args.dashboard.host = item.slice("--host=".length) || args.dashboard.host;
+    } else if (item === "--strict-port") {
+      args.dashboard.strictPort = true;
     } else if (item === "--no-open") {
       args.dashboard.open = false;
     } else if (item === "--project") {

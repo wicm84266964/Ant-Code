@@ -32,6 +32,7 @@ export type DashboardFactoryState = {
   selectedProviderId: string;
   selectedReasoningEffort: string;
   shuttingDown: boolean;
+  sourceUpdateShutdownStarted?: boolean;
   activeSweepPromise: Promise<unknown> | null;
   readRuntimeActivity: RuntimeActivityReader;
   cancelBackgroundWork: (state: DashboardActiveSessionState, options?: Record<string, unknown>) => Promise<unknown>;
@@ -83,6 +84,7 @@ export type DashboardRuntimeApi = {
   resolveApproval(approvalId: unknown, action: unknown): unknown;
   resolveQuestion(questionId: unknown, answer?: unknown): unknown;
   lifecycleStatus(): Promise<unknown>;
+  sourceUpdateActivity?(): Promise<{ busy: boolean; reasons?: string[] }>;
   sweepIdleSessions(): Promise<unknown>;
   shutdown(input?: DashboardRequestInput): Promise<unknown>;
   sessionFiles(sessionId: string): unknown;

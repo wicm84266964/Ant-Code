@@ -286,6 +286,9 @@ export type DashboardApiResult = {
   code?: string;
   cwd?: string;
   version?: string;
+  productVersion?: string;
+  bootCommit?: string | null;
+  instanceId?: string;
   queue?: Array<{ id?: string; kind?: string; [key: string]: unknown }>;
   item?: { id?: string; kind?: string; [key: string]: unknown };
   sessionStatus?: DashboardSessionStatus;

@@ -11,6 +11,7 @@ export async function tickDashboardSchedules(ctx: Pick<DashboardFactoryState, "c
   let fired = 0;
   let skipped = 0;
   for (const record of records) {
+    if (ctx.shuttingDown) break;
     const state = ctx.active.get(record.sessionId) as DashboardActiveSessionState | undefined;
     const decision = scheduleFireDecision(record, now, state ? {
       running: state.running === true,
@@ -35,6 +36,8 @@ export async function tickDashboardSchedules(ctx: Pick<DashboardFactoryState, "c
       lastError: null,
       ...(decision.once ? { enabled: false } : {})
     });
+    // Admission may close during the write; let startTurn reject so the failure
+    // path below compensates a one-time schedule instead of silently consuming it.
     const result = await ctx.runtime.startTurn({
       sessionId: record.sessionId,
       prompt: schedulePromptText(record),

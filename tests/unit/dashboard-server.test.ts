@@ -48,6 +48,7 @@ test("dashboard finds next available port", async () => {
 
     assert.ok(bound.port > used);
     assert.equal(server.listening, true);
+    assert.equal(server.address().port, bound.port);
   } finally {
     await close(server);
     await close(blocker);
@@ -206,6 +207,7 @@ test("dashboard maps Config V2 load failures to diagnostic 4xx responses and rec
     }
   });
   await listen(server, "127.0.0.1", 0);
+  const bound = server.address();
 
   try {
     const failed = await fetchJson(server, "/api/status?clientId=config-failure");
@@ -223,6 +225,7 @@ test("dashboard maps Config V2 load failures to diagnostic 4xx responses and rec
     assert.equal(recovered.body.ok, true);
     assert.equal(statusCalls, 2);
     assert.equal(server.listening, true);
+    assert.equal(server.address().port, bound.port);
   } finally {
     await close(server);
   }
@@ -263,6 +266,7 @@ test("dashboard logs unknown request failures as redacted structured diagnostics
     }
   });
   await listen(server, "127.0.0.1", 0);
+  const bound = server.address();
   console.error = (line) => diagnostics.push(String(line));
 
   try {
@@ -286,6 +290,7 @@ test("dashboard logs unknown request failures as redacted structured diagnostics
     assert.equal(recovered.body.ok, true);
     assert.equal(statusCalls, 3);
     assert.equal(server.listening, true);
+    assert.equal(server.address().port, bound.port);
     assert.equal(diagnostics.length, 2);
 
     const diagnostic = JSON.parse(diagnostics[0]);
@@ -1722,3 +1727,35 @@ async function waitFor(predicate) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
+
+test("dashboard strict-port rejects occupied listener without fallback", async () => {
+  const blocker = http.createServer();
+  const server = http.createServer();
+  await listen(blocker, "127.0.0.1", 0);
+  try {
+    await assert.rejects(listenOnAvailablePort(server, { host: "127.0.0.1", port: blocker.address().port, strictPort: true }), { code: "EADDRINUSE" });
+    assert.equal(server.listening, false);
+    assert.equal(blocker.listening, true);
+  } finally { await close(server); await close(blocker); }
+});
+
+test("ordinary shutdown awaits source-update dispose but never asks manager to start", async () => {
+  const disposal = Promise.withResolvers<void>();
+  let disposed = 0, started = 0, shutdownCalled = false;
+  const server = createDashboardServer({ cwd: process.cwd(), runtime: createRuntimeStub(),
+    sourceUpdateManager: { snapshot: async () => ({}), check: () => ({}), start: () => { started++; },
+      dispose: async () => { disposed++; await disposal.promise; } },
+    onShutdown: () => { shutdownCalled = true; } });
+  await listen(server, "127.0.0.1", 0);
+  try {
+    const response = await fetchJson(server, "/api/shutdown", { method: "POST" });
+    assert.equal(response.status, 200);
+    await waitFor(() => disposed === 1);
+    assert.equal(shutdownCalled, false);
+    disposal.resolve();
+    await waitFor(() => shutdownCalled);
+    await server.disposeSourceUpdate();
+    assert.equal(disposed, 1);
+    assert.equal(started, 0);
+  } finally { disposal.resolve(); await close(server); }
+});

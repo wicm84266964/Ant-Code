@@ -533,7 +533,7 @@ export function sessionMeta(session: DashboardSessionSummary, status: { label: s
 
 export function sessionStatusView(session: DashboardSessionSummary) {
   const raw = String(session.status ?? "").toLowerCase();
-  if (session.running || raw === "running") {
+  if (session.running === true) {
     return { label: "运行中", tone: "running", detail: Number(session.queueLength ?? 0) > 0 ? "有排队" : "" };
   }
   if (session.backgroundVisible) {
@@ -554,6 +554,9 @@ export function sessionStatusView(session: DashboardSessionSummary) {
   }
   if (["failed", "error"].includes(raw) || raw.endsWith("_error") || raw.includes("失败")) {
     return { label: "失败", tone: "error", detail: "" };
+  }
+  if (["paused", "running"].includes(raw)) {
+    return { label: "已暂停", tone: "warning", detail: "无实时任务" };
   }
   if (["interrupted", "cancelled"].includes(raw) || raw.includes("中断")) {
     return { label: "已中断", tone: "warning", detail: "" };
@@ -585,7 +588,6 @@ export function sessionsNeedRefresh() {
     session.running
     || session.backgroundVisible
     || Number(session.queueLength) > 0
-    || String(session.status ?? "").toLowerCase() === "running"
   );
 }
 

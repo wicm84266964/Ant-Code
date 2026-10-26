@@ -294,6 +294,169 @@ button {
   font-size: var(--fs-ui);
 }
 
+.brand-version {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
+
+.brand-version button {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text-soft);
+  cursor: pointer;
+  font-size: var(--fs-caption);
+  padding: 2px 8px;
+}
+
+.source-update-dialog {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+  color: var(--text-soft);
+  font: inherit;
+  margin: auto;
+  max-height: calc(100dvh - 32px);
+  max-width: calc(100vw - 32px);
+  overflow: auto;
+  overflow-wrap: anywhere;
+  padding: 24px;
+  width: 580px;
+}
+
+.source-update-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.72);
+}
+
+.source-update-heading,
+.source-update-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.source-update-heading h2 {
+  color: var(--text);
+  font-size: 20px;
+  margin: 0;
+}
+
+.source-update-dialog button {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+  min-height: 36px;
+  padding: 6px 12px;
+}
+
+.source-update-dialog button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+#source-update-start {
+  border-color: var(--accent-2);
+  color: var(--accent);
+}
+
+.source-update-current,
+.source-update-hint {
+  color: var(--text-muted);
+  font-size: var(--fs-ui);
+}
+
+.source-update-dialog p {
+  line-height: 1.65;
+}
+
+.source-update-proxy-label {
+  display: block;
+  margin: 16px 0 8px;
+}
+
+#source-update-proxy {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  font: inherit;
+  min-height: 40px;
+  min-width: 0;
+  padding: 8px 10px;
+  width: 100%;
+}
+
+.source-update-choice {
+  align-items: flex-start;
+  display: flex;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.source-update-choice input {
+  accent-color: var(--accent);
+  flex: 0 0 auto;
+  margin-top: 4px;
+}
+
+.source-update-progress,
+.source-update-plan,
+.source-update-recovery {
+  background: var(--panel-2);
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.source-update-plan dl {
+  margin: 0 0 12px;
+}
+
+.source-update-plan dt {
+  color: var(--text-muted);
+  font-size: var(--fs-caption);
+}
+
+.source-update-plan dd {
+  margin: 4px 0 12px;
+  overflow-wrap: anywhere;
+}
+
+.source-update-recovery,
+.source-update-capability {
+  color: var(--warning);
+}
+
+.source-update-actions {
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+.brand-version button:focus-visible,
+.source-update-dialog :focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+@media (max-width: 480px) {
+  .source-update-dialog {
+    max-height: calc(100dvh - 16px);
+    max-width: calc(100vw - 16px);
+    padding: 16px;
+  }
+
+  .source-update-actions button {
+    flex: 1 1 160px;
+  }
+}
+
 .primary-action {
   background: var(--accent);
   border: 0;

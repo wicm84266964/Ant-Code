@@ -1,3 +1,4 @@
+import { sourceUpdateWorkBlocked, sourceUpdateMaintenanceResult } from "./source-update-maintenance.ts";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash, createHmac, randomBytes, type Hash } from "node:crypto";
@@ -427,12 +428,56 @@ export function pruneTurnRequests(records: Map<string, TurnRequestRecord>) {
 }
 
 
+// Only active Goal work may supply unattended elevation; paused Goals do not.
+export function goalAllowsQueueElevation(state: DashboardActiveSessionState) {
+  return state.session.goal?.enabled === true && ["active", "running"].includes(state.session.goal.status);
+}
+
+function recordQueuePermission(state: DashboardActiveSessionState, item: DashboardQueueItem, requestedMode: string) {
+  if (item.kind === "schedule") return; // Schedules have their own authorization.
+  item.permissionSource = goalAllowsQueueElevation(state) ? "goal" : "request";
+  // During Goal, fullAccess may just be the UI's inherited mode, not a fresh
+  // authorization. Preserve only independently known request permissions.
+  if (item.permissionSource === "request" || requestedMode !== "fullAccess") {
+    item.requestedPermissionMode = requestedMode;
+  }
+}
+
+export function elevateQueueItemForGoal(state: DashboardActiveSessionState, item: DashboardQueueItem) {
+  if (!goalAllowsQueueElevation(state) || item.kind === "schedule") return;
+  if (item.permissionSource === "request" && item.permissionMode === "fullAccess") return;
+  if (item.permissionSource !== "goal") {
+    if (item.permissionMode !== "fullAccess") item.requestedPermissionMode = item.permissionMode;
+    item.permissionSource = "goal";
+  }
+  item.permissionMode = "fullAccess";
+}
+
+export function revokeGoalQueueElevation(state: DashboardActiveSessionState, fallbackMode: string) {
+  for (const item of state.queuedPrompts) {
+    if (item.kind === "schedule" || item.permissionSource === "request") continue;
+    if (item.permissionSource === "goal" && item.requestedPermissionMode) {
+      item.permissionMode = item.requestedPermissionMode;
+      item.permissionSource = "request";
+    } else if (item.permissionMode === "fullAccess") {
+      item.permissionMode = normalizePermissionMode(fallbackMode);
+      item.requiresPermissionConfirmation = true;
+    }
+  }
+}
+
 /** @param {Record<string, any>} state */
 export function takeNextQueueItem(state: DashboardActiveSessionState) {
+  // A turn can also pause Goal through interruption/failure, without a stop API.
+  if (state.session.goal?.enabled && !goalAllowsQueueElevation(state)) {
+    revokeGoalQueueElevation(state, state.session.goal.previousPermissionMode);
+  }
   const hasUserWork = state.queuedPrompts.some((item) => ["guide", "prompt", "wakeup", "schedule"].includes(item.kind ?? ""));
   if (hasUserWork) {
     dropGoalContinueItems(state);
   }
+  // Ambiguous Goal-era authorization must not silently drain the queue.
+  if (state.queuedPrompts[0]?.requiresPermissionConfirmation) return null;
   return state.queuedPrompts.shift() ?? null;
 }
 
@@ -466,7 +511,8 @@ export async function startDashboardTurn(context: DashboardRuntimeContext, input
   if (!trust.trusted) {
     return { ok: false, status: 403, error: "请先确认工作区信任", trust };
   }
-  let mode = normalizePermissionMode(input.permissionMode);
+  const requestedMode = normalizePermissionMode(input.permissionMode);
+  let mode = requestedMode;
   const createdThisRequest = !normalized.sessionId;
   const run = async () => {
     const configEnv = await context.resolveConfigEnv();
@@ -507,6 +553,7 @@ export async function startDashboardTurn(context: DashboardRuntimeContext, input
       }
       throw error;
     }
+    if (state.workAdmissionBlocked?.()) return sourceUpdateMaintenanceResult();
     if (state.disposed) {
       return { ok: false, status: 410, code: "SESSION_DISPOSED", error: "会话已被删除" };
     }
@@ -534,7 +581,7 @@ export async function startDashboardTurn(context: DashboardRuntimeContext, input
     }
     state.hooksTrusted = trust.trusted;
     const eventCursor = state.eventSequence;
-    if (state.session.goal?.enabled) {
+    if (goalAllowsQueueElevation(state)) {
       mode = "fullAccess";
     } else if (input.goalMode === true && String(input.goalText ?? "").trim()) {
       const created = enableGoalState({
@@ -574,7 +621,10 @@ export async function startDashboardTurn(context: DashboardRuntimeContext, input
         };
       }
       const item = enqueuePrompt(state, prompt, mode, turnSubmissionKind(input), attachments);
-      if (item) decorateScheduleQueueItem(item, input);
+      if (item) {
+        decorateScheduleQueueItem(item, input);
+        recordQueuePermission(state, item, requestedMode);
+      }
       if (!item) {
         return queueFullResult(state);
       }
@@ -601,6 +651,7 @@ export async function startDashboardTurn(context: DashboardRuntimeContext, input
     }
 
     const item = decorateScheduleQueueItem(createQueueItem(prompt, mode, turnSubmissionKind(input), "", attachments), input);
+    recordQueuePermission(state, item, requestedMode);
     beginPrompt(state, item, configEnv);
     return {
       ok: true,
@@ -710,8 +761,8 @@ export async function ensureTurnState(active: ActiveSessionMap, options: EnsureT
     if (!state.running && options.config) {
       applySessionConfig(state.session, configForExistingSession(state.session, options.config));
     }
-    if (!state.running) {
-      if (state.session.goal?.enabled) {
+    if (!state.running && !options.preservePermission) {
+      if (goalAllowsQueueElevation(state)) {
         applyPermissionMode(state.session, "fullAccess");
       } else if (options.mode) {
         applyPermissionMode(state.session, options.mode);
@@ -761,8 +812,11 @@ export async function ensureTurnState(active: ActiveSessionMap, options: EnsureT
         applySessionReasoningEffort(session, options.reasoningEffort);
       }
     }
-    applyPermissionMode(session, session.goal?.enabled ? "fullAccess" : (options.mode ?? "plan"));
+    if (!options.preservePermission) {
+      applyPermissionMode(session, session.goal?.enabled && ["active", "running"].includes(session.goal.status) ? "fullAccess" : (options.mode ?? "plan"));
+    }
     state = createTurnState(session, options.runTurn, { persisted: Boolean(options.sessionId) });
+    state.workAdmissionBlocked = () => sourceUpdateWorkBlocked(active);
     active.set(session.id, state);
     return state;
   });
@@ -879,6 +933,9 @@ export async function prepareDashboardSessionForQueuedTurn(state: DashboardActiv
 export function beginPrompt(state: DashboardActiveSessionState, item: DashboardQueueItem, env: NodeJS.ProcessEnv | undefined) {
   if (
     state.disposed
+    || item.requiresPermissionConfirmation
+    || (item.kind === GOAL_CONTINUE_KIND && !goalAllowsQueueElevation(state))
+    || state.workAdmissionBlocked?.()
     || state.running
     || state.quarantinedTurnId
     || (isPlainObject(state.session.modelSelectionInvalidation) && state.session.modelSelectionInvalidation.status === "unresolved")
@@ -1071,14 +1128,14 @@ export function runTurnInBackground(state: DashboardActiveSessionState, item: Da
       updateGoalAfterTurn(state, state.status);
       maybeEnqueueGoalContinue(state, { wasQuarantined });
       let canStartNext = false;
-      if (!wasQuarantined && !state.disposed && state.queuedPrompts.length > 0) {
+      // A permission-paused head must survive even a failed model/config reload.
+      if (!wasQuarantined && !state.disposed && !state.workAdmissionBlocked?.() && state.queuedPrompts.length > 0
+        && !state.queuedPrompts[0]?.requiresPermissionConfirmation) {
         canStartNext = await prepareDashboardSessionForQueuedTurn(state, env);
       }
       state.running = false;
-      const next = canStartNext ? takeNextQueueItem(state) : null;
-      if (next && state.session.goal?.enabled) {
-        next.permissionMode = "fullAccess";
-      }
+      const next = canStartNext && !state.workAdmissionBlocked?.() ? takeNextQueueItem(state) : null;
+      if (next) elevateQueueItemForGoal(state, next);
       let startedNext = false;
       if (next) {
         appendQueueUpdated(state);
@@ -1295,6 +1352,7 @@ export function publicQueueItem(item: DashboardQueueItem) {
     ].filter(Boolean).join(" · ")),
     attachments,
     permissionMode: item.permissionMode,
+    ...(item.requiresPermissionConfirmation ? { requiresPermissionConfirmation: true } : {}),
     at: item.at
   };
 }

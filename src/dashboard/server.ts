@@ -6,11 +6,21 @@ import type { Socket } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDashboardRuntime } from "./sessions.ts";
+import { captureBootSnapshot, acknowledgeSourceUpdate } from "../update/boot.ts";
+import { sourceRootFromModule } from "../update/repository.ts";
+import { SourceUpdateManager, type SourceUpdateOptions } from "../update/manager.ts";
+import { UpdateError, type BootSnapshot, type UpdateSnapshot } from "../update/contracts.ts";
 import { previewFile, readRawFile, resolveSystemOpenFile } from "./files.ts";
 
 type DashboardRuntime = ReturnType<typeof createDashboardRuntime>;
 type JsonObject = Record<string, unknown>;
 const EMPTY_JSON: JsonObject = {};
+export type DashboardSourceUpdateManager = Pick<SourceUpdateManager, "snapshot" | "check" | "start" | "dispose">;
+type SourceUpdateDependencies = {
+  createManager: (options: SourceUpdateOptions) => Promise<DashboardSourceUpdateManager>;
+  captureBoot: typeof captureBootSnapshot;
+  acknowledge: typeof acknowledgeSourceUpdate;
+};
 type DashboardServerOptions = {
   runtime: DashboardRuntime;
   cwd: string;
@@ -19,6 +29,9 @@ type DashboardServerOptions = {
   onShutdown?: () => void;
   requestShutdown?: () => void;
   openLocalPath?: (filePath: string) => void | Promise<void>;
+  boot?: BootSnapshot | Promise<BootSnapshot>;
+  sourceUpdateManager?: DashboardSourceUpdateManager;
+  sourceUpdateMaintenance?: () => boolean;
 };
 
 const DEFAULT_HOST = "127.0.0.1";
@@ -66,27 +79,115 @@ const EMBEDDABLE_PDF_CONTENT_SECURITY_POLICY = [
   "script-src 'none'"
 ].join("; ");
 
-/**
- * @param {{ cwd: string; env?: NodeJS.ProcessEnv; packageRoot?: string; host?: string; port?: number; open?: boolean; project?: string | null }} options
- */
-export async function startDashboard(options: { cwd: string; env?: NodeJS.ProcessEnv; packageRoot?: string; host?: string; port?: number; open?: boolean; project?: string | null }) {
+type StartDashboardOptions = {
+  cwd: string; env?: NodeJS.ProcessEnv; packageRoot?: string; host?: string;
+  port?: number; open?: boolean; project?: string | null; strictPort?: boolean;
+  // Trusted embedding/test dependencies only. Never populated from HTTP/env.
+  runtime?: DashboardRuntime;
+  sourceUpdate?: Partial<SourceUpdateDependencies>;
+  onShutdown?: () => void;
+};
+
+export async function startDashboard(options: StartDashboardOptions) {
   const host = normalizeDashboardHost(options.host ?? DEFAULT_HOST);
   const port = normalizePort(options.port ?? DEFAULT_PORT);
-  const cwd = path.resolve(options.cwd, options.project ?? ".");
-  const runtime = createDashboardRuntime({ cwd, env: options.env ?? process.env });
+  const env = options.env ?? process.env;
+  const strictPort = options.strictPort === true || env.ANT_SOURCE_UPDATE_STRICT_PORT === "1";
+  const cwd = await fs.realpath(path.resolve(options.cwd, options.project ?? "."));
+  // Installation identity MUST come from this real module, not project/packageRoot/env.
+  const sourceRoot = await sourceRootFromModule(import.meta.url);
+  const dependencies: SourceUpdateDependencies = {
+    createManager: (input) => SourceUpdateManager.create(input),
+    captureBoot: captureBootSnapshot,
+    acknowledge: acknowledgeSourceUpdate,
+    ...options.sourceUpdate
+  };
+  const boot = Object.freeze({ ...await dependencies.captureBoot(sourceRoot, env) });
+  const publicDir = await resolveDashboardPublicDir(options.packageRoot);
+  const runtime = options.runtime ?? createDashboardRuntime({ cwd, env });
   const server = createDashboardServer({
-    runtime,
-    cwd,
-    host,
-    publicDir: await resolveDashboardPublicDir(options.packageRoot),
-    onShutdown: () => process.exit(0)
+    runtime, cwd, host, boot,
+    publicDir,
+    onShutdown: options.onShutdown ?? (() => process.exit(0))
   });
-  const bound = await listenOnAvailablePort(server, { host, port });
-  const url = `http://${hostForUrl(host)}:${bound.port}`;
-  if (options.open !== false) {
-    openBrowser(url);
+  try {
+    const bound = await listenOnAvailablePort(server, { host, port, strictPort });
+    const manager = await dependencies.createManager({
+      sourceRoot, projectCwd: cwd, host, actualPort: bound.port, env: runtime.env,
+      config: await runtime.sourceUpdateConfig(), boot,
+      // Strict restart and local Windows lifecycle acceptance have passed.
+      // Repository and activity checks still fail closed per installation.
+      strictRestartSupported: true,
+      getActivity: () => runtime.sourceUpdateActivity(),
+      prepareShutdown: (handoff) => prepareDashboardSourceUpdateShutdown(runtime, handoff, server.requestShutdown)
+    });
+    server.setSourceUpdateManager(manager);
+    // ACK commits the replacement boot only after config, lease and listener are ready.
+    if (!server.listening) throw new Error("Dashboard listener closed during startup");
+    const ack = await dependencies.acknowledge({ sourceRoot, boot, host, actualPort: bound.port, strictPort, env });
+    if (env.ANT_SOURCE_UPDATE_JOB && !ack) throw new UpdateError("INVALID_UPDATE_BOOT");
+    const url = `http://${hostForUrl(host)}:${bound.port}`;
+    if (options.open !== false) openBrowser(url);
+    return { server, url, host, port: bound.port, cwd, boot };
+  } catch (error) {
+    // No ACK/listen/startup failure may leave a lease or accepting HTTP listener.
+    await server.disposeSourceUpdate().catch(() => undefined);
+    if (server.listening) await new Promise<void>((resolve) => {
+      server.close(() => resolve()); server.closeAllConnections();
+    });
+    await runtime.shutdown({}).catch(() => undefined);
+    throw error;
   }
-  return { server, url, host, port: bound.port, cwd };
+}
+
+// Installed only by the Dashboard CLI branch. Keep the existing signal exit
+// semantics; release the updater lease without forcing/cancelling runtime work.
+export function installDashboardSourceUpdateSignalHandlers(
+  server: ReturnType<typeof createDashboardServer>,
+  target: Pick<NodeJS.Process, "once" | "removeListener" | "exit"> = process
+) {
+  let exiting = false;
+  const onSignal = (exitCode: number) => {
+    if (exiting) return;
+    exiting = true;
+    void server.disposeSourceUpdate().catch(() => {}).finally(() => {
+      cleanup();
+      target.exit(exitCode);
+    });
+  };
+  const onInterrupt = () => onSignal(130);
+  const onTerminate = () => onSignal(143);
+  const cleanup = () => {
+    target.removeListener("SIGINT", onInterrupt);
+    target.removeListener("SIGTERM", onTerminate);
+    server.removeListener("close", cleanup);
+  };
+  target.once("SIGINT", onInterrupt);
+  target.once("SIGTERM", onTerminate);
+  server.once("close", cleanup);
+  return cleanup;
+}
+
+export async function prepareDashboardSourceUpdateShutdown(
+  runtime: DashboardRuntime,
+  handoff: { jobId: string; releaseWorker: () => Promise<void> },
+  requestShutdown: () => void
+) {
+  // Manager invokes this only after worker's prepared journal. Never called by an
+  // HTTP handler directly, and never shutdown merely because start was accepted.
+  const restoreAdmission = runtime.beginSourceUpdateMaintenance();
+  try {
+    if ((await runtime.sourceUpdateActivity()).busy) throw new UpdateError("ACTIVE_WORK");
+    const stopped = await runtime.shutdown({ sourceUpdate: true });
+    if (!stopped.ok) throw new UpdateError("SAFE_SHUTDOWN_REFUSED");
+    await handoff.releaseWorker();
+    requestShutdown();
+  } catch (error) {
+    // Runtime disposal/persistence is not reversible. If shutdown/release fails,
+    // stay gated for diagnosis; never claim the runtime was restored.
+    if (!runtime.sourceUpdateShutdownStarted()) restoreAdmission();
+    throw error;
+  }
 }
 
 /**
@@ -115,7 +216,7 @@ export function normalizePort(value: unknown) {
  * @param {http.Server} server
  * @param {{ host: string; port: number }} options
  */
-export async function listenOnAvailablePort(server: http.Server, options: { host: string; port: number }) {
+export async function listenOnAvailablePort(server: http.Server, options: { host: string; port: number; strictPort?: boolean }) {
   let port = options.port;
   for (;;) {
     try {
@@ -123,7 +224,7 @@ export async function listenOnAvailablePort(server: http.Server, options: { host
       return { port };
     } catch (error: unknown) {
       const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
-      if (code !== "EADDRINUSE" && code !== "EACCES") {
+      if (options.strictPort || (code !== "EADDRINUSE" && code !== "EACCES")) {
         throw error;
       }
       port += 1;
@@ -139,6 +240,19 @@ export async function listenOnAvailablePort(server: http.Server, options: { host
  */
 export function createDashboardServer(options: DashboardServerOptions) {
   const sockets = new Set<Socket>();
+  const boot = options.boot
+    ? Promise.resolve(options.boot).then((value) => Object.freeze({ ...value }))
+    : sourceRootFromModule(import.meta.url).then((root) => captureBootSnapshot(root));
+  void boot.catch(() => {}); // Request boundary contains local snapshot failures.
+  let sourceUpdateManager = options.sourceUpdateManager;
+  let disposePromise: Promise<void> | undefined;
+  const disposeSourceUpdate = () => {
+    if (disposePromise) return disposePromise;
+    if (!sourceUpdateManager) return Promise.resolve();
+    const manager = sourceUpdateManager;
+    sourceUpdateManager = undefined;
+    return disposePromise = Promise.resolve().then(() => manager.dispose());
+  };
   const auth = {
     sessionToken: randomBytes(32).toString("base64url"),
     csrfToken: randomBytes(32).toString("base64url")
@@ -159,6 +273,9 @@ export function createDashboardServer(options: DashboardServerOptions) {
         : null;
       await routeRequest(req, res, {
         ...options,
+        boot,
+        sourceUpdateManager,
+        sourceUpdateMaintenance: options.sourceUpdateMaintenance ?? (() => options.runtime.sourceUpdateMaintenanceActive?.() === true),
         requestShutdown
       }, request.url, body);
     } catch (error: unknown) {
@@ -179,7 +296,15 @@ export function createDashboardServer(options: DashboardServerOptions) {
     socket.on("close", () => sockets.delete(socket));
   });
 
-  return server;
+  server.once("close", () => { void disposeSourceUpdate().catch(() => {}); });
+  server.on("error", () => { void disposeSourceUpdate().catch(() => {}); });
+  return Object.assign(server, {
+    requestShutdown,
+    disposeSourceUpdate,
+    setSourceUpdateManager(manager: DashboardSourceUpdateManager) {
+      sourceUpdateManager = manager;
+    }
+  });
 
   function requestShutdown() {
     if (shutdownRequested) {
@@ -206,11 +331,12 @@ export function createDashboardServer(options: DashboardServerOptions) {
     });
   }
 
-  function finishShutdown() {
+  async function finishShutdown() {
     if (shutdownFinished) {
       return;
     }
     shutdownFinished = true;
+    try { await disposeSourceUpdate(); } catch { /* No private updater diagnostics on exit. */ }
     options.onShutdown?.();
   }
 }
@@ -384,6 +510,10 @@ class RequestError extends Error {
 /** @param {unknown} error @param {string} requestId */
 function dashboardRequestFailure(error: unknown, requestId: string) {
   try {
+    if (error instanceof UpdateError) {
+      return { status: error.code === "SOURCE_UPDATE_UNAVAILABLE" ? 503 : 409,
+        payload: { ok: false, code: safeDiagnosticCode(error.code) || "SOURCE_UPDATE_FAILED", error: "Source update request was refused" }, unexpected: false };
+    }
     if (error instanceof RequestError) {
       return {
         status: error.status,
@@ -511,8 +641,47 @@ function redactDiagnosticUrl(value: string) {
   }
 }
 
+function validateSourceUpdateInput(value: unknown, check: boolean) {
+  const allowed = check ? ["proxyUrl", "allowDirect"] : ["planId"];
+  if (!isJsonObject(value) || Object.keys(value).some((key) => !allowed.includes(key)) ||
+      (check && ((value.proxyUrl !== undefined && typeof value.proxyUrl !== "string") ||
+        (value.allowDirect !== undefined && typeof value.allowDirect !== "boolean"))) ||
+      (!check && (typeof value.planId !== "string" || !value.planId.trim()))) {
+    throw new RequestError(400, check ? "INVALID_CHECK_INPUT" : "INVALID_START_INPUT", "Invalid source update input");
+  }
+  return value;
+}
+
+async function sourceUpdateOperation<T>(operation: () => T | Promise<T>): Promise<T> {
+  try { return await operation(); } catch (error) {
+    // This boundary must never log arbitrary update errors (which may contain a
+    // one-shot proxy secret), even when they are not a known UpdateError.
+    if (error instanceof UpdateError) throw error;
+    throw new RequestError(500, "SOURCE_UPDATE_FAILED", "Source update operation failed");
+  }
+}
+
 async function routeRequest(req: http.IncomingMessage, res: http.ServerResponse, options: DashboardServerOptions, url: URL, requestBody: unknown) {
   const publicDir = options.publicDir ?? PUBLIC_DIR;
+  if (isMutationMethod(req.method) && options.sourceUpdateMaintenance?.()) {
+    throw new RequestError(503, "SOURCE_UPDATE_MAINTENANCE", "Dashboard is preparing a source update");
+  }
+  if (url.pathname === "/api/source-update" && req.method === "GET") {
+    const snapshot: UpdateSnapshot = options.sourceUpdateManager
+      ? await sourceUpdateOperation(() => options.sourceUpdateManager!.snapshot())
+      : { boot: await options.boot!, phase: "blocked", message: "SOURCE_UPDATE_UNAVAILABLE",
+          limitations: ["Source updates are unavailable in this Dashboard instance."], strictRestartSupported: false };
+    return sendJson(res, 200, snapshot);
+  }
+  if (req.method === "POST" && ["/api/source-update/check", "/api/source-update/start"].includes(url.pathname)) {
+    const check = url.pathname.endsWith("/check");
+    const body = validateSourceUpdateInput(requestBody, check);
+    if (!options.sourceUpdateManager) throw new UpdateError("SOURCE_UPDATE_UNAVAILABLE");
+    const result = await sourceUpdateOperation(() => check
+      ? options.sourceUpdateManager!.check(body as { proxyUrl?: string; allowDirect?: boolean })
+      : options.sourceUpdateManager!.start(body as { planId: string }));
+    return sendJson(res, 202, result);
+  }
   if (req.method === "GET" && url.pathname === "/") {
     return serveStatic(res, path.join(publicDir, "index.html"), publicDir);
   }
@@ -527,6 +696,7 @@ async function routeRequest(req: http.IncomingMessage, res: http.ServerResponse,
       ok: status.ok !== false,
       cwd: options.cwd,
       version: DASHBOARD_API_VERSION,
+      ...await options.boot,
       sessionStatus: "sessionStatus" in status ? status.sessionStatus : null,
       models: "models" in status ? status.models : [],
       agentModelTiers: "agentModelTiers" in status ? status.agentModelTiers : {},
@@ -670,8 +840,9 @@ async function routeRequest(req: http.IncomingMessage, res: http.ServerResponse,
   }
   if (req.method === "POST" && url.pathname === "/api/shutdown") {
     const body = isJsonObject(requestBody) ? requestBody : EMPTY_JSON;
+    const { sourceUpdate: _internalOnly, ...shutdownInput } = body;
     const result = typeof options.runtime.shutdown === "function"
-      ? await options.runtime.shutdown(body)
+      ? await options.runtime.shutdown(shutdownInput)
       : { ok: true, activity: { total: 0 } };
     if (!result.ok) {
       return sendJson(res, "status" in result && typeof result.status === "number" ? result.status : 409, result);

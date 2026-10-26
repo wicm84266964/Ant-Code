@@ -585,6 +585,15 @@ export async function commitSessionSnapshot(store: ReturnType<typeof createSessi
       ...currentMetadata,
       ...metadataUpdates,
       ...sessionModelMetadata(session),
+      // Goal controls share this file lock with Dashboard stop commits. A turn
+      // may have captured metadataUpdates before waiting behind such a commit;
+      // re-read the live controls here, not from that pre-lock snapshot.
+      goal: serializeSessionGoal(session.goal),
+      permissionMode: session.permissionMode,
+      fullAccess: session.fullAccess,
+      readonly: session.readonly,
+      allowWrite: session.allowWrite,
+      allowCommand: session.allowCommand,
       transcript: {
         ...(currentMetadata.transcript ?? {}),
         ...(metadataUpdates.transcript ?? {}),
