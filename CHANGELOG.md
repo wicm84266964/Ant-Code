@@ -4,7 +4,9 @@
 
 ## 2.0.29 - 2026-10-26
 
-本节为源码版候选发布说明；尚不表示线上发布、正式仓同一提交的 CI 或 Release 门禁已通过。完整变化与限制见 [2.0.29 中文说明](docs/releases/2.0.29-source-update-and-goal-stop_zh.md)。
+已于 2026-10-26 01:51:14 UTC（北京时间 09:51:14）发布稳定版：[v2.0.29](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.29)。标签指向 `cd3b75227aa742c16a3f89a125a6ba48fcf217f9`；功能经 [PR #87](https://github.com/wicm84266964/Ant-Code/pull/87) 合并，PR 与合并提交的 CI 均成功，[官方发布工作流](https://github.com/wicm84266964/Ant-Code/actions/runs/40256215064) 已通过。仅源码发布，无额外二进制附件，未更新 Windows 成品包或 TaxaMask 内嵌版。
+
+正式仓 Windows 本地 `verify:release`：全量 1571/1571、浏览器 41/41；独立 `test:process` 19/19，失败、取消、跳过均为 0。套件包含重叠覆盖，不累加为独立测试数；安装检查为 4 项静态检查。Ubuntu / Node 24 CI 的发布检查与生成物洁净检查通过，不等同于完整 POSIX 更新或真实公网升级验收。原始候选说明作为发布快照保留，完整变化与限制见 [2.0.29 中文说明](docs/releases/2.0.29-source-update-and-goal-stop_zh.md)。
 
 ### 用户可见变化
 
