@@ -160,7 +160,7 @@ export async function cancelWorkspaceBackgroundTerminals(cwd: string, options: R
 
 
 export async function queueBackgroundWakePrompt(state: DashboardActiveSessionState, event: Record<string, unknown>, env: NodeJS.ProcessEnv | undefined) {
-  if (state.disposed || state.quarantinedTurnId) {
+  if (state.disposed || state.quarantinedTurnId || state.workAdmissionBlocked?.()) {
     return { ok: false, status: 409, code: "SESSION_UNAVAILABLE" };
   }
   const item = createWakeQueueItem(event, state.currentPermissionMode);
@@ -195,6 +195,7 @@ export async function queueBackgroundWakePrompt(state: DashboardActiveSessionSta
       await appendBackgroundSubagentSnapshot(state);
       return queueFullResult(state);
     }
+    if (state.workAdmissionBlocked?.()) return { ok: false, status: 503, code: "SOURCE_UPDATE_MAINTENANCE" };
     state.queuedPrompts.push(item);
     appendDashboardEvent(state, {
       type: "wakeup_queued",

@@ -34,6 +34,7 @@ test("dashboard CLI args parse local web options", () => {
 
   assert.equal(args.command, "dashboard");
   assert.equal(args.dashboard.port, 7420);
+  assert.equal(args.dashboard.strictPort, false);
   assert.equal(args.dashboard.host, "localhost");
   assert.equal(args.dashboard.open, false);
   assert.equal(args.dashboard.project, ".");
@@ -43,4 +44,13 @@ test("dashboard invalid port falls back to default", () => {
   const args = parseArgs(["dashboard", "--port", "nope"]);
 
   assert.equal(args.dashboard.port, 7410);
+});
+
+test("dashboard strict-port is explicit and does not consume other options", () => {
+  const args = parseArgs(["dashboard", "--strict-port", "--port=7428", "--host", "127.0.0.1", "--no-open"]);
+  assert.equal(args.dashboard.strictPort, true);
+  assert.equal(args.dashboard.port, 7428);
+  assert.equal(args.dashboard.host, "127.0.0.1");
+  assert.equal(args.dashboard.open, false);
+  assert.equal(parseArgs(["dashboard"]).dashboard.strictPort, false);
 });

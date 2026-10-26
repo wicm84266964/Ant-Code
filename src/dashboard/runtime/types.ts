@@ -153,6 +153,9 @@ export type DashboardQueueItem = {
   prompt?: string;
   kind?: string;
   permissionMode?: string;
+  permissionSource?: "request" | "goal";
+  requestedPermissionMode?: string;
+  requiresPermissionConfirmation?: boolean;
   attachments?: DashboardTurnAttachment[];
   [key: string]: unknown;
 };
@@ -208,6 +211,7 @@ export type DashboardActiveSessionState = {
   currentTranscriptStart: number;
   currentPermissionMode: string;
   unattendedSchedule?: boolean;
+  workAdmissionBlocked?: () => boolean;
   turnEnv: NodeJS.ProcessEnv | null;
   turnChangeStats: DashboardChangeStats;
   queuedPrompts: DashboardQueueItem[];
@@ -428,6 +432,7 @@ export type EnsureTurnStateOptions = {
   env?: NodeJS.ProcessEnv;
   sessionId?: string;
   mode?: string;
+  preservePermission?: boolean;
   modelId?: string;
   reasoningEffort?: string;
   config?: LabAgentConfig;

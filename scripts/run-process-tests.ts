@@ -15,6 +15,8 @@ const PROCESS_TEST_PATTERN = [
 
 const suites = [
   ["tests/integration/session-persistence-process.test.ts"],
+  ["tests/integration/source-update-worker.test.ts"],
+  ["tests/integration/source-update-product.test.ts"],
   [
     `--test-name-pattern=${PROCESS_TEST_PATTERN}`,
     "tests/unit/dashboard-runtime.test.ts",

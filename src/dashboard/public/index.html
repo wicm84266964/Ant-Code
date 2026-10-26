@@ -9,6 +9,32 @@
   </head>
   <body data-dashboard-view="conversation">
     <div class="atmosphere" aria-hidden="true"></div>
+    <dialog class="source-update-dialog" id="source-update-dialog" tabindex="-1" aria-labelledby="source-update-title" aria-describedby="source-update-warning">
+      <div class="source-update-heading">
+        <h2 id="source-update-title">源码更新</h2>
+        <button id="source-update-close" type="button" autofocus>关闭</button>
+      </div>
+      <p class="source-update-current" id="source-update-current">正在读取启动版本身份</p>
+      <p id="source-update-warning">更新前请关闭其他 CLI/TUI 和 Dashboard 实例，处理全部运行、排队和待确认工作。只支持独立官方 HTTPS 源码安装与当前分支安全快进；源码有修改、未跟踪文件或 Git 操作未完成等都会阻止更新，不会自动清理、暂存或回滚。</p>
+      <p>请先发送、移除或自行备份未发送的输入与附件，再开始更新。成功核验后会自动刷新并定位当前会话；此窗口不会保存草稿或代理密码。</p>
+      <p class="source-update-route" id="source-update-route">检查时自动读取真实代理配置，不猜测端口、不扫描。</p>
+      <label class="source-update-proxy-label" for="source-update-proxy">一次性 HTTP(S) 代理（可留空使用自动检测）</label>
+      <input id="source-update-proxy" type="password" autocomplete="off" spellcheck="false" autocapitalize="none" maxlength="2048" aria-describedby="source-update-proxy-hint" />
+      <p class="source-update-hint" id="source-update-proxy-hint">可含用户名和密码；仅用于本次检查及对应更新，不写入浏览器存储或日志。只支持 HTTP(S)，不执行 SOCKS/PAC。代理失败不会自动直连。</p>
+      <label class="source-update-choice"><input id="source-update-direct" type="checkbox" />仅本次直连（明确跳过代理，与手填代理不能同时选择）</label>
+      <p class="source-update-capability" id="source-update-capability"></p>
+      <p class="source-update-progress" id="source-update-progress" role="status" aria-live="polite" aria-atomic="true">尚未检查版本。</p>
+      <section class="source-update-plan" id="source-update-plan" aria-label="确认更新目标" hidden>
+        <dl><dt>当前分支</dt><dd id="source-update-branch"></dd><dt>目标提交 SHA</dt><dd><code id="source-update-target"></code></dd></dl>
+        <label class="source-update-choice"><input id="source-update-confirm" type="checkbox" />我已核对分支与目标提交，并已关闭其他 CLI/TUI；确认更新并自动重启</label>
+      </section>
+      <p class="source-update-recovery" id="source-update-recovery" hidden></p>
+      <div class="source-update-actions">
+        <button id="source-update-check" type="button">检查版本</button>
+        <button id="source-update-start" type="button" disabled hidden>确认更新并重启</button>
+        <button id="source-update-refresh" type="button" hidden>刷新新版页面</button>
+      </div>
+    </dialog>
     <div class="app-shell">
       <aside class="sidebar" id="session-panel" aria-label="任务线程">
         <div class="brand">
@@ -17,7 +43,10 @@
           </div>
           <div>
             <div class="brand-name">Ant Code</div>
-            <div class="brand-subtitle">本机工作台</div>
+            <div class="brand-subtitle brand-version">
+              <span id="product-version">读取版本中</span>
+              <button id="source-update-button" type="button" aria-haspopup="dialog" aria-controls="source-update-dialog">更新</button>
+            </div>
           </div>
         </div>
         <button class="primary-action" id="new-task" type="button">新任务</button>

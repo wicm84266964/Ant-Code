@@ -49,6 +49,7 @@ import {
 } from "./gateway-probe.ts";
 import {
   applyDashboardGoal,
+  publicDashboardGoal,
   persistGoalSnapshot,
   sessionRecordGoalStatus
 } from "./goal-runtime.ts";
@@ -205,14 +206,16 @@ export async function runtimeListSessionRecords(ctx: DashboardFactoryState) {
   const persisted = records.map((record) => ({
     id: String(record.id ?? ""),
     title: record.title || record.prompt || "未命名任务",
-    status: record.status ?? "unknown",
+    status: record.status === "running" ? "paused" : record.status ?? "unknown",
+    active: false,
+    running: false,
     model: record.model ?? "",
     modifiedAt: record.modifiedAt,
     finishedAt: record.finishedAt ?? null,
     transcriptMessages: record.transcriptMessages ?? 0,
     readable: record.readable !== false,
     encrypted: record.encrypted === true,
-    goalStatus: sessionRecordGoalStatus(record)
+    goalStatus: sessionRecordGoalStatus(record) === "running" ? "paused" : sessionRecordGoalStatus(record)
   }));
   const byId = new Map<string, Record<string, unknown>>(persisted.map((record) => [record.id, record]));
   const activeStates = [...ctx.active.values()];
@@ -222,6 +225,7 @@ export async function runtimeListSessionRecords(ctx: DashboardFactoryState) {
       groups: groupSnapshots.get(path.resolve(state.session.cwd)) ?? []
     });
     const activeRecord = activeSessionRecord(state, byId.get(state.session.id), snapshot);
+    if (!state.running && activeRecord.goalStatus === "running") activeRecord.goalStatus = "paused";
     byId.set(activeRecord.id, activeRecord);
   }
   return Array.from(byId.values()).sort(compareSessionRecords);
@@ -258,7 +262,7 @@ export async function runtimeReadSession(ctx: DashboardFactoryState, selector: u
     session: {
       id: activeState?.session.id ?? metadata.id,
       title: session?.title || metadata.title || metadata.prompt || "未命名任务",
-      status: activeState ? activeDashboardStatus(activeState) : metadata.status ?? "unknown",
+      status: activeState ? activeDashboardStatus(activeState) : metadata.status === "running" ? "paused" : metadata.status ?? "unknown",
       cwd: session?.cwd ?? metadata.cwd ?? ctx.cwd,
       prompt: session?.prompt ?? metadata.prompt ?? "",
       outputBytes: metadata.outputBytes ?? 0,
@@ -269,10 +273,11 @@ export async function runtimeReadSession(ctx: DashboardFactoryState, selector: u
       eventCursor: activeState ? activeReplayCursor(activeState) : null,
       sessionStatus: activeState ? sessionStatusSummary(activeState.session) : sessionStatusFromMetadata(metadata, config),
       permission: permissionModeSummary(activeState?.session ?? metadata),
-      goal: publicGoalSnapshot(
+      goal: publicDashboardGoal(
         activeState?.session?.goal ?? (isPlainObject(metadata.goal) ? metadata.goal : null),
         activeState?.session?.config,
-        activeState?.session?.usage ?? metadata.usage
+        activeState?.session?.usage ?? metadata.usage,
+        activeState?.running === true
       ),
       transcript,
       transcriptPage: transcriptPage.summary,

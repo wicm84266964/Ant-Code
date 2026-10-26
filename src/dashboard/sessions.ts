@@ -29,6 +29,7 @@ import { createAgentTaskGroupStore, summarizeGroupStatus } from "../agents/task-
 export { DASHBOARD_ACTIVE_SESSION_DEFAULTS } from "./runtime/types.ts";
 
 import type { DashboardFactoryState, DashboardRuntimeApi } from "./runtime/factory-state.ts";
+import { createSourceUpdateMaintenance, sourceUpdateLocalActivity, sourceUpdateProbeBusy } from "./runtime/source-update-maintenance.ts";
 import { runtimeStatus, runtimeSaveSettingsConfig } from "./runtime/api-settings.ts";
 import { runtimeSwitchModel, runtimeSwitchReasoningEffort } from "./runtime/api-model.ts";
 import {
@@ -262,6 +263,7 @@ export type CreateDashboardRuntimeOptions = {
 export function createDashboardRuntime(options: CreateDashboardRuntimeOptions) {
   const runtimeEnv = options.env ?? process.env;
   const active = new ActiveSessionMap();
+  const updateMaintenance = createSourceUpdateMaintenance(active);
   const sessionMutationLocks = new Map<string, Promise<unknown>>();
   const sessionConfigMutationLock = Symbol("session-config-mutation-lock");
   const activeCapacityLocks = new Map<string, Promise<unknown>>();
@@ -296,6 +298,7 @@ export function createDashboardRuntime(options: CreateDashboardRuntimeOptions) {
    * @param {{ force?: boolean }} [maintenanceOptions]
    */
   const maintainSessionRetention = (config: LabAgentConfig, maintenanceOptions: { force?: boolean } = {}) => {
+    if (updateMaintenance.held || shuttingDown) return Promise.resolve({ ok: true, deleted: [], skipped: "source-update" });
     const force = maintenanceOptions.force === true;
     const requestedAt = Date.now();
     if (!force && pendingRetentionMaintenance) {
@@ -333,7 +336,7 @@ export function createDashboardRuntime(options: CreateDashboardRuntimeOptions) {
     return pending;
   };
   const activeSweepTimer = setInterval(() => {
-    if (activeSweepPromise || shuttingDown) {
+    if (activeSweepPromise || shuttingDown || updateMaintenance.held) {
       return;
     }
     activeSweepPromise = reclaimActiveSessions(active, {
@@ -352,11 +355,11 @@ export function createDashboardRuntime(options: CreateDashboardRuntimeOptions) {
   let scheduleTickPromise: Promise<unknown> | null = null;
   let scheduleRuntime: DashboardFactoryState["runtime"] | null = null;
   const scheduleTickTimer = setInterval(() => {
-    if (!scheduleRuntime || scheduleTickPromise || shuttingDown) return;
+    if (!scheduleRuntime || scheduleTickPromise || shuttingDown || updateMaintenance.held) return;
     scheduleTickPromise = tickDashboardSchedules({
       cwd: options.cwd,
       active,
-      get shuttingDown() { return shuttingDown; },
+      get shuttingDown() { return shuttingDown || updateMaintenance.held; },
       runtime: scheduleRuntime
     }).catch(() => {
       // The next tick retries. A failed fire is recorded on the schedule itself.
@@ -444,6 +447,22 @@ export function createDashboardRuntime(options: CreateDashboardRuntimeOptions) {
     resolveApproval: (approvalId: unknown, action: unknown) => runtimeResolveApproval(ctx, approvalId, action),
     resolveQuestion: (questionId: unknown, answer: unknown = {}) => runtimeResolveQuestion(ctx, questionId, answer),
     lifecycleStatus: () => runtimeLifecycleStatus(ctx),
+    sourceUpdateActivity: async () => {
+      try {
+        const reasons = await sourceUpdateLocalActivity(active, ctx.cwd);
+        if (sourceUpdateProbeBusy(await runtimeLifecycleStatus(ctx))) reasons.push("activityUnknownOrBusy");
+        if (updateMaintenance.pending || sessionMutationLocks.size || activeCapacityLocks.size
+            || activeSweepPromise || scheduleTickPromise || pendingRetentionMaintenance
+            || [...turnRequests.values()].some((record) => !record.settled)) reasons.push("pendingMutationOrMaintenance");
+        return { busy: reasons.length > 0, reasons };
+      } catch {
+        return { busy: true, reasons: ["uncertain"] };
+      }
+    },
+    beginSourceUpdateMaintenance: () => updateMaintenance.enter(),
+    sourceUpdateMaintenanceActive: () => updateMaintenance.held,
+    sourceUpdateShutdownStarted: () => ctx.sourceUpdateShutdownStarted === true,
+    sourceUpdateConfig: async () => loadConfig({ cwd: ctx.cwd, env: await resolveConfigEnv() }),
     sweepIdleSessions: () => runtimeSweepIdleSessions(ctx),
     shutdown: (input: DashboardRequestInput = {}) => runtimeShutdown(ctx, input),
     sessionFiles: (sessionId: string) => runtimeSessionFiles(ctx, sessionId),
@@ -457,6 +476,18 @@ export function createDashboardRuntime(options: CreateDashboardRuntimeOptions) {
     resumeSchedule: (id: string) => resumeDashboardSchedule(ctx.cwd, id),
     deleteSchedule: (id: string) => deleteDashboardSchedule(ctx.cwd, id)
   };
+  // Track every public operation that can write/create runtime state, including
+  // reads that materialize sessions or retention. Pure observation stays available.
+  const observations = new Set(["trustStatus", "searchSessionContent", "readTranscriptPage", "listActiveEvents",
+    "sessionCwd", "lifecycleStatus", "sessionFiles", "listSchedules", "sourceUpdateActivity", "sourceUpdateConfig",
+    "beginSourceUpdateMaintenance", "sourceUpdateMaintenanceActive", "sourceUpdateShutdownStarted", "subscribe", "shutdown"]);
+  const synchronousMutations = new Set(["interruptTurn", "cancelQueuedTurn", "guideTurn", "resolveApproval", "resolveQuestion"]);
+  for (const [name, operation] of Object.entries(runtime)) {
+    if (typeof operation !== "function" || observations.has(name)) continue;
+    Object.defineProperty(runtime, name, {
+      value: updateMaintenance.wrap(operation as (...args: never[]) => unknown, !synchronousMutations.has(name))
+    });
+  }
   ctx.runtime = runtime;
   scheduleRuntime = runtime;
   Object.defineProperty(ctx, "processTrusted", { get() { return processTrusted; }, set(v) { processTrusted = v; } });

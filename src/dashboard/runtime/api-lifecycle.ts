@@ -306,6 +306,9 @@ export async function runtimeShutdown(ctx: DashboardFactoryState, input: Dashboa
   if (ctx.shuttingDown) {
     return { ok: false, status: 409, code: "SHUTDOWN_IN_PROGRESS", error: "Dashboard 已在关闭" };
   }
+  if (input.sourceUpdate === true && (await ctx.runtime.sourceUpdateActivity?.())?.busy !== false) {
+    return { ok: false, status: 409, code: "ACTIVE_WORK", error: "Source update requires an idle runtime" };
+  }
   const forceShutdown = input.force === true;
   const requestedTimeoutMs = lifecycleWaitMs(input.timeoutMs, ctx.runtimeEnv);
   const timeoutMs = forceShutdown
@@ -400,6 +403,7 @@ export async function runtimeShutdown(ctx: DashboardFactoryState, input: Dashboa
         timeoutMs
       };
     }
+    if (input.sourceUpdate === true) ctx.sourceUpdateShutdownStarted = true;
     clearInterval(ctx.activeSweepTimer);
     clearInterval(ctx.scheduleTickTimer);
     for (const state of ctx.active.values()) {
@@ -407,6 +411,9 @@ export async function runtimeShutdown(ctx: DashboardFactoryState, input: Dashboa
         state.session.goal.status = "paused";
         state.session.goal.lastBlockReason = "dashboard_shutdown";
         await persistGoalSnapshot(state);
+      }
+      if (input.sourceUpdate === true) {
+        await persistSessionSnapshot(state.session, { env: ctx.runtimeEnv, requireExisting: state.persisted });
       }
       disposeTurnState(state, "shutdown");
     }
