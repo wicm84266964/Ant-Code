@@ -67,7 +67,8 @@ test("context builder explains compact, MCP, and local subagent boundaries", asy
   assert.match(systemText, /parent session is expensive global attention/);
   assert.match(systemText, /current parallel budget \(3 at once\)/);
   assert.match(systemText, /background=true/);
-  assert.match(systemText, /group completion prompt/);
+  assert.match(systemText, /Ant Code subagent handoff/);
+  assert.match(systemText, /one continuation brings every completed group together/);
   assert.match(systemText, /review gate/);
   assert.match(systemText, /background_terminal_list/);
   assert.match(systemText, /background_terminal_cancel/);

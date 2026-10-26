@@ -159,6 +159,12 @@ export function mapSessionEventToDashboard(event: Record<string, unknown>) {
       wakePromptBytes: Buffer.byteLength(String(event.wakePrompt ?? ""), "utf8")
     })];
   }
+  if (type === "subagent_handoff_injected") {
+    const count = Number(event.handoffCount ?? 0);
+    return [activity("subagent-handoff", "子任务结果已并入当前轮", count > 0 ? `${count} 组交接报告` : "交接报告已进入当前轮", "running", "session", event, {
+      coalesceKey: "subagent-handoff"
+    })];
+  }
   if (type === "assistant_interrupted_draft") {
     return [{
       type: "assistant_interrupted_draft",

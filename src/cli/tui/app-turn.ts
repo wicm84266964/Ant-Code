@@ -14,6 +14,7 @@ import { runSubagent } from "../../agents/runner.ts";
 import { runSlashCommand } from "../../commands/runtime.ts";
 import { clearSessionContext, compactSessionContextWithModel, summarizeContextWindow } from "../../core/context-window.ts";
 import { createInitialEventState, reduceAntEvent } from "../../core/event-reducer.ts";
+import { hasPendingWakeHandoffs, scheduleIdleWakeContinuation, cancelIdleWakeContinuation, WAKE_CONTINUATION_PROMPT } from "../../agents/wake-batch.ts";
 import { createSession, runSessionTurn, type AgentSession, type SessionMessage } from "../../core/session.ts";
 import type { SubagentResult } from "../../agents/runner.ts";
 import type { TuiLine } from "./format.ts";
@@ -810,6 +811,7 @@ export function useTuiAppTurn(s: ReturnType<typeof useTuiAppActions>) {
     const item = prompt && typeof prompt === "object"
       ? prompt
       : { prompt: String(prompt ?? ""), kind: "prompt" };
+    cancelIdleWakeContinuation(sessionRef.current.id);
     setBusy(true);
     const controller = new AbortController();
     currentTurnAbortRef.current = controller;
@@ -851,6 +853,14 @@ export function useTuiAppTurn(s: ReturnType<typeof useTuiAppActions>) {
         pendingGoalContinueRef.current = null;
         if (goalNext?.prompt) {
           void runPromptDirect(goalNext);
+        } else if (hasPendingWakeHandoffs(sessionRef.current.id)) {
+          setBusy(false);
+          scheduleIdleWakeContinuation(sessionRef.current.id, () => {
+            if (stateRef.current.busy) {
+              return;
+            }
+            void runPromptDirect(WAKE_CONTINUATION_PROMPT);
+          });
         } else {
           setBusy(false);
         }

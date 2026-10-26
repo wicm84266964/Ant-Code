@@ -107,8 +107,10 @@ import {
 } from "./approvals.ts";
 import {
   queueBackgroundWakePrompt,
-  scheduleBackgroundSubagentSnapshot
+  scheduleBackgroundSubagentSnapshot,
+  scheduleDashboardIdleWake
 } from "./background.ts";
+import { cancelIdleWakeContinuation, hasPendingWakeHandoffs } from "../../agents/wake-batch.ts";
 import {
   isAllowedDocumentExtension,
   extensionOfName,
@@ -942,6 +944,7 @@ export function beginPrompt(state: DashboardActiveSessionState, item: DashboardQ
   ) {
     return false;
   }
+  cancelIdleWakeContinuation(state.session.id);
   const scheduled = item.kind === "schedule";
   applyPermissionMode(state.session, scheduled ? "fullAccess" : (item.permissionMode ?? "plan"));
   state.persisted = false;
@@ -1061,6 +1064,9 @@ export function runTurnInBackground(state: DashboardActiveSessionState, item: Da
           if (event.type === "subagent_group_wakeup") {
             await queueBackgroundWakePrompt(state, event, env);
           }
+          if (event.type === "subagent_handoff_injected") {
+            scheduleBackgroundSubagentSnapshot(state);
+          }
         }
       });
       if (!isCurrentTurn(state, controller, turnId)) {
@@ -1140,6 +1146,8 @@ export function runTurnInBackground(state: DashboardActiveSessionState, item: Da
       if (next) {
         appendQueueUpdated(state);
         startedNext = beginPrompt(state, next, env);
+      } else if (!state.disposed && hasPendingWakeHandoffs(state.session.id)) {
+        scheduleDashboardIdleWake(state, env);
       }
       if (state.session.goal?.enabled) {
         await persistGoalSnapshot(state);

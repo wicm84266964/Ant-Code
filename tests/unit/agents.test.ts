@@ -1245,45 +1245,43 @@ test("verifier execute subagent can run validation commands without write tools"
   }
 });
 
-test("interrupted subagent keeps visible draft in the task record for later lookup", async () => {
+test("interrupted subagent keeps visible draft in the task record for later lookup", { timeout: 5000 }, async (t) => {
   const cwd = await makeTempWorkspace();
   const controller = new AbortController();
-  const server = await listen(http.createServer(async (request, response) => {
-    if (request.method !== "POST" || request.url !== "/v1/chat") {
-      response.writeHead(404, { "content-type": "application/json" });
-      response.end(JSON.stringify({ error: { code: "NOT_FOUND" } }));
-      return;
+  const chunks = [
+    { type: "message_start", id: "hanging-subagent", model: "mock-agent" },
+    { type: "text_delta", text: "half-written explorer draft" }
+  ];
+  let reads = 0;
+  // Pull only on demand: the next read happens after the parser has delivered
+  // text_delta to draft capture. An 80-ms wall-clock sleep can abort before the
+  // request/first delta even starts under the full suite's load.
+  t.mock.method(globalThis, "fetch", async () => new Response(new ReadableStream({
+    pull(stream) {
+      if (reads < chunks.length) {
+        stream.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(chunks[reads++])}\n\n`));
+      } else {
+        controller.abort();
+        stream.error(new DOMException("This operation was aborted", "AbortError"));
+      }
     }
-    for await (const _ of request) {
-      // Drain request body.
-    }
-    response.writeHead(200, { "content-type": "text/event-stream" });
-    response.write(`data: ${JSON.stringify({ type: "message_start", id: "hanging-subagent", model: "mock-agent" })}\n\n`);
-    response.write(`data: ${JSON.stringify({ type: "text_delta", text: "half-written explorer draft" })}\n\n`);
-  }), "127.0.0.1");
-
-  try {
-    const pending = runSubagent({
-      cwd,
-      profileName: "explorer",
-      query: "inspect workspace",
-      env: mockGatewayEnv(serverUrl(server)),
-      signal: controller.signal,
-      taskId: "task-interrupt-draft"
-    });
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    controller.abort();
-    const result = await pending;
-    assert.equal(result.interrupted, true);
-    assert.match(String(result.output ?? ""), /half-written explorer draft/);
-    const saved = await createAgentTaskStore({ cwd }).readTask("task-interrupt-draft");
-    assert.equal(saved.ok, true);
-    assert.equal(saved.task.status, "interrupted");
-    assert.match(String(saved.task.output ?? ""), /half-written explorer draft/);
-    assert.match(String(saved.task.outputSummary ?? ""), /已中断|half-written/);
-  } finally {
-    await close(server);
-  }
+  }, { highWaterMark: 0 }), { headers: { "content-type": "text/event-stream" } }));
+  const result = await runSubagent({
+    cwd,
+    profileName: "explorer",
+    query: "inspect workspace",
+    env: mockGatewayEnv("http://127.0.0.1:1"),
+    signal: controller.signal,
+    taskId: "task-interrupt-draft"
+  });
+  assert.equal(reads, 2);
+  assert.equal(result.interrupted, true);
+  assert.match(String(result.output ?? ""), /half-written explorer draft/);
+  const saved = await createAgentTaskStore({ cwd }).readTask("task-interrupt-draft");
+  assert.equal(saved.ok, true);
+  assert.equal(saved.task.status, "interrupted");
+  assert.match(String(saved.task.output ?? ""), /half-written explorer draft/);
+  assert.match(String(saved.task.outputSummary ?? ""), /已中断|half-written/);
 });
 
 test("interrupted subagent keeps completed tool calls in the task record", async () => {

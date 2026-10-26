@@ -4,6 +4,7 @@ import { registerBackgroundAgentTask } from "../agents/background-registry.ts";
 import { cancelBackgroundTerminalTasks, listBackgroundTerminalTasks } from "../agents/background-terminal-registry.ts";
 import { createAgentTaskStore } from "../agents/task-store.ts";
 import { createAgentTaskGroupStore, safeGroupId, summarizeGroupStatus } from "../agents/task-group-store.ts";
+import { noteWakeHandoff } from "../agents/wake-batch.ts";
 import { buildSubagentGroupWakePrompt } from "../agents/wakeup.ts";
 import { decidePermission } from "../permissions/policy-engine.ts";
 import { getAgentProfile, listAgentProfileLabels, type AgentProfile } from "../agents/profiles.ts";
@@ -1523,6 +1524,16 @@ async function finalizeBackgroundAgentTool(options: ToolRuntimeOptions, state: {
     },
     tasks,
     maxBytes
+  });
+  noteWakeHandoff({
+    groupId: state.groupId,
+    parentSessionId: String(group.parentSessionId ?? options.parentSessionId ?? ""),
+    cwd: options.cwd,
+    wakePrompt,
+    summary: String(group.summary ?? ""),
+    taskId: state.taskId,
+    profile: state.profile.name,
+    notedAt: new Date().toISOString()
   });
   groupResult = asGroupUpdate(await groupStore.updateGroup(state.groupId, {
     wakePrompt,

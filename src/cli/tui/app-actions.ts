@@ -8,6 +8,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Box, render, useApp, useInput, useStdin, useStdout } from "ink";
 import { parseSlashCommand } from "../../commands/parser.ts";
 import { cancelBackgroundAgentTasks, listBackgroundAgentTasks } from "../../agents/background-registry.ts";
+import { noteWakeHandoff, scheduleIdleWakeContinuation, WAKE_CONTINUATION_PROMPT } from "../../agents/wake-batch.ts";
 import { createAgentTaskGroupStore } from "../../agents/task-group-store.ts";
 import { createAgentTaskStore } from "../../agents/task-store.ts";
 import { runSubagent } from "../../agents/runner.ts";
@@ -919,26 +920,40 @@ export function useTuiAppActions(s: ReturnType<typeof useTuiAppPanels>) {
       return;
     }
     const groupId = String(event.groupId ?? "unknown");
+    noteWakeHandoff({
+      groupId,
+      parentSessionId: sessionRef.current.id,
+      cwd: sessionRef.current.cwd,
+      wakePrompt,
+      summary: String(event.summary ?? ""),
+      taskId: String(event.taskId ?? ""),
+      profile: String(event.profile ?? ""),
+      notedAt: new Date().toISOString()
+    });
     const body = [
       `group=${groupId}`,
       event.summary ? `摘要=${truncatePlainText(String(event.summary), 500)}` : null,
-      "后台子任务组已完成，主控将自动继续处理。"
+      stateRef.current.busy
+        ? "后台子任务组已完成，结果将并入当前轮，不另开排队会话。"
+        : "后台子任务组已完成，主控将自动继续处理。"
     ].filter(Boolean).join("\n");
     addEntry("agent", "子任务组完成", body);
     pushInspector(makeInspector("子任务组完成", groupId, body, "context"), { focus: false });
     setSideView("tasks");
     void loadTaskRecords();
     if (stateRef.current.busy) {
-      const nextPrompts = prependQueuedPrompt(queuedPromptsRef.current, wakePrompt, 20);
-      setQueueState(nextPrompts, 0);
-      addEntry("queue", "主控续跑已排队", `group=${groupId}`);
-      setActivity((current) => ({ ...current, status: "主控续跑已排队", lastTool: "subagent wakeup" }));
+      setActivity((current) => ({ ...current, status: "子任务结果将并入当前轮", lastTool: "subagent wakeup" }));
       return;
     }
     addEntry("queue", "主控自动续跑", `group=${groupId}`);
     setActivity((current) => ({ ...current, status: "子任务完成，主控继续处理", lastTool: "subagent wakeup" }));
-    void runPromptDirectRef.current?.(wakePrompt);
-  }, [addEntry, loadTaskRecords, pushInspector, setQueueState]);
+    scheduleIdleWakeContinuation(sessionRef.current.id, () => {
+      if (stateRef.current.busy) {
+        return;
+      }
+      void runPromptDirectRef.current?.(WAKE_CONTINUATION_PROMPT);
+    });
+  }, [addEntry, loadTaskRecords, pushInspector]);
 
   const onSessionEvent = useCallback((event: TuiRuntimeEvent) => {
     lastActivityAtRef.current = Date.now();

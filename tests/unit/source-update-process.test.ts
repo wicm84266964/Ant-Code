@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { spawn } from "node:child_process";
-import { once } from "node:events";
+import childProcess, { spawn } from "node:child_process";
+import { EventEmitter, once } from "node:events";
+import { syncBuiltinESMExports } from "node:module";
+import { PassThrough } from "node:stream";
 import { runProcess } from "../../src/update/process.ts";
 import { fixture, ownChild } from "../helpers/source-update/fixture.ts";
 
@@ -49,6 +51,95 @@ async function sandbox() {
     return Number(await fs.readFile(file, "utf8"));
   } };
 }
+
+// Model Windows termination without real PIDs or OS signals, including on POSIX CI.
+// Real-process tests below still verify descendants and the unrelated sentinel.
+function windowsRunnerModel(t: TestContext) {
+  class Child extends EventEmitter {
+    pid = 12345;
+    exitCode: number | null = null;
+    signalCode: NodeJS.Signals | null = null;
+    stdout = new PassThrough();
+    stderr = new PassThrough();
+    signals: NodeJS.Signals[] = [];
+    unref() {}
+    kill(signal: NodeJS.Signals) { this.signals.push(signal); return true; }
+    exit(code: number) { this.exitCode = code; this.emit("exit", code, null); this.emit("close", code, null); }
+  }
+  const root = new Child(), helper = new Child();
+  const calls: { file: string; args: readonly string[] }[] = [];
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+  const mocked = t.mock.method(childProcess, "spawn", (file, args) => {
+    calls.push({ file, args });
+    if (calls.length === 1) return root;
+    assert.equal(path.basename(file), "taskkill.exe");
+    assert.deepEqual(args, ["/PID", String(root.pid), "/T", "/F"]);
+    return helper;
+  });
+  syncBuiltinESMExports();
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.after(() => {
+    mocked.mock.restore();
+    syncBuiltinESMExports();
+    Object.defineProperty(process, "platform", platform);
+    t.mock.timers.reset();
+  });
+  const outcome = runProcess("fixture-node", [], { cwd: process.cwd(), env: {}, timeoutMs: 100 })
+    .then(() => "unexpected success", (error: { code: string }) => error.code);
+  return { root, helper, calls, outcome };
+}
+
+test("Windows runner does not cut off a tree helper before its existing final deadline", async (t) => {
+  const { root, helper, outcome } = windowsRunnerModel(t);
+  t.mock.timers.tick(100); // Timeout starts the tree helper.
+  t.mock.timers.tick(2000);
+  assert.deepEqual(helper.signals, [], "tree enumeration must not be cut off at 2 seconds");
+  assert.deepEqual(root.signals, [], "root-only fallback must not orphan the owned tree early");
+  // A helper that needs 2.2 seconds still fits the unchanged 2.5-second budget.
+  t.mock.timers.tick(200);
+  helper.exit(0); root.exit(1);
+  t.mock.timers.tick(300);
+  assert.equal(await outcome, "PROCESS_LIMIT");
+  assert.deepEqual(root.signals, [], "an exited root must never be signalled again");
+  assert.deepEqual(helper.signals, []);
+});
+
+test("Windows runner bounds a hung tree helper without extending its final deadline", async (t) => {
+  const { root, helper, outcome } = windowsRunnerModel(t);
+  t.mock.timers.tick(100);
+  t.mock.timers.tick(2500);
+  assert.equal(await outcome, "PROCESS_LIMIT");
+  assert.deepEqual(root.signals, ["SIGKILL"]);
+  assert.deepEqual(helper.signals, ["SIGKILL"]);
+  assert.equal(root.stdout.destroyed, true);
+  assert.equal(root.stderr.destroyed, true);
+});
+
+for (const failure of ["error", "nonzero"] as const) {
+  test(`Windows runner handles tree helper ${failure} while retaining the pipe deadline`, async (t) => {
+    const { root, helper, outcome } = windowsRunnerModel(t);
+    t.mock.timers.tick(100);
+    if (failure === "error") helper.emit("error", new Error("private helper failure"));
+    else helper.exit(1);
+    assert.deepEqual(root.signals, ["SIGKILL"]);
+    root.exit(1);
+    t.mock.timers.tick(2500);
+    assert.equal(await outcome, "PROCESS_LIMIT");
+    assert.deepEqual(root.signals, ["SIGKILL"], "do not signal the root after its exit");
+  });
+}
+
+test("Windows runner never creates a tree helper for an already exited root", async (t) => {
+  const { root, calls, outcome } = windowsRunnerModel(t);
+  root.exitCode = 0;
+  root.emit("exit", 0, null); // A descendant still holds the pipes: no close event.
+  t.mock.timers.tick(100);
+  t.mock.timers.tick(1000);
+  assert.equal(await outcome, "PROCESS_LIMIT");
+  assert.equal(calls.length, 1);
+  assert.deepEqual(root.signals, []);
+});
 
 test("runner drains normal output and hides spawn errors", async (t) => {
   const f = await fixture(); t.after(f.cleanup);

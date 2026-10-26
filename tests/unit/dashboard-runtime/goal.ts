@@ -223,17 +223,28 @@ test("dashboard Goal skips ask_user and does not emit approval_required for queu
   await runtime.shutdown({ cancelActive: true, force: true, timeoutMs: 200 });
 });
 
-test("dashboard Goal continue does not consume the user queue cap and user items win", async () => {
+test("dashboard Goal continue does not consume the user queue cap and user items win", async (t) => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-goal-queue-"));
   const firstGate = deferred();
+  const prompts: string[] = [];
   const runtime = createDashboardRuntime({
     cwd,
     env: {},
     runTurn: async (_session, options) => {
+      prompts.push(options.prompt);
       await firstGate.promise;
       await options.onEvent({ type: "turn_complete", status: "completed" });
-      return { output: "held" };
+      // Test queue priority, not exhaustion of the independent 12-continue budget.
+      // Only the last user item completes the fixture's Goal.
+      return { output: options.prompt === "user 20"
+        ? "GOAL_STATUS: complete\nEVIDENCE: all 20 user items ran in order\nGAPS:\n"
+        : "held" };
     }
+  });
+  t.after(async () => {
+    firstGate.resolve();
+    await runtime.shutdown({ cancelActive: true, force: true, timeoutMs: 200 });
+    await fs.rm(cwd, { recursive: true, force: true });
   });
   await runtime.trustWorkspace();
   const started = await runtime.startTurn({ prompt: "hold the turn", permissionMode: "plan" });
@@ -242,6 +253,12 @@ test("dashboard Goal continue does not consume the user queue cap and user items
     sessionId: started.sessionId,
     action: "enable",
     objective: "do not steal the user queue"
+  });
+  const state = runtime.active.get(started.sessionId);
+  // Seed a host continuation while the initial turn is held. All 20 user slots
+  // must remain available, and takeNextQueueItem must discard it for user work.
+  state.queuedPrompts.unshift({
+    id: "goal-priority-fixture", kind: "goal-continue", prompt: "must not run", permissionMode: "fullAccess"
   });
   for (let index = 0; index < 20; index += 1) {
     const queued = await runtime.startTurn({
@@ -260,9 +277,11 @@ test("dashboard Goal continue does not consume the user queue cap and user items
   assert.equal(overflow.status, 429);
   firstGate.resolve();
   await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false, 8000);
-  const state = runtime.active.get(started.sessionId);
+  assert.deepEqual(prompts, ["hold the turn", ...Array.from({ length: 20 }, (_, index) => `user ${index + 1}`)]);
+  assert.equal(state.session.goal.status, "complete");
+  assert.equal(state.session.goal.continueCount, 0);
+  assert.equal(state.queuedPrompts.length, 0);
   assert.equal(state.queuedPrompts.filter((item) => item.kind === "goal-continue").length, 0);
-  await runtime.shutdown({ cancelActive: true, force: true, timeoutMs: 200 });
 });
 
 test("dashboard Goal stops auto-continue at the configured cap", async () => {

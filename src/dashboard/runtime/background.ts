@@ -84,12 +84,16 @@ import {
   unresolvedSessionModelSelectionResult
 } from "./session-model.ts";
 import {
-  appendQueueUpdated,
+  hasPendingWakeHandoffs,
+  noteWakeHandoff,
+  scheduleIdleWakeContinuation,
+  WAKE_CONTINUATION_DISPLAY,
+  WAKE_CONTINUATION_PROMPT
+} from "../../agents/wake-batch.ts";
+import {
   beginPrompt,
-  createWakeQueueItem,
+  createQueueItem,
   prepareDashboardSessionForQueuedTurn,
-  queueFullResult,
-  queueHasCapacity,
   queueSnapshot
 } from "./turn-queue.ts";
 import {
@@ -163,86 +167,78 @@ export async function queueBackgroundWakePrompt(state: DashboardActiveSessionSta
   if (state.disposed || state.quarantinedTurnId || state.workAdmissionBlocked?.()) {
     return { ok: false, status: 409, code: "SESSION_UNAVAILABLE" };
   }
-  const item = createWakeQueueItem(event, state.currentPermissionMode);
-  if (!item) {
+  const groupId = String(event.groupId ?? "").trim();
+  const wakePrompt = String(event.wakePrompt ?? "").trim();
+  if (groupId && wakePrompt) {
+    noteWakeHandoff({
+      groupId,
+      parentSessionId: state.session.id,
+      cwd: state.session.cwd,
+      wakePrompt,
+      summary: String(event.summary ?? ""),
+      taskId: String(event.taskId ?? ""),
+      profile: String(event.profile ?? ""),
+      notedAt: new Date().toISOString()
+    });
+  }
+  if (!wakePrompt && !hasPendingWakeHandoffs(state.session.id)) {
     return;
   }
   if (state.running) {
-    let config;
-    try {
-      config = await loadConfig({ cwd: state.session.cwd, env });
-    } catch {
-      return { ok: false, status: 503, code: "SESSION_CONFIG_RELOAD_FAILED" };
-    }
-    if (isConfigV2Enabled(config)) {
-      const admission = dashboardSessionV2MutationView(state.session, config);
-      if (admission.resolution.status !== "resolved") {
-        invalidateRunningDashboardSessionSelection(state, admission);
-        return unresolvedSessionModelSelectionResult(admission.resolution, state.session.id);
-      }
-    }
-    if (!queueHasCapacity(state)) {
-      appendDashboardEvent(state, {
-        type: "wakeup_queue_full",
-        id: eventId("wakeup-queue-full"),
-        code: "QUEUE_FULL",
-        groupId: item.groupId,
-        queue: queueSnapshot(state),
-        queueLength: state.queuedPrompts.length,
-        running: true,
-        at: new Date().toISOString()
-      });
-      await appendBackgroundSubagentSnapshot(state);
-      return queueFullResult(state);
-    }
-    if (state.workAdmissionBlocked?.()) return { ok: false, status: 503, code: "SOURCE_UPDATE_MAINTENANCE" };
-    state.queuedPrompts.push(item);
     appendDashboardEvent(state, {
-      type: "wakeup_queued",
-      id: eventId("wakeup"),
-      groupId: item.groupId,
+      type: "wakeup_attached",
+      id: eventId("wakeup-attached"),
+      groupId: groupId || null,
       queue: queueSnapshot(state),
       queueLength: state.queuedPrompts.length,
       running: true,
+      attached: true,
       at: new Date().toISOString()
     });
-    appendQueueUpdated(state);
-    void markWakePromptConsumed(state, event)
-      .finally(() => scheduleBackgroundSubagentSnapshot(state));
     scheduleBackgroundSubagentSnapshot(state);
-    return { ok: true, queued: true, item };
-  } else {
-    if (!await prepareDashboardSessionForQueuedTurn(state, env)) {
-      return unresolvedSessionModelSelectionResult(
-        isPlainObject(state.session.modelSelectionInvalidation)
-          ? state.session.modelSelectionInvalidation
-          : { status: "unresolved", reason: "session-config-reload-failed" },
-        state.session.id
-      );
-    }
-    if (!beginPrompt(state, item, env)) {
-      return unresolvedSessionModelSelectionResult(
-        isPlainObject(state.session.modelSelectionInvalidation)
-          ? state.session.modelSelectionInvalidation
-          : { status: "unresolved", reason: "admission-blocked" },
-        state.session.id
-      );
-    }
-    appendDashboardEvent(state, {
-      type: "wakeup_queued",
-      id: eventId("wakeup"),
-      groupId: item.groupId,
-      queue: queueSnapshot(state),
-      queueLength: state.queuedPrompts.length,
-      running: true,
-      started: true,
-      at: new Date().toISOString()
-    });
-    void markWakePromptConsumed(state, event)
-      .finally(() => scheduleBackgroundSubagentSnapshot(state));
-    scheduleBackgroundSubagentSnapshot(state);
-    return { ok: true, started: true, item };
+    return { ok: true, attached: true, groupId };
   }
+  scheduleDashboardIdleWake(state, env);
+  return { ok: true, scheduled: true, groupId };
+}
+
+export function scheduleDashboardIdleWake(state: DashboardActiveSessionState, env: NodeJS.ProcessEnv | undefined) {
+  scheduleIdleWakeContinuation(state.session.id, () => {
+    void startDashboardWakeContinuation(state, env);
+  });
+}
+
+async function startDashboardWakeContinuation(state: DashboardActiveSessionState, env: NodeJS.ProcessEnv | undefined) {
+  if (state.disposed || state.running || state.quarantinedTurnId || state.workAdmissionBlocked?.()) {
+    return;
+  }
+  if (!hasPendingWakeHandoffs(state.session.id)) {
+    return;
+  }
+  if (!await prepareDashboardSessionForQueuedTurn(state, env)) {
+    return;
+  }
+  if (state.disposed || state.running || state.quarantinedTurnId || state.workAdmissionBlocked?.()) {
+    return;
+  }
+  if (!hasPendingWakeHandoffs(state.session.id)) {
+    return;
+  }
+  const item = createQueueItem(WAKE_CONTINUATION_PROMPT, state.currentPermissionMode, "wakeup");
+  item.title = WAKE_CONTINUATION_DISPLAY;
+  if (!beginPrompt(state, item, env)) {
+    return;
+  }
+  appendDashboardEvent(state, {
+    type: "wakeup_queued",
+    id: eventId("wakeup"),
+    queue: queueSnapshot(state),
+    queueLength: state.queuedPrompts.length,
+    running: false,
+    started: true,
+    at: new Date().toISOString()
+  });
+  scheduleBackgroundSubagentSnapshot(state);
 }
 
 

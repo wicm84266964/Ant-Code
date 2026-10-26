@@ -413,12 +413,20 @@ export function handleDashboardEvent(event: DashboardStreamEvent) {
     els.runStatus.textContent = state.queue.length > 0 ? `${state.queue.length} 条排队中` : state.running ? "运行中" : "空闲";
     return;
   }
+  if (event.type === "wakeup_attached") {
+    setLiveTitle("子任务结果将并入当前轮");
+    if (state.running) {
+      els.runStatus.textContent = "主控整合子任务结果";
+    }
+    updateSendButton();
+    return;
+  }
   if (event.type === "wakeup_queued") {
     state.queue = event.queue ?? state.queue;
     scheduleSessionsRefresh();
     clearBackgroundSubagentStatus(event.groupId);
     renderQueuePanel();
-    els.runStatus.textContent = event.running ? "主控续跑已排队" : "主控接续中";
+    els.runStatus.textContent = "主控接续中";
     setLiveTitle("子智能体已唤醒主控");
     updateSendButton();
     return;
