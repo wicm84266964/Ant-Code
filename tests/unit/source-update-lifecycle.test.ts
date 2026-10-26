@@ -201,6 +201,8 @@ test("activity refuses quarantine, uncertainty, queued/pending work and orphaned
     }
     reported = { total: 0 };
     assert.equal((await f.runtime.sourceUpdateActivity()).busy, true, "incomplete activity is uncertain");
+    reported = { ...emptyRuntimeActivity(), backgroundTasks: 2, total: 2 };
+    assert.equal((await f.runtime.sourceUpdateActivity()).busy, false, "visible finished groups are not source-update work");
     reported = emptyRuntimeActivity();
     const unregister = registerBackgroundAgentTask({ taskId: "source-update-orphan", controller: new AbortController() });
     assert.equal((await f.runtime.sourceUpdateActivity()).busy, true);

@@ -10,12 +10,13 @@ import { captureBootSnapshot, acknowledgeSourceUpdate } from "../update/boot.ts"
 import { sourceRootFromModule } from "../update/repository.ts";
 import { SourceUpdateManager, type SourceUpdateOptions } from "../update/manager.ts";
 import { UpdateError, type BootSnapshot, type UpdateSnapshot } from "../update/contracts.ts";
+import { isLoopbackAddress } from "../update/state-store.ts";
 import { previewFile, readRawFile, resolveSystemOpenFile } from "./files.ts";
 
 type DashboardRuntime = ReturnType<typeof createDashboardRuntime>;
 type JsonObject = Record<string, unknown>;
 const EMPTY_JSON: JsonObject = {};
-export type DashboardSourceUpdateManager = Pick<SourceUpdateManager, "snapshot" | "check" | "start" | "dispose">;
+export type DashboardSourceUpdateManager = Pick<SourceUpdateManager, "snapshot" | "check" | "start" | "dispose"> & { peerToken?: string };
 type SourceUpdateDependencies = {
   createManager: (options: SourceUpdateOptions) => Promise<DashboardSourceUpdateManager>;
   captureBoot: typeof captureBootSnapshot;
@@ -264,6 +265,13 @@ export function createDashboardServer(options: DashboardServerOptions) {
     const requestId = randomBytes(12).toString("base64url");
     applySecurityHeaders(res);
     try {
+      const earlyUrl = new URL(req.url ?? "/", "http://127.0.0.1");
+      if (req.method === "POST" && earlyUrl.pathname === "/api/source-update/peer") {
+        await handlePeerDashboardRelease(req, res, options.runtime, () => sourceUpdateManager, () => {
+          if (!shutdownRequested) requestShutdown();
+        });
+        return;
+      }
       const request = authorizeRequest(req, server, auth, configuredHost);
       if (request.bootstrap) {
         setBootstrapCookies(res, auth, request.port);
@@ -454,6 +462,40 @@ function readCookie(header: unknown, name: string) {
     }
   }
   return "";
+}
+
+async function handlePeerDashboardRelease(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  runtime: DashboardRuntime,
+  manager: () => DashboardSourceUpdateManager | undefined,
+  requestShutdown: () => void
+) {
+  if (!isLoopbackAddress(req.socket.remoteAddress)) {
+    return sendJson(res, 403, { ok: false, code: "PEER_FORBIDDEN" });
+  }
+  const current = manager();
+  const supplied = headerValue(req.headers["x-antcode-peer-token"]);
+  if (!current?.peerToken || !tokensEqual(supplied, current.peerToken)) {
+    return sendJson(res, 401, { ok: false, code: "PEER_UNAUTHORIZED" });
+  }
+  const body = await readJson(req, { maxBytes: 256 });
+  const action = isJsonObject(body) ? body.action : "";
+  const activity = await runtime.sourceUpdateActivity?.();
+  const busy = activity?.busy !== false;
+  if (action === "status") {
+    return sendJson(res, 200, { ok: true, busy, reasons: activity?.reasons ?? [] });
+  }
+  if (action !== "shutdown") {
+    return sendJson(res, 400, { ok: false, code: "INVALID_PEER_ACTION" });
+  }
+  if (busy) return sendJson(res, 409, { ok: false, busy: true, code: "OTHER_DASHBOARD_BUSY" });
+  const stopped = await runtime.shutdown({ sourceUpdate: true });
+  if (!stopped || typeof stopped !== "object" || !("ok" in stopped) || stopped.ok !== true) {
+    return sendJson(res, 409, { ok: false, busy: true, code: "OTHER_DASHBOARD_BUSY" });
+  }
+  requestShutdown();
+  return sendJson(res, 200, { ok: true, accepted: true });
 }
 
 function tokensEqual(supplied: unknown, expected: unknown) {

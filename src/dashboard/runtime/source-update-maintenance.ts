@@ -87,15 +87,12 @@ async function readActivityRecords(cwd: string, directory: string) {
 export async function sourceUpdateLocalActivity(active: ActiveSessionMap, cwd: string): Promise<string[]> {
   const reasons = new Set<string>();
   for (const state of active.values()) {
-    if (state.running || state.controller || state.interrupting || state.currentTurnId) reasons.add("turn");
+    if (state.running || state.interrupting) reasons.add("turn");
     if (state.quarantinedTurnId) reasons.add("quarantined");
     if (state.queuedPrompts.length) reasons.add("queue");
     if (state.pendingApprovals.size || state.pendingQuestions.size) reasons.add("pendingInteraction");
-    if (state.sessionTitleGeneration || state.backgroundSnapshotPromise) reasons.add("backgroundMaintenance");
   }
-  // This registry has no workspace ownership field; conservatively include ALL
-  // process-owned agents rather than missing orphaned/aborted-but-unsettled work.
-  if (listBackgroundAgentTasks().length) reasons.add("backgroundAgent");
+  if (listBackgroundAgentTasks().some((task) => task.aborted !== true)) reasons.add("backgroundAgent");
   const workspaces = new Set([cwd, ...[...active.values()].map((state) => state.session.cwd)]);
   const ownedWorkspaces = new Set([...workspaces].map((workspace) => path.resolve(workspace)));
   // Registry cwd controls loading, not filtering. Unrelated workspaces must not
@@ -108,7 +105,6 @@ export async function sourceUpdateLocalActivity(active: ActiveSessionMap, cwd: s
     for (const directory of [".lab-agent/tasks", ".lab-agent/task-groups", ".lab-agent/background-terminal/tasks"]) {
       for (const record of await readActivityRecords(workspace, directory)) {
         if (typeof record.status !== "string" || !terminalStatuses.has(record.status)) reasons.add("persistedBackground");
-        if (record.wakePromptQueuedAt && !record.wakePromptConsumedAt) reasons.add("pendingWakeup");
         if (record.cancelRequestedAt && !record.cancellationConfirmed && !record.finishedAt) reasons.add("uncertainCancellation");
       }
     }
@@ -126,4 +122,18 @@ export function sourceUpdateProbeBusy(result: unknown) {
     if (typeof values[key] !== "number" || !Number.isFinite(values[key]) || values[key] !== 0) return true;
   }
   return values.uncertain !== undefined && values.uncertain !== false;
+}
+
+/** Local scan owns background records. A probe whose only count is backgroundTasks is the general activity panel, which also counts finished groups waiting to hand off. */
+export function sourceUpdateProbeSupplementsLocalScan(result: unknown) {
+  if (!sourceUpdateProbeBusy(result)) return false;
+  if (!result || typeof result !== "object" || !("activity" in result)) return true;
+  const activity = result.activity;
+  if (!activity || typeof activity !== "object" || Array.isArray(activity)) return true;
+  const values = activity as Record<string, unknown>;
+  const background = values.backgroundTasks;
+  const restClear = ["activeTurns", "quarantinedTurns", "queuedTurns", "pendingInteractions"]
+    .every((key) => values[key] === 0);
+  const uncertainClear = values.uncertain === undefined || values.uncertain === false;
+  return !(restClear && uncertainClear && typeof background === "number" && background > 0 && values.total === background);
 }

@@ -15,7 +15,7 @@
         <button id="source-update-close" type="button" autofocus>关闭</button>
       </div>
       <p class="source-update-current" id="source-update-current">正在读取启动版本身份</p>
-      <p id="source-update-warning">更新前请关闭其他 CLI/TUI 和 Dashboard 实例，处理全部运行、排队和待确认工作。只支持独立官方 HTTPS 源码安装与当前分支安全快进；源码有修改、未跟踪文件或 Git 操作未完成等都会阻止更新，不会自动清理、暂存或回滚。</p>
+      <p id="source-update-warning">当前这个 Dashboard 可以保持打开，确认后会自动重启。另一个没有任务的 Dashboard 会在更新时关闭；有任务的另一个窗口仍会阻止更新。请先关闭其他 CLI/TUI，并处理运行、排队和待确认的任务。只支持独立官方 HTTPS 源码安装与当前分支安全快进；源码有修改、未跟踪文件或 Git 操作未完成等都会阻止更新，不会自动清理、暂存或回滚。</p>
       <p>请先发送、移除或自行备份未发送的输入与附件，再开始更新。成功核验后会自动刷新并定位当前会话；此窗口不会保存草稿或代理密码。</p>
       <p class="source-update-route" id="source-update-route">检查时自动读取真实代理配置，不猜测端口、不扫描。</p>
       <label class="source-update-proxy-label" for="source-update-proxy">一次性 HTTP(S) 代理（可留空使用自动检测）</label>

@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { UpdateError, TERMINAL_PHASES } from "./contracts.ts";
 import type { Activity, BootSnapshot, Route, UpdateJournal, UpdatePlan, UpdateSnapshot } from "./contracts.ts";
@@ -9,7 +9,7 @@ import { Repository, sourceRootFromModule } from "./repository.ts";
 import { captureBootSnapshot } from "./boot.ts";
 import { discoverRoute, summarizeRoute } from "./proxy-policy.ts";
 import { cleanEnvironment } from "./process.ts";
-import { StateStore, atomicJson, isAlive, readJson } from "./state-store.ts";
+import { StateStore, atomicJson, isAlive, readJson, releaseIdlePeerDashboards } from "./state-store.ts";
 import { waitFor } from "./worker.ts";
 
 export type SourceUpdateOptions = {
@@ -32,7 +32,7 @@ function restartEnvironment(input: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   }
   return env;
 }
-const LIMITATIONS = ["Close all other CLI/TUI instances before updating: non-Dashboard clients do not yet have leases.",
+const LIMITATIONS = ["The Dashboard performing the update stays open and restarts itself. An idle sibling Dashboard is closed during the update; one with active work still blocks. Other CLI/TUI instances have no lease and must be closed first.",
   "Only standalone official HTTPS source clones; no packages, linked worktrees, submodules, symlinks or custom Git execution configuration.",
   "Failed updates after shutdown require manual journal inspection; no automatic Git rollback."];
 
@@ -47,6 +47,7 @@ export class SourceUpdateManager {
   private currentTask: Promise<void> = Promise.resolve();
   private enabled = true;
   private stateEpoch = 0;
+  readonly peerToken = randomBytes(32).toString("base64url");
   private constructor(options: SourceUpdateOptions, root: string, boot: BootSnapshot) {
     this.options = { ...options, env: restartEnvironment(options.env ?? process.env) }; this.root = root;
     this.boot = boot; this.store = new StateStore(root);
@@ -61,7 +62,9 @@ export class SourceUpdateManager {
       const git = await fs.lstat(path.join(root, ".git"));
       if (!git.isDirectory() || git.isSymbolicLink()) throw new UpdateError("SOURCE_INSTALL_REQUIRED");
       await manager.store.initialize();
-      await manager.store.registerLease(boot.instanceId);
+      await manager.store.registerLease(boot.instanceId, {
+        host: options.host, port: options.actualPort, peerToken: manager.peerToken
+      });
     } catch (error) {
       manager.enabled = false;
       manager.state.phase = "blocked";
@@ -95,7 +98,7 @@ export class SourceUpdateManager {
     if (["checking", "staging", "handingOff", "applying", "restarting", "manualRecovery"].includes(this.state.phase)) throw new UpdateError("UPDATE_BUSY");
   }
   private async assertIdle() {
-    await this.store.assertOnlyLease(this.boot.instanceId);
+    await releaseIdlePeerDashboards(this.root, this.boot.instanceId);
     if ((await this.options.getActivity()).busy) throw new UpdateError("ACTIVE_WORK", "Finish all active, queued, uncertain, quarantined and pending work before updating.");
   }
   /** Return 202 with this result. check itself runs in the background. */

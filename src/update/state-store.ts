@@ -1,10 +1,19 @@
 import fs from "node:fs/promises";
+import http from "node:http";
 import path from "node:path";
 import os from "node:os";
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { UpdateError } from "./contracts.ts";
 import type { UpdateJournal } from "./contracts.ts";
 import { cleanEnvironment, runProcess } from "./process.ts";
+
+export type DashboardLease = {
+  instanceId: string;
+  pid: number;
+  host?: string;
+  port?: number;
+  peerToken?: string;
+};
 
 export function isAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -75,15 +84,85 @@ export class StateStore {
     const file = path.join(this.root, "update.lock");
     if ((await readJson<{ jobId: string }>(file))?.jobId === jobId) await fs.unlink(file);
   }
-  async registerLease(instanceId: string) {
-    await atomicJson(path.join(this.root, "leases", `${instanceId}.json`), { instanceId, pid: process.pid });
+  async registerLease(instanceId: string, details: { host?: string; port?: number; peerToken?: string } = {}) {
+    const lease: DashboardLease = { instanceId, pid: process.pid };
+    if (details.host && isLoopbackHost(details.host)) lease.host = details.host === "[::1]" ? "::1" : details.host;
+    if (Number.isInteger(details.port) && details.port! > 0 && details.port! < 65536) lease.port = details.port;
+    if (details.peerToken && /^[A-Za-z0-9_-]{32,128}$/.test(details.peerToken)) lease.peerToken = details.peerToken;
+    await atomicJson(path.join(this.root, "leases", `${instanceId}.json`), lease);
   }
   async removeLease(instanceId: string) { await fs.rm(path.join(this.root, "leases", `${instanceId}.json`), { force: true }); }
-  async assertOnlyLease(instanceId: string) {
+  async listOtherLiveLeases(instanceId: string) {
+    const peers: DashboardLease[] = [];
     for (const file of await fs.readdir(path.join(this.root, "leases"))) {
       if (!file.endsWith(".json")) continue;
-      const lease = await readJson<{ instanceId: string; pid: number }>(path.join(this.root, "leases", file));
-      if (lease && lease.instanceId !== instanceId && isAlive(lease.pid)) throw new UpdateError("OTHER_DASHBOARD_RUNNING");
+      const lease = await readJson<DashboardLease>(path.join(this.root, "leases", file));
+      if (lease && lease.instanceId !== instanceId && isAlive(lease.pid)) peers.push(lease);
     }
+    return peers;
   }
+  async assertOnlyLease(instanceId: string) {
+    if ((await this.listOtherLiveLeases(instanceId)).length > 0) throw new UpdateError("OTHER_DASHBOARD_RUNNING");
+  }
+}
+
+const PEER_HEADER = "x-antcode-peer-token";
+
+export function tokensEqual(left: string, right: string) {
+  const a = Buffer.from(left);
+  const b = Buffer.from(right);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+export function isLoopbackHost(value: string) {
+  const host = value.trim().toLowerCase();
+  return host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]";
+}
+
+export function isLoopbackAddress(value: string | undefined) {
+  const address = String(value ?? "").toLowerCase().replace(/^::ffff:/, "");
+  return address === "127.0.0.1" || address === "::1";
+}
+
+/** An idle sibling Dashboard is closed by the update. A busy or unreachable one still blocks. */
+export async function releaseIdlePeerDashboards(sourceRoot: string, instanceId: string) {
+  const peers = await new StateStore(sourceRoot).listOtherLiveLeases(instanceId);
+  for (const peer of peers) {
+    if (!peer.port || !peer.peerToken || !isLoopbackHost(peer.host ?? "127.0.0.1")) {
+      throw new UpdateError("OTHER_DASHBOARD_RUNNING");
+    }
+    const status = await callPeerDashboard(peer, "status");
+    if (status.busy) throw new UpdateError("OTHER_DASHBOARD_BUSY");
+    if (!status.ok) throw new UpdateError("OTHER_DASHBOARD_RUNNING");
+    const stopped = await callPeerDashboard(peer, "shutdown");
+    if (stopped.busy) throw new UpdateError("OTHER_DASHBOARD_BUSY");
+    if (!stopped.accepted) throw new UpdateError("OTHER_DASHBOARD_RUNNING");
+    const deadline = Date.now() + 15_000;
+    while (isAlive(peer.pid) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
+    if (isAlive(peer.pid)) throw new UpdateError("OTHER_DASHBOARD_RUNNING");
+  }
+}
+
+async function callPeerDashboard(peer: DashboardLease, action: "status" | "shutdown") {
+  const host = peer.host === "::1" || peer.host === "[::1]" ? "::1" : "127.0.0.1";
+  const body = JSON.stringify({ action });
+  return new Promise<{ ok: boolean; busy?: boolean; accepted?: boolean }>((resolve) => {
+    const request = http.request({
+      host, port: peer.port, method: "POST", path: "/api/source-update/peer",
+      headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body), [PEER_HEADER]: peer.peerToken },
+      timeout: 3_000
+    }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      response.on("end", () => {
+        try {
+          const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { ok?: boolean; busy?: boolean; accepted?: boolean };
+          resolve({ ok: parsed.ok === true && response.statusCode === 200, busy: parsed.busy === true, accepted: parsed.accepted === true });
+        } catch { resolve({ ok: false }); }
+      });
+    });
+    request.on("timeout", () => request.destroy());
+    request.on("error", () => resolve({ ok: false }));
+    request.end(body);
+  });
 }
