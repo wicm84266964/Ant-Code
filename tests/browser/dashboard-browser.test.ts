@@ -2818,3 +2818,47 @@ async function waitUntil(predicate, timeoutMs = 2000) {
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+
+test("catalog model test refreshes composer with confirmed reasoning levels", async () => {
+  const originalStatus = runtime.status, originalTest = runtime.testCatalogModel;
+  let tested = false;
+  runtime.testCatalogModel = async () => { tested = true; return { ok: true, saved: true, summary: "测试完成" }; };
+  runtime.status = async () => {
+    const status = await originalStatus();
+    if (!tested) return status;
+    const model = { ...browserModel(), reasoningEfforts: [{ id: "off" }, { id: "high" }, { id: "max" }] };
+    return { ...status, models: [model], gatewayProfiles: status.gatewayProfiles.map((profile) =>
+      profile.id === "test-source" ? { ...profile, models: [model] } : profile) };
+  };
+  try {
+    await withDashboardPage({ width: 1280, height: 900 }, async (page) => {
+      await page.locator("#settings-button").click();
+      await page.waitForFunction(() => document.querySelector("#settings-content")?.getAttribute("aria-busy") !== "true");
+      await page.locator("button[data-action='test-model']").first().click();
+      await page.waitForFunction(() => document.querySelector("#reasoning-effort-select option[value='max']"));
+      assert.deepEqual(await page.locator("#reasoning-effort-select option").evaluateAll((options) => options.map((option) => option.value)), ["", "off", "high", "max"]);
+    });
+  } finally { runtime.status = originalStatus; runtime.testCatalogModel = originalTest; }
+});
+
+
+test("delayed modal autofocus preserves a field already chosen for editing", async () => {
+  await withDashboardPage({ width: 1280, height: 900 }, async (page) => {
+    await page.locator("#settings-button").click();
+    await page.waitForFunction(() => document.querySelector("#settings-content")?.getAttribute("aria-busy") !== "true");
+    const selected = await page.evaluate(() => {
+      const original = window.requestAnimationFrame;
+      const pending = [];
+      window.requestAnimationFrame = (callback) => { pending.push(callback); return pending.length; };
+      try {
+        document.querySelector("button[data-action='edit-gateway-profile']").click();
+        const input = document.querySelector("#model-config-form input[name='routeName']");
+        input.focus();
+        for (const callback of pending) callback(performance.now());
+        return document.activeElement === input;
+      } finally { window.requestAnimationFrame = original; }
+    });
+    assert.equal(selected, true);
+  });
+});

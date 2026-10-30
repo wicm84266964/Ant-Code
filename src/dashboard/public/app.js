@@ -818,7 +818,7 @@ var REASONS = {
   SOURCE_INSTALL_REQUIRED: "仅支持独立源码安装；成品包、链接工作树等不能在此更新。",
   SOURCE_UPDATE_UNAVAILABLE: "当前安装不支持源码自更新，请使用原安装方式维护。",
   STRICT_RESTART_REQUIRED: "当前服务尚不支持严格同端口重启，不能执行自动更新。",
-  UNSAFE_GIT_CONFIG: "Git 执行、重写、TLS 或代理配置不满足安全更新要求，请在本机检查。",
+  UNSAFE_GIT_CONFIG: "此源码仓库的 Git 配置包含更新器不能安全使用的执行、重写、TLS 或代理设置。个人 Git 配置已隔离，请检查仓库本地配置。",
   HIDDEN_INDEX_CHANGES: "Git 索引含隐藏修改或稀疏配置，不能安全更新。",
   IGNORED_COLLISION: "目标源码与本机忽略文件冲突，请自行检查并备份后处理。",
   UNTRACKED_COLLISION: "目标源码与本机文件冲突，请自行检查并备份后处理。",
@@ -1174,6 +1174,7 @@ function collectModalBackground(modal) {
 function focusModalInitialTarget(modal, selector) {
   requestAnimationFrame(() => {
     if (!modal || state.modalContext?.modal !== modal) return;
+    if (modal.contains(document.activeElement)) return;
     const target = typeof selector === "string" ? modal.querySelector(selector) : modalFocusableElements(modal)[0];
     (target ?? modal).focus({ preventScroll: true });
   });
@@ -6105,7 +6106,7 @@ var DEFAULT_MODEL_OPTIONS = Object.freeze([
 ]);
 
 // src/model-gateway/reasoning-capabilities.ts
-var PROBE_EFFORT_IDS = Object.freeze(["none", "off", "low", "medium", "high", "xhigh", "max", "ultra"]);
+var PROBE_EFFORT_IDS = Object.freeze(["none", "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
 var LEGACY_GPT56_ULTRA_PRESET_IDS = Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]);
 var EFFORT_PATHS = Object.freeze([
   ["reasoningEfforts"],
@@ -7633,7 +7634,7 @@ function settingsModelHtml6(model, profile, modelCount) {
         ${testResult?.message ? `<small class="settings-model-test ${escapeAttribute(testResult.tone)}">${escapeHtml(testResult.message)}</small>` : ""}
       </div>
       <div class="settings-row-actions">
-        <button type="button" data-action="test-model" data-model-id="${escapeAttribute(model.id)}" data-profile-id="${escapeAttribute(profile?.id || "")}" title="发送一张程序内小图，并探测这条路线接受的思考档位。可能产生少量用量。" ${testBusy || state.settingsRefreshing || state.running ? "disabled" : ""}>${testing ? "测试中" : "测试"}</button>
+        <button type="button" data-action="test-model" data-model-id="${escapeAttribute(model.id)}" data-profile-id="${escapeAttribute(profile?.id || "")}" title="发送一张程序内小图，并探测这条路线接受的思考档位。确认的能力将保存到模型配置，未确认的能力保持原配置。可能产生少量用量。" ${testBusy || state.settingsRefreshing || state.running ? "disabled" : ""}>${testing ? "测试中" : "测试"}</button>
         <button type="button" data-action="use-model" data-model-id="${escapeAttribute(model.id)}" data-profile-id="${escapeAttribute(profile?.id || "")}" ${isScopedDefault || state.settingsRefreshing || state.running || state.modelSwitching ? "disabled" : ""}>${isScopedDefault ? "已设为默认" : "设为默认"}</button>
       </div>
     </div>
@@ -7889,6 +7890,7 @@ async function testCatalogModel(modelId, providerId) {
       modelId
     }, { timeoutMs: 4e4 });
     if (!result.ok) throw new Error(result.error || "模型测试失败");
+    await refreshSettingsConfiguration5();
     state.modelCatalogTestResults = {
       ...state.modelCatalogTestResults,
       [key]: { tone: "success", message: String(result.summary || "测试完成") }

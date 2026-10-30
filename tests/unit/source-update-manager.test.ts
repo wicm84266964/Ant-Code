@@ -49,13 +49,14 @@ test("check returns immediately, rejects duplicate check/start while checking, a
   const f = await fixture(); t.after(f.cleanup);
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
-  const manager = await managerFor(f, { getActivity: async () => { await gate; return { busy: true }; } });
+  const manager = await managerFor(f, { getActivity: () => ({ busy: true }) });
+  t.mock.method(Repository.prototype, "check", async () => { await gate; return f.plan(f.head); });
   assert.deepEqual(manager.check({ allowDirect: true }), { accepted: true });
   assert.equal((await manager.snapshot()).phase, "checking");
   assert.throws(() => manager.check(), /UPDATE_BUSY/);
   assert.throws(() => manager.start({ planId: randomUUID() }), /UPDATE_BUSY/);
   release(); await manager.settled();
-  assert.equal((await manager.snapshot()).message, "ACTIVE_WORK");
+  assert.equal((await manager.snapshot()).phase, "upToDate");
 });
 
 test("missing upstream blocks check BEFORE transport and cannot create a worker job", async (t) => {
@@ -69,6 +70,19 @@ test("missing upstream blocks check BEFORE transport and cannot create a worker 
   const store = new StateStore(f.root);
   assert.equal(await store.journal(), null);
   assert.equal(await readJson(path.join(store.root, "update.lock")), null);
+});
+
+test("active work allows checking but prevents installation without stopping work", async (t) => {
+  const f = await fixture(); t.after(f.cleanup);
+  const plan = f.plan(await f.advance());
+  const manager = await managerFor(f, { getActivity: () => ({ busy: true }) });
+  t.mock.method(Repository.prototype, "check", async () => plan);
+  manager.check({ allowDirect: true }); await manager.settled();
+  assert.equal((await manager.snapshot()).phase, "ready");
+  manager.start({ planId: plan.id }); await manager.settled();
+  assert.equal((await manager.snapshot()).message, "ACTIVE_WORK");
+  assert.equal(await new StateStore(f.root).journal(), null);
+  assert.equal(await f.git("rev-parse", "HEAD"), f.head);
 });
 
 test("plan is server-owned and single-use; changed tree prevents spawn; strict restart remains gated", async (t) => {
@@ -111,16 +125,16 @@ test("expired plan cannot start; repeated check replaces the previous plan", asy
   assert.equal(await new StateStore(f.root).journal(), null);
 });
 
-test("another live lease blocks check and a lease arriving after check blocks start before spawn", async (t) => {
+test("another live lease does not block checking but blocks installation before spawn", async (t) => {
   const f = await fixture(); t.after(f.cleanup);
   const target = await f.advance(); const plan = f.plan(target);
   let checks = 0; t.mock.method(Repository.prototype, "check", async () => { checks++; return plan; });
   const manager = await managerFor(f); const store = new StateStore(f.root), other = randomUUID();
   await store.registerLease(other);
   manager.check({ allowDirect: true }); await manager.settled();
-  assert.equal((await manager.snapshot()).message, "OTHER_DASHBOARD_RUNNING"); assert.equal(checks, 0);
+  assert.equal((await manager.snapshot()).phase, "ready"); assert.equal(checks, 1);
   await store.removeLease(other);
-  manager.check({ allowDirect: true }); await manager.settled(); assert.equal(checks, 1);
+  manager.check({ allowDirect: true }); await manager.settled(); assert.equal(checks, 2);
   await store.registerLease(other);
   manager.start({ planId: plan.id }); await manager.settled();
   assert.equal((await manager.snapshot()).message, "OTHER_DASHBOARD_RUNNING");
@@ -137,11 +151,13 @@ for (const previousPhase of ["succeeded", "failed"] as const) {
     let busy = false;
     const manager = await managerFor(f, { getActivity: () => ({ busy }) });
     assert.equal((await manager.snapshot()).jobId, journal.jobId); // initial restore is allowed
+    await f.put("changed.txt", "local work");
     busy = true; manager.check({ allowDirect: true }); await manager.settled();
     assert.equal((await manager.snapshot()).phase, "blocked");
-    assert.equal((await manager.snapshot()).message, "ACTIVE_WORK");
+    assert.equal((await manager.snapshot()).message, "DIRTY_WORKTREE");
     assert.equal((await manager.snapshot()).jobId, undefined);
     busy = false;
+    await fs.unlink(path.join(f.root, "changed.txt"));
     t.mock.method(Repository.prototype, "check", async () => plan);
     manager.check({ allowDirect: true }); await manager.settled();
     await f.put("changed.txt", "new user work");

@@ -15,6 +15,7 @@ import {
   deleteV2Provider,
   deleteV2ProviderModel,
   saveV2DefaultModel,
+  saveV2ModelProbe,
   saveV2ProviderModel
 } from "../../src/dashboard/model-settings-v2.ts";
 import { withConfigMutationLock } from "../../src/dashboard/config-store.ts";
@@ -1240,3 +1241,23 @@ function waitForChildOutput(child: import("node:child_process").ChildProcessWith
     child.once("exit", onExit);
   });
 }
+
+
+test("catalog evidence save preserves inconclusive reasoning and rejects stale settings", async () => {
+  const fixture = await createFixture();
+  const filePath = path.join(fixture.home, ".ant-code", "settings.json");
+  const before = existingProviderSettings();
+  await fs.writeFile(filePath, JSON.stringify(before));
+  const repository = createFileRepository({ filePath });
+  const snapshot = await repository.read();
+  const options = { cwd: fixture.cwd, env: fixture.env, scope: "global", expectedRevision: snapshot.revision,
+    expectedCredentialsRevision: "missing", input: { providerId: "grok", modelId: "grok-4.6", efforts: [], vision: true } };
+  await saveV2ModelProbe(options);
+  const after = (await repository.read()).data;
+  const model = after.namespaces["model-providers"].providers.grok.models[0];
+  assert.deepEqual(model.reasoning, before.namespaces["model-providers"].providers.grok.models[0].reasoning);
+  assert.deepEqual(model.inputModalities, ["text", "image"]);
+  assert.equal(model.description, "Preserve this curated description.");
+  await assert.rejects(saveV2ModelProbe({ ...options, input: { ...options.input, efforts: [{ id: "max" }] } }), { code: "CONFIG_REVISION_CONFLICT" });
+  assert.deepEqual((await repository.read()).data, after);
+});

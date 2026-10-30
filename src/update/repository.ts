@@ -57,7 +57,7 @@ export class Repository {
     this.root = await fs.realpath(this.root);
     const gitDir = await fs.lstat(path.join(this.root, ".git")).catch(() => null);
     if (!gitDir?.isDirectory() || gitDir.isSymbolicLink()) throw new UpdateError("SOURCE_INSTALL_REQUIRED", "Only standalone source clones are supported; linked worktrees and packaged installs are not.");
-    const raw = await this.runner("git", ["config", "--null", "--list"], { cwd: this.root, env: cleanEnvironment(this.env) });
+    const raw = await this.runner("git", ["config", "--null", "--list"], { cwd: this.root, env: { ...cleanEnvironment(this.env), GIT_CONFIG_GLOBAL: "/dev/null" } });
     if (raw.code !== 0) throw new UpdateError("GIT_CONFIG_UNREADABLE");
     assertSafeGitConfig(raw.stdout);
     // Alternates can make fetch consult external object stores and execute alternateRefsCommand.

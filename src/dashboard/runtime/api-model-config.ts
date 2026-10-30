@@ -7,7 +7,7 @@ import { probeVisionCapability } from "../../model-gateway/vision-probe.ts";
 import { createSessionStore } from "../../storage/session-store.ts";
 import { collectSessionFiles } from "../files.ts";
 import { applyPermissionMode, normalizePermissionMode, permissionModeSummary } from "../permissions.ts";
-import { publicV2ConfigState, saveV2DefaultModel, saveV2ProviderModel, deleteV2Provider, deleteV2ProviderModel, dashboardV2ErrorResult } from "../model-settings-v2.ts";
+import { publicV2ConfigState, saveV2ModelProbe, saveV2DefaultModel, saveV2ProviderModel, deleteV2Provider, deleteV2ProviderModel, dashboardV2ErrorResult } from "../model-settings-v2.ts";
 import { mutateJsonConfig } from "../config-store.ts";
 import { getAntCodeVersion } from "../../version.ts";
 import { resolveWorkspaceTrust, trustWorkspace as saveWorkspaceTrust } from "../../permissions/workspace-trust.ts";
@@ -1117,8 +1117,29 @@ export async function runtimeTestCatalogModel(
   }
   const efforts = Array.isArray(reasoning.reasoningEfforts) ? reasoning.reasoningEfforts : [];
   const warnings = reasoningDiscoveryWarnings(reasoning.reasoningDiscovery);
+  const source = gatewayProfileModelSource(config, profile, modelId);
+  const scope = source?.saveTarget;
+  let saved = false;
+  if (isConfigV2Enabled(config) && (scope === "global" || scope === "project")
+    && (efforts.length > 0 || typeof vision.supported === "boolean")) {
+    const revisions = publicV2ConfigState(config).revisions;
+    try {
+      await saveV2ModelProbe({
+        cwd: ctx.cwd, env: await ctx.resolveConfigEnv(), scope,
+        expectedRevision: revisions[scope], expectedCredentialsRevision: revisions.credentials,
+        input: { providerId, modelId, efforts: normalizeReasoningEfforts(efforts),
+          discovery: reasoning.reasoningDiscovery, vision: vision.supported }
+      });
+      const refreshed = await loadConfig({ cwd: ctx.cwd, env: await ctx.resolveConfigEnv() });
+      reconcileActiveDashboardSessionsAfterV2Mutation(ctx.active, refreshed);
+      saved = true;
+    } catch (error) {
+      return dashboardV2ErrorResult(error);
+    }
+  }
   return {
     ok: true,
+    saved,
     providerId,
     modelId,
     vision: {

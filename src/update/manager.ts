@@ -113,7 +113,8 @@ export class SourceUpdateManager {
     this.state.phase = "checking";
     this.currentTask = (async () => {
       try {
-        await this.assertIdle();
+        // Checking does not stop services or change the checked-out source.
+        // Activity and peer shutdown are enforced only when installing.
         if (await readJson(path.join(this.store.root, "update.lock"))) throw new UpdateError("UPDATE_LOCKED");
         const repo = new Repository(this.root, this.options.env);
         // Validate repository before proxy discovery or any network operation.

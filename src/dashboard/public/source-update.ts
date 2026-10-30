@@ -47,7 +47,7 @@ const REASONS: Record<string, string> = {
   SOURCE_INSTALL_REQUIRED: "仅支持独立源码安装；成品包、链接工作树等不能在此更新。",
   SOURCE_UPDATE_UNAVAILABLE: "当前安装不支持源码自更新，请使用原安装方式维护。",
   STRICT_RESTART_REQUIRED: "当前服务尚不支持严格同端口重启，不能执行自动更新。",
-  UNSAFE_GIT_CONFIG: "Git 执行、重写、TLS 或代理配置不满足安全更新要求，请在本机检查。",
+  UNSAFE_GIT_CONFIG: "此源码仓库的 Git 配置包含更新器不能安全使用的执行、重写、TLS 或代理设置。个人 Git 配置已隔离，请检查仓库本地配置。",
   HIDDEN_INDEX_CHANGES: "Git 索引含隐藏修改或稀疏配置，不能安全更新。",
   IGNORED_COLLISION: "目标源码与本机忽略文件冲突，请自行检查并备份后处理。",
   UNTRACKED_COLLISION: "目标源码与本机文件冲突，请自行检查并备份后处理。",

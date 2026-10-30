@@ -158,7 +158,7 @@ test("uses exact GPT 5.6 presets across supported OpenAI protocols", () => {
 });
 
 test("active probes cover both disabled aliases and third-party ultra without adding ultra to GPT presets", () => {
-  assert.deepEqual(reasoningProbeEffortIds(), ["none", "off", "low", "medium", "high", "xhigh", "max", "ultra"]);
+  assert.deepEqual(reasoningProbeEffortIds(), ["none", "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
   for (const modelId of ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]) {
     assert.deepEqual(
       inferCatalogReasoning({ id: modelId }, { protocol: "openai-responses" }).reasoningEfforts.map((effort) => effort.id),
