@@ -9,7 +9,8 @@ not the user's project. Unsupported layouts or unsafe state fail closed.
 
 - The manager captures immutable boot identity, checks installation eligibility,
   discovers one network route and issues an expiring, server-owned update plan.
-  Snapshot reads are local only; check/start run in the background.
+  Snapshot reads are local only; check/start run in the background. Checking does
+  not require idle work or stop peer Dashboards; installation enforces both.
 - The target is the current branch's official public HTTPS upstream tip. Apply is
   fast-forward only. Reject missing upstream, detached HEAD, dirty/untracked or
   hidden-index state, divergent/ahead branches, active Git operations, worktrees,
@@ -21,6 +22,8 @@ not the user's project. Unsupported layouts or unsafe state fail closed.
   Support HTTP/HTTPS proxies only; SOCKS and PAC/WPAD are explicit unsupported
   errors. Manual proxy/direct consent is one-shot. A failed proxy never silently
   falls back to direct, a mirror or disabled TLS.
+- Git ignores personal/system configuration; only repository-local configuration
+  is audited and consumed. Proxy discovery remains separate and read-only.
 - Git and npm use the same selected route. Remove conflicting route/config/env
   bypasses, including NO_PROXY and bare PROXY. Discovery only reads original npmrc
   files, including explicitly supplied user/global paths; it never rewrites them.

@@ -788,8 +788,7 @@ export async function probeCatalogReasoningLevels(
   let thinkingField: string | null = null;
   for (const effort of reasoningProbeEffortIds()) {
     if (requestOptions.deadlineAt - Date.now() < 1_000) {
-      attempts.push({ effort, status: "indeterminate", httpStatus: null, reasoningField: null, failure: "timeout" });
-      break;
+      return { ok: false, status: 504, outcome: "failed", error: "思考档位测试超时，未覆盖已保存的档位" };
     }
     const attempt = await sendReasoningCapabilityProbe(
       requestOptions,

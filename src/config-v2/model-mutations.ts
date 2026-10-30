@@ -5,6 +5,32 @@ import { isV2SettingsDocument } from "./schema.ts";
 type JsonObject = Record<string, unknown>;
 const EMPTY_OBJECT: JsonObject = {};
 
+/** Apply server-side probe evidence to the existing model only. */
+export function applyModelProbe(document: ConfigV2Document, input: {
+  providerId: string; modelId: string; efforts: { id: string; label?: string; description?: string }[];
+  discovery?: unknown; vision?: boolean | null;
+}) {
+  const next = structuredClone(document);
+  const models = next.namespaces["model-providers"]?.providers?.[input.providerId]?.models;
+  const model = models?.find((entry) => entry.id === input.modelId);
+  if (!model) throw Object.assign(new Error("模型配置已改变，请重新测试"), { status: 409 });
+  if (input.efforts.length) {
+    const previousDefault = model.reasoning?.default;
+    model.reasoning = {
+      efforts: structuredClone(input.efforts),
+      ...(input.efforts.some((effort) => effort.id === previousDefault) ? { default: previousDefault } : {})
+    };
+    model.compat = { ...model.compat, reasoningDiscovery: structuredClone(input.discovery) };
+    reconcileDefaultSelectionReasoning(next, input.providerId, models!);
+    reconcileQualifiedRoutingReasoning(next, input.providerId, models!);
+  }
+  if (typeof input.vision === "boolean") {
+    const modalities = Array.isArray(model.inputModalities) ? model.inputModalities.filter((item) => item !== "image") : ["text"];
+    model.inputModalities = input.vision ? [...modalities, "image"] : modalities;
+  }
+  return next;
+}
+
 type ConfigV2Model = {
   id?: string;
   compat?: { routingOnly?: boolean; reasoningDiscovery?: unknown };

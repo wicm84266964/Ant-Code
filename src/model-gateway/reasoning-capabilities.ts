@@ -1,6 +1,6 @@
 import { normalizeReasoningEfforts, type LabReasoningEffort } from "./models.ts";
 
-const PROBE_EFFORT_IDS: readonly string[] = Object.freeze(["none", "off", "low", "medium", "high", "xhigh", "max", "ultra"]);
+const PROBE_EFFORT_IDS: readonly string[] = Object.freeze(["none", "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
 const LEGACY_GPT56_ULTRA_PRESET_IDS: readonly string[] = Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]);
 
 type ReasoningPreset = {

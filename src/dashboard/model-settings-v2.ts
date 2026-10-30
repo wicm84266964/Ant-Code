@@ -3,6 +3,7 @@ import { createFileRepository, ConfigRevisionConflictError } from "../config-v2/
 import { importProviderCatalog, saveAgentRouting, saveModelContextWindow, saveProviderAgentModels, type ImportProviderCatalogInput } from "../config-v2/import-provider-catalog.ts";
 import {
   defaultSelection,
+  applyModelProbe,
   deleteProvider,
   deleteProviderModel,
   updateDefaultModelSelection,
@@ -25,6 +26,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 const EMPTY_SETTINGS_DOCUMENT = Object.freeze({ settingsVersion: 2, namespaces: Object.freeze({}) });
 const MODEL_SETTINGS_TRANSACTION_TARGET = "model-settings-v2.transaction";
+
+export async function saveV2ModelProbe(options: {
+  cwd: string; env?: NodeJS.ProcessEnv; scope: unknown; expectedRevision: unknown;
+  expectedCredentialsRevision: unknown; input: Parameters<typeof applyModelProbe>[1];
+}) {
+  return withModelSettingsMutationLock(options, async () => {
+    const context = await mutationContext(options);
+    const document = validateSettingsDocument(applyModelProbe(context.snapshot.data, options.input));
+    await writeSettingsWithCredential({ ...context, document,
+      expectedCredentialsRevision: options.expectedCredentialsRevision, credentialMutation: null });
+  });
+}
 
 /** @param {{ cwd: string; env?: NodeJS.ProcessEnv; scope: unknown; expectedRevision: unknown; expectedCredentialsRevision: unknown; input: Record<string, any>; prepareInput?: () => Promise<Record<string, any>>; credentialTransactionStage?: (stage: string, details: Record<string, any>) => unknown }} options */
 export async function saveV2ProviderModel(options: { cwd: string; env?: NodeJS.ProcessEnv; scope: unknown; expectedRevision: unknown; expectedCredentialsRevision: unknown; input: Record<string, unknown>; prepareInput?: () => Promise<Record<string, unknown>>; credentialTransactionStage?: (stage: string, details: Record<string, unknown>) => unknown }) {

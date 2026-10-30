@@ -9,6 +9,18 @@ import { runProcess } from "../../src/update/process.ts";
 for (const value of ["https://github.com/wicm84266964/Ant-Code.git", "https://GITHUB.COM/WICM84266964/ant-code"]) {
   test(`official HTTPS allowlist: ${value}`, () => assert.equal(isOfficialUpstream(value), true));
 }
+
+test("personal Git helpers and TLS/rewrite settings are isolated, local unsafe config still blocks", async (t) => {
+  const f = await fixture(); t.after(f.cleanup);
+  const personal = '[credential]\n helper = !echo should-not-run\n[http]\n sslVerify = false\n[url "https://invalid.example/"]\n insteadOf = https://github.com/\n';
+  const file = path.join(f.env.HOME!, ".gitconfig");
+  await fs.writeFile(file, personal);
+  const repo = new Repository(f.root, f.env);
+  assert.equal((await repo.inspect()).head, f.head);
+  assert.equal(await fs.readFile(file, "utf8"), personal);
+  await f.git("config", "http.sslVerify", "false");
+  await assert.rejects(repo.inspect(), { code: "UNSAFE_GIT_CONFIG" });
+});
 for (const value of ["http://github.com/wicm84266964/Ant-Code.git", "https://user@github.com/wicm84266964/Ant-Code.git", "git@github.com:wicm84266964/Ant-Code.git", "https://github.com/wicm84266964/Ant-Code.git/", "https://github.com.evil/wicm84266964/Ant-Code"]) {
   test(`reject unsupported upstream ${value}`, () => assert.equal(isOfficialUpstream(value), false));
 }

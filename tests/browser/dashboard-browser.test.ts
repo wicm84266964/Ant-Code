@@ -2818,3 +2818,26 @@ async function waitUntil(predicate, timeoutMs = 2000) {
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+
+test("catalog model test refreshes composer with confirmed reasoning levels", async () => {
+  const originalStatus = runtime.status, originalTest = runtime.testCatalogModel;
+  let tested = false;
+  runtime.testCatalogModel = async () => { tested = true; return { ok: true, saved: true, summary: "测试完成" }; };
+  runtime.status = async () => {
+    const status = await originalStatus();
+    if (!tested) return status;
+    const model = { ...browserModel(), reasoningEfforts: [{ id: "off" }, { id: "high" }, { id: "max" }] };
+    return { ...status, models: [model], gatewayProfiles: status.gatewayProfiles.map((profile) =>
+      profile.id === "test-source" ? { ...profile, models: [model] } : profile) };
+  };
+  try {
+    await withDashboardPage({ width: 1280, height: 900 }, async (page) => {
+      await page.locator("#settings-button").click();
+      await page.waitForFunction(() => document.querySelector("#settings-content")?.getAttribute("aria-busy") !== "true");
+      await page.locator("button[data-action='test-model']").first().click();
+      await page.waitForFunction(() => document.querySelector("#reasoning-effort-select option[value='max']"));
+      assert.deepEqual(await page.locator("#reasoning-effort-select option").evaluateAll((options) => options.map((option) => option.value)), ["", "off", "high", "max"]);
+    });
+  } finally { runtime.status = originalStatus; runtime.testCatalogModel = originalTest; }
+});

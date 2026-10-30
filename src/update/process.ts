@@ -99,6 +99,9 @@ export function routedEnvironment(input: NodeJS.ProcessEnv, route: Route, tool: 
   Object.assign(env, { HTTP_PROXY: proxy, HTTPS_PROXY: proxy, ALL_PROXY: proxy,
     http_proxy: proxy, https_proxy: proxy, all_proxy: proxy, NO_PROXY: "", no_proxy: "" });
   if (tool === "git") {
+    // Personal helpers, URL rewrites and TLS settings do not belong to the
+    // updater. Proxy discovery reads them separately; transport uses its route.
+    env.GIT_CONFIG_GLOBAL = "/dev/null";
     const config: [string, string][] = [
       ["http.proxy", proxy], ["http.sslVerify", "true"], ["http.followRedirects", "false"],
       ["core.hooksPath", "/dev/null"],

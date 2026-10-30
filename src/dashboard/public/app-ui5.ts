@@ -463,7 +463,7 @@ export function settingsModelHtml(model: DashboardModelOption, profile: Dashboar
         ${testResult?.message ? `<small class="settings-model-test ${escapeAttribute(testResult.tone)}">${escapeHtml(testResult.message)}</small>` : ""}
       </div>
       <div class="settings-row-actions">
-        <button type="button" data-action="test-model" data-model-id="${escapeAttribute(model.id)}" data-profile-id="${escapeAttribute(profile?.id || "")}" title="发送一张程序内小图，并探测这条路线接受的思考档位。可能产生少量用量。" ${testBusy || state.settingsRefreshing || state.running ? "disabled" : ""}>${testing ? "测试中" : "测试"}</button>
+        <button type="button" data-action="test-model" data-model-id="${escapeAttribute(model.id)}" data-profile-id="${escapeAttribute(profile?.id || "")}" title="发送一张程序内小图，并探测这条路线接受的思考档位。确认的能力将保存到模型配置，未确认的能力保持原配置。可能产生少量用量。" ${testBusy || state.settingsRefreshing || state.running ? "disabled" : ""}>${testing ? "测试中" : "测试"}</button>
         <button type="button" data-action="use-model" data-model-id="${escapeAttribute(model.id)}" data-profile-id="${escapeAttribute(profile?.id || "")}" ${isScopedDefault || state.settingsRefreshing || state.running || state.modelSwitching ? "disabled" : ""}>${isScopedDefault ? "已设为默认" : "设为默认"}</button>
       </div>
     </div>
@@ -749,6 +749,7 @@ export async function testCatalogModel(modelId: string | null | undefined, provi
       modelId
     }, { timeoutMs: 40_000 });
     if (!result.ok) throw new Error(result.error || "模型测试失败");
+    await refreshSettingsConfiguration();
     state.modelCatalogTestResults = {
       ...state.modelCatalogTestResults,
       [key]: { tone: "success", message: String(result.summary || "测试完成") }
