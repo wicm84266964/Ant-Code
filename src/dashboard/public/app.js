@@ -1174,6 +1174,7 @@ function collectModalBackground(modal) {
 function focusModalInitialTarget(modal, selector) {
   requestAnimationFrame(() => {
     if (!modal || state.modalContext?.modal !== modal) return;
+    if (modal.contains(document.activeElement)) return;
     const target = typeof selector === "string" ? modal.querySelector(selector) : modalFocusableElements(modal)[0];
     (target ?? modal).focus({ preventScroll: true });
   });

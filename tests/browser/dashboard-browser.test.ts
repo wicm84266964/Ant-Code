@@ -2841,3 +2841,24 @@ test("catalog model test refreshes composer with confirmed reasoning levels", as
     });
   } finally { runtime.status = originalStatus; runtime.testCatalogModel = originalTest; }
 });
+
+
+test("delayed modal autofocus preserves a field already chosen for editing", async () => {
+  await withDashboardPage({ width: 1280, height: 900 }, async (page) => {
+    await page.locator("#settings-button").click();
+    await page.waitForFunction(() => document.querySelector("#settings-content")?.getAttribute("aria-busy") !== "true");
+    const selected = await page.evaluate(() => {
+      const original = window.requestAnimationFrame;
+      const pending = [];
+      window.requestAnimationFrame = (callback) => { pending.push(callback); return pending.length; };
+      try {
+        document.querySelector("button[data-action='edit-gateway-profile']").click();
+        const input = document.querySelector("#model-config-form input[name='routeName']");
+        input.focus();
+        for (const callback of pending) callback(performance.now());
+        return document.activeElement === input;
+      } finally { window.requestAnimationFrame = original; }
+    });
+    assert.equal(selected, true);
+  });
+});

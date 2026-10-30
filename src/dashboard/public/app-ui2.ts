@@ -53,6 +53,9 @@ export function collectModalBackground(modal: HTMLElement | null | undefined) {
 export function focusModalInitialTarget(modal: HTMLElement | null | undefined, selector: unknown) {
   requestAnimationFrame(() => {
     if (!modal || state.modalContext?.modal !== modal) return;
+    // A user (or assistive technology) may already have chosen a field before
+    // this frame. Never redirect an in-progress edit to the default field.
+    if (modal.contains(document.activeElement)) return;
     const target = typeof selector === "string" ? modal.querySelector(selector) : modalFocusableElements(modal)[0];
     (target ?? modal).focus({ preventScroll: true });
   });
