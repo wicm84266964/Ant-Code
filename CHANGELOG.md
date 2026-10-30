@@ -1,5 +1,14 @@
 # Changelog
 
+
+## 2.0.32 - 2026-10-30
+
+- Dashboard 检查版本不再因活动会话或其他窗口而误拦；安装阶段保留工作和交接保护，更新子进程隔离个人 Git 配置。
+- 模型测试确认的思考档位与视觉能力保存后立即刷新；修复来源弹窗延迟聚焦抢占输入的问题。
+- [2.0.32 中文说明](docs/releases/2.0.32-update-check-and-model-probe_zh.md)。北京时间 2026-10-30 17:23:43 发布：[GitHub Release](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.32)。tag 对应提交 `f38cddac532dbe5ba9b6a4ad8e21fcc928e9c614`。
+- PR #93 最终 CI 与合并后的主分支 CI 通过；早期浏览器 CI 失败定位后修复，未覆盖历史记录。正式仓最终 Windows 发布门禁单元/集成 1585/1585、浏览器 43/43，通过且无取消、跳过；此前一次 Windows 进程清理时序失败已单独复查通过。
+- 仅源码发布，无二进制附件，不更新 TaxaMask、不发布 npm 包。真实其他设备升级仍待用户验证。
+
 ## Unreleased
 
 ## 2.0.31 - 2026-10-27
