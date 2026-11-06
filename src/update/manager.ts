@@ -162,7 +162,7 @@ export class SourceUpdateManager {
       await fs.mkdir(snapshot, { mode: 0o700 });
       // Explicit closed import graph; no runtime bundler and no imports from node_modules.
       const here = path.dirname(await fs.realpath(fileURLToPath(import.meta.url)));
-      for (const file of ["contracts.ts", "process.ts", "repository.ts", "state-store.ts", "worker.ts", "worker-entry.ts"]) {
+      for (const file of ["contracts.ts", "process.ts", "repository.ts", "github-archive.ts", "state-store.ts", "worker.ts", "worker-entry.ts"]) {
         await fs.copyFile(path.join(here, file), path.join(snapshot, file), fs.constants.COPYFILE_EXCL);
       }
       await fs.writeFile(path.join(snapshot, "package.json"), '{"type":"module"}', { mode: 0o600 });

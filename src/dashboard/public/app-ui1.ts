@@ -372,9 +372,14 @@ export function bindEvents() {
     }
   });
   window.addEventListener?.("offline", () => {
-    clearEventReconnectTimer();
-    closeEventSource();
-    setConnectionState("offline");
+    // Internet reachability does not determine whether loopback is available.
+    if (state.currentSessionId && !state.eventSource) reconnectEventsManually();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && state.currentSessionId
+      && (!state.eventSource || Date.now() - state.lastEventAt > EVENT_STALE_AFTER_MS)) {
+      reconnectEventsManually();
+    }
   });
   window.addEventListener?.("resize", () => {
     syncResponsiveNavigation();

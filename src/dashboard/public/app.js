@@ -826,6 +826,16 @@ var REASONS = {
   UNSUPPORTED_NPM_CONFIG: "候选 npm 配置需要人工审查，已阻止自动更新。",
   CHECK_FAILED: "版本检查失败。请检查上游与所选网络路由；不会自动改为直连。",
   GIT_FAILED: "Git 检查或网络操作失败。请检查上游与所选代理；不会自动改为直连。",
+  ARCHIVE_NETWORK_FAILED: "官方备用通道连接失败，请检查网络或改用 HTTP(S) 代理。",
+  ARCHIVE_RATE_LIMITED: "GitHub 官方 API 访问次数受限，请稍后重试或改用代理 Git 更新。",
+  ARCHIVE_HISTORY_LIMIT: "待更新历史超过备用通道上限，请改用代理 Git 更新。",
+  ARCHIVE_LIMIT: "源码归档超过备用更新大小限制，请改用代理 Git 更新。",
+  ARCHIVE_COMMIT_UNSUPPORTED: "官方提交格式无法精确还原校验，请改用代理 Git 更新。",
+  ARCHIVE_TREE_MISMATCH: "官方归档与目标提交内容不一致，已阻止更新。",
+  ARCHIVE_METADATA_INVALID: "官方备用提交信息校验失败，已阻止更新。",
+  ARCHIVE_INVALID: "官方源码归档格式校验失败，已阻止更新。",
+  ARCHIVE_OBJECT_STORE_UNSAFE: "本地 Git 对象目录不满足安全要求，已阻止备用更新。",
+  ARCHIVE_URL_INVALID: "备用更新地址不满足官方 HTTPS 限制，已阻止更新。",
   PROCESS_LIMIT: "更新子进程超时或超出限制，请检查网络和本机环境。",
   WORKER_INTERRUPTED: "更新进程中断，需要检查本机更新记录。",
   WORKER_INTERRUPTED_INSPECT_JOURNAL: "更新进程中断，需要检查本机更新记录。",
@@ -895,6 +905,7 @@ function createSourceUpdateController(deps, render) {
   const apply = (snapshot) => {
     view.snapshot = snapshot;
     view.message = PHASE_TEXT[snapshot.phase] ?? "正在等待更新状态…";
+    if (snapshot.plan?.transport === "codeload") view.message += " 已通过官方备用通道获取并校验提交与源码；依赖仍按所选路由下载。";
     view.recovery = ["failed", "manualRecovery"].includes(snapshot.phase);
     if (["blocked", "failed", "manualRecovery"].includes(snapshot.phase)) view.message += ` ${sourceUpdateReason(snapshot.message)}`;
     paint();
@@ -952,7 +963,7 @@ function createSourceUpdateController(deps, render) {
         }
         if (reply.ok === false || reply.accepted !== true) throw reply;
         view.snapshot = null;
-        for (let attempt = 0; attempt < 45; attempt += 1) {
+        for (let attempt = 0; attempt < 240; attempt += 1) {
           await sleep(2e3);
           const snapshot = readSnapshot(await deps.get("/api/source-update"));
           apply(snapshot);
@@ -1044,7 +1055,7 @@ function createSourceUpdateController(deps, render) {
 }
 function routeText(snapshot) {
   if (!snapshot?.route) return "检查时自动读取配置、环境变量、Git/npm 和 Windows 静态系统代理；不猜测端口、不扫描。";
-  if (snapshot.route.mode === "direct") return "路由：仅本次明确授权的直连。";
+  if (snapshot.route.mode === "direct") return "路由：仅本次明确授权的直连；Git 失败后自动尝试官方 API + codeload 备用更新。";
   const source = String(snapshot.route.source ?? "");
   const label = source === "manual" ? "一次性手填" : source === "config" ? "产品配置" : source.startsWith("env:") ? "环境变量" : source === "git" ? "Git 配置" : source.startsWith("npm:") ? "npm 配置" : source === "windows" ? "Windows 静态系统代理" : "自动配置";
   return `路由：HTTP(S) 代理（${label}）。代理失效不会自动直连。`;
@@ -4404,9 +4415,12 @@ function bindEvents3() {
     }
   });
   window.addEventListener?.("offline", () => {
-    clearEventReconnectTimer3();
-    closeEventSource3();
-    setConnectionState2("offline");
+    if (state.currentSessionId && !state.eventSource) reconnectEventsManually3();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && state.currentSessionId && (!state.eventSource || Date.now() - state.lastEventAt > EVENT_STALE_AFTER_MS)) {
+      reconnectEventsManually3();
+    }
   });
   window.addEventListener?.("resize", () => {
     syncResponsiveNavigation();
@@ -5080,8 +5094,8 @@ function backgroundCancelKey4(groupId, taskId) {
   return group || task ? `${group || "-"}:${task || "-"}` : "";
 }
 function connectEvents4(sessionId) {
-  clearEventReconnectTimer3();
-  closeEventSource3();
+  clearEventReconnectTimer4();
+  closeEventSource4();
   state.eventSourceSessionId = sessionId;
   setConnectionState2(state.eventReconnectAttempt > 0 ? "reconnecting" : "connecting");
   const params = new URLSearchParams({ sessionId });
@@ -5130,10 +5144,6 @@ function connectEvents4(sessionId) {
     source.close();
     state.eventSource = null;
     clearEventStaleTimer4();
-    if (navigator.onLine === false) {
-      setConnectionState2("offline");
-      return;
-    }
     scheduleEventReconnect4(sessionId);
   });
 }
@@ -5144,16 +5154,16 @@ function ensureEventsConnected(sessionId) {
   connectEvents4(sessionId);
 }
 function disconnectEvents() {
-  clearEventReconnectTimer3();
+  clearEventReconnectTimer4();
   clearEventConnectTimer4();
   clearEventStaleTimer4();
-  closeEventSource3();
+  closeEventSource4();
   state.eventSourceSessionId = null;
   state.eventReconnectAttempt = 0;
   state.lastEventAt = 0;
   setConnectionState2("idle");
 }
-function closeEventSource3() {
+function closeEventSource4() {
   clearEventConnectTimer4();
   clearEventStaleTimer4();
   state.eventSource?.close();
@@ -5180,10 +5190,6 @@ function armEventConnectTimer4(source, sessionId) {
     source.close();
     state.eventSource = null;
     clearEventStaleTimer4();
-    if (navigator.onLine === false) {
-      setConnectionState2("offline");
-      return;
-    }
     setConnectionState2("stale");
     scheduleEventReconnect4(sessionId);
   }, EVENT_CONNECT_TIMEOUT_MS);
@@ -5197,29 +5203,25 @@ function armEventStaleTimer4(sessionId, delay) {
       return;
     }
     setConnectionState2("stale");
-    closeEventSource3();
+    closeEventSource4();
     scheduleEventReconnect4(sessionId);
   }, Math.max(1, Number(delay) || 1));
 }
 function scheduleEventReconnect4(sessionId) {
   if (!sessionId || state.currentSessionId !== sessionId) return;
-  clearEventReconnectTimer3();
-  state.eventReconnectAttempt += 1;
-  if (state.eventReconnectAttempt > EVENT_RECONNECT_MAX_ATTEMPTS) {
-    setConnectionState2("offline");
-    return;
-  }
+  clearEventReconnectTimer4();
+  state.eventReconnectAttempt = Math.min(EVENT_RECONNECT_MAX_ATTEMPTS, state.eventReconnectAttempt + 1);
   setConnectionState2("reconnecting");
   const delay = Math.min(15e3, 500 * 2 ** (state.eventReconnectAttempt - 1));
   state.eventReconnectTimer = setTimeout(() => {
     state.eventReconnectTimer = null;
-    if (state.currentSessionId === sessionId && navigator.onLine !== false) {
+    if (state.currentSessionId === sessionId) {
       connectEvents4(sessionId);
     }
   }, delay);
 }
 function reconnectEventsManually3() {
-  clearEventReconnectTimer3();
+  clearEventReconnectTimer4();
   state.eventReconnectAttempt = 0;
   if (!state.currentSessionId) {
     bootstrapDashboard2();
@@ -5227,7 +5229,7 @@ function reconnectEventsManually3() {
   }
   connectEvents4(state.currentSessionId);
 }
-function clearEventReconnectTimer3() {
+function clearEventReconnectTimer4() {
   if (state.eventReconnectTimer) {
     clearTimeout(state.eventReconnectTimer);
     state.eventReconnectTimer = null;
@@ -5253,8 +5255,8 @@ function setConnectionState2(next) {
     idle: "本地网关未连接",
     connecting: "本地网关连接中",
     connected: "本地网关已连接",
-    reconnecting: `本地网关重连 ${Math.max(1, state.eventReconnectAttempt)}/${EVENT_RECONNECT_MAX_ATTEMPTS}`,
-    offline: "本地网关离线",
+    reconnecting: state.eventReconnectAttempt >= EVENT_RECONNECT_MAX_ATTEMPTS ? "本地网关持续重连中" : `本地网关重连 ${Math.max(1, state.eventReconnectAttempt)}/${EVENT_RECONNECT_MAX_ATTEMPTS}`,
+    offline: "Dashboard 连接中断",
     unavailable: "本地网关未连接",
     error: "本地网关异常",
     stale: "本地网关连接过期"
@@ -5287,6 +5289,23 @@ function rememberEventCursor(value) {
   }
 }
 function handleDashboardEvent4(event) {
+  if (event.type === "session_sync") {
+    handleDashboardEvent4({ ...event, type: "run_state" });
+    const approvals = Array.isArray(event.approvals) ? event.approvals : [];
+    const approvalIds = new Set(approvals.map((approval) => approval.id));
+    state.approvalQueue = state.approvalQueue.filter((approval) => approvalIds.has(approval.id));
+    if (state.pendingApproval && !approvalIds.has(state.pendingApproval.id)) hideApproval({ approvalId: state.pendingApproval.id });
+    for (const approval of approvals) showApproval4(approval);
+    const questions = Array.isArray(event.questions) ? event.questions : [];
+    const question = questions.at(-1);
+    if (state.pendingQuestion && state.pendingQuestion.id !== question?.id) hideQuestion();
+    if (question && state.pendingQuestion?.id !== question.id) showQuestion4(question);
+    if (event.replayGap === true) {
+      showNotice2("连接已恢复并同步当前任务状态", "部分较早实时进展已过期，可重新打开会话查看已保存记录。");
+    }
+    updateLiveStatus4();
+    return;
+  }
   if (event.type === "session_disposed" || event.type === "error" && /会话不存在/.test(String(event.message ?? ""))) {
     state.running = false;
     state.queue = [];
@@ -12281,7 +12300,7 @@ export {
   clearBootstrapStatus2 as clearBootstrapStatus,
   clearContentSearch,
   clearEventConnectTimer4 as clearEventConnectTimer,
-  clearEventReconnectTimer3 as clearEventReconnectTimer,
+  clearEventReconnectTimer4 as clearEventReconnectTimer,
   clearEventStaleTimer4 as clearEventStaleTimer,
   clearModelConfigFailure7 as clearModelConfigFailure,
   clearPendingGuide,
@@ -12289,7 +12308,7 @@ export {
   clearReasoningCapabilityControls7 as clearReasoningCapabilityControls,
   clearTranscript,
   closeActiveModal,
-  closeEventSource3 as closeEventSource,
+  closeEventSource4 as closeEventSource,
   collapseAssistantDrafts4 as collapseAssistantDrafts,
   collapseCompletedActivities4 as collapseCompletedActivities,
   collectModalBackground,

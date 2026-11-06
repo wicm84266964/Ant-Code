@@ -98,10 +98,6 @@ export function connectEvents(sessionId: string) {
     source.close();
     state.eventSource = null;
     clearEventStaleTimer();
-    if (navigator.onLine === false) {
-      setConnectionState("offline");
-      return;
-    }
     scheduleEventReconnect(sessionId);
   });
 }
@@ -154,10 +150,6 @@ export function armEventConnectTimer(source: EventSource, sessionId: string) {
     source.close();
     state.eventSource = null;
     clearEventStaleTimer();
-    if (navigator.onLine === false) {
-      setConnectionState("offline");
-      return;
-    }
     setConnectionState("stale");
     scheduleEventReconnect(sessionId);
   }, EVENT_CONNECT_TIMEOUT_MS);
@@ -180,16 +172,14 @@ export function armEventStaleTimer(sessionId: string | null, delay: unknown) {
 export function scheduleEventReconnect(sessionId: string) {
   if (!sessionId || state.currentSessionId !== sessionId) return;
   clearEventReconnectTimer();
-  state.eventReconnectAttempt += 1;
-  if (state.eventReconnectAttempt > EVENT_RECONNECT_MAX_ATTEMPTS) {
-    setConnectionState("offline");
-    return;
-  }
+  // A long-running task can outlive a browser/network interruption. Continue
+  // at the capped backoff rather than permanently abandoning its event stream.
+  state.eventReconnectAttempt = Math.min(EVENT_RECONNECT_MAX_ATTEMPTS, state.eventReconnectAttempt + 1);
   setConnectionState("reconnecting");
   const delay = Math.min(15_000, 500 * (2 ** (state.eventReconnectAttempt - 1)));
   state.eventReconnectTimer = setTimeout(() => {
     state.eventReconnectTimer = null;
-    if (state.currentSessionId === sessionId && navigator.onLine !== false) {
+    if (state.currentSessionId === sessionId) {
       connectEvents(sessionId);
     }
   }, delay);
@@ -234,8 +224,10 @@ export function setConnectionState(next: string) {
     idle: "本地网关未连接",
     connecting: "本地网关连接中",
     connected: "本地网关已连接",
-    reconnecting: `本地网关重连 ${Math.max(1, state.eventReconnectAttempt)}/${EVENT_RECONNECT_MAX_ATTEMPTS}`,
-    offline: "本地网关离线",
+    reconnecting: state.eventReconnectAttempt >= EVENT_RECONNECT_MAX_ATTEMPTS
+      ? "本地网关持续重连中"
+      : `本地网关重连 ${Math.max(1, state.eventReconnectAttempt)}/${EVENT_RECONNECT_MAX_ATTEMPTS}`,
+    offline: "Dashboard 连接中断",
     unavailable: "本地网关未连接",
     error: "本地网关异常",
     stale: "本地网关连接过期"
@@ -272,6 +264,23 @@ export function rememberEventCursor(value: unknown) {
 }
 
 export function handleDashboardEvent(event: DashboardStreamEvent) {
+  if (event.type === "session_sync") {
+    handleDashboardEvent({ ...event, type: "run_state" });
+    const approvals = Array.isArray(event.approvals) ? event.approvals as DashboardApproval[] : [];
+    const approvalIds = new Set(approvals.map(approval => approval.id));
+    state.approvalQueue = state.approvalQueue.filter(approval => approvalIds.has(approval.id));
+    if (state.pendingApproval && !approvalIds.has(state.pendingApproval.id)) hideApproval({ approvalId: state.pendingApproval.id });
+    for (const approval of approvals) showApproval(approval);
+    const questions = Array.isArray(event.questions) ? event.questions as DashboardPendingQuestion[] : [];
+    const question = questions.at(-1);
+    if (state.pendingQuestion && state.pendingQuestion.id !== question?.id) hideQuestion();
+    if (question && state.pendingQuestion?.id !== question.id) showQuestion(question);
+    if (event.replayGap === true) {
+      showNotice("连接已恢复并同步当前任务状态", "部分较早实时进展已过期，可重新打开会话查看已保存记录。");
+    }
+    updateLiveStatus();
+    return;
+  }
   if (event.type === "session_disposed" || (event.type === "error" && /会话不存在/.test(String(event.message ?? "")))) {
     state.running = false;
     state.queue = [];

@@ -274,6 +274,12 @@ export async function executeOneToolCall(call: import("../model-gateway/protocol
     content: serialized.content,
     truncated: serialized.truncated,
     interrupted: execution.interrupted === true,
+    outcome: {
+      ok: execution.ok === true,
+      blocked: execution.blocked === true,
+      interrupted: execution.interrupted === true,
+      decision: execution.decision && typeof execution.decision === "object" ? execution.decision.decision ?? null : null
+    },
     display: {
       ok: execution.ok === true,
       blocked: execution.blocked === true,

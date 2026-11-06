@@ -1063,6 +1063,58 @@ test("dashboard events route uses sequence cursor for replay", async () => {
   }
 });
 
+test("dashboard replays more than the live buffer limit without disconnecting or reordering live events", async () => {
+  let publish;
+  let unsubscribed = false;
+  const server = createDashboardServer({
+    cwd: process.cwd(),
+    runtime: {
+      ...createRuntimeStub(),
+      subscribe: (_sessionId, send) => {
+        publish = send;
+        for (let sequence = 1; sequence <= 500; sequence += 1) {
+          send({ type: "assistant_draft", sequence, text: "x".repeat(8192) });
+        }
+        return () => { unsubscribed = true; };
+      }
+    }
+  });
+  await listen(server, "127.0.0.1", 0);
+  let stream;
+  try {
+    stream = await openEventStream(server, "/api/events?sessionId=large-replay&after=10");
+    assert.equal(stream.response.statusCode, 200);
+    publish({ type: "assistant_message", sequence: 501, text: "live" });
+    const sequences = await new Promise<number[]>((resolve, reject) => {
+      let pending = "";
+      const received: number[] = [];
+      const timer = setTimeout(() => reject(new Error("replay did not complete")), 5000);
+      stream.response.on("error", (error) => { clearTimeout(timer); reject(error); });
+      stream.response.on("data", (chunk) => {
+        pending += chunk.toString("utf8");
+        let boundary;
+        while ((boundary = pending.indexOf("\n\n")) >= 0) {
+          const frame = pending.slice(0, boundary);
+          pending = pending.slice(boundary + 2);
+          const id = /^id: (\d+)$/m.exec(frame);
+          if (id) received.push(Number(id[1]));
+          if (received.length === 501) {
+            clearTimeout(timer);
+            resolve(received);
+          }
+        }
+      });
+    });
+    assert.deepEqual(sequences, Array.from({ length: 501 }, (_, index) => index + 1));
+    assert.equal(unsubscribed, false);
+  } finally {
+    stream?.request.destroy();
+    await close(server);
+  }
+  await waitFor(() => unsubscribed);
+  assert.equal(unsubscribed, true);
+});
+
 test("dashboard events expose heartbeat events to clients", async () => {
   const originalSetInterval = globalThis.setInterval;
   const server = createDashboardServer({

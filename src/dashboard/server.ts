@@ -1157,12 +1157,14 @@ function serveEvents(req: http.IncomingMessage, res: http.ServerResponse, runtim
 
   let unsubscribe: (() => void) | null = null;
   let heartbeat: ReturnType<typeof setInterval> | null = null;
+  const replay: Record<string, unknown>[] = [];
   let cleaned = false;
   const cleanup = (destroy = false) => {
     if (cleaned) {
       return;
     }
     cleaned = true;
+    replay.length = 0;
     if (heartbeat) {
       clearInterval(heartbeat);
       heartbeat = null;
@@ -1191,9 +1193,16 @@ function serveEvents(req: http.IncomingMessage, res: http.ServerResponse, runtim
     "x-accel-buffering": "no"
   });
   res.flushHeaders?.();
-  const send = (event: Record<string, unknown>) => {
+  const encodeEvent = (event: Record<string, unknown>) => {
     const id = Number.isFinite(event?.sequence) ? `id: ${event.sequence}\n` : "";
-    writer.write(`event: dashboard\n${id}data: ${JSON.stringify(event)}\n\n`);
+    return `event: dashboard\n${id}data: ${JSON.stringify(event)}\n\n`;
+  };
+  // subscribe synchronously replays retained events. Keep references until drain
+  // instead of serializing the entire replay into the bounded live-event queue.
+  let subscribing = true;
+  const send = (event: Record<string, unknown>) => {
+    if (subscribing) replay.push(event);
+    else writer.write(encodeEvent(event));
   };
   unsubscribe = runtime.subscribe(sessionId, send, {
     afterSequence: eventReplayCursor(after, req.headers["last-event-id"]),
@@ -1203,6 +1212,7 @@ function serveEvents(req: http.IncomingMessage, res: http.ServerResponse, runtim
       cleanup();
     }
   });
+  subscribing = false;
   if (cleaned) {
     unsubscribe?.();
     unsubscribe = null;
@@ -1214,6 +1224,11 @@ function serveEvents(req: http.IncomingMessage, res: http.ServerResponse, runtim
     cleanup();
     return;
   }
+  writer.replay((function* () {
+    for (const event of replay) yield encodeEvent(event);
+    replay.length = 0;
+  })());
+  if (cleaned) return;
   heartbeat = setInterval(() => {
     writer.write(`: heartbeat\nevent: heartbeat\ndata: ${JSON.stringify({ at: new Date().toISOString() })}\n\n`);
   }, 15000);
@@ -1233,12 +1248,14 @@ function createSseWriter(res: http.ServerResponse, onFailure: () => void) {
   let blocked = false;
   let closed = false;
   let queuedBytes = 0;
+  let replay: Iterator<string> | null = null;
   const queue: string[] = [];
   const fail = () => {
     if (closed) {
       return;
     }
     closed = true;
+    replay = null;
     queue.length = 0;
     queuedBytes = 0;
     onFailure();
@@ -1248,12 +1265,22 @@ function createSseWriter(res: http.ServerResponse, onFailure: () => void) {
       return;
     }
     blocked = false;
-    while (queue.length > 0) {
-      const chunk = queue.shift();
+    while (replay || queue.length > 0) {
+      let chunk: string | undefined;
+      if (replay) {
+        const next = replay.next();
+        if (next.done) {
+          replay = null;
+          continue;
+        }
+        chunk = next.value;
+      } else {
+        chunk = queue.shift();
+        if (chunk !== undefined) queuedBytes -= Buffer.byteLength(chunk);
+      }
       if (chunk === undefined) {
         break;
       }
-      queuedBytes -= Buffer.byteLength(chunk);
       try {
         if (!res.write(chunk)) {
           blocked = true;
@@ -1267,6 +1294,11 @@ function createSseWriter(res: http.ServerResponse, onFailure: () => void) {
   };
   res.on("drain", flush);
   return {
+    replay(chunks: Iterator<string>) {
+      if (closed) return;
+      replay = chunks;
+      if (!blocked) flush();
+    },
     write(chunk: string) {
       if (closed || res.destroyed || res.writableEnded) {
         return false;
@@ -1291,6 +1323,7 @@ function createSseWriter(res: http.ServerResponse, onFailure: () => void) {
     },
     close() {
       closed = true;
+      replay = null;
       queue.length = 0;
       queuedBytes = 0;
       res.off("drain", flush);

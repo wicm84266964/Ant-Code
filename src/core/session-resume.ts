@@ -701,7 +701,10 @@ export function appendInterruptedDraftMessages(session: AgentSession, prompt: st
  */
 export function summarizeToolCalls(calls: import("../model-gateway/protocol.ts").GatewayToolCall[], results: Array<Record<string, unknown>>) {
   return calls.map((call, index: number) => {
-    const result = parseToolResult(results[index]?.content);
+    const outcome = results[index]?.outcome;
+    const result = outcome && typeof outcome === "object" && !Array.isArray(outcome)
+      ? outcome as Record<string, unknown>
+      : parseToolResult(results[index]?.content);
     return {
       id: call.id,
       name: call.name,
@@ -709,7 +712,7 @@ export function summarizeToolCalls(calls: import("../model-gateway/protocol.ts")
       ok: result.ok === true,
       blocked: result.blocked === true,
       interrupted: results[index]?.interrupted === true || result.interrupted === true,
-      decision: result.decision?.decision ?? null,
+      decision: typeof result.decision === "string" ? result.decision : result.decision?.decision ?? null,
       truncated: Boolean(results[index]?.truncated)
     };
   });

@@ -38,6 +38,18 @@ test("boot identity is a startup snapshot, not dashboard API version or hardcode
   assert.deepEqual(sourceUpdateBoot({ ...oldBoot, bootCommit: null }), { ...oldBoot, bootCommit: null });
 });
 
+test("archive check can outlast the previous polling window and explains verified fallback", async () => {
+  let polls = 0;
+  const ready = snapshot(); ready.plan!.transport = "codeload";
+  const app = harness({ get: async () => ({ ...(++polls < 60 ? snapshot({ phase: "checking" }) : ready) }) });
+  await app.controller.check("", true);
+  assert.equal(polls, 60);
+  assert.equal(app.latest().snapshot?.phase, "ready");
+  assert.match(app.latest().message, /官方备用通道.*校验提交与源码/);
+  assert.match(sourceUpdateReason("ARCHIVE_RATE_LIMITED"), /次数受限/);
+  assert.match(sourceUpdateReason("ARCHIVE_TREE_MISMATCH"), /阻止更新/);
+});
+
 test("proxy body defaults to automatic discovery, uses one-shot consent and rejects unsupported/ambiguous routes", () => {
   assert.deepEqual(sourceUpdateCheckBody("", false), {});
   assert.deepEqual(sourceUpdateCheckBody("", true), { allowDirect: true });
