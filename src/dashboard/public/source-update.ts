@@ -55,6 +55,16 @@ const REASONS: Record<string, string> = {
   UNSUPPORTED_NPM_CONFIG: "候选 npm 配置需要人工审查，已阻止自动更新。",
   CHECK_FAILED: "版本检查失败。请检查上游与所选网络路由；不会自动改为直连。",
   GIT_FAILED: "Git 检查或网络操作失败。请检查上游与所选代理；不会自动改为直连。",
+  ARCHIVE_NETWORK_FAILED: "官方备用通道连接失败，请检查网络或改用 HTTP(S) 代理。",
+  ARCHIVE_RATE_LIMITED: "GitHub 官方 API 访问次数受限，请稍后重试或改用代理 Git 更新。",
+  ARCHIVE_HISTORY_LIMIT: "待更新历史超过备用通道上限，请改用代理 Git 更新。",
+  ARCHIVE_LIMIT: "源码归档超过备用更新大小限制，请改用代理 Git 更新。",
+  ARCHIVE_COMMIT_UNSUPPORTED: "官方提交格式无法精确还原校验，请改用代理 Git 更新。",
+  ARCHIVE_TREE_MISMATCH: "官方归档与目标提交内容不一致，已阻止更新。",
+  ARCHIVE_METADATA_INVALID: "官方备用提交信息校验失败，已阻止更新。",
+  ARCHIVE_INVALID: "官方源码归档格式校验失败，已阻止更新。",
+  ARCHIVE_OBJECT_STORE_UNSAFE: "本地 Git 对象目录不满足安全要求，已阻止备用更新。",
+  ARCHIVE_URL_INVALID: "备用更新地址不满足官方 HTTPS 限制，已阻止更新。",
   PROCESS_LIMIT: "更新子进程超时或超出限制，请检查网络和本机环境。",
   WORKER_INTERRUPTED: "更新进程中断，需要检查本机更新记录。",
   WORKER_INTERRUPTED_INSPECT_JOURNAL: "更新进程中断，需要检查本机更新记录。",
@@ -125,6 +135,7 @@ export function createSourceUpdateController(deps: SourceUpdateDependencies, ren
   const apply = (snapshot: UpdateSnapshot) => {
     view.snapshot = snapshot;
     view.message = PHASE_TEXT[snapshot.phase] ?? "正在等待更新状态…";
+    if (snapshot.plan?.transport === "codeload") view.message += " 已通过官方备用通道获取并校验提交与源码；依赖仍按所选路由下载。";
     view.recovery = ["failed", "manualRecovery"].includes(snapshot.phase);
     if (["blocked", "failed", "manualRecovery"].includes(snapshot.phase)) view.message += ` ${sourceUpdateReason(snapshot.message)}`;
     paint();
@@ -163,7 +174,7 @@ export function createSourceUpdateController(deps: SourceUpdateDependencies, ren
         finally { delete body.proxyUrl; }
         if (reply.ok === false || reply.accepted !== true) throw reply;
         view.snapshot = null;
-        for (let attempt = 0; attempt < 45; attempt += 1) {
+        for (let attempt = 0; attempt < 240; attempt += 1) {
           await sleep(2000);
           const snapshot = readSnapshot(await deps.get("/api/source-update"));
           apply(snapshot);
@@ -222,7 +233,7 @@ export function createSourceUpdateController(deps: SourceUpdateDependencies, ren
 
 function routeText(snapshot: UpdateSnapshot | null): string {
   if (!snapshot?.route) return "检查时自动读取配置、环境变量、Git/npm 和 Windows 静态系统代理；不猜测端口、不扫描。";
-  if (snapshot.route.mode === "direct") return "路由：仅本次明确授权的直连。";
+  if (snapshot.route.mode === "direct") return "路由：仅本次明确授权的直连；Git 失败后自动尝试官方 API + codeload 备用更新。";
   const source = String(snapshot.route.source ?? "");
   const label = source === "manual" ? "一次性手填" : source === "config" ? "产品配置" : source.startsWith("env:") ? "环境变量" : source === "git" ? "Git 配置" : source.startsWith("npm:") ? "npm 配置" : source === "windows" ? "Windows 静态系统代理" : "自动配置";
   // Intentionally omit endpoint: even malformed server summaries cannot disclose proxy credentials.

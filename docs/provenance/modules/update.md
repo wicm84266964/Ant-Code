@@ -8,10 +8,12 @@ references:
   - lab_product_doc: docs/deployment/source-self-update.md
   - standard: Node.js built-in filesystem, process, crypto and URL APIs
   - standard: Git fast-forward and npm ci command interfaces
+  - standard: Git content-addressed object format, POSIX pax tar and official GitHub REST/codeload protocols
 design_notes:
   - Independently implements this project's standalone source-install update lifecycle using existing Ant Code startup and Dashboard contracts.
   - Derives the installation from the running module and validates repository identity, clean state, official HTTPS upstream and fast-forward eligibility before mutation.
   - Uses one explicitly selected proxy or consented direct route for Git and npm without silently falling back or persisting proxy credentials.
+  - On consented direct Git network failure only, imports hash-exact official commits and verified archive trees without changing refs; preserves the existing candidate, fast-forward and restart gates.
   - Prepares dependencies and loads the candidate CLI in isolation before an activity-gated handoff to a detached built-in-only worker.
   - Records durable journal steps and requires old-process exit plus an authenticated new-process ACK matching the target commit, instance and original listener.
   - Preserves project and configuration paths across strict-port restart; ambiguous post-shutdown failures retain evidence for manual recovery rather than automatic rollback.

@@ -1995,6 +1995,57 @@ test("question review preserves the draft while allowing transcript-only inspect
   }
 });
 
+test("reconnection restores interactions and keeps retrying loopback when the browser reports offline", async () => {
+  runtime.activeSessionIds.add("session-b");
+  try {
+    await withDashboardPage({ width: 1280, height: 900 }, async (page) => {
+      await page.locator(".thread-open", { hasText: "Session B" }).click();
+      await page.waitForFunction(() => globalThis.__dashboardEventSources?.length > 0);
+      await page.clock.install();
+      await page.evaluate(() => {
+        Object.defineProperty(navigator, "onLine", { configurable: true, get: () => false });
+        globalThis.__dashboardEventSources.at(-1).emit("error");
+      });
+      for (let attempt = 0; attempt < 9; attempt++) {
+        await page.clock.runFor(16_000);
+        await page.evaluate(() => globalThis.__dashboardEventSources.at(-1).emit("error"));
+      }
+      assert.ok(await page.evaluate(() => globalThis.__dashboardEventSources.length) > 6);
+      await page.clock.runFor(16_000);
+      await page.evaluate(() => {
+        const source = globalThis.__dashboardEventSources.at(-1);
+        source.emit("open");
+        source.emit("heartbeat");
+        source.emit("dashboard", {
+          type: "session_sync", sequence: 1000, replayGap: true,
+          running: true, turnId: "sync-turn", queue: [], questions: [],
+          approvals: [{ id: "sync-approval", toolName: "write_file", reason: "恢复权限确认", input: { path: "notes.txt" } }]
+        });
+      });
+      assert.equal(await page.locator("#connection-status").getAttribute("data-state"), "connected");
+      assert.equal(await page.locator("#approval-panel").isVisible(), true);
+      await page.evaluate(() => globalThis.__dashboardEventSources.at(-1).emit("dashboard", {
+        type: "session_sync", sequence: 1001, running: true, turnId: "sync-turn", queue: [], approvals: [],
+        questions: [{ id: "sync-question", question: "恢复需求确认", allowCustom: true, choices: [] }]
+      }));
+      assert.equal(await page.locator("#approval-panel").isHidden(), true);
+      await page.locator("#question-panel .question-input").fill("保留我的草稿");
+      await page.evaluate(() => globalThis.__dashboardEventSources.at(-1).emit("dashboard", {
+        type: "session_sync", sequence: 1001, running: true, turnId: "sync-turn", queue: [], approvals: [],
+        questions: [{ id: "sync-question", question: "恢复需求确认", allowCustom: true, choices: [] }]
+      }));
+      assert.equal(await page.locator("#question-panel .question-input").inputValue(), "保留我的草稿");
+      await page.evaluate(() => globalThis.__dashboardEventSources.at(-1).emit("dashboard", {
+        type: "session_sync", sequence: 1002, running: false, queue: [], approvals: [], questions: []
+      }));
+      assert.equal(await page.locator("#question-panel").isHidden(), true);
+      assert.doesNotMatch(await page.locator("#run-status").textContent(), /任务状态未知/);
+    }, { fakeEventSource: true });
+  } finally {
+    runtime.activeSessionIds.delete("session-b");
+  }
+});
+
 test("permission approval dialog stays on screen and does not leave a stuck wait bar", async () => {
   runtime.activeSessionIds.add("session-b");
   try {

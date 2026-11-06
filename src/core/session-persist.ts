@@ -329,7 +329,7 @@ export async function persistSessionMetadata(store: ReturnType<typeof createSess
       output
     });
   }
-  metadata.finishedAt = new Date().toISOString();
+  metadata.finishedAt = status === "running" ? null : new Date().toISOString();
   metadata.outputBytes = Buffer.byteLength(output, "utf8");
   const usage = normalizeProviderUsageAggregate(session.usage);
   metadata.usage = usage;
@@ -351,6 +351,8 @@ export async function persistSessionMetadata(store: ReturnType<typeof createSess
   Object.assign(metadata, committed.metadata);
   const metadataPath = committed.metadataPath;
   metadata.metadataPath = metadataPath;
+  // A tool checkpoint is a live snapshot, not the end of a turn.
+  if (status === "running") return;
   await runHooks({
     config: session.config,
     cwd: session.cwd,

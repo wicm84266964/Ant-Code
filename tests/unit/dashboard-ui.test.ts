@@ -78,7 +78,7 @@ test("configured idle gateway shows connected without masking event failures", a
   app.state.running = true;
   app.els.runStatus = { textContent: "正在回答" };
   app.setConnectionState("offline");
-  assert.equal(label.textContent, "本地网关离线");
+  assert.equal(label.textContent, "Dashboard 连接中断");
   assert.match(app.els.runStatus.textContent, /任务状态未知/);
   assert.match(node.title, /请勿重复发送/);
   assert.equal(app.state.running, true);
@@ -87,6 +87,29 @@ test("configured idle gateway shows connected without masking event failures", a
   app.state.gatewayProfiles = [];
   app.setConnectionState("idle");
   assert.equal(label.textContent, "本地网关未连接");
+});
+
+test("dashboard keeps retrying long-running sessions after repeated connection failures", async () => {
+  const app = await loadAppExports(["state", "scheduleEventReconnect", "clearEventReconnectTimer", "markEventConnectionAlive", "clearEventStaleTimer"]);
+  app.state.currentSessionId = "long-task";
+  app.state.eventSourceSessionId = "long-task";
+  app.state.running = true;
+  try {
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      app.scheduleEventReconnect("long-task");
+      assert.ok(app.state.eventReconnectTimer, `retry ${attempt + 1} was abandoned`);
+      assert.equal(app.state.connectionState, "reconnecting");
+      app.clearEventReconnectTimer();
+    }
+    assert.equal(app.state.eventReconnectAttempt, 6);
+    assert.equal(app.state.running, true);
+    app.markEventConnectionAlive();
+    assert.equal(app.state.eventReconnectAttempt, 0);
+    assert.equal(app.state.connectionState, "connected");
+  } finally {
+    app.clearEventReconnectTimer();
+    app.clearEventStaleTimer();
+  }
 });
 
 async function publicTsSource() {

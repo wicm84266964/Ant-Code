@@ -7,6 +7,24 @@ not the user's project. Unsupported layouts or unsafe state fail closed.
 
 ## Architecture and preparation
 
+- Explicit direct routes fall back from failed Git fetch/ls-remote to the official
+  GitHub API and codeload HTTPS endpoints. Proxy failures never trigger direct
+  requests. The API resolves the configured branch once; downloads pin that SHA.
+  Reconstruct exact commit bytes (including signed payloads) and require Git SHA-1
+  matches. Parse bounded tar.gz in memory without filesystem extraction, rebuild
+  blob/tree objects and require the committed root tree hash. Unsupported commit
+  encodings, links, unsafe paths, corrupt archives and quota/size failures stop.
+  Import at most 64 missing commits, all required snapshots first, then commits in
+  parent-first order using flushed, atomically linked loose objects. No refs/HEAD
+  change during checking; failed checks may retain verified unreachable objects.
+  Keep `github-archive.ts` in the detached worker's closed dependency copy list.
+  A `transport: "codeload"` plan follows the same validation/export/FF/restart path.
+  The API and npm registry must still be reachable; this is not universal offline
+  updating. Anonymous API quotas and special commit encodings may require Git via
+  a proxy. The archive stage has a 180-second budget, 20 seconds per request,
+  32 MiB compressed / 128 MiB expanded per archive, 128 MiB total compressed and
+  512 MiB cumulative object contents. TLS uses bundled roots; no redirects.
+
 - The manager captures immutable boot identity, checks installation eligibility,
   discovers one network route and issues an expiring, server-owned update plan.
   Snapshot reads are local only; check/start run in the background. Checking does
@@ -82,7 +100,7 @@ await acknowledgeSourceUpdate({ sourceRoot, boot, host, actualPort, strictPort: 
   not arbitrary exception text. Background check rejection becomes blocked + code.
 - `snapshot()` returns `{boot, phase, message?, route?, plan?, jobId?, limitations,
   strictRestartSupported}`. Plan fields are `{id, head, target, branch, remote,
-  mergeRef, createdAt, expiresAt}`. Do not expose installation/upstream URLs, proxy
+  mergeRef, transport?, createdAt, expiresAt}`. Do not expose installation/upstream URLs, proxy
   credentials, nonce, raw stderr or journal. `route.endpoint` omits credentials;
   `message` is a safe code. Caller mutation cannot change manager state. One-shot
   credentials stay in memory and inherited worker stdin, not argv or journals.

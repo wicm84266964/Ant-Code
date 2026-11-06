@@ -71,7 +71,7 @@ export async function fixture() {
 export async function copyUpdateModules(destination: string, all = false) {
   await fs.mkdir(destination, { recursive: true });
   const names = all ? (await fs.readdir(path.join(moduleRoot, "src/update"))).filter((name) => name.endsWith(".ts")) :
-    ["contracts.ts", "process.ts", "repository.ts", "state-store.ts", "worker.ts", "worker-entry.ts"];
+    ["contracts.ts", "process.ts", "repository.ts", "github-archive.ts", "state-store.ts", "worker.ts", "worker-entry.ts"];
   for (const name of names) await fs.copyFile(path.join(moduleRoot, "src/update", name), path.join(destination, name));
   await fs.writeFile(path.join(destination, "package.json"), '{"type":"module"}');
 }

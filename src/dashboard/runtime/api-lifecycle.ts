@@ -51,6 +51,7 @@ import {
 import {
   applyDashboardGoal,
   persistGoalSnapshot,
+  publicStateGoal,
   sessionRecordGoalStatus
 } from "./goal-runtime.ts";
 import {
@@ -188,6 +189,25 @@ export function runtimeSubscribe(ctx: DashboardFactoryState, sessionId: string, 
       send(event);
     }
   }
+  // Retained events are bounded and coalesced. Always finish a subscription
+  // with current state; replay alone cannot restore a long-disconnected tab.
+  send({
+    type: "session_sync",
+    sequence: state.eventSequence,
+    replayGap: state.events.length > 0 && afterSequence < nonNegativeInteger(state.events[0].sequence) - 1,
+    running: state.running === true,
+    interrupting: state.interrupting === true,
+    quarantined: Boolean(state.quarantinedTurnId),
+    turnId: state.currentTurnId,
+    queue: queueSnapshot(state),
+    permission: permissionModeSummary(state.session),
+    goal: publicStateGoal(state),
+    sessionStatus: sessionStatusSummary(state.session),
+    changeStats: { ...state.turnChangeStats },
+    approvals: Array.from(state.pendingApprovals.values()).map(pending => pending.approval).filter(Boolean),
+    questions: Array.from(state.pendingQuestions.values()).map(pending => pending.question).filter(Boolean),
+    at: new Date().toISOString()
+  });
   return () => {
     state.listeners.delete(send);
     state.listenerDisposers.delete(send);

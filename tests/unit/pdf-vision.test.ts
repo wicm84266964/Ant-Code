@@ -9,6 +9,7 @@ import { parseDocumentBufferAsync } from "../../src/tools/document-tools.ts";
 import { createSession, runSessionTurn } from "../../src/core/session.ts";
 import { prepareVisionAttachmentsForTurn } from "../../src/core/session-messages.ts";
 import http from "node:http";
+import { createRequire } from "node:module";
 import { validateTurnSubmission, turnRequestFingerprint } from "../../src/dashboard/runtime/turn-queue.ts";
 import { mapSessionEventToDashboard } from "../../src/dashboard/events.ts";
 import { visualPdf } from "../fixtures/pdf-vision.ts";
@@ -29,6 +30,16 @@ test("PDF page ranges are validated, retained and included in request identity",
 });
 
 test("PDF rendering covers all pages, vector content, text and multiple images", async (t) => {
+  // The synthetic PDF references an unembedded Helvetica font. Supply a known
+  // local font for that fixture instead of depending on runner image font aliases.
+  // Keep the pixel assertion: missing text must still fail the render test.
+  const { GlobalFonts } = loadPdfCanvas();
+  const fixtureFont = createRequire(import.meta.url).resolve("katex/dist/fonts/KaTeX_Main-Regular.ttf");
+  for (const alias of ["Helvetica", "Arial", "sans-serif"]) {
+    const key = GlobalFonts.registerFromPath(fixtureFont, alias);
+    assert.ok(key, `fixture font registration failed: ${alias}`);
+    t.after(() => GlobalFonts.remove(key));
+  }
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "ant-pdf-render-"));
   t.after(() => fs.rm(cwd, { recursive: true, force: true }));
   const file = path.join(cwd, "five.pdf");

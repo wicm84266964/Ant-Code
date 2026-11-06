@@ -822,7 +822,7 @@ export function sessionGatewayProtocol(session: AgentSession) {
  * @param {ReturnType<typeof createToolRuntime>} toolRuntime
  * @param {{ onEvent?: (event: SessionEvent) => void | Promise<void>; signal?: AbortSignal; delegationGuard?: ReturnType<typeof createDelegationGuard>; reviewGate?: ReturnType<typeof createReviewGate> }} options
  */
-export async function executeToolCalls(toolCalls: import("../model-gateway/protocol.ts").GatewayToolCall[], toolRuntime: ReturnType<typeof createToolRuntime>, options: { onEvent?: (event: SessionEvent) => void | Promise<void>; signal?: AbortSignal; delegationGuard?: ReturnType<typeof createDelegationGuard>; reviewGate?: ReturnType<typeof createReviewGate>; turnChangeTracker?: ReturnType<typeof createTurnChangeTracker>; antEventNormalizer?: ReturnType<typeof createAntEventNormalizer>; onAntEvent?: (event: Record<string, unknown>) => void | Promise<void> } = {}): Promise<SessionToolResult[]> {
+export async function executeToolCalls(toolCalls: import("../model-gateway/protocol.ts").GatewayToolCall[], toolRuntime: ReturnType<typeof createToolRuntime>, options: { onEvent?: (event: SessionEvent) => void | Promise<void>; signal?: AbortSignal; delegationGuard?: ReturnType<typeof createDelegationGuard>; reviewGate?: ReturnType<typeof createReviewGate>; turnChangeTracker?: ReturnType<typeof createTurnChangeTracker>; antEventNormalizer?: ReturnType<typeof createAntEventNormalizer>; onAntEvent?: (event: Record<string, unknown>) => void | Promise<void>; onBatchComplete?: (calls: import("../model-gateway/protocol.ts").GatewayToolCall[], results: SessionToolResult[]) => Promise<void> } = {}): Promise<SessionToolResult[]> {
   const results: SessionToolResult[] = [];
   const batches = createToolExecutionBatches(toolCalls, toolRuntime);
   const agentTaskIds = new Set<string>();
@@ -835,6 +835,7 @@ export async function executeToolCalls(toolCalls: import("../model-gateway/proto
     if (batch.parallel) {
       const batchResults = await Promise.all(batch.calls.map((call) => executeOneToolCall(call, toolRuntime, options, agentTaskIds)));
       results.push(...batchResults);
+      await options.onBatchComplete?.(batch.calls, batchResults);
       if (options.signal?.aborted) {
         return results;
       }
@@ -847,6 +848,7 @@ export async function executeToolCalls(toolCalls: import("../model-gateway/proto
       }
       const result = await executeOneToolCall(call, toolRuntime, options, agentTaskIds);
       results.push(result);
+      await options.onBatchComplete?.([call], [result]);
       if (options.signal?.aborted) {
         return results;
       }

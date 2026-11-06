@@ -104,6 +104,8 @@ import {
 } from "./session-tools.ts";
 import {
   appendSessionMessages,
+  appendTranscriptMessages,
+  appendModelContextArchiveMessages,
   persistableContextMessages,
   persistSessionMetadata
 } from "./session-persist.ts";
@@ -241,10 +243,16 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
   let finalOutput = "";
   let outputHealthRetries = 0;
   let reasoningEffortRetried = false;
+  let checkpointedTurn = false;
+  const finishTurnInterrupted = (input: Parameters<typeof finishInterruptedTurn>[0]) => finishInterruptedTurn({
+    ...input,
+    // The user message is already in the checkpoint. Save only the remaining draft.
+    ...(checkpointedTurn ? { prompt: "", displayPrompt: "" } : {})
+  });
 
   try {
   if (options.signal?.aborted) {
-      return finishInterruptedTurn({
+      return finishTurnInterrupted({
         session,
         sessionStore,
         metadata,
@@ -321,7 +329,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
 
   for (let round = 0; ; round += 1) {
     if (options.signal?.aborted) {
-      return finishInterruptedTurn({
+      return finishTurnInterrupted({
         session,
         sessionStore,
         metadata,
@@ -411,7 +419,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
     });
 
     if (options.signal?.aborted) {
-      return finishInterruptedTurn({
+      return finishTurnInterrupted({
         session,
         sessionStore,
         metadata,
@@ -454,8 +462,8 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
       const failedDraft = appendFailedGatewayDraft({
         session,
         metadata,
-        prompt: options.prompt,
-        displayPrompt,
+        prompt: checkpointedTurn ? "" : options.prompt,
+        displayPrompt: checkpointedTurn ? "" : displayPrompt,
         draft: interruptedDraft,
         reason: `gateway_error:${response.error?.code ?? "GATEWAY_ERROR"}`
       });
@@ -509,7 +517,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
     });
 
     if (options.signal?.aborted) {
-      return finishInterruptedTurn({
+      return finishTurnInterrupted({
         session,
         sessionStore,
         metadata,
@@ -711,7 +719,6 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
         : {})
     };
     messages.push(assistantToolMessage);
-    turnMessages.push(assistantToolMessage);
 
     await emitEvent(eventOptions, {
       type: "tool_calls_requested",
@@ -719,15 +726,47 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
       toolCalls: summarizeToolCallRequests(response.data.toolCalls)
     });
 
+    let checkpointedResponseBatches = 0;
     toolResults = await executeToolCalls(response.data.toolCalls, toolRuntime, {
       ...eventOptions,
       delegationGuard,
       reviewGate,
-      turnChangeTracker
+      turnChangeTracker,
+      onBatchComplete: async (completedCalls, completedResults) => {
+        const firstBatch = checkpointedResponseBatches++ === 0;
+        const completedIds = new Set(completedCalls.map(call => call.id));
+        const checkpointAssistant = {
+          ...assistantToolMessage,
+          content: firstBatch ? assistantToolMessage.content : [],
+          thinking: firstBatch ? assistantToolMessage.thinking : undefined,
+          toolCalls: completedCalls,
+          ...(assistantToolMessage.responseItems ? {
+            responseItems: assistantToolMessage.responseItems.filter(item => (
+              item.type === "function_call" ? completedIds.has(String(item.call_id ?? "")) : firstBatch
+            ))
+          } : {})
+        };
+        const completedMessages = completedResults.map(result => ({
+          role: "tool", toolCallId: result.toolCallId, name: result.name,
+          content: [{ type: "text", text: result.content }]
+        }));
+        const modelCheckpoint = [...turnMessages, checkpointAssistant, ...completedMessages];
+        session.messages.push(...persistableContextMessages(modelCheckpoint));
+        appendModelContextArchiveMessages(session, modelCheckpoint);
+        appendTranscriptMessages(session, [
+          ...transcriptTurnMessages,
+          ...completedResults.flatMap((result, index) => [completedMessages[index], toolActivityTranscriptMessage(result)])
+        ]);
+        metadata.toolCalls.push(...summarizeToolCalls(completedCalls, completedResults));
+        turnMessages.length = 0;
+        transcriptTurnMessages.length = 0;
+        checkpointedTurn = true;
+        // Await durable storage before admitting the next tool or model request.
+        await persistSessionMetadata(sessionStore, metadata, "", "running", session, options);
+      }
     });
-    metadata.toolCalls.push(...summarizeToolCalls(response.data.toolCalls, toolResults));
     if (options.signal?.aborted) {
-      return finishInterruptedTurn({
+      return finishTurnInterrupted({
         session,
         sessionStore,
         metadata,
@@ -748,9 +787,6 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
         content: [{ type: "text", text: result.content }]
       };
       messages.push(toolMessage);
-      turnMessages.push(toolMessage);
-      transcriptTurnMessages.push(toolMessage);
-      transcriptTurnMessages.push(toolActivityTranscriptMessage(result));
     }
   }
 

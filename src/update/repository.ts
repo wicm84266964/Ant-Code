@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
+import { importOfficialArchive } from "./github-archive.ts";
 import { UpdateError } from "./contracts.ts";
 import type { RepositoryIdentity, Route, UpdatePlan } from "./contracts.ts";
 import { cleanEnvironment, routedEnvironment, runProcess } from "./process.ts";
@@ -91,11 +92,25 @@ export class Repository {
   }
   async check(route: Route): Promise<UpdatePlan> {
     const identity = await this.inspect();
-    // Fetch a literal trusted URL and current upstream ref, never a config refspec or remote helper.
-    await this.git(["-c", "fetch.writeCommitGraph=false", "fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", identity.upstreamUrl, identity.mergeRef], route);
-    // --no-write-fetch-head does not expose the fetched tip; resolve it via ls-remote over the SAME route.
-    const refs = await this.git(["ls-remote", "--exit-code", identity.upstreamUrl, identity.mergeRef], route);
-    const target = refs.trim().split(/\s+/)[0];
+    let target: string;
+    let transport: "codeload" | undefined;
+    try {
+      // Literal trusted URL/ref, never config refspecs or helpers.
+      await this.git(["-c", "fetch.writeCommitGraph=false", "fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", identity.upstreamUrl, identity.mergeRef], route);
+      const refs = await this.git(["ls-remote", "--exit-code", identity.upstreamUrl, identity.mergeRef], route);
+      target = refs.trim().split(/\s+/)[0]!;
+    } catch (error) {
+      // Only network commands may trigger fallback, and only on an authorized
+      // direct route. Local safety failures and proxy failures never bypass it.
+      if (route.mode !== "direct" || !(error instanceof UpdateError) || !["GIT_FAILED", "PROCESS_LIMIT"].includes(error.code)) throw error;
+      target = await importOfficialArchive({ root: this.root, mergeRef: identity.mergeRef, hasCommit: async sha => {
+        const result = await this.runner("git", ["cat-file", "-e", `${sha}^{commit}`], {
+          cwd: this.root, env: routedEnvironment(this.env, route, "git"), timeoutMs: 30_000
+        });
+        return result.code === 0;
+      } });
+      transport = "codeload";
+    }
     if (!/^[a-f0-9]{40,64}$/.test(target)) throw new UpdateError("INVALID_TARGET");
     // If upstream moved between fetch and ls-remote, fail closed rather than fetch an arbitrary SHA.
     await this.git(["cat-file", "-e", `${target}^{commit}`]);
@@ -104,7 +119,7 @@ export class Repository {
     const fresh = await this.inspect();
     if (JSON.stringify(fresh) !== JSON.stringify(identity)) throw new UpdateError("REPOSITORY_CHANGED");
     const now = Date.now();
-    return { ...identity, id: randomUUID(), target, createdAt: now, expiresAt: now + 10 * 60_000 };
+    return { ...identity, id: randomUUID(), target, ...(transport ? { transport } : {}), createdAt: now, expiresAt: now + 10 * 60_000 };
   }
   async validateTarget(target: string) {
     const entries = (await this.git(["ls-tree", "-r", "-z", target])).split("\0").filter(Boolean);

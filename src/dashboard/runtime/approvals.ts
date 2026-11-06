@@ -299,6 +299,9 @@ export function askApproval(state: DashboardActiveSessionState, request: Record<
     approvalKey,
     at: new Date().toISOString()
   };
+  const promise = new Promise((resolve: (allowed: boolean) => void) => {
+    state.pendingApprovals.set(approvalId, { resolve, approvalKey, approval: payload });
+  });
   appendDashboardEvent(state, {
     type: "approval_required",
     id: approvalId,
@@ -306,9 +309,7 @@ export function askApproval(state: DashboardActiveSessionState, request: Record<
     activity: permissionRequestToActivity(request),
     at: payload.at
   });
-  return new Promise((resolve: (allowed: boolean) => void) => {
-    state.pendingApprovals.set(approvalId, { resolve, approvalKey });
-  });
+  return promise;
 }
 
 
