@@ -195,6 +195,10 @@ test("gateway client normalizes HTTP errors with bounded response body", async (
     assert.equal(result.error.code, "GATEWAY_HTTP_ERROR");
     assert.equal(result.error.status, 503);
     assert.equal(result.error.details.body.length, 1000);
+    assert.equal(result.error.details.attempts, 6);
+    // The final response is represented by error.status; history holds prior attempts.
+    assert.equal(result.error.details.retryHistory.length, 5);
+    assert.ok(result.error.details.retryHistory.every((entry) => entry.status === 503));
     assert.match(result.error.details.body, /service unavailable/);
     assert.doesNotMatch(result.error.details.body, /token=secret/);
     assert.ok(result.error.diagnostics.some((hint) => /server logs/i.test(hint)));

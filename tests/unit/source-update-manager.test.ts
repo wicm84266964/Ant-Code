@@ -17,6 +17,27 @@ async function managerFor(f: Awaited<ReturnType<typeof fixture>>, overrides: Par
   return manager;
 }
 
+test("Windows ACL validation ignores incompatible parent PowerShell modules", { skip: process.platform !== "win32" }, async (t) => {
+  const f = await fixture(); t.after(f.cleanup);
+  const modules = path.join(f.parent, "foreign-modules");
+  const security = path.join(modules, "Microsoft.PowerShell.Security");
+  await fs.mkdir(security, { recursive: true });
+  await fs.writeFile(path.join(security, "Microsoft.PowerShell.Security.psd1"),
+    "@{ ModuleVersion='99.0'; RootModule='foreign.psm1'; FunctionsToExport=@('Get-Acl') }");
+  await fs.writeFile(path.join(security, "foreign.psm1"), "throw 'Incompatible parent module loaded'");
+  const previous = process.env.PSModulePath;
+  process.env.PSModulePath = modules;
+  try {
+    const store = new StateStore(f.root);
+    await store.initialize();
+    await store.initialize(); // Existing private directories are still validated.
+    assert.ok((await fs.stat(path.join(store.root, "leases"))).isDirectory());
+  } finally {
+    if (previous === undefined) delete process.env.PSModulePath;
+    else process.env.PSModulePath = previous;
+  }
+});
+
 test("GET snapshot is local-only, cloned and exposes immutable boot, not journal secrets", async (t) => {
   const f = await fixture(); t.after(f.cleanup);
   const manager = await managerFor(f);

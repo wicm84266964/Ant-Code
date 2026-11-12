@@ -123,6 +123,7 @@ import {
   activeReplayCursor,
   activeSessionRecord,
   assistantTranscriptText,
+  finalAssistantTranscriptText,
   boundedSessionCwd,
   compareSessionRecords,
   createSnapshotReadState,
@@ -255,6 +256,9 @@ export async function runtimeReadSession(ctx: DashboardFactoryState, selector: u
     : storedPage;
   const transcript = includeInterruptedDraftsFromEvents(transcriptPage.messages, activeState);
   const finalText = activeState?.finalOutput || assistantTranscriptText(transcript);
+  const deliveryText = activeState
+    ? (!activeState.running && activeState.status === "completed" ? activeState.finalOutput : "")
+    : metadata.status === "completed" ? finalAssistantTranscriptText(transcript) : "";
   const snapshotState = activeState ?? createSnapshotReadState(metadata, ctx.cwd);
   const backgroundSnapshot = snapshotState ? await buildBackgroundSubagentSnapshot(snapshotState) : null;
   return {
@@ -285,8 +289,9 @@ export async function runtimeReadSession(ctx: DashboardFactoryState, selector: u
       files: collectSessionFiles({
         cwd: session?.cwd ?? metadata.cwd ?? ctx.cwd,
         workflow: session?.workflow ?? metadata.workflow ?? null,
+        visualEvidence: session?.visualEvidence,
         artifacts: metadata.artifacts ?? session?.artifacts ?? null
-      }, finalText),
+      }, deliveryText),
       workflow: session?.workflow ?? metadata.workflow ?? null,
       backgroundSnapshot: backgroundSnapshot ? publicBackgroundSnapshot(backgroundSnapshot) : null,
       modifiedAt: metadata.modifiedAt ?? null,

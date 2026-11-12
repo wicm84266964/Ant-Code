@@ -46,6 +46,11 @@ export class StateStore {
     if (process.platform === "win32") {
       // No broad user/group inheritance in this private directory. Existing state is never silently trusted.
       const env = cleanEnvironment(process.env);
+      // Windows PowerShell must resolve its own built-in Security module.
+      // A parent PowerShell 7 module path can make Get-Acl fail to load.
+      for (const key of Object.keys(env)) {
+        if (key.toLowerCase() === "psmodulepath") delete env[key];
+      }
       if (created) {
         const who = await runProcess("whoami.exe", ["/user", "/fo", "csv", "/nh"], { cwd: this.root, env });
         const sid = who.stdout.match(/S-1-5-[\d-]+/i)?.[0];

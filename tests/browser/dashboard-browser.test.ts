@@ -2913,3 +2913,44 @@ test("delayed modal autofocus preserves a field already chosen for editing", asy
     assert.equal(selected, true);
   });
 });
+
+
+test("file activity tabs follow revisions, pause on selection, and keep delivery separate", async () => {
+  runtime.activeSessionIds.add("session-b");
+  try {
+    await withDashboardPage({ width: 1440, height: 900 }, async (page) => {
+      await page.route("**/api/files?**", async (route) => {
+        const name = new URL(route.request().url()).searchParams.get("path");
+        await route.fulfill({ json: { ok: true, file: { kind: "text", relativePath: name, name, content: `preview ${name}` } } });
+      });
+      await page.locator(".thread-open", { hasText: "Session B" }).click();
+      await page.waitForFunction(() => globalThis.__dashboardEventSources?.length > 0);
+      const files = [
+        { name: "draft.txt", relativePath: "draft.txt", kind: "text", source: "edited", inProcess: true, revision: "1", activityAt: "1" },
+        { name: "result.txt", relativePath: "result.txt", kind: "text", inProcess: true, delivered: true, revision: "1", activityAt: "2" }
+      ];
+      async function emit(sequence, items) {
+        await page.evaluate(({ sequence, files }) => globalThis.__dashboardEventSources.at(-1).emit("dashboard", { type: "artifacts_updated", sequence, files }), { sequence, files: items });
+      }
+      await emit(1, files);
+      await page.locator('#file-list .file-item[data-file="result.txt"].active').waitFor();
+      await page.locator('#file-list .file-item[data-file="draft.txt"]').click();
+      await page.locator('#preview-body:has-text("preview draft.txt")').waitFor();
+      await emit(2, [...files, { name: "new.txt", relativePath: "new.txt", kind: "text", inProcess: true, revision: "1", activityAt: "3" }]);
+      assert.equal(await page.locator('#file-list .file-item.active').getAttribute("data-file"), "draft.txt");
+      await page.getByRole("button", { name: "跟随最新", exact: true }).click();
+      await page.locator('#file-list .file-item[data-file="new.txt"].active').waitFor();
+      let previews = 0;
+      page.on("request", (request) => { if (request.url().includes("/api/files?")) previews++; });
+      await emit(3, [...files, { name: "new.txt", relativePath: "new.txt", kind: "text", inProcess: true, revision: "2", activityAt: "4" }]);
+      await page.waitForFunction(() => document.querySelector("#preview-body")?.textContent.includes("preview new.txt"));
+      await waitUntil(() => previews > 0);
+      await page.getByRole("button", { name: /交付文件/ }).click();
+      assert.equal(await page.locator("#file-list .file-item").count(), 1);
+      assert.equal(await page.locator("#file-list .file-name").textContent(), "result.txt");
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.locator("[data-dashboard-view='files']").click();
+      await assertNoPageOverflow(page, "file activity mobile");
+    }, { fakeEventSource: true });
+  } finally { runtime.activeSessionIds.delete("session-b"); }
+});

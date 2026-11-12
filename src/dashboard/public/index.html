@@ -251,11 +251,12 @@
         <header class="preview-header">
           <div>
             <div class="section-label">产物与文件</div>
-            <div class="preview-subtitle">生成的图、报表和导出文件会自动预览</div>
+            <div class="preview-subtitle">查看执行动态，或切换到最终回复交付的文件</div>
           </div>
           <button class="icon-button" id="collapse-preview" type="button" title="收起预览" aria-label="收起文件预览">›</button>
         </header>
-        <div class="file-list" id="file-list"></div>
+        <div class="file-toolbar" id="file-toolbar" role="group" aria-label="文件分类与跟随"></div>
+        <div class="file-list" id="file-list" role="group" aria-label="当前分类文件"></div>
         <div class="preview-body" id="preview-body">
           <div class="preview-placeholder">任务产物会显示在这里</div>
         </div>

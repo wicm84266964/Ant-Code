@@ -98,6 +98,8 @@ var state = {
   deleteConfirmSessionId: "",
   files: [],
   previewPath: "",
+  fileCategory: "process",
+  followFiles: true,
   liveTitle: "",
   liveActivities: /* @__PURE__ */ new Map(),
   backgroundSubagents: /* @__PURE__ */ new Map(),
@@ -1781,6 +1783,8 @@ async function openSession(id, options = {}) {
   updateSendButton();
   resetTurnChangeStats();
   state.previewPath = "";
+  state.followFiles = true;
+  state.fileCategory = "process";
   applySessionFiles(Array.isArray(loadedSession.files) ? loadedSession.files : [], { force: true });
   els.runStatus.textContent = loadedSession.status || "历史";
   setTranscriptPaging(loadedSession.transcriptPage);
@@ -1890,6 +1894,8 @@ function newTask() {
   clearTranscript();
   state.files = [];
   state.previewPath = "";
+  state.followFiles = true;
+  state.fileCategory = "process";
   state.queue = [];
   state.queueCancelling.clear();
   state.backgroundCancelling.clear();
@@ -3092,44 +3098,79 @@ function pickExhibitFile(files, options = {}) {
   const pool = fresh.length > 0 ? fresh : options.force === true ? items : [];
   return pool.at(-1) ?? null;
 }
+function visibleActivityFiles(files, category) {
+  return files.filter((file) => category === "delivery" ? file.delivered === true : file.inProcess === true || file.inProcess === void 0 && ["created", "edited", "changed"].includes(String(file.source))).sort((a, b) => String(b.activityAt ?? "").localeCompare(String(a.activityAt ?? "")));
+}
+function renderFileToolbar() {
+  const toolbar = document.querySelector("#file-toolbar");
+  if (!toolbar) return;
+  const focusedId = toolbar.contains(document.activeElement) ? document.activeElement?.id : "";
+  toolbar.innerHTML = "";
+  for (const [category, label] of [["process", "过程动态"], ["delivery", "交付文件"]]) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.id = `file-category-${category}`;
+    button.textContent = `${label} · ${visibleActivityFiles(state.files, category).length}`;
+    button.setAttribute("aria-pressed", String(state.fileCategory === category));
+    button.addEventListener("click", () => {
+      state.fileCategory = category;
+      cancelScopedRequest("file");
+      resetPreview(category === "process" ? "文件改写和图片动态会显示在这里" : "最终回复明确链接的文件会显示在这里");
+      renderFiles();
+      const first = visibleActivityFiles(state.files, category)[0];
+      if (first?.relativePath) void openFile2(first.relativePath, { automatic: true });
+    });
+    toolbar.append(button);
+  }
+  const follow = document.createElement("button");
+  follow.type = "button";
+  follow.id = "file-follow";
+  follow.textContent = state.followFiles ? "跟随中" : "跟随最新";
+  follow.setAttribute("aria-pressed", String(state.followFiles));
+  follow.addEventListener("click", () => {
+    state.followFiles = !state.followFiles;
+    renderFileToolbar();
+    const first = visibleActivityFiles(state.files, state.fileCategory)[0];
+    if (state.followFiles && first?.relativePath) void openFile2(first.relativePath, { automatic: true });
+  });
+  toolbar.append(follow);
+  if (focusedId) document.getElementById(focusedId)?.focus({ preventScroll: true });
+}
 function applySessionFiles(files, options = {}) {
-  const previousPaths = state.files.map((file) => file.relativePath);
+  const previous = new Map(state.files.map((file) => [file.relativePath, file.revision]));
   state.files = Array.isArray(files) ? files : [];
   renderFiles();
-  if (options.exhibit === false) {
+  if (options.exhibit === false) return;
+  const visible = visibleActivityFiles(state.files, state.fileCategory);
+  const next = visible.find((file) => !previous.has(file.relativePath) || previous.get(file.relativePath) !== file.revision) ?? (options.force || !state.previewPath ? visible[0] : null);
+  if (state.followFiles && next?.relativePath) {
+    void openFile2(next.relativePath, { automatic: true });
     return;
   }
-  const next = pickExhibitFile(state.files, {
-    previousPaths,
-    force: options.force === true || !state.previewPath
-  });
-  if (next?.relativePath && next.relativePath !== state.previewPath) {
-    void openFile2(next.relativePath);
-    return;
-  }
-  if (!state.previewPath) {
-    resetPreview();
-    return;
-  }
+  if (!state.previewPath) resetPreview(state.fileCategory === "delivery" ? "最终回复明确链接的文件会显示在这里" : "文件改写和图片动态会显示在这里");
   syncFileListSelection();
 }
 function renderFiles() {
+  renderFileToolbar();
   els.fileList.innerHTML = "";
-  if (state.files.length === 0) {
+  const files = visibleActivityFiles(state.files, state.fileCategory);
+  if (files.length === 0) {
     const empty = document.createElement("div");
     empty.className = "thread-meta";
-    empty.textContent = "暂无产物";
+    empty.textContent = state.fileCategory === "delivery" ? "暂无交付文件" : "暂无文件动态";
     els.fileList.append(empty);
     return;
   }
-  for (const file of state.files) {
+  const sourceLabels = { created: "已生成", edited: "已修改", changed: "已更新", viewed: "已查看图片", screenshot: "已截图" };
+  for (const file of files) {
     const item = document.createElement("button");
     item.type = "button";
     item.className = "file-item";
     item.dataset.file = file.relativePath ?? "";
+    item.title = file.relativePath ?? "";
     item.innerHTML = `
       <div class="file-name">${escapeHtml(file.name)}</div>
-      <div class="file-meta">${escapeHtml(file.kind)} · ${escapeHtml(file.source ?? "file")}</div>
+      <div class="file-meta">${escapeHtml(state.fileCategory === "delivery" ? "最终回复交付" : sourceLabels[String(file.source)] ?? "已更新")} · ${escapeHtml(file.kind)}</div>
     `;
     item.classList.toggle("active", Boolean(state.previewPath) && item.dataset.file === state.previewPath);
     item.addEventListener("click", () => openFile2(file.relativePath));
@@ -3145,14 +3186,18 @@ function syncFileListSelection() {
   });
 }
 function currentImageFiles2() {
-  return state.files.filter((file) => file.kind === "image").map((file) => ({
+  return visibleActivityFiles(state.files, state.fileCategory).filter((file) => file.kind === "image").map((file) => ({
     name: file.name,
     rawUrl: rawFileUrl2(file.relativePath),
     relativePath: file.relativePath
   }));
 }
-async function openFile2(filePath) {
+async function openFile2(filePath, options = {}) {
   if (!filePath) return;
+  if (!options.automatic) {
+    state.followFiles = false;
+    renderFileToolbar();
+  }
   state.previewPath = filePath;
   syncFileListSelection();
   const sessionId = state.currentSessionId;
@@ -3176,7 +3221,7 @@ async function openFile2(filePath) {
   if (file.kind === "image") {
     els.previewBody.innerHTML = `
       <button class="preview-image-button" type="button" aria-label="打开 ${escapeHtml(file.name)} 大图">
-        <img class="preview-image" alt="${escapeHtml(file.name)}" src="${file.rawUrl}" />
+        <img class="preview-image" alt="${escapeHtml(file.name)}" src="${escapeAttribute(`${file.rawUrl}&revision=${encodeURIComponent(String(state.files.find((item) => item.relativePath === filePath)?.revision ?? ""))}`)}" />
       </button>
     `;
     els.previewBody.querySelector(".preview-image-button")?.addEventListener("click", () => {
@@ -3195,7 +3240,7 @@ async function openFile2(filePath) {
           </div>
           ${localOpenButtonHtml(file.relativePath)}
         </header>
-        <iframe class="preview-frame" title="${escapeHtml(file.name)}" src="${file.rawUrl}"></iframe>
+        <iframe class="preview-frame" title="${escapeHtml(file.name)}" src="${escapeAttribute(`${file.rawUrl}&revision=${encodeURIComponent(String(state.files.find((item) => item.relativePath === filePath)?.revision ?? ""))}`)}"></iframe>
       </div>
     `;
   } else if (file.kind === "office-preview") {
@@ -12779,6 +12824,7 @@ export {
   upsertToolActivityCard,
   userMessageDisplayText2 as userMessageDisplayText,
   userTranscriptDisplayText,
+  visibleActivityFiles,
   workflowItem4 as workflowItem,
   workflowSection4 as workflowSection
 };
