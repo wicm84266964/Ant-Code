@@ -4,6 +4,10 @@
 
 ## 2.0.34 - 2026-11-13
 
+已于北京时间 2026-11-13 00:33:04 发布稳定版：[v2.0.34](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.34)。不可变标签指向 `7759bac6c41a6e0c46b5c7d2ac2937890b45d967`，功能经 [PR #97](https://github.com/wicm84266964/Ant-Code/pull/97) 合并；[候选 CI](https://github.com/wicm84266964/Ant-Code/actions/runs/43258123004)、[主分支 CI](https://github.com/wicm84266964/Ant-Code/actions/runs/43259051762) 与[官方发布工作流](https://github.com/wicm84266964/Ant-Code/actions/runs/43259854341) 均通过。
+
+开发仓与正式仓 Windows 完整发布门禁分别通过：单元/集成 1612/1612（Node 运行器口径，含父级汇总）、浏览器 45/45，无失败、取消或跳过。Ubuntu 候选 CI 单元/集成 1603 通过、9 项平台条件跳过、0 失败，浏览器 45/45；跨仓 25 个字节一致文件、11 项内部资料/本地生成物排除项通过，重复覆盖不累加。初次 Windows 40 项更新器相关失败已定位为父 PowerShell 模块路径干扰并修复，严格 ACL 检查未放宽。下方候选内容及已发布说明保持历史快照。
+
 - Dashboard 文件栏区分“过程动态 / 交付文件”，最终交付依据成功完成回复中的本地链接识别；同路径更新刷新预览，支持暂停和恢复跟随。
 - 异步会话保存对短暂文件占用有限重试，持续失败保留旧文件；Windows 源码更新隔离父 PowerShell 模块路径，保留严格权限检查。
 - 配置和会话无需迁移，升级后完整重启 CLI/TUI、Dashboard 并刷新页面。仅源码发布，无新增二进制附件，不发布 npm 包，不更新 TaxaMask 内嵌版。
