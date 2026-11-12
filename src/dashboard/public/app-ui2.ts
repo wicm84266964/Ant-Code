@@ -692,6 +692,8 @@ export async function openSession(id: string, options: { restore?: boolean } = {
   updateSendButton();
   resetTurnChangeStats();
   state.previewPath = "";
+  state.followFiles = true;
+  state.fileCategory = "process";
   applySessionFiles(Array.isArray(loadedSession.files) ? loadedSession.files : [], { force: true });
   els.runStatus.textContent = loadedSession.status || "历史";
   setTranscriptPaging(loadedSession.transcriptPage);
@@ -807,6 +809,8 @@ export function newTask() {
   clearTranscript();
   state.files = [];
   state.previewPath = "";
+  state.followFiles = true;
+  state.fileCategory = "process";
   state.queue = [];
   state.queueCancelling.clear();
   state.backgroundCancelling.clear();

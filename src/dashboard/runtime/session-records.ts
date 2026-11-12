@@ -244,6 +244,14 @@ export function publicBackgroundSnapshot(snapshot: { groups?: unknown[]; totalGr
 }
 
 
+export function finalAssistantTranscriptText(messages: unknown = []) {
+  if (!Array.isArray(messages)) return "";
+  const last = messages.at(-1);
+  if (!last || last.role !== "assistant" || last.interruptedDraft || last.thinkingProcess || last.toolActivity
+    || last.tool_calls?.length || last.toolCalls?.length) return "";
+  return messageContentText(last.content);
+}
+
 export function assistantTranscriptText(messages: unknown = []) {
   if (!Array.isArray(messages)) {
     return "";

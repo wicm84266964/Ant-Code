@@ -6,6 +6,7 @@ import test from "node:test";
 import { collectSessionFiles, previewFile, readRawFile, resolveSystemOpenFile, resolveWorkspaceFile } from "../../src/dashboard/files.ts";
 import { parseDocumentBufferAsync } from "../../src/tools/document-tools.ts";
 import { createDocxBuffer, createOfficeZip, createXlsxBuffer } from "../fixtures/office-fixtures.ts";
+import { finalAssistantTranscriptText } from "../../src/dashboard/runtime/session-records.ts";
 
 test("dashboard file preview blocks paths outside workspace", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-files-"));
@@ -308,4 +309,65 @@ test("dashboard collects mentioned files when persisted workflow changes are sum
   const files = collectSessionFiles(session, "see chart.png");
 
   assert.equal(files.some((file) => file.relativePath === "chart.png"), true);
+});
+
+
+test("file activity merges repeated edits and only final local links become deliveries", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-activity-"));
+  try {
+    for (const name of ["draft.md", "final report.md", "reference.txt", "chart.png"]) await fs.writeFile(path.join(cwd, name), "test");
+    const session = { cwd, workflow: { changes: [
+      { path: "draft.md", created: true, recordedAt: "2026-11-11T01:00:00Z" },
+      { path: "draft.md", edited: true, recordedAt: "2026-11-11T02:00:00Z" },
+      { path: "final report.md", created: true }
+    ] } };
+    const files = collectSessionFiles(session, "参考 `reference.txt`；[交付](<final%20report.md>)；![图](chart.png)；[外部](https://example.com/reference.txt)\n```md\n[例子](draft.md)\n```");
+    assert.equal(files.filter((file) => file.relativePath === "draft.md").length, 1);
+    assert.equal(files.find((file) => file.relativePath === "draft.md")?.source, "edited");
+    assert.equal(files.find((file) => file.relativePath === "draft.md")?.delivered, undefined);
+    assert.equal(files.find((file) => file.relativePath === "reference.txt")?.inProcess, undefined);
+    assert.deepEqual(files.filter((file) => file.delivered).map((file) => file.name).sort(), ["chart.png", "final report.md"]);
+    const revision = files.find((file) => file.relativePath === "draft.md")?.revision;
+    await fs.writeFile(path.join(cwd, "draft.md"), "updated content");
+    assert.notEqual(collectSessionFiles(session).find((file) => file.relativePath === "draft.md")?.revision, revision);
+  } finally { await fs.rm(cwd, { recursive: true, force: true }); }
+});
+
+test("only inspected workspace image evidence enters activity without exposing pixels", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-visual-"));
+  try {
+    await fs.writeFile(path.join(cwd, "view.png"), "image");
+    await fs.writeFile(path.join(cwd, "pending.png"), "image");
+    const files = collectSessionFiles({ cwd, visualEvidence: { items: [
+      { name: "view.png", status: "inspected", data: "private-pixels" },
+      { name: "pending.png", status: "pending" },
+      { name: "../outside.png", status: "inspected" }
+    ] } });
+    assert.equal(files.length, 1);
+    assert.equal(files[0].source, "viewed");
+    assert.equal(files[0].inProcess, true);
+    assert.equal(JSON.stringify(files).includes("private-pixels"), false);
+  } finally { await fs.rm(cwd, { recursive: true, force: true }); }
+});
+
+test("delivery restoration excludes drafts and fenced examples", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-delivery-"));
+  try {
+    await fs.writeFile(path.join(cwd, "draft.md"), "draft");
+    await fs.writeFile(path.join(cwd, "final.md"), "final");
+    const messages = [
+      { role: "assistant", content: "[中间](draft.md)", toolCalls: [{ id: "1" }] },
+      { role: "tool", content: "ok" },
+      { role: "assistant", content: "[交付](final.md)" }
+    ];
+    const restored = collectSessionFiles({ cwd }, finalAssistantTranscriptText(messages));
+    assert.deepEqual(restored.filter((file) => file.delivered).map((file) => file.name), ["final.md"]);
+    for (const last of [messages[0], { role: "assistant", interruptedDraft: true, content: "[草稿](draft.md)" }, { role: "user", content: "继续" }]) {
+      assert.equal(finalAssistantTranscriptText([...messages, last]), "");
+    }
+    for (const fence of ["~~~", "````"]) {
+      const example = `[交付](final.md)\n${fence}md\n[示例](draft.md)\n\x60\x60\x60\n[仍在示例](draft.md)\n${fence}`;
+      assert.deepEqual(collectSessionFiles({ cwd }, example).filter((file) => file.delivered).map((file) => file.name), ["final.md"]);
+    }
+  } finally { await fs.rm(cwd, { recursive: true, force: true }); }
 });

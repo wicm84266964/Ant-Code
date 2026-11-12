@@ -800,7 +800,7 @@ test("dashboard auto-exhibits newly generated preview files", async () => {
   assert.match(app, /event\.type === "artifacts_updated"/);
   assert.match(app, /function applySessionFiles\(/);
   assert.match(app, /function pickExhibitFile\(/);
-  assert.match(html, /生成的图、报表和导出文件会自动预览/);
+  assert.match(html, /查看执行动态，或切换到最终回复交付的文件/);
   assert.equal(module.isExhibitFile({ kind: "image", relativePath: "chart.png" }), true);
   assert.equal(module.isExhibitFile({ kind: "binary", relativePath: "blob.bin" }), false);
   assert.equal(module.isExhibitFile({ kind: "text", relativePath: "notes.txt" }), true);

@@ -867,8 +867,8 @@ export function createTurnState(
   };
 }
 
-function artifactFingerprint(files: Array<{ relativePath?: string }>): string {
-  return files.map((file) => String(file.relativePath ?? "").toLowerCase()).join("\n");
+function artifactFingerprint(files: Array<{ relativePath?: string; revision?: string; delivered?: boolean }>): string {
+  return files.map((file) => `${file.relativePath}:${file.revision}:${file.delivered}`).join("\n");
 }
 
 function rememberSessionArtifactFingerprint<T extends { relativePath?: string }>(state: DashboardActiveSessionState, files: T[]): T[] {
@@ -880,7 +880,7 @@ function publishSessionArtifacts(state: DashboardActiveSessionState) {
   if (!state.currentTurnId || state.disposed) {
     return;
   }
-  const files = collectSessionFiles(state.session, state.finalOutput);
+  const files = collectSessionFiles(state.session);
   const fingerprint = artifactFingerprint(files);
   if (fingerprint === state.lastArtifactFingerprint) {
     return;
@@ -1051,8 +1051,8 @@ export function runTurnInBackground(state: DashboardActiveSessionState, item: Da
           }
           if (currentTurn && event.type === "tool_finish") {
             const name = String(event.name ?? "");
+            publishSessionArtifacts(state);
             if (["write_file", "edit_file", "powershell", "bash"].includes(name)) {
-              publishSessionArtifacts(state);
               if (state.session.goal?.enabled) {
                 state.session.goal.hasWrites = true;
               }
@@ -1088,7 +1088,7 @@ export function runTurnInBackground(state: DashboardActiveSessionState, item: Da
         type: "files_updated",
         id: eventId("files"),
         turnId: state.currentTurnId,
-        files: rememberSessionArtifactFingerprint(state, collectSessionFiles(state.session, state.finalOutput)),
+        files: rememberSessionArtifactFingerprint(state, collectSessionFiles(state.session, terminalStatus === "completed" ? state.finalOutput : "")),
         sessionStatus: sessionStatusSummary(state.session),
         changeStats: { ...state.turnChangeStats },
         at: new Date().toISOString()

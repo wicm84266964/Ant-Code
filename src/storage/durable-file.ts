@@ -42,7 +42,9 @@ export async function atomicWriteFile(filePath: string, data: string | Uint8Arra
     await handle.sync();
     await handle.close();
     handle = null;
-    await fs.rename(temporaryPath, target);
+    // Windows readers/scanners may briefly deny replacement even with our
+    // writer lock held. Retry the same durable temp file; never unlink target.
+    await retrySharingViolation(() => fs.rename(temporaryPath, target));
     await fs.chmod(target, mode).catch(() => {});
     await syncDirectory(directory);
     return target;
@@ -224,7 +226,7 @@ async function acquireFileMutationLock(filePath: string, options: { timeoutMs?: 
 
 async function releaseOwnedLock(lockPath: string, token: string) {
   // A transient Windows sharing violation must not strand a lock we own.
-  const owner = await retryLockRelease(() => fs.readFile(path.join(lockPath, "owner.json"), "utf8"))
+  const owner = await retrySharingViolation(() => fs.readFile(path.join(lockPath, "owner.json"), "utf8"))
     .then((text) => JSON.parse(text) as { token?: unknown })
     .catch((error) => { if (errorCode(error) === "ENOENT") return null; throw error; });
   if (owner?.token !== token) {
@@ -232,7 +234,7 @@ async function releaseOwnedLock(lockPath: string, token: string) {
   }
   const released = `${lockPath}.released.${process.pid}.${randomBytes(8).toString("hex")}`;
   try {
-    await retryLockRelease(() => fs.rename(lockPath, released));
+    await retrySharingViolation(() => fs.rename(lockPath, released));
     await fs.rm(released, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   } catch (error) {
     if (errorCode(error) !== "ENOENT") {
@@ -241,7 +243,7 @@ async function releaseOwnedLock(lockPath: string, token: string) {
   }
 }
 
-async function retryLockRelease<T>(operation: () => Promise<T>): Promise<T> {
+async function retrySharingViolation<T>(operation: () => Promise<T>): Promise<T> {
   for (let attempt = 0; ; attempt += 1) {
     try {
       return await operation();

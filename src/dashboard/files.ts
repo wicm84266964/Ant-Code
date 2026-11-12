@@ -48,6 +48,10 @@ type SessionFileItem = {
   kind: string;
   source?: string;
   toolName?: unknown;
+  inProcess?: boolean;
+  delivered?: boolean;
+  activityAt?: string;
+  revision?: string;
 };
 type TableSheet = {
   name: string;
@@ -318,7 +322,7 @@ export async function readRawFile(cwd: string, requestedPath: string) {
  * @param {Record<string, any>} session
  * @param {string} finalOutput
  */
-export function collectSessionFiles(session: { cwd?: unknown; workflow?: unknown; artifacts?: unknown } = {}, finalOutput: string = "") {
+export function collectSessionFiles(session: { cwd?: unknown; workflow?: unknown; artifacts?: unknown; visualEvidence?: unknown } = {}, finalOutput: string = "") {
   const cwd = typeof session?.cwd === "string" ? session.cwd : process.cwd();
   const items: SessionFileItem[] = [];
   const workflow = session?.workflow && typeof session.workflow === "object" ? session.workflow as { changes?: unknown } : {};
@@ -327,21 +331,60 @@ export function collectSessionFiles(session: { cwd?: unknown; workflow?: unknown
     const record = isRecord(change) ? change : {};
     addFile(items, cwd, record.path, {
       source: record.created ? "created" : record.edited ? "edited" : "changed",
+      inProcess: true,
+      activityAt: String(record.recordedAt ?? ""),
       toolName: record.toolName ?? null
     });
+  }
+  // Evidence names are only previewed when they resolve through the existing
+  // workspace boundary. In-memory MCP pixels are never persisted just for UI.
+  const visual = isRecord(session.visualEvidence) && Array.isArray(session.visualEvidence.items) ? session.visualEvidence.items : [];
+  for (const evidence of visual) {
+    if (!isRecord(evidence) || evidence.status !== "inspected") continue;
+    const before = items.length;
+    addFile(items, cwd, evidence.name, { source: "viewed", inProcess: true });
+    if (items.length > before && items.at(-1)?.kind !== "image") items.pop();
   }
   const persisted = Array.isArray(session?.artifacts) ? session.artifacts : [];
   for (const artifact of persisted) {
     const record = isRecord(artifact) ? artifact : {};
-    addFile(items, cwd, record.relativePath ?? record.path, {
-      source: typeof record.source === "string" ? record.source : "created"
+    const target = String(record.relativePath ?? record.path ?? "");
+    if (items.some((item) => path.resolve(cwd, target) === item.path)) continue;
+    addFile(items, cwd, target, {
+      source: typeof record.source === "string" ? record.source : "created",
+      inProcess: true
     });
   }
   for (const candidate of extractPaths(finalOutput)) {
     addFile(items, cwd, candidate, { source: "mentioned" });
   }
+  // Only explicit local links in the final reply count as delivery. Search/read
+  // references and shell discovery remain activity, never proof of delivery.
+  for (const match of withoutFencedCode(finalOutput).matchAll(/\[[^\]]*\]\((<[^>]+>|[^)\s]+)(?:\s+"[^"]*")?\)/g)) {
+    let target = match[1].replace(/^<|>$/g, "");
+    if (/^[a-z][a-z0-9+.-]*:/i.test(target) && !/^[a-z]:[\\/]/i.test(target)) continue;
+    try { target = decodeURIComponent(target); } catch { continue; }
+    addFile(items, cwd, target.split(/[?#]/)[0], { source: "mentioned", delivered: true });
+  }
   addComposerUploads(items, cwd);
-  return dedupeFiles(items);
+  const merged = dedupeFiles(items);
+  const recent = new Set(merged.filter((item) => item.inProcess)
+    .sort((a, b) => String(b.activityAt ?? "").localeCompare(String(a.activityAt ?? "")))
+    .slice(0, 100).map((item) => item.path));
+  return merged.filter((item) => !item.inProcess || recent.has(item.path) || item.delivered);
+}
+
+function withoutFencedCode(text: string): string {
+  let fence = "";
+  return text.split(/\r?\n/).filter((line) => {
+    const marker = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    if (fence) {
+      if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) fence = "";
+      return false;
+    }
+    if (marker) { fence = marker[1]; return false; }
+    return true;
+  }).join("\n");
 }
 
 function addComposerUploads(items: SessionFileItem[], cwd: string) {
@@ -549,24 +592,37 @@ function addFile(items: SessionFileItem[], cwd: string, target: unknown, meta: P
   if (!fileExists(resolved.path)) {
     return;
   }
+  let revision: string;
+  let modifiedAt: string;
+  try {
+    const stat = statSync(resolved.path);
+    revision = `${stat.mtimeMs}:${stat.ctimeMs}:${stat.size}:${meta.activityAt ?? ""}`;
+    modifiedAt = stat.mtime.toISOString();
+  } catch { return; }
   items.push({
     ...fileSummary(resolved.root, resolved.path),
-    ...meta
+    revision,
+    ...meta,
+    activityAt: meta.activityAt || (meta.inProcess ? modifiedAt : undefined)
   });
 }
 
 function dedupeFiles(items: SessionFileItem[]) {
-  const seen = new Set<string>();
-  const out: SessionFileItem[] = [];
+  const merged = new Map<string, SessionFileItem>();
   for (const item of items) {
-    const key = item.path.toLowerCase();
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    out.push(item);
+    const key = process.platform === "win32" ? item.path.toLowerCase() : item.path;
+    const previous = merged.get(key);
+    merged.set(key, previous ? {
+      ...previous,
+      ...item,
+      source: item.inProcess ? item.source : previous.source,
+      inProcess: previous.inProcess || item.inProcess,
+      delivered: previous.delivered || item.delivered,
+      activityAt: item.activityAt || previous.activityAt,
+      revision: item.inProcess ? item.revision : previous.revision
+    } : item);
   }
-  return out;
+  return [...merged.values()];
 }
 
 function isInside(root: string, target: string) {

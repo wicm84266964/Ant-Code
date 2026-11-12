@@ -71,3 +71,14 @@ test("collectShellArtifacts does not treat package.json as a silent walk artifac
 
   assert.equal(artifacts.some((item) => item.path.endsWith("package.json")), false);
 });
+
+
+test("shell read-only mentions do not promote stale files into activity", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "artifact-read-"));
+  try {
+    await fs.writeFile(path.join(cwd, "reference.md"), "old reference");
+    const past = new Date(Date.now() - 60000);
+    await fs.utimes(path.join(cwd, "reference.md"), past, past);
+    assert.equal(collectShellArtifacts(cwd, { command: "cat reference.md", stdout: "reference.md", durationMs: 1 }).length, 0);
+  } finally { await fs.rm(cwd, { recursive: true, force: true }); }
+});

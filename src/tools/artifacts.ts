@@ -110,7 +110,7 @@ export function isExhibitWalkPath(target: string): boolean {
 
 /**
  * Collect previewable files a shell command just produced.
- * Mentions in stdout/stderr are trusted; command-line paths and a bounded
+ * Mentions in stdout/stderr, command-line paths and a bounded
  * workspace walk only accept recently modified exhibit files.
  */
 export function serializeExhibitArtifacts(cwd: string, changes: unknown): PersistedExhibitArtifact[] {
@@ -213,7 +213,7 @@ export function collectShellArtifacts(
   };
 
   for (const candidate of extractCandidatePaths(`${String(input.stdout ?? "")}\n${String(input.stderr ?? "")}`)) {
-    add(candidate, false);
+    add(candidate, true);
   }
   for (const candidate of extractCandidatePaths(String(input.command ?? ""))) {
     add(candidate, true);

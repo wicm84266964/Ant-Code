@@ -623,6 +623,8 @@ export type DashboardUiState = {
   deleteConfirmSessionId: string;
   files: DashboardFile[];
   previewPath: string;
+  fileCategory: "process" | "delivery";
+  followFiles: boolean;
   liveTitle: string;
   liveActivities: Map<string | undefined, DashboardActivity>;
   backgroundSubagents: Map<string | undefined, DashboardActivity>;
@@ -824,6 +826,8 @@ export const state: DashboardUiState = {
   deleteConfirmSessionId: "",
   files: [],
   previewPath: "",
+  fileCategory: "process",
+  followFiles: true,
   liveTitle: "",
   liveActivities: new Map<string, DashboardActivity>(),
   backgroundSubagents: new Map(),

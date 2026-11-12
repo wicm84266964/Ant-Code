@@ -7469,3 +7469,10 @@ textarea:focus {
     box-shadow: none;
   }
 }
+
+/* File activity and delivery share the same permission-checked preview. */
+.file-toolbar { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 12px 10px; }
+.file-toolbar button { color: var(--text); background: transparent; border: 1px solid rgba(255,255,255,.15); border-radius: 6px; padding: 6px 8px; cursor: pointer; }
+.file-toolbar button[aria-pressed="true"] { background: rgba(255,255,255,.12); border-color: rgba(255,255,255,.35); }
+.file-toolbar button:last-child { margin-left: auto; }
+.preview-collapsed .file-toolbar { display: none; }

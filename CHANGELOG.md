@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 2.0.34 - 2026-11-13
+
+- Dashboard 文件栏区分“过程动态 / 交付文件”，最终交付依据成功完成回复中的本地链接识别；同路径更新刷新预览，支持暂停和恢复跟随。
+- 异步会话保存对短暂文件占用有限重试，持续失败保留旧文件；Windows 源码更新隔离父 PowerShell 模块路径，保留严格权限检查。
+- 配置和会话无需迁移，升级后完整重启 CLI/TUI、Dashboard 并刷新页面。仅源码发布，无新增二进制附件，不发布 npm 包，不更新 TaxaMask 内嵌版。
+- [2.0.34 中文说明](docs/releases/2.0.34-dashboard-deliverables-and-session-save_zh.md)。开发仓 Windows 单元/集成 1612/1612、浏览器 45/45 通过，无跳过/取消。公开候选 CI、标签与线上发布状态以最终记录为准。
+
 ## 2.0.33 - 2026-11-06
 
 已于北京时间 2026-11-06 18:27:32 发布稳定版：[v2.0.33](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.33)。标签指向 `7a9d2dac70990b2f0154942642532162e7d18192`；功能经 [PR #95](https://github.com/wicm84266964/Ant-Code/pull/95) 合并，最终候选 [CI](https://github.com/wicm84266964/Ant-Code/actions/runs/42200415709)、[主分支 CI](https://github.com/wicm84266964/Ant-Code/actions/runs/42200893824) 和[官方发布工作流](https://github.com/wicm84266964/Ant-Code/actions/runs/42202804090) 均通过。仅源码发布，无二进制附件，不更新 TaxaMask 或 npm 包。
