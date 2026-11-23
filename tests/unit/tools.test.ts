@@ -18,7 +18,9 @@ import { persistableUserTurnMessage } from "../../src/core/session-messages.ts";
 import { persistableContextMessages, persistableTranscriptMessages } from "../../src/core/session-persist.ts";
 import { encodePng } from "../../src/tools/png-encode.ts";
 import { serializeToolResult } from "../../src/tools/result.ts";
+import { formatToolResultForModel } from "../../src/tools/result-view.ts";
 import { createToolRuntime } from "../../src/tools/runtime.ts";
+import { createXlsxBuffer } from "../fixtures/office-fixtures.ts";
 import {
   collectRawHttpResponse,
   parseBingHtml,
@@ -1845,6 +1847,43 @@ test("web_fetch honors explicit maxBytes for MCP fetch output", async (t) => {
   assert.equal(result.result.bytes, 4096);
 });
 
+test("web_fetch keeps MCP HTTP errors and robots restrictions out of page content", async () => {
+  let fallbackRequests = 0;
+  const server = createServer((_request, response) => {
+    fallbackRequests += 1;
+    response.end("Fallback body");
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const url = `http://127.0.0.1:${server.address().port}/data`;
+    const scenarios = [
+      { isError: true, text: `Failed to fetch ${url} - status code 404`, expected: /HTTP 404/ },
+      { text: "Error executing tool fetch: robots.txt disallows fetching\nDisallow: /downloads", expected: /网站访问规则/ }
+    ];
+    for (const { isError, text, expected } of scenarios) {
+      const runtime = createToolRuntime({
+        cwd: process.cwd(),
+        config: { web: { fetchProvider: "mcp-first" } },
+        policy: { networkMode: "offline" },
+        mcpRuntime: {
+          async callTool() {
+            return { ok: true, result: { isError, content: [{ type: "text", text }] } };
+          }
+        }
+      });
+      const result = await runtime.execute("web_fetch", { url });
+      assert.equal(result.ok, false);
+      assert.equal(result.error.code, "MCP_FETCH_FAILED");
+      assert.match(result.error.message, expected);
+      assert.equal(result.result, undefined);
+      assert.doesNotMatch(result.error.message, /Disallow:/);
+    }
+    assert.equal(fallbackRequests, 0);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test("web_fetch truncates MCP output on a valid UTF-8 boundary", async () => {
   const runtime = createToolRuntime({
     cwd: process.cwd(),
@@ -2133,6 +2172,28 @@ test("document_intake rejects oversized Office archives before parsing", async (
   assert.equal(result.supported, false);
   assert.equal(result.maxBytes, 20 * 1024 * 1024);
   assert.equal(result.error.code, "DOCUMENT_TOO_LARGE");
+});
+
+test("document_intake reports input cap and format failures and returns a workbook preview to the model", async () => {
+  const cwd = await makeTempWorkspace();
+  await fs.writeFile(path.join(cwd, "scores.xlsx"), createXlsxBuffer([["Name", "Score"], ["Sample", "98"]]));
+  await fs.writeFile(path.join(cwd, "example.py"), "print('sample')\n", "utf8");
+  const runtime = createToolRuntime({ cwd });
+
+  const tooLarge = await runtime.execute("document_intake", { path: "scores.xlsx", maxBytes: 100 });
+  const limit = formatToolResultForModel("document_intake", tooLarge);
+  assert.equal(tooLarge.ok, false);
+  assert.match(limit.content, /ok=false[\s\S]*DOCUMENT_TOO_LARGE[\s\S]*100-byte limit[\s\S]*path=scores\.xlsx/);
+
+  const workbook = await runtime.execute("document_intake", { path: "scores.xlsx" });
+  const preview = formatToolResultForModel("document_intake", workbook);
+  assert.equal(workbook.ok, true);
+  assert.match(preview.content, /path=scores\.xlsx[\s\S]*Sample[\s\S]*98/);
+
+  const unsupported = await runtime.execute("document_intake", { path: "example.py" });
+  const unsupportedView = formatToolResultForModel("document_intake", unsupported);
+  assert.equal(unsupported.ok, false);
+  assert.match(unsupportedView.content, /ok=false[\s\S]*DOCUMENT_UNSUPPORTED_FORMAT[\s\S]*Use read_file/);
 });
 
 test("full access document_intake can read outside the workspace", async () => {

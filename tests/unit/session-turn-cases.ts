@@ -6,6 +6,8 @@ import path from "node:path";
 import test from "node:test";
 import { createSession, persistSessionSnapshot, runSessionTurn } from "../../src/core/session.ts";
 import { createSessionStore } from "../../src/storage/session-store.ts";
+import { createQuickSources } from "../../src/core/quick-turn.ts";
+import { renderMarkdown } from "../../src/dashboard/public/markdown.ts";
 import {
   createRecordingGateway,
   messageText,
@@ -48,6 +50,43 @@ import {
   mockGatewayEnv,
   mockGatewayEnvWithoutModel
 } from "./session-helpers.ts";
+
+test("quick mode preserves the summary and inserts only selected source quotes", () => {
+  const sources = createQuickSources();
+  sources.collect("web_search", {}, { ok: true, result: { results: [
+    { title: "Search hit", url: "https://example.org/article", snippet: "The method improved the measured outcome." }
+  ] } });
+  const snippet = sources.render("摘要提到测量值有改善。[source:1]");
+  assert.match(snippet, /^摘要提到测量值有改善。［1］/);
+  assert.match(snippet, /引用来自搜索摘要，正文待核实/);
+  assert.doesNotMatch(snippet, /网页正文/);
+
+  const passage = "The method improved outcomes in adults only. The effect was uncertain after 90 days.";
+  const entries = sources.collect("mcp_call", { server: "library" }, { ok: true, result: { structuredContent: { sources: [
+    { text: passage, title: "Trial report", doi: "10.1234/study", page: 7, kind: "abstract" }
+  ] } } });
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].text, passage);
+  const web = sources.collect("web_fetch", {}, { ok: true, result: {
+    ok: true, provider: "mcp-fetch", url: "https://example.org/article", content:
+      "Contents of https://example.org/article:\n\n# Page heading\n\nThis is the relevant result.\n\nAdditional material."
+  } });
+  assert.deepEqual(web.map((entry) => entry.text), ["This is the relevant result.", "Additional material."]);
+  const failed = sources.collect("web_fetch", {}, { ok: true, result: {
+    ok: true, provider: "mcp-fetch", url: "https://example.org/missing", content:
+      "Error executing tool fetch: robots.txt restricts access.\n\nUser-agent: *\nDisallow: /downloads"
+  } });
+  assert.deepEqual(failed, []);
+  assert.equal(sources.render("这个结论还有待确认。[source:900]"), "这个结论还有待确认。");
+  const citation = sources.render("只在成人群体中观察到改善。[source:2] 另见数据页。[source:3] 重复引用。[source:2] [source:4]");
+  const html = renderMarkdown(citation);
+  assert.match(html, /只在成人群体中观察到改善。［1］ 另见数据页。［2］ 重复引用。［1］/);
+  assert.match(html, /href="https:\/\/doi.org\/10.1234\/study"/);
+  assert.ok(html.includes(`<blockquote><p>${passage}</p></blockquote>`));
+  assert.match(html, /第 7 页/);
+  assert.equal((html.match(/<blockquote>/g) ?? []).length, 2);
+  assert.doesNotMatch(citation, /Contents of|Additional material|robots\.txt|source:/);
+});
 
 test("interactive session turns reuse bounded conversation context", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));

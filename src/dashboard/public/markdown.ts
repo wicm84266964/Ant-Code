@@ -246,6 +246,9 @@ function textLines(text: string | string[] | undefined): string[] {
 
 function renderCodeBlock(block: MarkdownBlock, context: Record<string, unknown> = {}) {
   const text = textLines(block.text).join("\n");
+  if (block.language === "quote") {
+    return `<blockquote><p>${escapeHtml(text).replace(/\n/g, "<br>")}</p></blockquote>`;
+  }
   if (context.lightweight) {
     const label = block.language ? `${block.language} 预览` : "代码预览";
     return renderPlainDraftBlock(text, label);

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 2.0.35 - 2026-11-23
+
+- Dashboard 新增可选「快速」模式。常规模式仍是默认，排队消息保留发送时的模式。快速模式由主模型直接处理简短任务，查资料时用少量原文和出处支撑总结。
+- 用户消息先保存再发给网关。首轮零响应后，可以在同一会话切换网关并继续，刷新页面时仍由实时事件重放当前轮。
+- 文档读取失败显示具体原因。输入文件大小限制、预览输出上限和访问审批沿用既有规则。
+- 配置和会话无需迁移。升级后完整重启 CLI/TUI、Dashboard 并刷新页面。本次提供 GitHub 源码和中文说明。
+- [2.0.35 中文说明](docs/releases/2.0.35-dashboard-quick-mode-and-turn-recovery_zh.md)。公开 CI 和线上发布状态以实际发布记录为准。
+
 ## 2.0.34 - 2026-11-13
 
 已于北京时间 2026-11-13 00:33:04 发布稳定版：[v2.0.34](https://github.com/wicm84266964/Ant-Code/releases/tag/v2.0.34)。不可变标签指向 `7759bac6c41a6e0c46b5c7d2ac2937890b45d967`，功能经 [PR #97](https://github.com/wicm84266964/Ant-Code/pull/97) 合并；[候选 CI](https://github.com/wicm84266964/Ant-Code/actions/runs/43258123004)、[主分支 CI](https://github.com/wicm84266964/Ant-Code/actions/runs/43259051762) 与[官方发布工作流](https://github.com/wicm84266964/Ant-Code/actions/runs/43259854341) 均通过。

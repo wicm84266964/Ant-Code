@@ -246,7 +246,7 @@ export async function runtimeReadSession(ctx: DashboardFactoryState, selector: u
     : {};
   const session = activeState?.session ?? null;
   const storedPage = result.ok
-    ? await readStoredTranscriptPage(store, metadata)
+    ? await readStoredTranscriptPage(store, metadata, {}, activeState)
     : createTranscriptPageResult([]);
   if (!storedPage.ok) {
     return transcriptPageReadError(storedPage);
@@ -315,7 +315,7 @@ export async function runtimeReadTranscriptPage(ctx: DashboardFactoryState, inpu
   }
   const metadata = result.ok ? result.metadata ?? {} : {};
   const storedPage = result.ok
-    ? await readStoredTranscriptPage(store, metadata, { before: input.before, limit: input.limit })
+    ? await readStoredTranscriptPage(store, metadata, { before: input.before, limit: input.limit }, activeState)
     : createTranscriptPageResult([], { before: input.before, limit: input.limit });
   if (!storedPage.ok) {
     return transcriptPageReadError(storedPage);

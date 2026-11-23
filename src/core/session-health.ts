@@ -25,6 +25,7 @@ import { createReviewGate } from "../agents/review-policy.ts";
 import { buildCompactedContextMessage, compactSessionContextWithModel, createContextWindow, estimatePromptPayload, summarizeContextWindow } from "./context-window.ts";
 import { compactInFlightLiveContext, DEFAULT_IN_FLIGHT_COMPACT_RATIO, isReducedToolText } from "./inflight-compaction.ts";
 import { summarizeToolBatch, toolSummaryBudget, toolSummaryState } from "./tool-summary.ts";
+import type { createQuickSources } from "./quick-turn.ts";
 import { buildGoalSystemPromptAppendix, normalizeSessionGoal, serializeSessionGoal, stripGoalStatusFromContent, stripGoalStatusMarkers } from "./goal.ts";
 import { createAntEventNormalizer } from "./events.ts";
 import { accumulateProviderUsage, normalizeProviderUsageAggregate, sanitizeProviderUsage, type ProviderUsageAggregate } from "./provider-usage.ts";
@@ -77,7 +78,8 @@ import {
 /**
  * @param {AgentSession} session
  */
-export function buildSystemMessages(session: AgentSession): SessionMessage[] {
+export function buildSystemMessages(session: AgentSession, systemText?: string): SessionMessage[] {
+  if (systemText) return [{ role: "system", content: [{ type: "text", text: systemText }] }];
   const base = Array.isArray(session.context?.system)
     ? session.context.system.filter((line: unknown) => typeof line === "string").join("\n")
     : "";
@@ -492,6 +494,8 @@ type PromptBudgetInput = {
   eventOptions: Record<string, unknown>;
   attachments?: Parameters<typeof buildUserTurnMessage>[2];
   visionAnalysisText?: string;
+  tools?: AgentSession["context"]["tools"];
+  systemText?: string;
 };
 
 export async function preparePromptBudgetForGateway(input: PromptBudgetInput) {
@@ -499,7 +503,7 @@ export async function preparePromptBudgetForGateway(input: PromptBudgetInput) {
   const estimateOf = (current: SessionMessage[]) => estimatePromptPayload({
     model: input.session.model,
     messages: current,
-    tools: input.session.context.tools,
+    tools: input.tools ?? input.session.context.tools,
     toolResults: input.toolResults,
     gatewayProtocol: sessionGatewayProtocol(input.session)
   });
@@ -512,12 +516,21 @@ export async function preparePromptBudgetForGateway(input: PromptBudgetInput) {
   );
 
   let estimate = estimateOf(messages);
-  const target = await toolSummaryBudget(input.session, estimate.bytes, input.env);
   if (!needsCompaction(estimate)) {
     return { messages, estimate, blocked: false };
   }
+  if (input.systemText) {
+    messages = await compactHistoryForGateway(input, messages, estimate);
+    estimate = estimateOf(messages);
+    if (promptEstimateOverBudget(estimate, input.session.contextWindow)) {
+      messages = await compactInflightForGateway(input, messages, true);
+      estimate = estimateOf(messages);
+    }
+    return { messages, estimate, blocked: promptEstimateOverBudget(estimate, input.session.contextWindow) };
+  }
 
   const before = estimate;
+  const target = await toolSummaryBudget(input.session, estimate.bytes, input.env);
   for (let batch = 0; batch < 3 && (estimate.tokens > target.targetTokens || estimate.bytes > target.targetBytes); batch += 1) {
     const result = await summarizeToolBatch({ ...input, messages,
       onStart: batch === 0 ? () => emitEvent(input.eventOptions, { type: "tool_results_summarizing", round: input.round + 1 }) : undefined,
@@ -586,7 +599,7 @@ async function compactHistoryForGateway(
     compaction = await compactSessionContextWithModel(input.session, {
       reason: "automatic_prompt_budget",
       force: true,
-      gateway: input.gateway,
+      gateway: input.systemText ? undefined : input.gateway,
       signal: input.signal,
       env: input.env,
       hooksTrusted: input.hooksTrusted,
@@ -612,11 +625,12 @@ async function compactHistoryForGateway(
   state.historyFingerprint = liveHistoryFingerprint(input.session.messages);
   dropToolResultsNotInMessages(input.toolResults, input.session.messages);
 
-  let nextMessages = appendCompactContinueMessage(rebuildCompactedGatewayMessages(input.session));
+  let nextMessages = rebuildCompactedGatewayMessages(input.session, input.systemText);
+  if (!input.systemText) nextMessages = appendCompactContinueMessage(nextMessages);
   if (promptEstimateOverBudget(estimatePromptPayload({
     model: input.session.model,
     messages: nextMessages,
-    tools: input.session.context.tools,
+    tools: input.tools ?? input.session.context.tools,
     toolResults: input.toolResults,
     gatewayProtocol: sessionGatewayProtocol(input.session)
   }), input.session.contextWindow)) {
@@ -630,7 +644,7 @@ async function compactHistoryForGateway(
     afterTokens: estimatePromptPayload({
       model: input.session.model,
       messages: nextMessages,
-      tools: input.session.context.tools,
+      tools: input.tools ?? input.session.context.tools,
       toolResults: input.toolResults,
       gatewayProtocol: sessionGatewayProtocol(input.session)
     }).tokens,
@@ -643,10 +657,10 @@ async function compactHistoryForGateway(
   return nextMessages;
 }
 
-function rebuildCompactedGatewayMessages(session: AgentSession) {
+function rebuildCompactedGatewayMessages(session: AgentSession, systemText?: string) {
   const compactedContext = buildCompactedContextMessage(session);
   return [
-    ...buildSystemMessages(session),
+    ...buildSystemMessages(session, systemText),
     ...(compactedContext ? [compactedContext] : []),
     ...messagesForModelContext(session.messages)
   ];
@@ -709,7 +723,7 @@ async function compactInflightForGateway(
       return promptEstimateOverBudget(estimatePromptPayload({
         model: input.session.model,
         messages,
-        tools: input.session.context.tools,
+        tools: input.tools ?? input.session.context.tools,
         toolResults: input.toolResults,
         gatewayProtocol: sessionGatewayProtocol(input.session)
       }), input.session.contextWindow);
@@ -822,7 +836,7 @@ export function sessionGatewayProtocol(session: AgentSession) {
  * @param {ReturnType<typeof createToolRuntime>} toolRuntime
  * @param {{ onEvent?: (event: SessionEvent) => void | Promise<void>; signal?: AbortSignal; delegationGuard?: ReturnType<typeof createDelegationGuard>; reviewGate?: ReturnType<typeof createReviewGate> }} options
  */
-export async function executeToolCalls(toolCalls: import("../model-gateway/protocol.ts").GatewayToolCall[], toolRuntime: ReturnType<typeof createToolRuntime>, options: { onEvent?: (event: SessionEvent) => void | Promise<void>; signal?: AbortSignal; delegationGuard?: ReturnType<typeof createDelegationGuard>; reviewGate?: ReturnType<typeof createReviewGate>; turnChangeTracker?: ReturnType<typeof createTurnChangeTracker>; antEventNormalizer?: ReturnType<typeof createAntEventNormalizer>; onAntEvent?: (event: Record<string, unknown>) => void | Promise<void>; onBatchComplete?: (calls: import("../model-gateway/protocol.ts").GatewayToolCall[], results: SessionToolResult[]) => Promise<void> } = {}): Promise<SessionToolResult[]> {
+export async function executeToolCalls(toolCalls: import("../model-gateway/protocol.ts").GatewayToolCall[], toolRuntime: ReturnType<typeof createToolRuntime>, options: { onEvent?: (event: SessionEvent) => void | Promise<void>; signal?: AbortSignal; delegationGuard?: ReturnType<typeof createDelegationGuard>; reviewGate?: ReturnType<typeof createReviewGate>; turnChangeTracker?: ReturnType<typeof createTurnChangeTracker>; quickSources?: ReturnType<typeof createQuickSources>; antEventNormalizer?: ReturnType<typeof createAntEventNormalizer>; onAntEvent?: (event: Record<string, unknown>) => void | Promise<void>; onBatchComplete?: (calls: import("../model-gateway/protocol.ts").GatewayToolCall[], results: SessionToolResult[]) => Promise<void> } = {}): Promise<SessionToolResult[]> {
   const results: SessionToolResult[] = [];
   const batches = createToolExecutionBatches(toolCalls, toolRuntime);
   const agentTaskIds = new Set<string>();

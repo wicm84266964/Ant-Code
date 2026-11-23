@@ -3769,7 +3769,8 @@ body > .approval-panel:not(.hidden),
   color: var(--danger);
 }
 
-.goal-mode-button {
+.goal-mode-button,
+.quick-mode-button {
   background: transparent;
   border: 1px solid transparent;
   border-radius: 999px;
@@ -3781,6 +3782,16 @@ body > .approval-panel:not(.hidden),
   margin-left: 2px;
   padding: 8px 12px;
   position: relative;
+}
+
+.quick-mode-button {
+  color: var(--text-muted);
+}
+
+.quick-mode-button[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--accent);
 }
 
 .goal-mode-button::before {
@@ -3801,7 +3812,8 @@ body > .approval-panel:not(.hidden),
   color: var(--danger);
 }
 
-.goal-mode-button:disabled {
+.goal-mode-button:disabled,
+.quick-mode-button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
 }
@@ -7014,7 +7026,8 @@ textarea:focus {
     white-space: normal;
   }
 
-  .goal-mode-button {
+  .goal-mode-button,
+  .quick-mode-button {
     min-height: 44px;
   }
 

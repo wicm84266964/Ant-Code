@@ -229,6 +229,9 @@ export async function applyDashboardGoal(context: DashboardRuntimeContext, input
     if (state.session.permissionReadonlyLocked) {
       return { ok: false, status: 400, error: "只读锁定会话不能启用 Goal" };
     }
+    if (state.currentQuickMode || state.queuedPrompts.some((item) => item.quickMode)) {
+      return { ok: false, status: 409, code: "QUICK_MODE_GOAL_CONFLICT", error: "请等快速消息处理完后再启用 Goal" };
+    }
     const eventCursor = state.eventSequence;
     // Stage controls separately: no live elevation, events, queue insertion or
     // execution can escape a failed commit, even while an old turn settles.

@@ -183,6 +183,7 @@ export type ToolRuntimeOptions = {
   hooksTrusted?: boolean;
   allowedSkills?: string[];
   allowedMcpServers?: string[];
+  allowedToolNames?: ReadonlySet<string>;
   signal?: AbortSignal;
   mcpRuntime?: {
     callTool: (serverName: string, toolName: string, args?: Record<string, unknown>, signal?: AbortSignal) => Promise<Record<string, unknown>>;
@@ -224,6 +225,9 @@ export function createToolRuntime(options: ToolRuntimeOptions) {
       const definition = tools.get(name) as ToolDefinition | undefined;
       if (!definition) {
         return { ok: false, error: { code: "TOOL_NOT_FOUND", message: `Unknown tool: ${name}` } };
+      }
+      if (options.allowedToolNames && !options.allowedToolNames.has(name)) {
+        return blockedScope("TOOL_NOT_ALLOWED", `Tool is unavailable in this mode: ${name}`);
       }
 
       input = normalizeToolInput(name, input);
@@ -648,9 +652,19 @@ async function executeMcpFetchTool(options: ToolRuntimeOptions, input: Record<st
     return execution;
   }
   try {
+    const result = isPlainObject(execution.result) ? execution.result : EMPTY_RECORD;
+    const text = extractMcpText(result);
+    if (result.isError === true || /^\s*Error executing tool fetch:/i.test(text)) {
+      const summary = text.trim().split(/\r?\n/, 1)[0];
+      const status = summary.match(/\bstatus code\s+(\d{3})\b/i)?.[1];
+      const message = /robots\.txt/i.test(summary)
+        ? "网站访问规则限制自动抓取。"
+        : status ? `网页抓取失败（HTTP ${status}）。` : "抓取服务未返回网页正文。";
+      return { ok: false, error: { code: "MCP_FETCH_FAILED", message } };
+    }
     return {
       ok: true,
-      result: normalizeMcpFetchResult(input, isPlainObject(execution.result) ? execution.result : EMPTY_RECORD)
+      result: normalizeMcpFetchResult(input, text)
     };
   } catch (error) {
     return {
@@ -794,8 +808,8 @@ function buildMcpFetchArguments(input: Record<string, unknown>) {
   return args;
 }
 
-function normalizeMcpFetchResult(input: Record<string, unknown>, result: Record<string, unknown>) {
-  const bounded = normalizeMcpFetchContent(extractMcpText(result), input);
+function normalizeMcpFetchResult(input: Record<string, unknown>, text: string) {
+  const bounded = normalizeMcpFetchContent(text, input);
   return {
     url: input.url,
     finalUrl: input.url,

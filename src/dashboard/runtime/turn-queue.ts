@@ -393,6 +393,7 @@ export function turnRequestFingerprint(input: DashboardRequestInput = {}) {
   updateFingerprintField(hash, "sessionId", String(input.sessionId ?? "").trim());
   updateFingerprintField(hash, "prompt", String(input.prompt ?? ""));
   updateFingerprintField(hash, "permissionMode", String(input.permissionMode ?? ""));
+  updateFingerprintField(hash, "quickMode", String(input.quickMode === true));
   const attachments = Array.isArray(input.attachments) ? input.attachments : [];
   updateFingerprintField(hash, "attachmentCount", String(attachments.length));
   for (let index = 0; index < attachments.length; index += 1) {
@@ -514,6 +515,7 @@ export async function startDashboardTurn(context: DashboardRuntimeContext, input
     return { ok: false, status: 403, error: "请先确认工作区信任", trust };
   }
   const requestedMode = normalizePermissionMode(input.permissionMode);
+  const quickMode = input.quickMode === true && turnSubmissionKind(input) === "prompt";
   let mode = requestedMode;
   const createdThisRequest = !normalized.sessionId;
   const run = async () => {
@@ -561,6 +563,12 @@ export async function startDashboardTurn(context: DashboardRuntimeContext, input
     }
     if (state.quarantinedTurnId) {
       return quarantinedSessionResult(state);
+    }
+    if (quickMode && (state.session.goal?.enabled || input.goalMode === true)) {
+      return { ok: false, status: 409, code: "QUICK_MODE_GOAL_CONFLICT", error: "请先退出 Goal 再发送快速消息" };
+    }
+    if (input.goalMode === true && (state.currentQuickMode || state.queuedPrompts.some((item) => item.quickMode))) {
+      return { ok: false, status: 409, code: "QUICK_MODE_GOAL_CONFLICT", error: "请等快速消息处理完后再启用 Goal" };
     }
     if (state.running && isConfigV2Enabled(loadedConfig)) {
       const admission = dashboardSessionV2MutationView(state.session, loadedConfig);
@@ -624,6 +632,7 @@ export async function startDashboardTurn(context: DashboardRuntimeContext, input
       }
       const item = enqueuePrompt(state, prompt, mode, turnSubmissionKind(input), attachments);
       if (item) {
+        item.quickMode = quickMode;
         decorateScheduleQueueItem(item, input);
         recordQueuePermission(state, item, requestedMode);
       }
@@ -653,6 +662,7 @@ export async function startDashboardTurn(context: DashboardRuntimeContext, input
     }
 
     const item = decorateScheduleQueueItem(createQueueItem(prompt, mode, turnSubmissionKind(input), "", attachments), input);
+    item.quickMode = quickMode;
     recordQueuePermission(state, item, requestedMode);
     beginPrompt(state, item, configEnv);
     return {
@@ -952,9 +962,14 @@ export function beginPrompt(state: DashboardActiveSessionState, item: DashboardQ
   state.interrupting = false;
   state.status = "running";
   state.currentPrompt = String(item.prompt ?? "");
+  state.currentQuickMode = item.quickMode === true;
+  state.currentUserRecorded = false;
   state.currentTurnId = eventId("turn");
   state.currentAttachmentBytes = imageAttachmentBytes(item.attachments ?? []);
   state.currentTranscriptStart = activeTranscriptMessages(state).length;
+  state.currentStableTranscript = activeTranscriptMessages(state).slice();
+  state.currentTranscriptArchiveEnd = state.session.transcriptArchive.totalMessages + state.session.transcriptArchive.pendingMessages.length;
+  state.currentTranscriptVisibleTotal = state.session.transcriptArchive.totalVisibleMessages ?? undefined;
   state.currentPermissionMode = scheduled ? "fullAccess" : (item.permissionMode ?? "plan");
   state.unattendedSchedule = scheduled;
   state.turnChangeStats = emptyChangeStats();
@@ -983,7 +998,7 @@ export function beginPrompt(state: DashboardActiveSessionState, item: DashboardQ
     at: new Date().toISOString()
   });
   runTurnInBackground(state, item, env);
-  scheduleDashboardSessionTitle(state, item);
+  if (!item.quickMode) scheduleDashboardSessionTitle(state, item);
   return true;
 }
 
@@ -997,6 +1012,7 @@ export function runTurnInBackground(state: DashboardActiveSessionState, item: Da
     try {
       const result = await state.runTurn(state.session, {
         prompt: String(item.prompt ?? ""),
+        quickMode: item.quickMode,
         displayPrompt: String(displayPromptForQueueItem(item) ?? ""),
         attachments: item.attachments,
         env,
@@ -1004,6 +1020,9 @@ export function runTurnInBackground(state: DashboardActiveSessionState, item: Da
         signal: controller?.signal,
         hooksTrusted: state.hooksTrusted,
         approvalCallback: (request: Record<string, unknown>) => askApproval(state, request),
+        onUserMessageCheckpointed: () => {
+          if (ownsTurn(state, controller, turnId)) state.currentUserRecorded = true;
+        },
         userInputCallback: async (request: Record<string, unknown>) => {
           const answered = await askQuestion(state, request);
           return isPlainObject(answered) ? answered : { answer: String(answered ?? "") };
@@ -1122,6 +1141,7 @@ export function runTurnInBackground(state: DashboardActiveSessionState, item: Da
       }
       await persistVisibleInterruptedDraft(state, turnId, env);
       state.currentPrompt = "";
+      state.currentQuickMode = false;
       state.currentAttachmentBytes = 0;
       const pendingMutation = state.session.pendingModelSelectionMutation;
       if (isPlainObject(pendingMutation) && isPlainObject(pendingMutation.resolution) && isPlainObject(pendingMutation.config)) {
@@ -1168,6 +1188,9 @@ export function runTurnInBackground(state: DashboardActiveSessionState, item: Da
           at: new Date().toISOString()
         });
         state.currentTurnId = "";
+        state.currentStableTranscript = undefined;
+        state.currentTranscriptArchiveEnd = undefined;
+        state.currentTranscriptVisibleTotal = undefined;
         state.currentTranscriptStart = activeTranscriptMessages(state).length;
         state.turnEnv = null;
       }
@@ -1203,7 +1226,7 @@ async function persistVisibleInterruptedDraft(state: DashboardActiveSessionState
   if (!text.trim()) {
     return;
   }
-  const prompt = String(state.currentPrompt ?? "");
+  const prompt = state.currentUserRecorded ? "" : String(state.currentPrompt ?? "");
   appendInterruptedDraftMessages(
     state.session,
     prompt,
@@ -1218,6 +1241,7 @@ async function persistVisibleInterruptedDraft(state: DashboardActiveSessionState
     state.persisted = false;
   }
 }
+
 
 export function isCurrentTurn(state: DashboardActiveSessionState, controller: unknown, turnId: unknown) {
   return ownsTurn(state, controller, turnId) && state.quarantinedTurnId !== turnId && !state.disposed;
@@ -1354,6 +1378,7 @@ export function publicQueueItem(item: DashboardQueueItem) {
   return {
     id: item.id,
     kind: item.kind,
+    ...(item.quickMode ? { quickMode: true } : {}),
     preview: previewText([
       item.title || (item.kind === "guide" ? item.guidance : item.kind === GOAL_CONTINUE_KIND ? "Goal 续跑" : item.prompt),
       attachments.length > 0 ? `${attachments.length} 个附件` : ""

@@ -70,10 +70,10 @@ import {
  * @param {AgentSession} session
  * @param {string} prompt
  */
-export function buildTurnMessages(session: AgentSession, userMessage: SessionMessage | string | Record<string, unknown>): SessionMessage[] {
-  const systemMessages = buildSystemMessages(session);
+export function buildTurnMessages(session: AgentSession, userMessage: SessionMessage | string | Record<string, unknown>, history = session.messages, systemText?: string): SessionMessage[] {
+  const systemMessages = buildSystemMessages(session, systemText);
   const compactedContext = buildCompactedContextMessage(session);
-  const retainedMessages = messagesForModelContext(session.messages);
+  const retainedMessages = messagesForModelContext(history);
   return [
     ...systemMessages,
     ...(compactedContext ? [compactedContext] : []),
@@ -88,6 +88,7 @@ export async function prepareVisionAttachmentsForTurn(options: {
   attachments?: unknown;
   pdfDocuments?: PdfVisionDocument[];
   forceVisionAnalysis?: boolean;
+  allowVisionFallback?: boolean;
   prompt?: string;
   gateway?: unknown;
   signal?: AbortSignal;
@@ -103,7 +104,7 @@ export async function prepareVisionAttachmentsForTurn(options: {
     const reports: string[] = [];
     let reportChars = 0;
     try {
-      if (!resolveVisionAgentModel(options.session.config)) {
+      if (options.allowVisionFallback === false || !resolveVisionAgentModel(options.session.config)) {
         const rendered: InputImageAttachment[] = [];
         for (const document of options.pdfDocuments) {
           await emitEvent(options.eventOptions, { type: "pdf_vision_progress", name: document.name, stage: "rendering" });
@@ -111,6 +112,9 @@ export async function prepareVisionAttachmentsForTurn(options: {
             rendered.push(...batch.images);
             await emitEvent(options.eventOptions, { type: "pdf_vision_progress", name: document.name, pageStart: batch.pageStart, pageEnd: batch.pageEnd, totalPages: batch.totalPages, stage: "completed" });
           }
+        }
+        if (options.allowVisionFallback === false) {
+          return prepareVisionAttachmentsForTurn({ ...options, pdfDocuments: undefined, attachments: [...attachments, ...rendered] });
         }
         return { ok: true, attachments: rendered, analysisText: "" };
       }
@@ -141,6 +145,12 @@ export async function prepareVisionAttachmentsForTurn(options: {
     }
   }
   if (attachments.length === 0) {
+    return { ok: true, attachments, analysisText: "" };
+  }
+  if (options.allowVisionFallback === false) {
+    if (!modelSupportsImages(options.session.config, options.session.model)) {
+      return { ok: false, status: "vision_unavailable", output: "当前模型不支持图片，请切换视觉模型或使用常规模式。" };
+    }
     return { ok: true, attachments, analysisText: "" };
   }
   const visionModel = resolveVisionAgentModel(options.session.config);
@@ -278,8 +288,8 @@ export function modelSupportsImagesEntry(model: { id?: unknown; modalities?: unk
 }
 
 
-export function buildUserTurnMessage(prompt: string, workflow: WorkflowState, attachments: InputImageAttachment[] = [], visionAnalysisText: unknown = "") {
-  const workflowContext = formatWorkflowContext(workflow);
+export function buildUserTurnMessage(prompt: string, workflow: WorkflowState | undefined, attachments: InputImageAttachment[] = [], visionAnalysisText: unknown = "") {
+  const workflowContext = workflow ? formatWorkflowContext(workflow) : "";
   const imageBlocks = attachments.map((attachment) => ({
     type: "image",
     data: attachment.data,

@@ -50,6 +50,7 @@ var state = {
   eventStaleTimer: null,
   lastEventAt: 0,
   permissionMode: "plan",
+  quickMode: false,
   goal: {
     enabled: false,
     status: "off",
@@ -292,6 +293,7 @@ var els = {
   sendButton: document.querySelector("#send-button"),
   permissionMode: document.querySelector("#permission-mode"),
   goalMode: document.querySelector("#goal-mode"),
+  quickMode: document.querySelector("#quick-mode"),
   goalConfirmPanel: document.querySelector("#goal-confirm-panel"),
   goalTextPanel: document.querySelector("#goal-text-panel"),
   goalStatusBar: document.querySelector("#goal-status-bar"),
@@ -1756,6 +1758,7 @@ async function openSession(id, options = {}) {
     }
     return;
   }
+  if (state.currentSessionId !== id || options.restore) state.quickMode = false;
   state.currentSessionId = id;
   applyGoalSnapshot(loadedSession.goal, { permissionMode: loadedSession.permission?.mode ?? "plan" });
   state.running = loadedSession.active === true && loadedSession.running === true;
@@ -1884,6 +1887,7 @@ function newTask() {
   cancelScopedRequest("file");
   state.turnRequest = null;
   state.currentSessionId = null;
+  state.quickMode = false;
   applyGoalSnapshot(null, { permissionMode: "plan" });
   state.running = false;
   rememberCurrentSession(null);
@@ -2190,6 +2194,7 @@ async function sendPrompt() {
       sessionId: submittedSessionId,
       clientId: submittedSessionId ? void 0 : dashboardClientId(),
       permissionMode: state.permissionMode,
+      quickMode: state.quickMode,
       goalMode: state.goal.enabled === true,
       goalText: state.goal.enabled ? state.goal.text : void 0,
       clientPreviousPermissionMode: state.goal.enabled ? state.goal.previousPermissionMode : void 0
@@ -2252,6 +2257,7 @@ function stableTurnRequest(prompt, attachments) {
     prompt,
     sessionId: state.currentSessionId,
     permissionMode: state.permissionMode,
+    quickMode: state.quickMode,
     attachments: attachments.map((item) => [item.id, item.name, item.mimeType, item.size, item.pageStart, item.pageEnd])
   });
   if (state.turnRequest?.signature === signature) {
@@ -2619,6 +2625,9 @@ function textLines(text) {
 }
 function renderCodeBlock(block, context = {}) {
   const text = textLines(block.text).join("\n");
+  if (block.language === "quote") {
+    return `<blockquote><p>${escapeHtml2(text).replace(/\n/g, "<br>")}</p></blockquote>`;
+  }
   if (context.lightweight) {
     const label = block.language ? `${block.language} 预览` : "代码预览";
     return renderPlainDraftBlock(text, label);
@@ -4352,6 +4361,10 @@ function bindEvents3() {
   });
   els.permissionMode.addEventListener("keydown", handlePermissionModeKeydown3);
   els.goalMode?.addEventListener("click", () => requestGoalMode3());
+  els.quickMode?.addEventListener("click", () => {
+    state.quickMode = !state.quickMode;
+    renderGoalControls2();
+  });
   els.preview.addEventListener("click", handleLocalFileOpenClick);
   els.collapsePreview.addEventListener("click", () => {
     if (responsiveLayoutMode3() === "desktop") {
@@ -4787,6 +4800,12 @@ function syncPromptPlaceholder() {
 }
 function renderGoalControls2() {
   const enabled = state.goal.enabled === true;
+  if (enabled) state.quickMode = false;
+  if (els.quickMode) {
+    els.quickMode.disabled = enabled;
+    els.quickMode.setAttribute("aria-pressed", String(state.quickMode));
+    els.quickMode.title = enabled ? "退出 Goal 后可使用快速模式" : "快速模式";
+  }
   const readonlyLocked = state.sessionStatus?.readonlyLocked === true || state.trust?.readonlyLocked === true;
   if (els.goalMode) {
     els.goalMode.setAttribute("aria-pressed", String(enabled));
@@ -11211,7 +11230,7 @@ function renderQueueItem9(item, index) {
   return `
     <div class="queue-item${item.kind === "guide" ? " guide" : ""}">
       <span>${index + 1}</span>
-      <strong>${item.kind === "guide" ? "引导" : item.kind === "wakeup" ? "接续" : item.kind === "goal-continue" ? "Goal 续跑" : "排队"}</strong>
+      <strong>${item.kind === "guide" ? "引导" : item.kind === "wakeup" ? "接续" : item.kind === "goal-continue" ? "Goal 续跑" : item.quickMode ? "快速" : "排队"}</strong>
       <em>${escapeHtml(item.preview ?? "")}</em>
       <div class="queue-actions">
         ${item.kind === "guide" || item.kind === "wakeup" || item.kind === "goal-continue" ? "" : `<button type="button" class="queue-guide-button" data-guide-queue-id="${escapeHtml(item.id)}" ${isCancelling ? "disabled" : ""}>引导</button>`}

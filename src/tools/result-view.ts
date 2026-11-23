@@ -40,7 +40,7 @@ export function renderToolResultView(
   const budget = Number.isInteger(maxBytes) && Number(maxBytes) > 0
     ? Number(maxBytes)
     : (toolName === "agent_run" ? DEFAULT_AGENT_HANDOFF_MAX_BYTES : DEFAULT_TOOL_RESULT_MAX_BYTES);
-  const result = asRecord(execution?.result);
+  const result = asRecord(execution?.result ?? (toolName === "document_intake" ? execution : undefined));
   const lines = [
     ...statusLines(toolName, execution),
     ...locatorLines(toolName, execution, result),

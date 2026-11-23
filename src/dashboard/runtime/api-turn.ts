@@ -508,6 +508,7 @@ export function runtimeGuideTurn(ctx: DashboardFactoryState, input: DashboardReq
 
   const mode = normalizePermissionMode(String(input.permissionMode ?? state.currentPermissionMode));
   const item = createQueueItem(buildGuidePrompt(guidance, state.currentPrompt), mode, "guide", guidance);
+  item.quickMode = queuedItem ? queuedItem.quickMode : state.currentQuickMode;
   state.queuedPrompts.unshift(item);
   appendDashboardEvent(state, {
     type: "guide_queued",
