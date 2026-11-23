@@ -16,6 +16,7 @@ import { appendThinkingPreview, limitThinkingPreview } from "../model-gateway/th
 import { createSessionStore } from "../storage/session-store.ts";
 import { DEFAULT_AGENT_HANDOFF_MAX_BYTES, DEFAULT_TOOL_RESULT_MAX_BYTES } from "../tools/result.ts";
 import { formatToolResultForModel } from "../tools/result-view.ts";
+import type { createQuickSources } from "./quick-turn.ts";
 import { extractImagePayloads, registerVisualEvidence } from "./visual-evidence.ts";
 import { countLineChanges, previewUnifiedDiff } from "../tools/diff.ts";
 import { createToolRuntime } from "../tools/runtime.ts";
@@ -169,7 +170,7 @@ export function isParallelAgentRun(call: import("../model-gateway/protocol.ts").
  * @param {ReturnType<typeof createToolRuntime>} toolRuntime
  * @param {{ onEvent?: (event: SessionEvent) => void | Promise<void>; signal?: AbortSignal; delegationGuard?: ReturnType<typeof createDelegationGuard>; reviewGate?: ReturnType<typeof createReviewGate> }} options
  */
-export async function executeOneToolCall(call: import("../model-gateway/protocol.ts").GatewayToolCall, toolRuntime: ReturnType<typeof createToolRuntime>, options: { onEvent?: (event: SessionEvent) => void | Promise<void>; signal?: AbortSignal; delegationGuard?: ReturnType<typeof createDelegationGuard>; reviewGate?: ReturnType<typeof createReviewGate>; turnChangeTracker?: TurnChangeTracker } = {}, agentTaskIds: Set<string> = new Set()) {
+export async function executeOneToolCall(call: import("../model-gateway/protocol.ts").GatewayToolCall, toolRuntime: ReturnType<typeof createToolRuntime>, options: { onEvent?: (event: SessionEvent) => void | Promise<void>; signal?: AbortSignal; delegationGuard?: ReturnType<typeof createDelegationGuard>; reviewGate?: ReturnType<typeof createReviewGate>; turnChangeTracker?: TurnChangeTracker; quickSources?: ReturnType<typeof createQuickSources> } = {}, agentTaskIds: Set<string> = new Set()) {
   const input: Record<string, unknown> = call.input && typeof call.input === "object" ? call.input : {};
   const taskId = call.name === "agent_run"
     ? uniqueAgentTaskId(input.taskId, agentTaskIds)
@@ -241,6 +242,10 @@ export async function executeOneToolCall(call: import("../model-gateway/protocol
     maxBytes: resolveParentToolResultMaxBytes(toolRuntime.config, call.name),
     evidence
   });
+  const sources = options.quickSources?.collect(call.name, input, execution);
+  const modelContent = sources?.length
+    ? `${serialized.content}\n\nCitable source passages:\n${JSON.stringify(sources)}`
+    : serialized.content;
   await emitEvent(options, {
     type: "tool_finish",
     toolCallId: call.id,
@@ -271,7 +276,7 @@ export async function executeOneToolCall(call: import("../model-gateway/protocol
   return {
     toolCallId: call.id,
     name: call.name,
-    content: serialized.content,
+    content: modelContent,
     truncated: serialized.truncated,
     interrupted: execution.interrupted === true,
     outcome: {

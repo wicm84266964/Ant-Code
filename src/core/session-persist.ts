@@ -325,7 +325,7 @@ export async function persistSessionMetadata(store: ReturnType<typeof createSess
   metadata.status = status;
   if (VISIBLE_FAILED_TURN_STATUSES.has(String(status ?? "").trim().toLowerCase())) {
     ensureVisibleFailedTurnTranscript(session, {
-      prompt: metadata.prompt,
+      prompt: options.userMessageRecorded ? undefined : metadata.prompt,
       output
     });
   }

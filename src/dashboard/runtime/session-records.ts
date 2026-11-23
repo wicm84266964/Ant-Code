@@ -277,6 +277,7 @@ export function stableActiveTranscriptMessages(state: DashboardActiveSessionStat
   if (!state?.running || !state.currentTurnId) {
     return messages;
   }
+  if (state.currentStableTranscript) return state.currentStableTranscript;
   const start = Number(state.currentTranscriptStart);
   if (!Number.isInteger(start) || start < 0) {
     return messages;
@@ -285,21 +286,28 @@ export function stableActiveTranscriptMessages(state: DashboardActiveSessionStat
 }
 
 
-export async function readStoredTranscriptPage(store: ReturnType<typeof createSessionStore>, metadata: unknown, options: Record<string, unknown> = {}) {
+export async function readStoredTranscriptPage(store: ReturnType<typeof createSessionStore>, metadata: unknown, options: Record<string, unknown> = {}, activeState?: DashboardActiveSessionState) {
   const record = isPlainObject(metadata) ? metadata : {};
   const transcript = isPlainObject(record.transcript) ? record.transcript : {};
   const fallback = Array.isArray(transcript.messages) ? transcript.messages : [];
   const archive = transcript.archive;
+  const running = activeState?.running && activeState.currentTurnId;
   if (!isPlainObject(archive) || !Array.isArray(archive.chunks) || archive.chunks.length === 0) {
-    return createTranscriptPageResult(fallback, options);
+    return createTranscriptPageResult(running ? fallback.slice(0, activeState.currentTranscriptStart) : fallback, options);
   }
+  const end = running ? activeState.currentTranscriptArchiveEnd : undefined;
+  const requested = String(options.before ?? "");
+  const before = end === undefined ? options.before : /^\d+$/.test(requested) ? Math.min(end, Number(requested)) : end;
   const result = await store.readTranscriptPage(archive, {
-    before: options.before,
+    before,
     limit: options.limit,
     visibleRoles: VISIBLE_TRANSCRIPT_ROLES
   });
   if (!result.ok) {
     return result;
+  }
+  if (running && activeState.currentTranscriptVisibleTotal !== undefined && isPlainObject(result.summary)) {
+    result.summary = { ...result.summary, total: activeState.currentTranscriptVisibleTotal };
   }
   return result;
 }
@@ -373,7 +381,8 @@ export function mergeActiveTranscriptPage(storedPage: TranscriptPageView, state:
     position: nonNegativeInteger(storedPositions[index] ?? (Number(storedSummary.start) + index))
   }));
   const appended = activeTail.slice(overlap);
-  const pendingEntries = activePendingTranscriptEntries(state, nonNegativeInteger(storedSummary.end));
+  const isRunning = state.running && state.currentTurnId;
+  const pendingEntries = isRunning ? [] : activePendingTranscriptEntries(state, nonNegativeInteger(storedSummary.end));
   const positionedPending = pendingEntries.slice(-appended.length);
   const pendingMatches = positionedPending.length === appended.length
     && sameTranscriptSlice(positionedPending.map((entry) => entry.message), appended);
@@ -388,7 +397,7 @@ export function mergeActiveTranscriptPage(storedPage: TranscriptPageView, state:
   const selected = mergedEntries.slice(-limit);
   const messages = selected.map((entry: { message?: unknown; position?: number }) => entry.message);
   const start = selected[0]?.position ?? 0;
-  const pendingVisible = Array.isArray(state.session.transcriptArchive?.pendingMessages)
+  const pendingVisible = !isRunning && Array.isArray(state.session.transcriptArchive?.pendingMessages)
     ? state.session.transcriptArchive.pendingMessages.filter((message) => {
       if (!message || typeof message !== "object") {
         return false;
@@ -396,7 +405,7 @@ export function mergeActiveTranscriptPage(storedPage: TranscriptPageView, state:
       return VISIBLE_TRANSCRIPT_ROLES.has(String((message as { role?: string }).role ?? ""));
     }).length
     : 0;
-  const archiveVisible = Number(state.session.transcriptArchive?.totalVisibleMessages);
+  const archiveVisible = Number(isRunning ? storedSummary.total : state.session.transcriptArchive?.totalVisibleMessages);
   const total = Math.max(
     nonNegativeInteger(storedSummary.total),
     Number.isInteger(archiveVisible) && archiveVisible >= 0 ? archiveVisible + pendingVisible : 0,

@@ -578,6 +578,7 @@ export type DashboardUiState = {
   eventStaleTimer: ReturnType<typeof setTimeout> | null;
   lastEventAt: number;
   permissionMode: string;
+  quickMode: boolean;
   goal: {
     enabled: boolean;
     status: string;
@@ -781,6 +782,7 @@ export const state: DashboardUiState = {
   eventStaleTimer: null,
   lastEventAt: 0,
   permissionMode: "plan",
+  quickMode: false,
   goal: {
     enabled: false,
     status: "off",
@@ -976,6 +978,7 @@ export const els = {
   sendButton: document.querySelector("#send-button"),
   permissionMode: document.querySelector("#permission-mode"),
   goalMode: document.querySelector("#goal-mode"),
+  quickMode: document.querySelector<HTMLButtonElement>("#quick-mode"),
   goalConfirmPanel: document.querySelector("#goal-confirm-panel"),
   goalTextPanel: document.querySelector("#goal-text-panel"),
   goalStatusBar: document.querySelector("#goal-status-bar"),

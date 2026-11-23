@@ -150,6 +150,7 @@ export type DashboardTurnAttachment = {
 
 export type DashboardQueueItem = {
   id: string;
+  quickMode?: boolean;
   prompt?: string;
   kind?: string;
   permissionMode?: string;
@@ -206,9 +207,14 @@ export type DashboardActiveSessionState = {
   disposed: boolean;
   controller: AbortController | null;
   currentPrompt: string;
+  currentQuickMode?: boolean;
+  currentUserRecorded?: boolean;
   currentTurnId: string;
   currentAttachmentBytes: number;
   currentTranscriptStart: number;
+  currentTranscriptArchiveEnd?: number;
+  currentTranscriptVisibleTotal?: number;
+  currentStableTranscript?: AgentSession["messages"];
   currentPermissionMode: string;
   unattendedSchedule?: boolean;
   workAdmissionBlocked?: () => boolean;
@@ -261,6 +267,7 @@ export class ActiveSessionCapacityError extends Error {
 
 export type DashboardRequestInput = {
   sessionId?: string;
+  quickMode?: boolean;
   clientId?: string;
   saveTarget?: string;
   section?: string;

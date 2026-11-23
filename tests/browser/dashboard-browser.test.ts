@@ -117,6 +117,32 @@ test("composer accepts PNG without MIME and sends PDF page ranges on desktop and
   }
 });
 
+test("composer sends the selected quick mode on desktop and mobile", async () => {
+  for (const width of [390, 1280]) {
+    await withDashboardPage({ width, height: 900 }, async (page) => {
+      const sent = [];
+      await page.route("**/api/turns", async (route) => {
+        sent.push(route.request().postDataJSON());
+        await route.fulfill({ status: 400, json: { ok: false, error: "test capture" } });
+      });
+      const quick = page.getByRole("button", { name: "快速模式", exact: true });
+      assert.equal(await quick.getAttribute("aria-pressed"), "false");
+      await page.locator("#prompt-input").fill("快速查询");
+      for (const enabled of [true, false]) {
+        await quick.click();
+        assert.equal(await quick.getAttribute("aria-pressed"), String(enabled));
+        await Promise.all([
+          page.waitForResponse((response) => response.url().endsWith("/api/turns")),
+          page.locator("#send-button").click()
+        ]);
+      }
+      assert.deepEqual(sent.map((body) => body.quickMode), [true, false]);
+      assert.notEqual(sent[0].requestId, sent[1].requestId);
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    });
+  }
+});
+
 test("dashboard has no page overflow and keeps core navigation reachable from 320 to 1440", async () => {
   for (const width of [320, 390, 768, 1024, 1280, 1440]) {
     await withDashboardPage({ width, height: width < 768 ? 844 : 900 }, async (page) => {

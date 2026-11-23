@@ -89,18 +89,23 @@ export async function documentIntakeTool(input: {
   });
   const ext = path.extname(target).toLowerCase();
   const configuredMaxBytes = positiveIntegerOrNull(input.maxBytes);
-  const maxBytes = configuredMaxBytes ?? ([".docx", ".pptx", ".xlsx"].includes(ext)
+  const defaultMaxBytes = [".docx", ".pptx", ".xlsx"].includes(ext)
     ? OFFICE_ZIP_LIMITS.maxArchiveBytes
     : ext === ".pdf"
       ? PDF_LIMITS.maxBytes
-      : null);
+      : null;
+  const maxBytes = configuredMaxBytes ?? defaultMaxBytes;
   if (maxBytes && stat.size > maxBytes) {
     return {
+      ok: false as const,
       path: toDisplayPath(workspace, target),
       supported: false,
       bytes: stat.size,
       maxBytes,
-      error: { code: "DOCUMENT_TOO_LARGE", message: `Document exceeds maxBytes (${maxBytes})` }
+      error: {
+        code: "DOCUMENT_TOO_LARGE",
+        message: `Input file is ${stat.size} bytes, above the ${maxBytes}-byte limit.`
+      }
     };
   }
 
@@ -120,7 +125,13 @@ export async function documentIntakeTool(input: {
     pageStart: parsed.pageStart,
     pageEnd: parsed.pageEnd,
     totalPages: parsed.totalPages,
-    truncated: parsed.truncated
+    truncated: parsed.truncated,
+    ...(!parsed.supported ? {
+      ok: false as const,
+      error: defaultMaxBytes !== null
+        ? { code: "DOCUMENT_PARSE_FAILED", message: parsed.notes[0] ?? "Could not extract the document content." }
+        : { code: "DOCUMENT_UNSUPPORTED_FORMAT", message: `Unsupported document format ${ext || "(no extension)"}. Use read_file for plain text and source code.` }
+    } : {})
   };
 }
 

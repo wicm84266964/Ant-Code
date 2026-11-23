@@ -481,6 +481,94 @@ test("dashboard runtime switches model sources and reasoning effort in one reque
   }
 });
 
+test("a zero-response turn survives a Dashboard restart and gateway switch exactly once", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-failed-gateway-"));
+  const requests = [];
+  const failed = await listen(http.createServer((req) => req.socket.destroy()), "127.0.0.1", 0);
+  const healthy = await listen(createRecordingGateway(requests, "Recovered"), "127.0.0.1", 0);
+  const profiles = [[failed, "failed"], [healthy, "healthy"]].map(([server, id]) => ({
+    id, modelAlias: id, models: [{ id }],
+    gatewayUrl: `http://127.0.0.1:${server.address().port}`,
+    gatewayProtocol: "lab-agent-gateway"
+  }));
+  const env = { HOME: cwd, USERPROFILE: cwd, LAB_MODEL_GATEWAY_MAX_RETRIES: "0" };
+  try {
+    await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
+      modelAlias: "failed", models: [{ id: "failed" }],
+      networkMode: "open-dev", allowedHosts: ["127.0.0.1"],
+      lab: { ...profiles[0], activeGatewayProfile: "failed", gatewayProfiles: profiles }
+    }));
+    const original = createDashboardRuntime({ cwd, env });
+    await original.trustWorkspace();
+    const first = await original.startTurn({ prompt: "最初的任务", quickMode: true, permissionMode: "plan" });
+    assert.equal(first.ok, true);
+    await waitForEvent(original, first.sessionId, (event) => event.type === "run_state" && event.running === false);
+    assert.equal(original.active.get(first.sessionId).status, "failed");
+
+    const resumed = createDashboardRuntime({ cwd, env });
+    const switched = await resumed.switchModel({ sessionId: first.sessionId, profileId: "healthy", modelId: "healthy" });
+    assert.equal(switched.ok, true);
+    const second = await resumed.startTurn({ sessionId: first.sessionId, prompt: "继续", quickMode: true, permissionMode: "plan" });
+    assert.equal(second.ok, true);
+    await waitForEvent(resumed, first.sessionId, (event) => event.type === "run_state" && event.running === false);
+    assert.equal(requests.length, 1);
+    assert.deepEqual(requests[0].messages.filter((message) => message.role !== "system").map((message) => [message.role, requestMessageText(message)]), [
+      ["user", "最初的任务"], ["user", "继续"]
+    ]);
+    const reopened = await resumed.readSession(first.sessionId);
+    assert.deepEqual(reopened.session.transcript.filter((message) => message.role === "user").map(requestMessageText), ["最初的任务", "继续"]);
+  } finally {
+    await close(failed);
+    await close(healthy);
+  }
+});
+
+test("dashboard quick mode is captured per queued turn and denies unadvertised agent tools", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-quick-mode-"));
+  const requests = [];
+  const entered = deferred();
+  const release = deferred();
+  const server = await listen(http.createServer(async (req, res) => {
+    const body = await readDashboardRequestJson(req);
+    const system = requestMessageText(body.messages[0]);
+    const quick = system.includes("Solve the current request directly");
+    const title = system.includes("session title");
+    if (!title) requests.push(body);
+    const call = quick && body.toolResults.length === 0;
+    if (call) {
+      entered.resolve();
+      await release.promise;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      id: "reply", content: call ? [] : [{ type: "text", text: "处理完毕" }],
+      toolCalls: call ? [{ id: "call-forbidden", name: "agent_run", input: { profile: "explorer", query: "blocked" } }] : [],
+      stopReason: call ? "tool_calls" : "stop"
+    }));
+  }), "127.0.0.1", 0);
+  try {
+    const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+    await runtime.trustWorkspace();
+    const quick = await runtime.startTurn({ prompt: "快速检查", permissionMode: "plan", quickMode: true, requestId: "quick-1" });
+    await entered.promise;
+    const conflict = await runtime.startTurn({ prompt: "快速检查", permissionMode: "plan", requestId: "quick-1" });
+    assert.equal(conflict.status, 409);
+    const queued = await runtime.startTurn({ sessionId: quick.sessionId, prompt: "常规处理", permissionMode: "plan" });
+    assert.equal(queued.queued, true);
+    release.resolve();
+    await waitForEvent(runtime, quick.sessionId, (event) => event.type === "run_state" && event.running === false);
+    assert.equal(requests.length, 3);
+    assert.ok(requests[0].tools.some((tool) => tool.name === "mcp_call"));
+    assert.ok(requests[0].tools.every((tool) => !["agent_run", "skill_run", "plan_update"].includes(tool.name)));
+    assert.match(JSON.stringify(requests[1].toolResults), /TOOL_NOT_ALLOWED/);
+    assert.match(requestMessageText(requests[2].messages[0]), /parent coordinator/);
+    assert.ok(requests[2].tools.some((tool) => tool.name === "agent_run"));
+  } finally {
+    release.resolve();
+    await close(server);
+  }
+});
+
 test("dashboard runtime clears an explicit reasoning override without resolving it to the model default", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-reasoning-"));
   await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({

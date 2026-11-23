@@ -665,6 +665,7 @@ export async function openSession(id: string, options: { restore?: boolean } = {
     }
     return;
   }
+  if (state.currentSessionId !== id || options.restore) state.quickMode = false;
   state.currentSessionId = id;
   applyGoalSnapshot(loadedSession.goal, { permissionMode: loadedSession.permission?.mode ?? "plan" });
   state.running = loadedSession.active === true && loadedSession.running === true;
@@ -799,6 +800,7 @@ export function newTask() {
   cancelScopedRequest("file");
   state.turnRequest = null;
   state.currentSessionId = null;
+  state.quickMode = false;
   applyGoalSnapshot(null, { permissionMode: "plan" });
   state.running = false;
   rememberCurrentSession(null);
@@ -1138,6 +1140,7 @@ export async function sendPrompt() {
       sessionId: submittedSessionId,
       clientId: submittedSessionId ? undefined : dashboardClientId(),
       permissionMode: state.permissionMode,
+      quickMode: state.quickMode,
       goalMode: state.goal.enabled === true,
       goalText: state.goal.enabled ? state.goal.text : undefined,
       clientPreviousPermissionMode: state.goal.enabled ? state.goal.previousPermissionMode : undefined
@@ -1202,6 +1205,7 @@ export function stableTurnRequest(prompt: string, attachments: Array<{ id?: stri
     prompt,
     sessionId: state.currentSessionId,
     permissionMode: state.permissionMode,
+    quickMode: state.quickMode,
     attachments: attachments.map((item) => [item.id, item.name, item.mimeType, item.size, item.pageStart, item.pageEnd])
   });
   if (state.turnRequest?.signature === signature) {

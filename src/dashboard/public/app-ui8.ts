@@ -904,7 +904,7 @@ export function renderQueueItem(item: Record<string, unknown>, index: number) {
   return `
     <div class="queue-item${item.kind === "guide" ? " guide" : ""}">
       <span>${index + 1}</span>
-      <strong>${item.kind === "guide" ? "引导" : item.kind === "wakeup" ? "接续" : item.kind === "goal-continue" ? "Goal 续跑" : "排队"}</strong>
+      <strong>${item.kind === "guide" ? "引导" : item.kind === "wakeup" ? "接续" : item.kind === "goal-continue" ? "Goal 续跑" : item.quickMode ? "快速" : "排队"}</strong>
       <em>${escapeHtml(item.preview ?? "")}</em>
       <div class="queue-actions">
         ${item.kind === "guide" || item.kind === "wakeup" || item.kind === "goal-continue" ? "" : `<button type="button" class="queue-guide-button" data-guide-queue-id="${escapeHtml(item.id)}" ${isCancelling ? "disabled" : ""}>引导</button>`}

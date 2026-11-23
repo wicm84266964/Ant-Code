@@ -169,6 +169,7 @@ export type TurnChangeTracker = {
 
 export type RunSessionTurnOptions = {
   prompt: string;
+  quickMode?: boolean;
   displayPrompt?: string;
   attachments?: Array<Record<string, unknown>>;
   env?: NodeJS.ProcessEnv;
@@ -182,6 +183,7 @@ export type RunSessionTurnOptions = {
   }) => boolean | Promise<boolean>;
   userInputCallback?: (input: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
   onEvent?: (event: SessionEvent) => void | Promise<void>;
+  onUserMessageCheckpointed?: () => void;
   onAntEvent?: (event: Record<string, unknown>) => void | Promise<void>;
   hooksTrusted?: boolean;
 };

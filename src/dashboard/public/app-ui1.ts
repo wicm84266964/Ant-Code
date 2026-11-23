@@ -264,6 +264,10 @@ export function bindEvents() {
   });
   els.permissionMode.addEventListener("keydown", handlePermissionModeKeydown);
   els.goalMode?.addEventListener("click", () => requestGoalMode());
+  els.quickMode?.addEventListener("click", () => {
+    state.quickMode = !state.quickMode;
+    renderGoalControls();
+  });
   els.preview.addEventListener("click", handleLocalFileOpenClick);
   els.collapsePreview.addEventListener("click", () => {
     if (responsiveLayoutMode() === "desktop") {
@@ -764,6 +768,12 @@ function syncPromptPlaceholder() {
 
 export function renderGoalControls() {
   const enabled = state.goal.enabled === true;
+  if (enabled) state.quickMode = false;
+  if (els.quickMode) {
+    els.quickMode.disabled = enabled;
+    els.quickMode.setAttribute("aria-pressed", String(state.quickMode));
+    els.quickMode.title = enabled ? "退出 Goal 后可使用快速模式" : "快速模式";
+  }
   const readonlyLocked = state.sessionStatus?.readonlyLocked === true || state.trust?.readonlyLocked === true;
   if (els.goalMode) {
     els.goalMode.setAttribute("aria-pressed", String(enabled));

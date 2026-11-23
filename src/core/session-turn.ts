@@ -26,6 +26,7 @@ import { getAgentProfile } from "../agents/profiles.ts";
 import { resolveMaxParallelReadonlyAgentRuns } from "../agents/orchestration-config.ts";
 import { appendDelegationReminderToExecution, createDelegationGuard } from "../agents/delegation-guard.ts";
 import { createReviewGate } from "../agents/review-policy.ts";
+import { createQuickSources, QUICK_EXCLUDED_TOOLS, QUICK_SYSTEM_PROMPT } from "./quick-turn.ts";
 import {
   buildBatchedWakePrompt,
   hasPendingWakeHandoffs,
@@ -127,6 +128,10 @@ import {
 
 
 export async function runSessionTurn(session: AgentSession, options: RunSessionTurnOptions) {
+  const quickMode = options.quickMode === true && !session.goal?.enabled;
+  const systemText = quickMode ? QUICK_SYSTEM_PROMPT : undefined;
+  const quickSources = quickMode ? createQuickSources() : undefined;
+  const tools = quickMode ? session.context.tools.filter((tool) => !QUICK_EXCLUDED_TOOLS.has(String(tool.name))) : session.context.tools;
   const displayPrompt = typeof options.displayPrompt === "string" ? options.displayPrompt : options.prompt;
   const ingested = await ingestComposerDocuments({
     cwd: session.cwd,
@@ -144,6 +149,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
   const eventOptions = withAntEventOptions(session, {
     ...options,
     onEvent: async (event: SessionEvent) => {
+      if (quickSources?.hasSources && (event.type === "assistant_delta" || event.type === "assistant_text_delta")) return;
       captureThinkingEvent(thinkingCapture, event);
       captureInterruptedDraftEvent(interruptedDraft, event);
       captureVisibleProcessEvent(visibleProcess, event);
@@ -200,6 +206,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
     config: session.config,
     env: options.env,
     signal: options.signal,
+    allowedToolNames: quickMode ? new Set(tools.map((tool) => String(tool.name))) : undefined,
     mcpRuntime,
     workflowState: session.workflow,
     visualEvidence: session.visualEvidence,
@@ -222,13 +229,13 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
       }
     }
   });
-  const delegationGuard = createDelegationGuard({
+  const delegationGuard = quickMode ? undefined : createDelegationGuard({
     config: session.config,
     cwd: session.cwd,
     sessionId: session.id,
     prompt: options.prompt
   });
-  const reviewGate = createReviewGate({
+  const reviewGate = quickMode ? undefined : createReviewGate({
     config: session.config,
     prompt: options.prompt
   });
@@ -243,14 +250,22 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
   let finalOutput = "";
   let outputHealthRetries = 0;
   let reasoningEffortRetried = false;
-  let checkpointedTurn = false;
   const finishTurnInterrupted = (input: Parameters<typeof finishInterruptedTurn>[0]) => finishInterruptedTurn({
     ...input,
-    // The user message is already in the checkpoint. Save only the remaining draft.
-    ...(checkpointedTurn ? { prompt: "", displayPrompt: "" } : {})
+    prompt: "",
+    displayPrompt: ""
   });
 
   try {
+  const historyBeforeTurn = session.messages.slice();
+  const archivedUser = persistableUserTurnMessage(options.prompt, options.attachments ?? attachments);
+  session.messages.push(...persistableContextMessages([archivedUser]));
+  appendModelContextArchiveMessages(session, [archivedUser]);
+  appendTranscriptMessages(session, [persistableUserTurnMessage(displayPrompt, options.attachments ?? attachments)]);
+  const saveOptions = { ...options, userMessageRecorded: true };
+  await persistSessionMetadata(sessionStore, metadata, "", "running", session, saveOptions);
+  options.onUserMessageCheckpointed?.();
+
   if (options.signal?.aborted) {
       return finishTurnInterrupted({
         session,
@@ -276,7 +291,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
       type: "gateway_not_configured",
       outputBytes: Buffer.byteLength(finalOutput, "utf8")
     });
-    await persistSessionMetadata(sessionStore, metadata, finalOutput, "gateway_not_configured", session, options);
+    await persistSessionMetadata(sessionStore, metadata, finalOutput, "gateway_not_configured", session, saveOptions);
     await emitEvent(eventOptions, {
       type: "turn_complete",
       status: "gateway_not_configured",
@@ -293,6 +308,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
     prompt: options.prompt,
     attachments,
     gateway,
+    allowVisionFallback: !quickMode,
     pdfDocuments: ingested.pdfDocuments,
     signal: options.signal,
     eventOptions,
@@ -300,7 +316,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
   });
   if (!visionPreparation.ok) {
     finalOutput = String(visionPreparation.output ?? "");
-    await persistSessionMetadata(sessionStore, metadata, finalOutput, String(visionPreparation.status ?? "vision_error"), session, options);
+    await persistSessionMetadata(sessionStore, metadata, finalOutput, String(visionPreparation.status ?? "vision_error"), session, saveOptions);
     await emitEvent(eventOptions, {
       type: "turn_complete",
       status: visionPreparation.status,
@@ -319,11 +335,15 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
     });
   }
 
-  const userMessage = buildUserTurnMessage(modelPrompt, session.workflow, visionPreparation.attachments, visionPreparation.analysisText);
-  let messages: SessionMessage[] = buildTurnMessages(session, userMessage);
+  const userMessage = buildUserTurnMessage(modelPrompt, quickMode ? undefined : session.workflow, visionPreparation.attachments, visionPreparation.analysisText);
+  let messages: SessionMessage[] = buildTurnMessages(session, userMessage, historyBeforeTurn, systemText);
+  const currentUser = messages.at(-1);
+  const contextForPersistence = (history: SessionMessage[]) => liveModelMessages(history).map((message) => (
+    message === currentUser ? mergePersistableImageSummaries([message], [archivedUser])[0] : message
+  ));
   let toolResults: SessionToolResult[] = [];
-  const turnMessages: SessionMessage[] = [persistableUserTurnMessage(options.prompt, options.attachments ?? attachments)];
-  const transcriptTurnMessages: SessionMessage[] = [persistableUserTurnMessage(displayPrompt, options.attachments ?? attachments)];
+  const turnMessages: SessionMessage[] = [];
+  const transcriptTurnMessages: SessionMessage[] = [];
   const maxToolRounds = resolveMainToolRounds(session.config);
   const turnChangeTracker = createTurnChangeTracker();
 
@@ -342,7 +362,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
         reason: abortSignalReason(options.signal)
       });
     }
-    await injectPendingWakeHandoffs(session, messages, turnMessages, transcriptTurnMessages, eventOptions);
+    if (!quickMode) await injectPendingWakeHandoffs(session, messages, turnMessages, transcriptTurnMessages, eventOptions);
     if (round > 0) {
       messages = distillLiveImageBlocks(messages, session.visualEvidence);
     }
@@ -353,6 +373,8 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
       toolResults,
       round,
       gateway,
+      tools,
+      systemText,
       signal: options.signal,
       env: options.env,
       hooksTrusted: options.hooksTrusted,
@@ -362,12 +384,9 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
     });
     messages = budgetPreparation.messages;
     if (budgetPreparation.blocked) {
-      session.messages = persistableContextMessages(mergePersistableImageSummaries(
-        liveModelMessages(messages),
-        turnMessages
-      ));
+      session.messages = persistableContextMessages(contextForPersistence(messages));
       finalOutput = contextOverflowMessage(budgetPreparation.estimate, session.contextWindow);
-      await persistSessionMetadata(sessionStore, metadata, finalOutput, "context_overflow", session, options);
+      await persistSessionMetadata(sessionStore, metadata, finalOutput, "context_overflow", session, saveOptions);
       await emitEvent(eventOptions, {
         type: "turn_complete",
         status: "context_overflow",
@@ -379,7 +398,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
     const promptEstimate = estimatePromptPayload({
       model: session.model,
       messages,
-      tools: session.context.tools,
+      tools,
       toolResults,
       gatewayProtocol: sessionGatewayProtocol(session)
     });
@@ -392,7 +411,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
       round: round + 1,
       messageCount: messages.length,
       toolResultCount: toolResults.length,
-      toolSchemaCount: session.context.tools.length,
+      toolSchemaCount: tools.length,
       promptEstimate
     });
     await emitEvent(eventOptions, {
@@ -400,7 +419,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
       round: round + 1,
       messageCount: messages.length,
       toolResultCount: toolResults.length,
-      toolSchemaCount: session.context.tools.length,
+      toolSchemaCount: tools.length,
       promptBytesEstimate: promptEstimate.bytes,
       promptTokensEstimate: promptEstimate.tokens,
       promptMessageTokensEstimate: promptEstimate.messageTokens,
@@ -409,7 +428,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
     });
     const response = await gateway.sendChat({
       messages,
-      tools: session.context.tools,
+      tools,
       toolResults,
       sessionId: session.id,
       sessionAffinity: session.gatewaySessionAffinity,
@@ -462,8 +481,8 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
       const failedDraft = appendFailedGatewayDraft({
         session,
         metadata,
-        prompt: checkpointedTurn ? "" : options.prompt,
-        displayPrompt: checkpointedTurn ? "" : displayPrompt,
+        prompt: "",
+        displayPrompt: "",
         draft: interruptedDraft,
         reason: `gateway_error:${response.error?.code ?? "GATEWAY_ERROR"}`
       });
@@ -485,7 +504,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
         draftThinkingBytes: failedDraft?.thinkingBytes ?? 0,
         outputBytes: Buffer.byteLength(finalOutput, "utf8")
       });
-      await persistSessionMetadata(sessionStore, metadata, finalOutput, "gateway_error", session, options);
+      await persistSessionMetadata(sessionStore, metadata, finalOutput, "gateway_error", session, saveOptions);
       await emitEvent(eventOptions, {
         type: "turn_complete",
         status: "gateway_error",
@@ -532,10 +551,10 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
     }
 
     if (response.data.toolCalls.length === 0) {
-      if (hasPendingWakeHandoffs(session.id)) {
+      if (!quickMode && hasPendingWakeHandoffs(session.id)) {
         continue;
       }
-      const reviewReminder = reviewGate.beforeFinal();
+      const reviewReminder = reviewGate?.beforeFinal();
       if (reviewReminder) {
         const reminderMessage = {
           role: "user",
@@ -567,15 +586,16 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
       finalOutput = formatAssistantOutput(response.data);
       const thinking = thinkingForRound(thinkingCapture, round + 1, response.data);
       const outputHealth = analyzeAssistantOutputHealth(response.data, finalOutput, thinking, {
-        toolNames: (session.context.tools ?? []).map((tool) => String(tool?.name ?? "")).filter(Boolean)
+        toolNames: tools.map((tool) => String(tool?.name ?? "")).filter(Boolean)
       });
-      if (OUTPUT_HEALTH_CHECK_ENABLED || outputHealth.mustRetry) {
+      if ((!quickMode && OUTPUT_HEALTH_CHECK_ENABLED) || outputHealth.mustRetry) {
+        const retryOutput = !quickMode && !outputHealth.ok && shouldRetryOutputHealth(outputHealth, outputHealthRetries);
         recordOutputHealth(metadata, {
           round: round + 1,
           ...outputHealth,
-          retry: outputHealth.ok ? false : shouldRetryOutputHealth(outputHealth, outputHealthRetries)
+          retry: retryOutput
         });
-        if (!outputHealth.ok && shouldRetryOutputHealth(outputHealth, outputHealthRetries)) {
+        if (retryOutput) {
           outputHealthRetries += 1;
           if (outputHealth.reasons.includes("promised_tool_without_call")) {
             rotateGatewaySessionAffinity(session);
@@ -633,11 +653,11 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
             eventOptions,
             round: round + 1,
             outputHealth,
-            options
+            options: saveOptions
           });
         }
       }
-      if (!session.goal?.enabled) {
+      if (!quickMode && !session.goal?.enabled) {
         const workflowSync = syncWorkflowCompletionOnFinal(session.workflow, finalOutput);
         if (workflowSync.changed) {
           await emitEvent(eventOptions, {
@@ -648,8 +668,13 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
           });
         }
       }
-      const compaction = await appendSessionMessages(session, response.data, finalOutput, {
-        gateway,
+      const citedOutput = quickSources?.render(finalOutput) || finalOutput;
+      const assistantData = citedOutput !== finalOutput
+        ? { ...response.data, text: citedOutput, content: [{ type: "text" as const, text: citedOutput }] }
+        : response.data;
+      finalOutput = citedOutput;
+      const compaction = await appendSessionMessages(session, assistantData, finalOutput, {
+        gateway: quickMode ? undefined : gateway,
         signal: options.signal,
         env: options.env,
         hooksTrusted: options.hooksTrusted,
@@ -659,7 +684,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
         processItems: visibleProcessItemsForTranscript(visibleProcess),
         turnMessages,
         transcriptMessages: transcriptTurnMessages,
-        modelContextMessages: liveModelMessages(messages)
+        modelContextMessages: contextForPersistence(messages)
       });
       await emitEvent(eventOptions, {
         type: "assistant_final",
@@ -697,7 +722,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
         maxToolRounds,
         outputBytes: Buffer.byteLength(finalOutput, "utf8")
       });
-      await persistSessionMetadata(sessionStore, metadata, finalOutput, "tool_limit", session, options);
+      await persistSessionMetadata(sessionStore, metadata, finalOutput, "tool_limit", session, saveOptions);
       await emitEvent(eventOptions, {
         type: "turn_complete",
         status: "tool_limit",
@@ -731,6 +756,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
       ...eventOptions,
       delegationGuard,
       reviewGate,
+      quickSources,
       turnChangeTracker,
       onBatchComplete: async (completedCalls, completedResults) => {
         const firstBatch = checkpointedResponseBatches++ === 0;
@@ -760,7 +786,6 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
         metadata.toolCalls.push(...summarizeToolCalls(completedCalls, completedResults));
         turnMessages.length = 0;
         transcriptTurnMessages.length = 0;
-        checkpointedTurn = true;
         // Await durable storage before admitting the next tool or model request.
         await persistSessionMetadata(sessionStore, metadata, "", "running", session, options);
       }
@@ -795,7 +820,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
     type: "turn_unexpected_end",
     outputBytes: Buffer.byteLength(finalOutput, "utf8")
   });
-  await persistSessionMetadata(sessionStore, metadata, finalOutput, "unexpected_loop_end", session, options);
+  await persistSessionMetadata(sessionStore, metadata, finalOutput, "unexpected_loop_end", session, saveOptions);
   await emitEvent(eventOptions, {
     type: "turn_complete",
     status: "unexpected_loop_end",
